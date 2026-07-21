@@ -28,6 +28,5 @@ spec:
     remediation:
       retries: 3
       remediateLastFailure: true
-  wait: true
   timeout: 3m
   values: {}

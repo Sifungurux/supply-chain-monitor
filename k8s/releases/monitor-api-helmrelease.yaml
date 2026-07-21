@@ -32,7 +32,6 @@ spec:
     remediation:
       retries: 3
       remediateLastFailure: true
-  wait: true
   timeout: 3m
   # image.tag stays "dev" (the chart's default) for local iteration --
   # `make deploy` rebuilds monitor-api:dev and rollout-restarts the

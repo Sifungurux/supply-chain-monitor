@@ -26,7 +26,6 @@ spec:
     remediation:
       retries: 3
       remediateLastFailure: true
-  wait: true
   timeout: 3m
   # No values overrides today -- charts/registry/values.yaml's defaults
   # are exactly what this project has always run with. Override here

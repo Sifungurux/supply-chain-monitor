@@ -24,6 +24,5 @@ spec:
   # ClamAV's first boot (freshclam DB download) can take a few minutes
   # -- give wait a correspondingly generous timeout so a fresh install
   # doesn't get marked failed while it's still just downloading.
-  wait: true
   timeout: 5m
   values: {}

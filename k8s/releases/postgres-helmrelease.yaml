@@ -21,7 +21,6 @@ spec:
     remediation:
       retries: 3
       remediateLastFailure: true
-  wait: true
   timeout: 3m
   # Credentials stay at charts/postgres/values.yaml's dev-only defaults
   # for this local cluster -- override credentials.password here (never
