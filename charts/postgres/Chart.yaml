@@ -1,0 +1,10 @@
+apiVersion: v2
+name: postgres
+description: >-
+  Percona Distribution for PostgreSQL (scm-postgres) -- monitor-api's
+  persistent store for artifacts, findings, and stage history -- plus a
+  daily backup CronJob. Deployed via Flux's HelmRelease (see
+  k8s/postgres-helmrelease.yaml).
+type: application
+version: 0.1.0
+appVersion: "17.10"

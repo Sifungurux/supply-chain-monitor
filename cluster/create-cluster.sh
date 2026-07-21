@@ -36,3 +36,18 @@ case "${RUNTIME}" in
     exit 1
     ;;
 esac
+
+# Flux install piggybacks on cluster-up rather than being a separate
+# manual step (see cluster/install-flux.sh and
+# k8s/flux-system/README.md) -- set SCM_SKIP_FLUX=1 to skip it
+# (e.g. if you're standing the cluster up before helm/kubectl are ready,
+# or don't want Flux on this cluster at all) and run `make flux-install`
+# yourself whenever you do want it.
+if [[ "${SCM_SKIP_FLUX:-0}" != "1" ]]; then
+  echo
+  echo "Installing Flux (set SCM_SKIP_FLUX=1 to skip this step)..."
+  "${SCRIPT_DIR}/install-flux.sh"
+else
+  echo
+  echo "SCM_SKIP_FLUX=1 -- skipping Flux install. Run 'make flux-install' later if you want it."
+fi

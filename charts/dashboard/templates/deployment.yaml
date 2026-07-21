@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scm-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: scm-dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scm-dashboard
+  template:
+    metadata:
+      labels:
+        app: scm-dashboard
+      annotations:
+        # Forces a new pod any time the embedded index.html or
+        # DASHBOARD_API_BASE changes -- see monitor-api's deployment.yaml
+        # for the same pattern and why it's needed.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      # The dashboard used to require a person to paste the API key
+      # into a browser field by hand -- fine for one person on one
+      # laptop, annoying (and easy to get wrong) for anyone else who
+      # opens the page. This initContainer renders env.js (a plain
+      # `window.SCM_CONFIG = {...}` assignment) from the *same*
+      # scm-monitor-api-auth Secret monitor-api itself reads, so the
+      # dashboard is pre-configured with a working key with zero manual
+      # steps -- see docs/architecture.md ("Configuring the dashboard
+      # via ConfigMap/Secret instead of by hand").
+      initContainers:
+        - name: render-config
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              cp /config-src/index.html /html/index.html
+              # Escape backslashes and double quotes so an odd API_KEY
+              # or DASHBOARD_API_BASE value can't break out of the JS
+              # string literal below -- good enough for this project's
+              # scope (a local dev cluster), not a substitute for a
+              # real templating engine if this ever needs to be
+              # hardened further.
+              ESCAPED_KEY=$(printf '%s' "$API_KEY" | sed 's/\\/\\\\/g; s/"/\\"/g')
+              ESCAPED_BASE=$(printf '%s' "$DASHBOARD_API_BASE" | sed 's/\\/\\\\/g; s/"/\\"/g')
+              printf 'window.SCM_CONFIG = { apiBase: "%s", apiKey: "%s" };\n' "$ESCAPED_BASE" "$ESCAPED_KEY" > /html/env.js
+          env:
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  # Same Secret the monitor-api chart creates -- both
+                  # charts are reconciled into the same namespace by
+                  # Flux, so this cross-chart Secret reference works the
+                  # same way it did before the Helm conversion.
+                  name: scm-monitor-api-auth
+                  key: API_KEY
+            - name: DASHBOARD_API_BASE
+              valueFrom:
+                configMapKeyRef:
+                  name: scm-dashboard-config
+                  key: DASHBOARD_API_BASE
+          volumeMounts:
+            - name: dashboard-html
+              mountPath: /config-src
+              readOnly: true
+            - name: html
+              mountPath: /html
+      containers:
+        - name: nginx
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            # Serves the initContainer's rendered output (index.html +
+            # env.js), not the ConfigMap directly -- nginx never sees
+            # the Secret itself, only what render-config already wrote
+            # into this emptyDir.
+            - name: html
+              mountPath: /usr/share/nginx/html
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: dashboard-html
+          configMap:
+            name: scm-dashboard-html
+        - name: html
+          emptyDir: {}

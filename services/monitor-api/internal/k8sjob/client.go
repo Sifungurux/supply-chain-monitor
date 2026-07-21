@@ -19,7 +19,7 @@ import (
 
 // serviceAccountDir is where Kubernetes mounts a pod's ServiceAccount
 // token/CA cert/namespace when automountServiceAccountToken: true (see
-// k8s/monitor-api/serviceaccount.yaml).
+// charts/monitor-api/templates/serviceaccount.yaml).
 const serviceAccountDir = "/var/run/secrets/kubernetes.io/serviceaccount"
 
 // Client is a minimal Kubernetes API client scoped to exactly the

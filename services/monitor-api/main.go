@@ -121,8 +121,9 @@ func main() {
 // runScanWorker unpacks and malware-scans exactly one image artifact
 // (SCM_SCAN_REF) and prints the result as JSON (scanner.WorkerResult)
 // to stdout, then exits. Intended to run inside a short-lived,
-// minimally-privileged Kubernetes Job pod (see k8s/monitor-api/rbac.yaml
-// and IsolatedUnpackerScanner), not as a long-running process.
+// minimally-privileged Kubernetes Job pod (see
+// charts/monitor-api/templates/rbac.yaml and IsolatedUnpackerScanner),
+// not as a long-running process.
 //
 // A scan error (couldn't pull the image, clamd unreachable, etc.) is
 // reported *inside* the printed JSON (WorkerResult.Error), and the
@@ -149,8 +150,9 @@ func runScanWorker() {
 
 	// Matches the scan timeout the API server itself used to apply
 	// in-process (see internal/api/handlers.go) -- the Job's own
-	// activeDeadlineSeconds (k8s/monitor-api/rbac.yaml's Job template,
-	// built in internal/k8sjob) is set a little longer than this as a
+	// activeDeadlineSeconds (the Job template built in internal/k8sjob,
+	// scoped by charts/monitor-api/templates/rbac.yaml's Role) is set a
+	// little longer than this as a
 	// backstop, so this context timeout is what actually fires first
 	// in the normal case.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -218,15 +220,16 @@ func runAPIServer() {
 	// Fail closed: no default, no "insecure mode" fallback. Every
 	// request (except /healthz) must carry this as
 	// `Authorization: Bearer <API_KEY>` -- see internal/api/router.go's
-	// withAuth. Sourced from a Secret (k8s/monitor-api/auth-secret.yaml),
-	// the same pattern already used for POSTGRES_PASSWORD.
+	// withAuth. Sourced from a Secret
+	// (charts/monitor-api/templates/auth-secret.yaml), the same pattern
+	// already used for POSTGRES_PASSWORD.
 	apiKey := os.Getenv("API_KEY")
 	if apiKey == "" {
 		log.Fatalf("API_KEY is required and was not set")
 	}
 
 	// Artifacts are persisted in Postgres (Percona Distribution for
-	// PostgreSQL, deployed via k8s/postgres/) rather than in-memory --
+	// PostgreSQL, deployed via charts/postgres/) rather than in-memory --
 	// see docs/architecture.md for why. artifact.MemStore still exists
 	// and backs this package's own unit tests plus internal/api's
 	// handler tests, but production always talks to a real database.
@@ -252,9 +255,10 @@ func runAPIServer() {
 	// IsolatedUnpackerScanner and docs/architecture.md ("Isolating the
 	// unpack+scan step"). That requires a real Kubernetes API client,
 	// which requires this pod to actually have a ServiceAccount token
-	// (k8s/monitor-api/serviceaccount.yaml -- deliberately flipped to
-	// automountServiceAccountToken: true for exactly this, scoped down
-	// tightly via k8s/monitor-api/rbac.yaml's Role) -- which a bare
+	// (charts/monitor-api/templates/serviceaccount.yaml -- deliberately
+	// flipped to automountServiceAccountToken: true for exactly this,
+	// scoped down tightly via charts/monitor-api/templates/rbac.yaml's
+	// Role) -- which a bare
 	// `docker run` outside any cluster does not have.
 	//
 	// DISABLE_SCAN_ISOLATION restores the ability to run this binary

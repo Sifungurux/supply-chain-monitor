@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: scm-clamav
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: scm-clamav
+  ports:
+    - name: clamd
+      port: 3310
+      targetPort: 3310
+  type: ClusterIP

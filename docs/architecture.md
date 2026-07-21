@@ -105,7 +105,9 @@ drop-in-compatible build of stock PostgreSQL with Percona's own
 support/tooling layered on top, so nothing about the schema, the
 driver, or the SQL below cares which one is running underneath — the
 only real repo-visible acknowledgment is the image name in
-`k8s/postgres/deployment.yaml`.
+`charts/postgres/templates/deployment.yaml` (originally
+`k8s/postgres/deployment.yaml`, before the move to Helm charts -- see
+"All services on Flux + Helm").
 `internal/artifact/postgres_store.go` originally stored everything in a
 single `artifacts` table, with `stage_history`, `cve_findings`,
 `malware_findings`, and `last_scan_errors` as `JSONB` columns rather
@@ -129,12 +131,12 @@ initializing its data directory first. `main.go`'s
 `connectStoreWithRetry` retries `NewPostgresStore` with a fixed 5s
 backoff (12 attempts, ~60s worst case) rather than crashing and relying
 on Kubernetes' own crash-loop-backoff, which would otherwise add its
-own growing delay on top. `k8s/monitor-api/deployment.yaml`'s
+own growing delay on top. `charts/monitor-api/templates/deployment.yaml`'s
 liveness/readiness probes were tuned to tolerate that ~60s window
 without killing a pod that's still legitimately retrying (see the
 comments there).
 Credentials live in a Kubernetes Secret
-(`k8s/postgres/secret.yaml`, `scm-postgres-credentials`) rather than
+(`charts/postgres/templates/secret.yaml`, `scm-postgres-credentials`) rather than
 the plaintext `ConfigMap` the rest of `monitor-api`'s config lives in —
 mounted into `monitor-api`'s pod via `secretKeyRef` for
 `POSTGRES_PASSWORD` specifically, everything else (host, port, user,
@@ -391,8 +393,10 @@ implements the length-prefixed streaming protocol directly against
 and the daemon don't share a filesystem here. Reasonable to leave as-is.
 
 **Why a separate static dashboard.** The dashboard is one HTML file
-(`dashboard/index.html`, embedded verbatim into
-`k8s/dashboard/configmap.yaml`) served by stock `nginx:1.27-alpine` —
+(`dashboard/index.html`, copied verbatim into
+`charts/dashboard/files/index.html` and embedded into a ConfigMap by
+`charts/dashboard/templates/configmap.yaml`) served by stock
+`nginx:1.27-alpine` —
 no build step, no JS framework, no new language in the stack. It calls
 `monitor-api`'s existing REST endpoints directly from the browser
 (`fetch`, polled every 10s) rather than `monitor-api` serving its own
@@ -546,7 +550,7 @@ in-process deliberately (see below).
   (`runAsUser: 65534`, alpine's built-in `nobody` -- no Dockerfile
   change needed), and no ServiceAccount token at all (a brand new,
   zero-RBAC `scm-scan-worker` ServiceAccount --
-  `k8s/monitor-api/scan-worker-serviceaccount.yaml`). None of that is
+  `charts/monitor-api/templates/serviceaccount.yaml`). None of that is
   achievable for the API server pod itself without breaking its actual
   job (serving requests, holding a Postgres connection open).
   Doing this requires `monitor-api` to call the Kubernetes API for the
@@ -561,7 +565,7 @@ in-process deliberately (see below).
   client-go for this alone.
 - **What this cost:** `monitor-api`'s own ServiceAccount flipped from
   `automountServiceAccountToken: false` to `true`
-  (`k8s/monitor-api/serviceaccount.yaml`) -- a real, deliberate
+  (`charts/monitor-api/templates/serviceaccount.yaml`) -- a real, deliberate
   reversal of the earlier hardening decision, since it now genuinely
   needs to call the Kubernetes API. `rbac.yaml`'s `Role` scopes that
   token down to exactly the four calls `internal/k8sjob/client.go`
@@ -618,7 +622,7 @@ The key itself is fail-closed at startup: `main.go` reads `API_KEY`
 from the environment and `log.Fatal`s if it's empty, rather than
 falling back to some "insecure mode" default — the entire point of
 this change is to close the no-auth gap, not to make it optional.
-It's sourced from a Kubernetes Secret (`k8s/monitor-api/auth-secret.yaml`,
+It's sourced from a Kubernetes Secret (`charts/monitor-api/templates/auth-secret.yaml`,
 `scm-monitor-api-auth`) mounted via `secretKeyRef`, the same pattern
 already used for `POSTGRES_PASSWORD` — including the same placeholder-value
 caveat (`changeme-api-key`, fine for a local single-user cluster, not for
@@ -653,7 +657,7 @@ the new "Couldn't reach ... — missing or invalid API key" status
 experience) until *they* also knew to go find the key and paste it in.
 That's a real usability gap for something meant to be a shared team
 dashboard, not a personal tool.
-The fix: `k8s/dashboard/deployment.yaml` gained a `render-config`
+The fix: `charts/dashboard/templates/deployment.yaml` gained a `render-config`
 initContainer that runs before nginx starts, reading `API_KEY` from
 the *same* `scm-monitor-api-auth` Secret `monitor-api` itself reads
 (one source of truth -- there's no separate dashboard copy of the key
@@ -689,9 +693,11 @@ a real templating engine -- adequate for this project's scope (a
 single flat key and an optional URL), not something to lean on harder
 without revisiting.
 A genuine, unrelated bug surfaced and got fixed while wiring this up:
-`k8s/dashboard/deployment.yaml`'s ConfigMap volume referenced a
-ConfigMap named `dashboard-html`, but the actual object (from
-`k8s/dashboard/configmap.yaml`) has always been named
+`k8s/dashboard/deployment.yaml`'s ConfigMap volume (this file no longer
+exists -- see `charts/dashboard/templates/deployment.yaml` for its
+replacement) referenced a ConfigMap named `dashboard-html`, but the
+actual object (from what's now `charts/dashboard/templates/configmap.yaml`)
+has always been named
 `scm-dashboard-html` -- a mismatch that would leave the dashboard pod's
 volume permanently unable to mount (a `FailedMount` visible only via
 `kubectl describe pod`, not as any kind of application-level error, and
@@ -709,7 +715,7 @@ no backup story at all -- losing that PVC (storage failure, an
 accidental `kubectl delete pvc`, a botched migration) meant losing
 every registered artifact and its scan history outright, the exact
 problem Postgres was originally brought in to solve (see "Swapping the
-in-memory store for Postgres"). `k8s/postgres/backup-cronjob.yaml`
+in-memory store for Postgres"). `charts/postgres/templates/backup-cronjob.yaml`
 adds a daily (`0 2 * * *`) `pg_dump | gzip` into a *separate* PVC,
 `scm-postgres-backups` -- deliberately not the same volume the live
 data lives on, since a backup that can be lost by the exact same
@@ -773,7 +779,7 @@ lunch -- turning it on means a bug in `unpacker`/`umoci`/`oras-go`
 parsing a malicious image is back to sharing this process's blast
 radius with the API server and its live Postgres connection. It
 defaults to `false` in every real deployment
-(`k8s/monitor-api/configmap.yaml`) and is meant only for running the
+(`charts/monitor-api/values.yaml`'s `disableScanIsolation`) and is meant only for running the
 plain binary standalone, never for a cluster that might see anything
 beyond a throwaway local registry's own test images.
 The selection logic itself (`buildImageScanners` in `main.go`) is
@@ -783,63 +789,136 @@ Kubernetes API client, a real `trivy` binary, or a real `unpacker` --
 it never invokes either scanner it's choosing between, just picks
 which one ends up in the registry.
 
-## Migrating monitor-api to Flux GitOps
+## All services on Flux + Helm
 
-`monitor-api` is the first (and so far only) service moved from
-"`make deploy` applies it directly" to
-[Flux](https://fluxcd.io) GitOps management. This section covers what
-changed, what deliberately hasn't, and the manual steps still needed
-before it's real -- this repo can't perform them itself, since they
-require pushing to a Git remote and running `flux bootstrap` against a
-live cluster with real credentials.
+Every service in this project -- `registry`, `clamav`, `postgres`,
+`monitor-api`, `dashboard` -- deploys as a Helm chart via Flux, not
+`kubectl apply -k` against raw manifests. This is a full move, not the
+partial monitor-api-only migration this section used to describe. What
+changed, how the pieces fit together, and the (few) manual steps this
+repo genuinely can't do for itself are all below.
 
-**What changed:**
-- `k8s/monitor-api/kustomization.yaml` is new -- it gives monitor-api its
-  own self-contained kustomize base (serviceaccount, scan-worker
-  serviceaccount, RBAC, auth secret, ConfigMap, Deployment, Service) so
-  Flux can `kustomize build` that directory on its own.
-- `clusters/dev/monitor-api.yaml` is a Flux `Kustomization` custom
-  resource (`kustomize.toolkit.fluxcd.io/v1`) pointing at
-  `./k8s/monitor-api`, with `prune: true` (so resources removed from Git
-  get removed from the cluster too) and a health check on the
-  `monitor-api` Deployment.
-- `k8s/kustomization.yaml` (the top-level one `make deploy` still uses)
-  had monitor-api's resource lines removed, with a comment explaining
-  why: once Flux owns a path, nothing else should also be applying it
-  directly, or the two could silently fight (an out-of-Git local edit
-  applied via `make deploy` would get reverted the next time Flux
-  reconciles, or vice versa depending on timing/prune settings).
+### Repo layout
 
-**What deliberately hasn't changed yet:** everything else --
-`namespace.yaml`, `postgres/*`, `registry/*`, `clamav/*`, `dashboard/*` --
-is still applied the old way via `make deploy` (`kubectl apply -k k8s/`).
-`clusters/dev/monitor-api.yaml` assumes those already exist in the
-cluster (monitor-api's Deployment depends on Postgres, the registry, and
-ClamAV all being reachable) rather than modeling that as a Flux
-`dependsOn`, since those services aren't Flux-managed yet. If/when they
-move too, add a Flux `Kustomization` for them and reference it via
-`dependsOn` instead of relying on `make deploy` having already run first.
+```
+charts/
+  registry/       Chart.yaml, values.yaml, templates/{pvc,deployment,service}.yaml
+  clamav/         Chart.yaml, values.yaml, templates/{deployment,service}.yaml
+  postgres/       Chart.yaml, values.yaml, templates/{secret,pvc,deployment,service,backup-cronjob}.yaml
+  monitor-api/    Chart.yaml, values.yaml, templates/{serviceaccount,rbac,auth-secret,configmap,deployment,service}.yaml
+  dashboard/      Chart.yaml, values.yaml, templates/{configmap,deployment,service}.yaml, files/index.html
+k8s/
+  namespace.yaml
+  kustomization.yaml           # root of what Flux reconciles
+  flux-system/
+    gotk-sync.yaml             # GitRepository + root Kustomization (path: ./k8s)
+    kustomization.yaml
+    values.yaml                # Helm values for installing Flux itself
+    README.md
+  releases/
+    registry-helmrelease.yaml
+    clamav-helmrelease.yaml
+    postgres-helmrelease.yaml
+    monitor-api-helmrelease.yaml
+    dashboard-helmrelease.yaml
+```
 
-**What's still manual, and why this repo can't do it:**
-1. **This project isn't a Git repository yet** (no `git init`, no
-   remote) -- Flux polls Git, not a local filesystem, so this has to
-   happen, and the repo has to be pushed somewhere Flux's cluster can
-   reach (GitHub, GitLab, etc.), before anything else here matters.
-2. **The Flux controllers install via Helm, not `flux bootstrap`** --
-   a deliberate choice for this project: `helm install flux2
-   fluxcd-community/flux2` (see `clusters/dev/flux-system/README.md` for
-   the exact commands and `values.yaml`). The tradeoff is that this route
-   doesn't auto-create the `GitRepository`/root `Kustomization` pair the
-   way `flux bootstrap` would, so `clusters/dev/flux-system/gotk-sync.yaml`
-   has that written by hand instead (same filename bootstrap itself would
-   use) and needs `kubectl apply -k clusters/dev/flux-system/` run once,
-   after the Helm install, with its placeholder Git URL filled in.
-3. Once both steps are done, `flux get kustomizations` should show both
-   `flux-system` and `monitor-api` as `Ready` -- that's the loop closing
-   end to end, from this repo's `k8s/monitor-api/` path to a running
-   Deployment, with no `kubectl apply` involved on the deploy side ever
-   again (only `git push`). Upgrading the controllers later is also a
-   Helm operation (`helm upgrade flux2 ...`), not a re-run of bootstrap.
+Every resource that used to be a hand-written Deployment/Service/etc.
+directly under `k8s/<service>/` is now a chart template under
+`charts/<service>/templates/`, parameterized by that chart's own
+`values.yaml`. Resource *names* (`scm-registry`, `scm-clamav`,
+`scm-postgres`, `monitor-api`, `scm-dashboard`, `scm-postgres-credentials`,
+`scm-monitor-api-auth`, etc.) are deliberately hard-coded in the
+templates rather than derived from the Helm release name -- every other
+piece of tooling in this repo (`Makefile`, this doc, the dashboard's own
+config-rendering) already refers to those exact names, and there's only
+ever one release of each chart in this cluster, so templating them would
+add risk for no real benefit.
+
+### Why the root Flux Kustomization's path is `./k8s`, and reconciles itself
+
+`k8s/flux-system/gotk-sync.yaml`'s root `Kustomization` has
+`spec.path: ./k8s` -- the whole `k8s/` tree, including `flux-system/`
+itself. That means Flux reconciles its own bootstrap definition (the
+`GitRepository` and root `Kustomization`) as part of every sync. This is
+normal and matches how real `flux bootstrap` output behaves too, not a
+special case introduced here.
+
+`k8s/kustomization.yaml` (a plain, non-Flux kustomize file) is what Flux
+actually builds at that path: it lists `namespace.yaml`, the
+`flux-system` directory (self-reference), and the five `HelmRelease`
+custom resources under `releases/`. Each `HelmRelease`'s
+`chart.spec.chart` points at `./charts/<service>` in this same repo via
+`sourceRef: {kind: GitRepository, name: flux-system}` -- no separate
+`HelmRepository`/OCI registry needed, since the charts live in the same
+Git repo Flux already watches.
+
+### Explicit ordering via `dependsOn`
+
+`monitor-api`'s `HelmRelease` sets `dependsOn: [postgres, registry,
+clamav]`, and `dashboard`'s sets `dependsOn: [monitor-api]` (the
+dashboard's `render-config` initContainer reads the `scm-monitor-api-auth`
+Secret the monitor-api chart creates). Flux won't even attempt to
+reconcile a `HelmRelease` until everything in its `dependsOn` list is
+itself `Ready`. This is a real ordering guarantee the old flat `kubectl
+apply -k k8s/` resource list never had -- before, correctness depended
+entirely on `monitor-api`'s own `connectStoreWithRetry` tolerating
+Postgres not being up yet (still true and still a good belt-and-suspenders
+layer, but no longer the *only* thing preventing a race).
+
+### Installing Flux itself (automated)
+
+`cluster/install-flux.sh` runs automatically at the end of `make
+cluster-up` (set `SCM_SKIP_FLUX=1` to skip it, `make flux-install` to run
+it standalone later). It installs the Flux controllers via the
+`fluxcd-community/flux2` Helm chart -- not `flux bootstrap` -- then
+applies `k8s/flux-system/gotk-sync.yaml` (the `GitRepository`/root
+`Kustomization` pair the Helm chart itself doesn't create, hand-written
+here instead). See `k8s/flux-system/README.md` for exactly what the
+script does and why the Helm route needs that extra file at all.
+
+### `make deploy`: trigger a reconcile, then hand off
+
+Since Flux now owns every resource under `k8s/`, `make deploy` no longer
+runs `kubectl apply -k k8s/` itself -- doing so would just fight Flux for
+ownership of the same resources. Instead it: builds the local
+`monitor-api:dev` image, commits and pushes the current working tree (so
+the `GitRepository` has something new to see), forces an immediate
+reconcile of the source, root `Kustomization`, and all five
+`HelmRelease`s (via the `flux` CLI if installed, falling back to
+annotating the `GitRepository`/`Kustomization` to force an early
+re-sync), then rollout-restarts `monitor-api`/`scm-dashboard`
+specifically -- still necessary because the image tag (`monitor-api:dev`)
+doesn't change on a rebuild, so neither Flux nor Helm can detect on their
+own that a restart is warranted. The target is finite and exits when
+done; it doesn't babysit the cluster afterward, since Flux keeps
+reconciling continuously and independently of any particular `make
+deploy` invocation.
+
+### What this repo genuinely can't do for itself
+
+1. **This project needs to actually be a pushed Git repository.** Flux
+   polls Git, not the filesystem. `k8s/flux-system/gotk-sync.yaml`'s
+   `GitRepository.spec.url` is set to
+   `https://github.com/sifungurux/supply-chain-monitor.git` -- the
+   install and `make deploy` both succeed regardless, but nothing
+   actually reconciles until that remote exists, has this content
+   pushed to it, and is reachable from the cluster.
+2. **A real cluster, Docker, kubectl, and Helm on your own machine.**
+   None of the automation above can be executed or verified from inside
+   a sandboxed assistant session -- `make cluster-up` drives Colima (a
+   local macOS VM manager) and `make deploy` drives `git`/`kubectl`/`flux`
+   against a live Kubernetes API, none of which exist in a text-only
+   sandbox. This repo, the charts, and the scripts are all real and
+   ready to run; running them and reporting back what happens (or what
+   errors out) is the one part of this loop that has to happen on your
+   own machine.
+3. Once both are true, `flux get kustomizations -A` and `flux get
+   helmreleases -A` should show `flux-system` and all five releases as
+   `Ready` -- that's the loop closed end to end, from `git push` to
+   running Deployments, with artifact registration and scanning
+   (`make test-artifact`, or the dashboard) actually working against
+   them.
 
 ## Roadmap / open gaps
 
@@ -850,14 +929,15 @@ move too, add a Flux `Kustomization` for them and reference it via
   Docker (that's all it needs), and commit the resulting `go.sum` for
   reproducible, verified builds instead of resolving fresh in every
   Docker build.
-- **No point-in-time recovery**: `k8s/postgres/backup-cronjob.yaml`
+- **No point-in-time recovery**: `charts/postgres/templates/backup-cronjob.yaml`
   now takes daily `pg_dump` backups (see "Postgres backups"), closing
   the "no backup at all" gap, but a restore can still lose up to a
   day of data (whatever changed since the last scheduled dump). WAL
   archiving would close that remaining gap but is real additional
   operational complexity not yet justified for a local dev cluster.
-- **Secret management**: `k8s/postgres/secret.yaml` ships a
-  placeholder password in plaintext YAML (committed to the repo, even
+- **Secret management**: `charts/postgres/values.yaml`'s
+  `credentials.password` ships a placeholder password in plaintext YAML
+  (committed to the repo, even
   if only used locally). Fine for a throwaway dev cluster; swap for a
   generated secret or an external secret manager before this cluster
   persists anything sensitive.
@@ -936,11 +1016,13 @@ move too, add a Flux `Kustomization` for them and reference it via
   newest-first, and registering a `file` artifact from the form doesn't
   warn you that its `ref` needs to already be a path inside the
   `monitor-api` pod (see the `file`-artifact fetching gap above).
-- **Only monitor-api is on Flux GitOps so far**: see "Migrating
-  monitor-api to Flux GitOps" above -- namespace/postgres/registry/
-  clamav/dashboard are still applied via `make deploy`, and the project
-  itself isn't a Git repository yet (a hard prerequisite for Flux, which
-  polls Git, not a local filesystem). Both are worth finishing before
-  leaning on Flux for anything beyond monitor-api: dual `kubectl apply
-  -k` / Flux ownership of the same resources is a real drift risk, not
-  just an inconsistency.
+- **Never actually run/verified against a live cluster**: see "All
+  services on Flux + Helm" above -- every chart, `HelmRelease`, and
+  script here was written and statically validated (YAML parsing,
+  template-balance checks, a from-scratch re-derivation of the
+  dashboard ConfigMap render) but never executed against a real
+  Kubernetes API, since no sandbox this project has been built in has
+  had Docker, kubectl, Helm, or Colima available. Run `make cluster-up
+  && make deploy` on a real machine and treat the first pass as an
+  integration test of this migration, not just a routine deploy --
+  report back anything that fails so it can be fixed.

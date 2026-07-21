@@ -1,0 +1,33 @@
+# dependsOn monitor-api: the dashboard's render-config initContainer
+# reads the scm-monitor-api-auth Secret the monitor-api chart creates --
+# without this, a from-scratch install could race and have the
+# dashboard's pod fail to start (missing Secret) before monitor-api's
+# HelmRelease has had a chance to create it.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: dashboard
+  namespace: flux-system
+spec:
+  interval: 5m
+  dependsOn:
+    - name: monitor-api
+  chart:
+    spec:
+      chart: ./charts/dashboard
+      sourceRef:
+        kind: GitRepository
+        name: flux-system
+        namespace: flux-system
+  targetNamespace: supply-chain-monitor
+  install:
+    createNamespace: true
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  wait: true
+  timeout: 3m
+  values: {}

@@ -1,0 +1,12 @@
+apiVersion: v2
+name: registry
+description: >-
+  Plain Docker Registry v2 (scm-registry) -- this project's local,
+  unauthenticated OCI registry for artifact images and non-image
+  artifacts monitor-api fetches and scans. Deployed via Flux's
+  HelmRelease (see k8s/registry-helmrelease.yaml), chart values come
+  from that HelmRelease's spec.values (see values.yaml here for
+  defaults/documentation of every knob).
+type: application
+version: 0.1.0
+appVersion: "2"

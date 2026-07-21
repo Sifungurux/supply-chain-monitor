@@ -1,27 +1,21 @@
-# NOTE: monitor-api is no longer applied from here -- it moved to Flux
-# GitOps management (see clusters/dev/monitor-api.yaml and
-# k8s/monitor-api/kustomization.yaml). `make deploy` (kubectl apply -k
-# k8s/) still applies everything else on this list directly; monitor-api
-# is deliberately excluded so there is exactly one path that can change
-# it (a merged commit, reconciled by Flux) rather than two paths that
-# could silently fight each other or apply out-of-Git local edits. See
-# docs/architecture.md, "Migrating monitor-api to Flux GitOps".
+# Root of what Flux reconciles (see k8s/flux-system/gotk-sync.yaml's
+# Kustomization -- path: ./k8s). Every service now deploys as a Helm
+# chart (see charts/) via a HelmRelease under releases/ -- there are no
+# raw Deployment/Service manifests left directly in this tree, only the
+# namespace, the Flux bootstrap self-reference, and the five
+# HelmReleases. See docs/architecture.md, "All services on Flux + Helm".
+#
+# `make deploy` no longer runs `kubectl apply -k k8s/` directly (see
+# Makefile) -- it builds the local dev image, pushes/commits, and
+# triggers Flux to reconcile this same tree. This file is what Flux
+# builds and applies each time.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - namespace.yaml
-  - registry/pvc.yaml
-  - registry/deployment.yaml
-  - registry/service.yaml
-  - clamav/deployment.yaml
-  - clamav/service.yaml
-  - postgres/secret.yaml
-  - postgres/pvc.yaml
-  - postgres/deployment.yaml
-  - postgres/service.yaml
-  - postgres/backup-pvc.yaml
-  - postgres/backup-cronjob.yaml
-  - dashboard/configmap.yaml
-  - dashboard/config.yaml
-  - dashboard/deployment.yaml
-  - dashboard/service.yaml
+  - flux-system
+  - releases/registry-helmrelease.yaml
+  - releases/clamav-helmrelease.yaml
+  - releases/postgres-helmrelease.yaml
+  - releases/monitor-api-helmrelease.yaml
+  - releases/dashboard-helmrelease.yaml

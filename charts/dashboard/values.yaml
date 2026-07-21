@@ -1,0 +1,23 @@
+image:
+  repository: nginx
+  tag: 1.27-alpine
+  pullPolicy: IfNotPresent
+
+# Left empty by default: the dashboard already self-derives the right
+# API address from window.location (same host it was loaded from, port
+# 30300), so it works unmodified on both the colima and podman runtimes
+# -- see docs/architecture.md, "A shipped bug, and what it changed." Set
+# this only if that self-detection is wrong for your setup (e.g. a fixed
+# ingress hostname that differs from the dashboard's own).
+apiBase: ""
+
+service:
+  nodePort: 30301
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 64Mi

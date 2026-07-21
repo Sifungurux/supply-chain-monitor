@@ -1,0 +1,99 @@
+# Default values for the monitor-api chart. Flux's HelmRelease
+# (k8s/monitor-api-helmrelease.yaml) can override any of these -- see
+# that file for what's actually overridden in this cluster today (mainly
+# just image.tag, when it needs to differ from "dev").
+image:
+  repository: monitor-api
+  tag: dev
+  pullPolicy: IfNotPresent
+
+listenAddr: ":8080"
+pipelineStages: "source,build,test,scan,sign,publish,deploy"
+
+# Service name + port only -- the ConfigMap template builds the full
+# in-cluster FQDN using .Release.Namespace, so these stay correct even
+# if this chart is ever installed into a namespace other than
+# supply-chain-monitor (values.yaml itself isn't template-rendered by
+# Helm, so a namespace can't be interpolated here directly).
+clamav:
+  service: scm-clamav
+  port: "3310"
+registry:
+  service: scm-registry
+  port: "5000"
+
+# Postgres holds every artifact/finding/stage-history record. password
+# deliberately isn't set here -- it comes from the postgres chart's own
+# scm-postgres-credentials Secret via this chart's deployment.yaml
+# secretKeyRef, never a plaintext value in this ConfigMap.
+postgres:
+  service: scm-postgres
+  port: "5432"
+  user: "monitor_api"
+  db: "monitor_api"
+  sslmode: "disable"
+
+# Dev-only API key for monitor-api's shared-key auth (see
+# internal/api/router.go's withAuth and docs/architecture.md, "Adding
+# API authentication"). Generate a real random value (e.g. `openssl rand
+# -hex 32`) and override it via this HelmRelease's spec.values before
+# this points at anything shared -- same caveat as postgres's
+# credentials.password.
+apiKey: qwe4r56789009876543223456789
+
+# unpacker (github.com/Sifungurux/unpacker) pull settings, forwarded
+# into the env of each per-scan Kubernetes Job monitor-api creates (see
+# internal/scanner/isolated_unpacker.go). Defaults assume a local,
+# unauthenticated, plain-HTTP dev registry (scm-registry) -- tighten
+# before pointing this at anything else.
+unpacker:
+  insecure: "true"
+  public: "true"
+  maxFileMB: "100"
+
+# Almost always the same image monitor-api itself runs from, since
+# `monitor-api scan-worker` is the same binary in a different mode. Left
+# unset here so the template defaults it to image.repository:image.tag
+# (see configmap.yaml) -- override only if the scan-worker really needs
+# to run a different image/tag than the API pod itself.
+scanWorkerImage: ""
+
+# false here (the real in-cluster deployment, which has the
+# ServiceAccount token isolation needs -- see serviceaccount.yaml). true
+# is only ever meant for running the monitor-api binary standalone
+# outside Kubernetes -- see README, "Running monitor-api outside a
+# Kubernetes pod". Never set this true here without also accepting image
+# malware scanning moving back in-process for real.
+disableScanIsolation: "false"
+
+# oras pull settings for file/sbom/sarif artifacts registered by OCI
+# reference (see internal/scanner/fetch.go). true matches
+# unpacker.insecure/unpacker.public's same plain-HTTP assumption.
+fetchPlainHTTP: "true"
+
+# Uncomment (and set trivyDB.enabled: true) for air-gapped operation --
+# see cluster/seed-trivy-db.sh and README's "Air-gapped operation".
+trivyDB:
+  enabled: false
+  repository: ""
+  javaRepository: ""
+  skipUpdate: "true"
+  skipJavaUpdate: "true"
+
+resources:
+  # ephemeral-storage right-sized down: unpacking a container image no
+  # longer happens in this pod at all -- it runs in its own per-scan
+  # Kubernetes Job, which carries its own, separate ephemeral-storage
+  # limit. What's left needing real disk here is just trivy's own
+  # vulnerability DB cache. Memory stays bumped (768Mi -> 1Gi from the
+  # original baseline): trivy's first-run DB download+decompression is
+  # memory-hungry enough that a "trivy scan failed ...: signal: killed"
+  # error can be an OOM-kill.
+  requests:
+    cpu: "200m"
+    memory: "384Mi"
+    ephemeral-storage: "256Mi"
+  limits:
+    cpu: "1"
+    memory: "1Gi"
+    ephemeral-storage: "512Mi"

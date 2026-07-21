@@ -2,7 +2,7 @@
 SCM_RUNTIME  ?= colima
 IMAGE        := monitor-api:dev
 
-.PHONY: cluster-up cluster-down cluster-destroy build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard check-dashboard-configmap db-shell lock-deps db-backup db-restore db-backups-list
+.PHONY: cluster-up cluster-down cluster-destroy flux-install build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard check-dashboard-configmap db-shell lock-deps db-backup db-restore db-backups-list
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -13,6 +13,16 @@ cluster-down:
 cluster-destroy:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/destroy-cluster.sh --delete
 
+# `make cluster-up` already runs this automatically (see
+# cluster/create-cluster.sh) -- this target is for installing/upgrading
+# Flux on its own, standalone, against whatever cluster your kubectl
+# context already points at (e.g. after SCM_SKIP_FLUX=1, or just to pick
+# up a newer chart version / a values.yaml edit without touching the
+# cluster itself). See cluster/install-flux.sh and
+# k8s/flux-system/README.md.
+flux-install:
+	./cluster/install-flux.sh
+
 # On the colima runtime, this is all you need -- colima's k3s (docker
 # runtime) shares the same image store as `docker build`, so there's no
 # import step. On the podman runtime, export the DOCKER_HOST printed by
@@ -21,17 +31,62 @@ cluster-destroy:
 build:
 	docker build -t $(IMAGE) services/monitor-api
 
-# `kubectl apply` only restarts a pod when the Deployment *spec*
-# changes. Rebuilding monitor-api:dev with new code but the same tag
-# looks identical to it, so a running pod can silently keep serving old
-# code indefinitely -- the rollout restarts below force it to actually
-# pick up whatever was just built.
+# Every service now deploys as a Helm chart via Flux (see charts/,
+# k8s/releases/, and docs/architecture.md's "All services on Flux +
+# Helm") -- so unlike before, this target no longer runs `kubectl apply
+# -k k8s/` itself. Flux owns that application now; `kubectl apply`-ing
+# the same resources here too would just fight it. Instead: commit and
+# push whatever's in the working tree (so Flux's GitRepository has
+# something new to see), force an immediate reconcile (rather than
+# waiting for Flux's normal poll interval), then rollout-restart
+# monitor-api/dashboard specifically -- that last step is still needed
+# because the image tag (monitor-api:dev) doesn't change on a rebuild,
+# so neither Flux nor Helm can detect that a restart is warranted on
+# their own. Finite and exits when done -- it doesn't babysit the
+# cluster afterward; Flux does that continuously on its own from here.
 deploy: build
-	kubectl apply -k k8s/
+	@if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
+		echo "This project isn't a git repository yet -- Flux polls Git, not the filesystem." >&2; \
+		echo "Run: git init && git remote add origin <url matching k8s/flux-system/gotk-sync.yaml's GitRepository.spec.url> && git push -u origin main" >&2; \
+		exit 1; \
+	fi
+	@echo "Committing and pushing the current tree so Flux has something new to reconcile..."
+	git add -A
+	@git diff --cached --quiet && echo "(nothing to commit)" || git commit -q -m "deploy: $$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	git push
+	@echo "Triggering an immediate Flux reconcile (instead of waiting for its normal interval)..."
+	@if command -v flux >/dev/null 2>&1; then \
+		flux reconcile source git flux-system --timeout=2m && \
+		flux reconcile kustomization flux-system --with-source --timeout=3m && \
+		flux reconcile helmrelease postgres -n flux-system --timeout=2m && \
+		flux reconcile helmrelease registry -n flux-system --timeout=2m && \
+		flux reconcile helmrelease clamav -n flux-system --timeout=2m && \
+		flux reconcile helmrelease monitor-api -n flux-system --timeout=2m && \
+		flux reconcile helmrelease dashboard -n flux-system --timeout=2m ; \
+	else \
+		echo "('flux' CLI not found -- brew install fluxcd/tap/flux for a faster,"; \
+		echo " per-HelmRelease reconcile trigger. Falling back to annotating the"; \
+		echo " GitRepository/root Kustomization so they re-sync right away instead"; \
+		echo " of waiting up to their normal interval; the five HelmReleases will"; \
+		echo " pick up the change on their own next poll, within a few minutes.)"; \
+		kubectl -n flux-system annotate gitrepository/flux-system reconcile.fluxcd.io/requestedAt="$$(date +%s)" --overwrite; \
+		kubectl -n flux-system annotate kustomization/flux-system reconcile.fluxcd.io/requestedAt="$$(date +%s)" --overwrite; \
+	fi
+	@echo "Restarting monitor-api/dashboard so they pick up the freshly built image..."
 	kubectl -n supply-chain-monitor rollout restart deployment/monitor-api deployment/scm-dashboard
-	kubectl -n supply-chain-monitor rollout status deployment/monitor-api --timeout=60s
-	kubectl -n supply-chain-monitor rollout status deployment/scm-dashboard --timeout=60s
+	kubectl -n supply-chain-monitor rollout status deployment/monitor-api --timeout=120s
+	kubectl -n supply-chain-monitor rollout status deployment/scm-dashboard --timeout=120s
+	@echo ""
+	@echo "Deployed. Flux owns reconciliation continuously from here -- this target"
+	@echo "hands off rather than watching the cluster; run 'make logs' or"
+	@echo "'flux get helmreleases -A' any time to check on it."
 
+# Deletes everything Flux currently manages under k8s/ -- the five
+# HelmReleases (which helm-controller then correctly un-installs, taking
+# their Deployments/Services/etc. with them), the namespace, and Flux's
+# own root Kustomization/GitRepository. Flux's finalizers handle the
+# cascade; this is just telling the API server to delete what's
+# currently built from k8s/, the same as before the Helm conversion.
 undeploy:
 	kubectl delete -k k8s/ --ignore-not-found
 
@@ -53,10 +108,11 @@ scan-jobs:
 db-shell:
 	kubectl -n supply-chain-monitor exec -it deploy/scm-postgres -- psql -U monitor_api -d monitor_api
 
-# Triggers an immediate pg_dump backup (see k8s/postgres/backup-cronjob.yaml,
-# which otherwise only runs on its own daily schedule) as a one-off Job
-# cloned from the same CronJob template -- useful right before a risky
-# change, or just to confirm backups are actually working.
+# Triggers an immediate pg_dump backup (see
+# charts/postgres/templates/backup-cronjob.yaml, which otherwise only
+# runs on its own daily schedule) as a one-off Job cloned from the same
+# CronJob template -- useful right before a risky change, or just to
+# confirm backups are actually working.
 db-backup:
 	kubectl -n supply-chain-monitor create job --from=cronjob/scm-postgres-backup scm-postgres-backup-manual-$$(date +%s)
 	@echo "Triggered -- watch it with: kubectl -n supply-chain-monitor get jobs -l app=scm-postgres-backup -w"
@@ -138,14 +194,12 @@ lock-deps:
 	@echo "go.sum written to services/monitor-api/go.sum -- review with 'git diff' and commit it."
 
 # Catches the exact bug that shipped once already: dashboard/index.html
-# edited without regenerating the ConfigMap that actually serves it, so
-# the running dashboard silently drifts from the source file. Point
-# whatever CI you wire up against your own git server at this target
-# (plus test-api and test-dashboard above).
+# edited without updating the copy the dashboard chart actually serves
+# (charts/dashboard/files/index.html -- Helm's .Files.Get can only read
+# files inside the chart directory, so this is a real second copy, not a
+# symlink), so the running dashboard silently drifts from the source
+# file. Point whatever CI you wire up against your own git server at
+# this target (plus test-api and test-dashboard above).
 check-dashboard-configmap:
-	python3 -c "\
-import yaml, sys; \
-cm = yaml.safe_load(open('k8s/dashboard/configmap.yaml')); \
-embedded = cm['data']['index.html']; \
-original = open('dashboard/index.html').read(); \
-sys.exit(0) if embedded.rstrip(chr(10)) == original.rstrip(chr(10)) else (print('k8s/dashboard/configmap.yaml is out of date -- see README') or sys.exit(1))"
+	diff -q dashboard/index.html charts/dashboard/files/index.html || \
+		(echo "charts/dashboard/files/index.html is out of date -- run: cp dashboard/index.html charts/dashboard/files/index.html" && exit 1)

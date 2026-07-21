@@ -1,0 +1,32 @@
+# Default values for the registry chart. Flux's HelmRelease
+# (k8s/registry-helmrelease.yaml) can override any of these via its own
+# spec.values -- left empty there today since these defaults are already
+# what this project has always run with.
+image:
+  repository: registry
+  tag: "2"
+  pullPolicy: IfNotPresent
+
+# REGISTRY_STORAGE_DELETE_ENABLED=true is needed for anything that ever
+# deletes a tag/manifest (not exercised by this project's own tooling
+# today, but cheap to leave on for a throwaway dev registry).
+deleteEnabled: true
+
+persistence:
+  size: 5Gi
+
+service:
+  # NodePort so the registry is reachable from outside the cluster too
+  # (oras/docker pushing test images from your own machine, not just
+  # from inside a pod) -- matches how this project has always run it.
+  type: NodePort
+  port: 5000
+  nodePort: 30500
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scm-postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: scm-postgres
+spec:
+  replicas: 1
+  # Single replica, no rolling update (a second pod can't share the same
+  # PVC read-write) -- Recreate avoids two Postgres pods ever fighting
+  # over the same data directory during a rollout.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: scm-postgres
+  template:
+    metadata:
+      labels:
+        app: scm-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: scm-postgres-credentials
+          env:
+            # PGDATA points at a subdirectory of the mounted volume, not
+            # the mount point itself -- the postgres image's own docs
+            # call this out, since some volume drivers seed the mount
+            # point with a lost+found dir that trips up initdb's
+            # "directory exists but is not empty" check.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: scm-postgres-data

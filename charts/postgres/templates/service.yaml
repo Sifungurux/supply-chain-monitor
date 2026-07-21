@@ -1,0 +1,17 @@
+# ClusterIP only -- unlike scm-registry/monitor-api/dashboard, nothing
+# outside the cluster needs to reach Postgres directly. monitor-api
+# talks to it at scm-postgres.<namespace>.svc.cluster.local:5432 (see
+# charts/monitor-api/values.yaml's postgres.host default).
+apiVersion: v1
+kind: Service
+metadata:
+  name: scm-postgres
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: scm-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  type: ClusterIP

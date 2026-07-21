@@ -39,8 +39,9 @@ type IsolatedUnpackerConfig struct {
 	// tag), since `monitor-api scan-worker` is the same binary.
 	Image string
 	// ServiceAccount is the Job pod's ServiceAccount -- deliberately
-	// NOT monitor-api's own (see k8s/monitor-api/scan-worker-serviceaccount.yaml,
-	// which has zero RBAC bound to it).
+	// NOT monitor-api's own (see the scm-scan-worker ServiceAccount in
+	// charts/monitor-api/templates/serviceaccount.yaml, which has zero
+	// RBAC bound to it).
 	ServiceAccount string
 
 	ClamAddr          string

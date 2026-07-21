@@ -1,0 +1,9 @@
+# Plain kustomize file (not a Flux CR) so `kubectl apply -k
+# k8s/flux-system/` applies gotk-sync.yaml in one command -- matches the
+# file `flux bootstrap` itself would generate here. Also referenced as a
+# directory resource from ../kustomization.yaml, so Flux's own
+# reconciliation of ./k8s picks this up the same way.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - gotk-sync.yaml

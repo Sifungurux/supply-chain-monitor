@@ -16,15 +16,18 @@ cluster/               cluster create/destroy scripts (colima by default, podman
   runtimes/colima.sh    colima --kubernetes runtime path (default, recommended)
   runtimes/podman.sh    k3d-on-podman runtime path (experimental, see below)
   k3d-config.yaml       k3d config used only by the podman path
+  install-flux.sh       installs Flux via Helm (`make flux-install`, or automatic via `make cluster-up`)
   postgres-restore.sh, postgres-list-backups.sh   on-demand Postgres backup restore/listing (`make db-restore`/`db-backups-list`)
-k8s/                    Kubernetes manifests (kustomize-able)
-  registry/             in-cluster OCI registry (simulates the pipeline's artifact registry)
-  clamav/               malware-scanning backend (clamd)
-  postgres/             Percona Distribution for PostgreSQL -- artifact/finding/stage persistence + daily backup CronJob
-  monitor-api/          the API service deployment
-  dashboard/            static dashboard, served by nginx from a ConfigMap, auto-configured with the API key
+charts/                 every service deploys as a Helm chart now (see "GitOps (Flux)" below)
+  registry/, clamav/, postgres/, monitor-api/, dashboard/   Chart.yaml + values.yaml + templates/
+k8s/                    what Flux actually reconciles (path: ./k8s) -- no raw per-service
+                        manifests anymore, just the namespace, Flux's own bootstrap
+                        self-reference, and a HelmRelease per service
+  namespace.yaml
+  flux-system/          GitRepository + root Kustomization (gotk-sync.yaml), Flux install values.yaml
+  releases/             one HelmRelease per service, chart sourced from charts/ above
 services/monitor-api/   the Go API service source + tests (internal/.../*_test.go)
-dashboard/index.html    the dashboard itself (source of truth -- k8s/dashboard/configmap.yaml is generated from this)
+dashboard/index.html    the dashboard itself (source of truth -- charts/dashboard/files/index.html is a copy of this)
 dashboard/tests/        dashboard test suite (Node + jsdom)
 docs/architecture.md    design notes, rationale, roadmap
 Makefile                cluster-up/down/destroy, build, deploy, port-forward, test
@@ -63,10 +66,27 @@ SCM_RUNTIME=podman ./cluster/create-cluster.sh  # podman, experimental
 ## Quickstart
 
 ```bash
-make cluster-up       # colima start --kubernetes (or podman, if SCM_RUNTIME=podman)
-make deploy            # docker build + kubectl apply -k k8s/
+make cluster-up       # colima start --kubernetes (or podman, if SCM_RUNTIME=podman); also installs Flux
+make deploy            # docker build + git push + trigger Flux reconcile + rollout restart
 kubectl -n supply-chain-monitor get pods -w   # wait for everything to go Ready
 ```
+
+`make cluster-up` also installs Flux (see "GitOps (Flux)" below) —
+`SCM_SKIP_FLUX=1 make cluster-up` if you don't want that yet. Every
+service (registry, clamav, postgres, monitor-api, dashboard) deploys as
+a Helm chart via Flux now — `make deploy` no longer applies manifests
+directly, it pushes to Git and lets Flux do it (see "GitOps (Flux)").
+That means `make deploy` needs this repo to actually be pushed to a Git
+remote first — see that section for the one-time setup.
+
+**This exact setup — full Helm-chart-per-service + Flux, path `./k8s` —
+hasn't been run end-to-end on a real cluster yet.** It was built and
+statically validated (every chart's YAML, template logic, and the
+dashboard's embedded HTML were checked by hand and by script) but never
+executed against a live Kubernetes API — treat your first `make
+cluster-up && make deploy` as the real integration test of this
+migration, and see "GitOps (Flux)" below for exactly what to check and
+report back if something doesn't come up clean.
 
 Note: the `clamav` pod downloads its virus definition DB on first boot,
 which can take a few minutes before its readiness probe passes.
@@ -119,35 +139,39 @@ This only works because `monitor-api` sends permissive CORS headers
 (`Access-Control-Allow-Origin: *`) so the browser can call it from a
 different origin/port. Every request still needs the API key (see
 Authentication below), but you shouldn't need to paste one in
-yourself — a fresh `kubectl apply -k k8s/`/`make deploy` pre-configures
-the dashboard with a working key automatically (see "Auto-configured
-API address/key" below). The "API"/"Key" fields are still there and
-still editable (and remembered in `localStorage`) for pointing this
-one browser tab somewhere else temporarily.
+yourself — a fresh `make deploy` pre-configures the dashboard with a
+working key automatically (see "Auto-configured API address/key"
+below). The "API"/"Key" fields are still there and still editable (and
+remembered in `localStorage`) for pointing this one browser tab
+somewhere else temporarily.
 
-To edit the dashboard: change `dashboard/index.html`, then regenerate
-the ConfigMap that serves it:
+To edit the dashboard: change `dashboard/index.html`, copy it into the
+dashboard chart (Helm's `.Files.Get` can only read files inside the
+chart directory, so this is a real second copy, not a symlink —
+`make check-dashboard-configmap` catches drift between the two), then
+deploy:
 
 ```bash
-kubectl create configmap scm-dashboard-html --from-file=index.html=dashboard/index.html \
-  -n supply-chain-monitor --dry-run=client -o yaml > k8s/dashboard/configmap.yaml
+cp dashboard/index.html charts/dashboard/files/index.html
 make deploy
 ```
 
 ### Auto-configured API address/key
 
 The dashboard no longer needs anyone to open it and paste an API key
-in by hand. `k8s/dashboard/deployment.yaml` runs a small initContainer
-before nginx starts that reads `API_KEY` from the same
-`scm-monitor-api-auth` Secret `monitor-api` itself uses, and writes it
-(plus an optional API-address override from the `scm-dashboard-config`
-ConfigMap, empty/unset by default) into a generated `env.js` the page
-loads automatically. Rotate the key in one place
-(`k8s/monitor-api/auth-secret.yaml`) and redeploy — both `monitor-api`
-and every dashboard pod pick up the new value, no manual re-entry
-anywhere. If you ever *do* want the dashboard to point at a fixed
-address instead of self-detecting one from `window.location`, set
-`DASHBOARD_API_BASE` in `k8s/dashboard/config.yaml` and redeploy. See
+in by hand. `charts/dashboard/templates/deployment.yaml` runs a small
+initContainer before nginx starts that reads `API_KEY` from the same
+`scm-monitor-api-auth` Secret the monitor-api chart creates, and writes
+it (plus an optional API-address override from the
+`scm-dashboard-config` ConfigMap, empty/unset by default) into a
+generated `env.js` the page loads automatically. Rotate the key in one
+place (`charts/monitor-api/values.yaml`'s `apiKey`, or an override in
+`k8s/releases/monitor-api-helmrelease.yaml`'s `spec.values`) and
+redeploy — both `monitor-api` and every dashboard pod pick up the new
+value, no manual re-entry anywhere. If you ever *do* want the dashboard
+to point at a fixed address instead of self-detecting one from
+`window.location`, set `apiBase` in `charts/dashboard/values.yaml` (or
+override it in `k8s/releases/dashboard-helmrelease.yaml`) and redeploy. See
 docs/architecture.md ("Configuring the dashboard via ConfigMap/Secret
 instead of by hand") for the full design and a real bug that was found
 and fixed while wiring this up (a ConfigMap name mismatch that left the
@@ -157,9 +181,9 @@ dashboard pod unable to mount its own HTML at all).
 
 Every endpoint except `/healthz` requires `Authorization: Bearer <key>`.
 The key is sourced from `API_KEY`, which `monitor-api` reads from the
-`scm-monitor-api-auth` Secret (`k8s/monitor-api/auth-secret.yaml`) —
-change the placeholder value (`changeme-api-key`) before this cluster
-is anything but local and throwaway, the same caveat as
+`scm-monitor-api-auth` Secret (rendered from `charts/monitor-api/values.yaml`'s
+`apiKey`) — override that value (never commit a real one) before this
+cluster is anything but local and throwaway, the same caveat as
 `scm-postgres-credentials`. A request with no key, the wrong key, or a
 missing `Bearer ` prefix gets a `401`.
 
@@ -278,7 +302,8 @@ artifacts, `/scan` now runs both:
 
 Both scanners' findings land on the same artifact — `cve_findings` from
 Trivy, `malware_findings` from ClamAV — told apart by `Finding.source`,
-not by artifact type. Relevant env vars (see `k8s/monitor-api/configmap.yaml`):
+not by artifact type. Relevant env vars (see `charts/monitor-api/values.yaml`'s
+`unpacker.*` keys, rendered into the ConfigMap by that chart):
 `UNPACKER_INSECURE`, `UNPACKER_PUBLIC` (defaults assume our local,
 unauthenticated `scm-registry`), `UNPACKER_MAX_FILE_MB` (skip huge files
 when walking the unpacked image, default 100MB).
@@ -293,7 +318,7 @@ different mode) whose pod has a read-only root filesystem, every Linux
 capability dropped, runs as non-root, and has no Kubernetes
 ServiceAccount token at all. `monitor-api`'s own ServiceAccount gained
 just enough access to create/watch that Job and read its logs — see
-`k8s/monitor-api/rbac.yaml` and docs/architecture.md ("Isolating the
+`charts/monitor-api/templates/rbac.yaml` and docs/architecture.md ("Isolating the
 unpack+scan step") for exactly what that token can and can't do.
 One practical effect: each `/scan` on an image now pays for a pod
 being scheduled (usually a few seconds, since the image is normally
@@ -321,8 +346,8 @@ malware scanning runs in-process again (like every version of this
 code before isolation shipped), so a bug in `unpacker`/`umoci`/`oras-go`
 parsing a malicious image once again shares this process's blast
 radius with the API server and its Postgres connection. Leave it unset
-(the default, `false`) for every real deployment — `k8s/monitor-api/configmap.yaml`
-already does. See docs/architecture.md ("Running monitor-api outside a
+(the default, `false`) for every real deployment — `charts/monitor-api/values.yaml`'s
+`disableScanIsolation` already does. See docs/architecture.md ("Running monitor-api outside a
 Kubernetes pod") for the full reasoning.
 
 ## Database
@@ -331,12 +356,14 @@ Artifacts, findings, and stage history are stored in Postgres
 (`percona/percona-distribution-postgresql`, deployed as `scm-postgres`
 in-cluster) instead of in-memory, so a `monitor-api` pod restart no
 longer loses everything registered so far. `monitor-api` connects
-using `POSTGRES_HOST`/`PORT`/`USER`/`DB`/`SSLMODE` from
-`k8s/monitor-api/configmap.yaml` plus `POSTGRES_PASSWORD` from the
-`scm-postgres-credentials` Secret (`k8s/postgres/secret.yaml`) — change
-that placeholder password before this cluster is anything but local
-and throwaway. `POSTGRES_DSN` is also accepted as a full connection
-string override if you'd rather set one directly.
+using `POSTGRES_HOST`/`PORT`/`USER`/`DB`/`SSLMODE` (rendered from
+`charts/monitor-api/values.yaml`'s `postgres.*` keys) plus
+`POSTGRES_PASSWORD` from the `scm-postgres-credentials` Secret (from
+`charts/postgres/values.yaml`'s `credentials.password`) — override
+that placeholder password (via `k8s/releases/postgres-helmrelease.yaml`'s
+`spec.values`, never committed directly) before this cluster is
+anything but local and throwaway. `POSTGRES_DSN` is also accepted as a
+full connection string override if you'd rather set one directly.
 
 ```bash
 make db-shell   # opens a psql shell in the scm-postgres pod
@@ -360,8 +387,9 @@ is handled since Postgres and `monitor-api` start up concurrently.
 
 A daily `pg_dump` (gzip-compressed, into its own PVC separate from the
 live data) runs automatically once deployed — see
-`k8s/postgres/backup-cronjob.yaml`. Retention keeps the newest 7
-backups by default (`KEEP_BACKUPS` in that file).
+`charts/postgres/templates/backup-cronjob.yaml`. Retention keeps the
+newest 7 backups by default (`backup.keepBackups` in
+`charts/postgres/values.yaml`).
 
 ```bash
 make db-backup          # trigger an on-demand backup right now, don't wait for the schedule
@@ -413,8 +441,9 @@ brew install oras            # if you don't already have it
 ./cluster/seed-trivy-db.sh   # mirrors both trivy DBs into localhost:30500
 ```
 
-Then uncomment the four `TRIVY_*` lines in
-`k8s/monitor-api/configmap.yaml` (printed by the script) and redeploy:
+Then set `trivyDB.enabled: true` and fill in `trivyDB.repository`/
+`trivyDB.javaRepository` in `charts/monitor-api/values.yaml` (the
+script prints the values to use) and redeploy:
 
 ```bash
 make deploy
@@ -439,11 +468,11 @@ These run in containers (`golang:1.22-alpine`, `node:22-alpine`,
 `percona/percona-distribution-postgresql`) so there's nothing extra to
 install beyond Docker, which you already have via Colima or Podman. No
 CI workflow is wired up yet -- these `make`
-targets are meant to be the entry point whenever you set one up against
-your own git server; worth adding, alongside these two, a check that
-`k8s/dashboard/configmap.yaml` actually matches `dashboard/index.html`
-(the exact class of bug that shipped once already — see above), since
-that one's easy to let drift silently otherwise.
+targets (plus `make check-dashboard-configmap`, which checks that
+`charts/dashboard/files/index.html` actually matches `dashboard/index.html`
+— the exact class of bug that shipped once already, see above) are
+meant to be the entry point whenever you set one up against your own
+git server.
 
 - **API tests** (`services/monitor-api/internal/.../*_test.go`): exercise
   every endpoint through `httptest`, using fake in-memory `Scanner`
@@ -485,46 +514,57 @@ that one's easy to let drift silently otherwise.
 
 ## GitOps (Flux)
 
-`monitor-api` is the first service moved to [Flux](https://fluxcd.io)
-GitOps management instead of `make deploy`. What that means in practice:
+Every service — registry, clamav, postgres, monitor-api, dashboard —
+deploys as a Helm chart via [Flux](https://fluxcd.io), not `kubectl
+apply -k` against raw manifests. See `docs/architecture.md`, "All
+services on Flux + Helm", for the full picture; the short version:
 
-- `k8s/monitor-api/kustomization.yaml` — monitor-api's own kustomize base,
-  so it can be built and applied independently of the rest of `k8s/`.
-- `clusters/dev/monitor-api.yaml` — the Flux `Kustomization` CR that
-  actually tells Flux to reconcile that path.
-- `k8s/kustomization.yaml` no longer lists monitor-api's manifests —
-  `make deploy` now only applies everything *except* monitor-api
-  (namespace, Postgres, registry, ClamAV, dashboard).
+- `charts/<service>/` — a real Helm chart per service (`Chart.yaml`,
+  `values.yaml`, `templates/`).
+- `k8s/releases/<service>-helmrelease.yaml` — a Flux `HelmRelease` per
+  service, sourcing its chart from `charts/<service>` in this same repo.
+  `monitor-api` `dependsOn` postgres/registry/clamav; `dashboard`
+  `dependsOn` monitor-api (it needs monitor-api's auth Secret to exist).
+- `k8s/flux-system/gotk-sync.yaml` — the `GitRepository` (pointing at
+  `https://github.com/sifungurux/supply-chain-monitor.git`, branch
+  `main`) and the root `Kustomization` (`path: ./k8s` — the whole tree,
+  self-referencing).
+- `k8s/kustomization.yaml` — the plain kustomize file Flux actually
+  builds at that path: the namespace, the `flux-system` self-reference,
+  and all five `HelmRelease`s.
 
-This isn't live yet. Two things this repo can't do on its own:
+**Installing Flux is automated** — `make cluster-up` installs it for you
+via `cluster/install-flux.sh` (the `fluxcd-community/flux2` Helm chart,
+not `flux bootstrap` — see `k8s/flux-system/README.md` for why). Skip it
+with `SCM_SKIP_FLUX=1 make cluster-up`, or run it standalone against an
+already-running cluster with `make flux-install`.
 
-1. **The project needs to be a real Git repository with a remote** —
-   Flux polls Git, and there's no `git init`/remote here today.
-2. **The Flux controllers install via Helm**, not `flux bootstrap`:
+**`make deploy` no longer applies manifests directly** — it builds the
+local `monitor-api:dev` image, commits and pushes the working tree,
+triggers an immediate Flux reconcile (via the `flux` CLI if installed,
+otherwise by annotating the `GitRepository`/`Kustomization`), then
+rollout-restarts `monitor-api`/`scm-dashboard` (still needed since the
+`:dev` image tag doesn't change on rebuild, so Flux/Helm can't detect a
+restart is warranted on their own). It's finite and hands off once
+done — Flux keeps reconciling on its own after that, independent of any
+particular `make deploy` run.
 
-   ```sh
-   helm repo add fluxcd-community https://fluxcd-community.github.io/helm-charts
-   helm install flux2 fluxcd-community/flux2 -n flux-system --create-namespace \
-     --values clusters/dev/flux-system/values.yaml --wait
-   kubectl apply -k clusters/dev/flux-system/   # GitRepository + root Kustomization
-   ```
+What's still on you: **this project needs to actually be pushed to that
+Git remote.** The Flux install and `make deploy` both succeed
+regardless; nothing actually reconciles until
+`https://github.com/sifungurux/supply-chain-monitor.git` exists, has
+this content, and is reachable from the cluster.
 
-   The Helm chart only installs controllers/CRDs — it doesn't create the
-   `GitRepository`/root `Kustomization` pair `flux bootstrap` would have
-   generated automatically, so those are hand-written in
-   `clusters/dev/flux-system/gotk-sync.yaml` instead and need that second
-   `kubectl apply -k` run once (with its placeholder Git URL filled in
-   first). See `clusters/dev/flux-system/README.md` for the full sequence
-   and prerequisites.
-
-Once both steps are done, `flux get kustomizations` should show
-`flux-system` and `monitor-api` both `Ready`, and monitor-api changes
-should land by `git push` rather than `make deploy` from then on.
-Upgrading the controllers later is a Helm operation too (`helm upgrade
-flux2 ...`), not a re-run of anything bootstrap-flavored. See
-`docs/architecture.md`, "Migrating monitor-api to Flux GitOps", for the
-full rationale, including why the rest of the services are staying on
-`make deploy` for now.
+Once it is, `flux get kustomizations -A` and `flux get helmreleases -A`
+should show `flux-system` and all five releases `Ready`. **This exact
+setup has not been run against a real cluster yet** (see the note under
+Quickstart) — the first time you do, please report back exactly what
+`kubectl -n supply-chain-monitor get pods`, `flux get helmreleases -A`,
+and `make test-artifact` show, especially anything `NotReady`,
+`CrashLoopBackOff`, or failed, so any real issue (a bad chart value, a
+missed dependency, a typo an actual Kubernetes API would catch that
+static YAML validation can't) gets fixed quickly rather than sitting
+undiscovered.
 
 ## Tearing down
 
@@ -536,11 +576,21 @@ make cluster-destroy    # stops AND deletes the VM/machine + its data
 
 ## Known limitations (v1 stub — see docs/architecture.md for the plan)
 
-- `k8s/postgres/secret.yaml` ships a placeholder password in plaintext
-  in the repo; fine for a local, throwaway cluster, not for anywhere
-  the Postgres data itself matters. Daily backups exist now (see
-  "Backing up and restoring Postgres"), but not point-in-time recovery
-  -- a restore can still lose up to a day of data in the worst case.
+- **This Helm-chart-per-service + Flux setup hasn't been run against a
+  real cluster yet.** Every chart and CR was written and statically
+  validated (YAML parsing, template-balance checks, a from-scratch
+  re-derivation of the dashboard's rendered ConfigMap) but never
+  executed against a live Kubernetes API — no environment this project
+  has been built in has had Docker, kubectl, Helm, or Colima available.
+  Treat the first `make cluster-up && make deploy` as a real
+  integration test, not a routine deploy, and see "GitOps (Flux)"
+  above for what to check and report back.
+- `charts/postgres/values.yaml`'s `credentials.password` ships a
+  placeholder in plaintext in the repo; fine for a local, throwaway
+  cluster, not for anywhere the Postgres data itself matters. Daily
+  backups exist now (see "Backing up and restoring Postgres"), but not
+  point-in-time recovery -- a restore can still lose up to a day of
+  data in the worst case.
 - `go.sum` isn't committed (couldn't be generated without a real Go
   toolchain in the sandbox this was built in) -- the Dockerfile's build
   stage runs `go mod tidy` at build time instead. Run `make lock-deps`
