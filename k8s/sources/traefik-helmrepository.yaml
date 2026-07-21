@@ -1,0 +1,14 @@
+# Unlike the other 5 services (whose charts live in charts/ in this
+# same repo, sourced via the flux-system GitRepository), Traefik is
+# third-party infra -- there's no reason to fork/vendor a well-maintained
+# upstream chart the way this project owns its own services. This
+# HelmRepository is what k8s/releases/traefik-helmrelease.yaml's
+# chart.spec.sourceRef points at instead.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: traefik
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: https://traefik.github.io/charts

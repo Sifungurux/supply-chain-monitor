@@ -2,8 +2,16 @@
 # Kustomization -- path: ./k8s). Every service now deploys as a Helm
 # chart (see charts/) via a HelmRelease under releases/ -- there are no
 # raw Deployment/Service manifests left directly in this tree, only the
-# namespace, the Flux bootstrap self-reference, and the five
-# HelmReleases. See docs/architecture.md, "All services on Flux + Helm".
+# namespace, the Flux bootstrap self-reference, and the HelmReleases.
+# See docs/architecture.md, "All services on Flux + Helm".
+#
+# traefik-namespace.yaml, sources/, releases/traefik-helmrelease.yaml,
+# and gateway/ add Traefik + the Gateway API as an ingress path to the
+# dashboard -- see docs/architecture.md, "Ingress: Traefik + Gateway
+# API". Unlike the other 5 HelmReleases, Traefik's chart comes from an
+# upstream HelmRepository (sources/traefik-helmrepository.yaml), not
+# charts/ in this repo -- it's third-party infra, not one of this
+# project's own services.
 #
 # `make deploy` no longer runs `kubectl apply -k k8s/` directly (see
 # Makefile) -- it builds the local dev image, pushes/commits, and
@@ -19,3 +27,7 @@ resources:
   - releases/postgres-helmrelease.yaml
   - releases/monitor-api-helmrelease.yaml
   - releases/dashboard-helmrelease.yaml
+  - traefik-namespace.yaml
+  - sources/traefik-helmrepository.yaml
+  - releases/traefik-helmrelease.yaml
+  - gateway

@@ -59,8 +59,9 @@ colima_up() {
     vm_ip="$(colima ls --json 2>/dev/null | jq -r "select(.name==\"${PROFILE}\") | .address" 2>/dev/null || true)"
     if [[ -n "${vm_ip}" && "${vm_ip}" != "null" ]]; then
       echo "VM address: ${vm_ip}"
-      echo "  API:       curl ${vm_ip}:30300/healthz"
-      echo "  Dashboard: http://${vm_ip}:30301"
+      echo "  API:               curl ${vm_ip}:30300/healthz"
+      echo "  Dashboard:         http://${vm_ip}:30301"
+      echo "  Dashboard (via Traefik/Gateway API, once deployed): http://${vm_ip}:30080"
     fi
   fi
 }

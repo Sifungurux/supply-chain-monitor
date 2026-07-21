@@ -1,0 +1,9 @@
+# Separate from supply-chain-monitor on purpose: Traefik is cluster
+# infra (an ingress controller shared by whatever's exposed through it),
+# not one of this project's own services -- same reasoning as
+# flux-system getting its own namespace instead of living alongside the
+# app it deploys.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: traefik

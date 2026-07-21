@@ -1,0 +1,89 @@
+# Traefik as the cluster's ingress controller, configured for the
+# Kubernetes Gateway API specifically (not classic Ingress, and not
+# Traefik's own IngressRoute CRDs) -- see k8s/gateway/ for the
+# GatewayClass-consuming Gateway/HTTPRoute that actually route to the
+# dashboard, and docs/architecture.md ("Ingress: Traefik + Gateway API")
+# for the full picture, including why the version pins below matter and
+# how this interacts with k3s's own bundled Traefik.
+#
+# version 41.0.2 / appVersion v3.7.6 was the latest published chart as
+# of this writing (see https://traefik.github.io/charts/index.yaml) --
+# pinned rather than left floating, same reproducibility reasoning as
+# every other version pin in this project.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: traefik
+  namespace: flux-system
+spec:
+  interval: 10m
+  chart:
+    spec:
+      chart: traefik
+      version: "41.0.2"
+      sourceRef:
+        kind: HelmRepository
+        name: traefik
+        namespace: flux-system
+  targetNamespace: traefik
+  install:
+    createNamespace: true
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  timeout: 5m
+  values:
+    # This is the whole point: enables Traefik's Gateway API provider,
+    # which also auto-creates a GatewayClass named "traefik"
+    # (controllerName: traefik.io/gateway-controller) -- see
+    # k8s/gateway/gateway.yaml, which references that GatewayClass by
+    # name. Requires the Gateway API CRDs to already exist in the
+    # cluster (cluster/install-gateway-api.sh, run automatically by
+    # create-cluster.sh -- NOT something this chart installs itself).
+    providers:
+      kubernetesGateway:
+        enabled: true
+      # Not used by this project -- everything routes through the
+      # Gateway API (k8s/gateway/) instead. Disabling both keeps
+      # Traefik's watch/RBAC surface limited to what's actually in use;
+      # flip either back on if you introduce a classic Ingress or a
+      # Traefik-native IngressRoute later.
+      kubernetesIngress:
+        enabled: false
+      kubernetesCRD:
+        enabled: false
+
+    gatewayClass:
+      enabled: true
+
+    # The chart's own default Gateway would be created in Traefik's own
+    # namespace (traefik) -- disabled here in favor of hand-writing our
+    # own in k8s/gateway/gateway.yaml, inside supply-chain-monitor
+    # itself, so the Gateway lives right next to the HTTPRoute (and
+    # Service) it routes to rather than split across namespaces.
+    gateway:
+      enabled: false
+
+    # NodePort with a fixed port, matching every other Service in this
+    # project (registry 30500, monitor-api 30300, dashboard 30301) --
+    # deliberately not the chart's default (LoadBalancer), so exposure
+    # works identically on both the colima and podman/k3d runtimes
+    # without depending on k3s's Klipper LB vs. k3d's own loadbalancer
+    # container behaving the same way. See cluster/k3d-config.yaml's
+    # 30080:30080 mapping and colima's --network-address (cluster/
+    # runtimes/colima.sh) for how each runtime makes this reachable from
+    # the host.
+    service:
+      type: NodePort
+    ports:
+      web:
+        nodePort: 30080
+      # No TLS termination configured yet (see docs/architecture.md's
+      # Known limitations) -- disabling this port rather than exposing
+      # a 443 that can't actually complete a TLS handshake.
+      websecure:
+        expose:
+          default: false

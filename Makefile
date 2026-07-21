@@ -2,7 +2,7 @@
 SCM_RUNTIME  ?= colima
 IMAGE        := monitor-api:dev
 
-.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard check-dashboard-configmap db-shell lock-deps db-backup db-restore db-backups-list
+.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test gateway-api-install build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard check-dashboard-configmap db-shell lock-deps db-backup db-restore db-backups-list
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -39,6 +39,17 @@ git-auth:
 
 git-test:
 	./cluster/test-git-connection.sh
+
+# `make cluster-up` already runs this automatically (see
+# cluster/create-cluster.sh) -- standalone target for installing/
+# re-running just the Gateway API CRDs against a cluster that's already
+# up (e.g. after SCM_SKIP_GATEWAY_API=1). See
+# cluster/install-gateway-api.sh and docs/architecture.md ("Ingress:
+# Traefik + Gateway API") -- Traefik itself is Flux-managed
+# (k8s/releases/traefik-helmrelease.yaml), this only installs the CRDs
+# it depends on.
+gateway-api-install:
+	./cluster/install-gateway-api.sh
 
 # On the colima runtime, this is all you need -- colima's k3s (docker
 # runtime) shares the same image store as `docker build`, so there's no
@@ -79,12 +90,13 @@ deploy: build
 		flux reconcile helmrelease registry -n flux-system --timeout=2m && \
 		flux reconcile helmrelease clamav -n flux-system --timeout=2m && \
 		flux reconcile helmrelease monitor-api -n flux-system --timeout=2m && \
-		flux reconcile helmrelease dashboard -n flux-system --timeout=2m ; \
+		flux reconcile helmrelease dashboard -n flux-system --timeout=2m && \
+		flux reconcile helmrelease traefik -n flux-system --timeout=2m ; \
 	else \
 		echo "('flux' CLI not found -- brew install fluxcd/tap/flux for a faster,"; \
 		echo " per-HelmRelease reconcile trigger. Falling back to annotating the"; \
 		echo " GitRepository/root Kustomization so they re-sync right away instead"; \
-		echo " of waiting up to their normal interval; the five HelmReleases will"; \
+		echo " of waiting up to their normal interval; the six HelmReleases will"; \
 		echo " pick up the change on their own next poll, within a few minutes.)"; \
 		kubectl -n flux-system annotate gitrepository/flux-system reconcile.fluxcd.io/requestedAt="$$(date +%s)" --overwrite; \
 		kubectl -n flux-system annotate kustomization/flux-system reconcile.fluxcd.io/requestedAt="$$(date +%s)" --overwrite; \
@@ -98,12 +110,15 @@ deploy: build
 	@echo "hands off rather than watching the cluster; run 'make logs' or"
 	@echo "'flux get helmreleases -A' any time to check on it."
 
-# Deletes everything Flux currently manages under k8s/ -- the five
+# Deletes everything Flux currently manages under k8s/ -- the six
 # HelmReleases (which helm-controller then correctly un-installs, taking
-# their Deployments/Services/etc. with them), the namespace, and Flux's
-# own root Kustomization/GitRepository. Flux's finalizers handle the
-# cascade; this is just telling the API server to delete what's
-# currently built from k8s/, the same as before the Helm conversion.
+# their Deployments/Services/etc. with them, Traefik included), the
+# Gateway/HTTPRoute, the namespaces, and Flux's own root Kustomization/
+# GitRepository. Flux's finalizers handle the cascade; this is just
+# telling the API server to delete what's currently built from k8s/,
+# the same as before the Helm conversion. Does NOT remove the Gateway
+# API CRDs themselves (cluster/install-gateway-api.sh) -- those are
+# cluster-wide infra outside Flux's remit, same as Flux's own CRDs.
 undeploy:
 	kubectl delete -k k8s/ --ignore-not-found
 

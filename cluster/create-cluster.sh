@@ -51,3 +51,19 @@ else
   echo
   echo "SCM_SKIP_FLUX=1 -- skipping Flux install. Run 'make flux-install' later if you want it."
 fi
+
+# Same shape of bootstrap problem as Flux's own CRDs: Traefik's Gateway
+# API provider (k8s/releases/traefik-helmrelease.yaml) needs these CRDs
+# to exist before it can watch GatewayClass/Gateway/HTTPRoute objects,
+# and no Helm chart installs them for you. Set SCM_SKIP_GATEWAY_API=1 to
+# skip (e.g. if you don't want Traefik/Gateway API on this cluster at
+# all) and run `make gateway-api-install` yourself whenever you do want
+# it -- see cluster/install-gateway-api.sh and docs/architecture.md.
+if [[ "${SCM_SKIP_GATEWAY_API:-0}" != "1" ]]; then
+  echo
+  echo "Installing Gateway API CRDs (set SCM_SKIP_GATEWAY_API=1 to skip this step)..."
+  "${SCRIPT_DIR}/install-gateway-api.sh"
+else
+  echo
+  echo "SCM_SKIP_GATEWAY_API=1 -- skipping Gateway API CRD install. Run 'make gateway-api-install' later if you want it."
+fi

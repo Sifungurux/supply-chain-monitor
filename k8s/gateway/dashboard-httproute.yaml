@@ -1,0 +1,24 @@
+# Routes everything through scm-gateway (see gateway.yaml) to the
+# dashboard's own Service (charts/dashboard/templates/service.yaml) --
+# no hostname restriction, so this matches on any Host header, reachable
+# at whatever address/port Traefik itself is exposed on (NodePort 30080
+# -- see k8s/releases/traefik-helmrelease.yaml). The dashboard's existing
+# direct NodePort (30301) still works unchanged; this is an additional
+# path in, not a replacement.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: scm-dashboard
+  namespace: supply-chain-monitor
+spec:
+  parentRefs:
+    - name: scm-gateway
+      sectionName: http
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: scm-dashboard
+          port: 80

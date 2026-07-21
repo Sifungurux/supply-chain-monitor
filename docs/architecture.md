@@ -837,18 +837,26 @@ charts/
   dashboard/      Chart.yaml, values.yaml, templates/{configmap,deployment,service}.yaml, files/index.html
 k8s/
   namespace.yaml
+  traefik-namespace.yaml       # separate namespace for Traefik itself
   kustomization.yaml           # root of what Flux reconciles
   flux-system/
     gotk-sync.yaml             # GitRepository + root Kustomization (path: ./k8s)
     kustomization.yaml
     values.yaml                # Helm values for installing Flux itself
     README.md
+  sources/
+    traefik-helmrepository.yaml   # upstream chart source (not vendored into charts/)
   releases/
     registry-helmrelease.yaml
     clamav-helmrelease.yaml
     postgres-helmrelease.yaml
     monitor-api-helmrelease.yaml
     dashboard-helmrelease.yaml
+    traefik-helmrelease.yaml
+  gateway/
+    gateway.yaml               # Gateway API: scm-gateway
+    dashboard-httproute.yaml   # Gateway API: routes to scm-dashboard
+    kustomization.yaml
 ```
 
 Every resource that used to be a hand-written Deployment/Service/etc.
@@ -874,12 +882,17 @@ special case introduced here.
 
 `k8s/kustomization.yaml` (a plain, non-Flux kustomize file) is what Flux
 actually builds at that path: it lists `namespace.yaml`, the
-`flux-system` directory (self-reference), and the five `HelmRelease`
-custom resources under `releases/`. Each `HelmRelease`'s
-`chart.spec.chart` points at `./charts/<service>` in this same repo via
-`sourceRef: {kind: GitRepository, name: flux-system}` -- no separate
-`HelmRepository`/OCI registry needed, since the charts live in the same
-Git repo Flux already watches.
+`flux-system` directory (self-reference), the five `HelmRelease` custom
+resources under `releases/` for this project's own services, and (see
+"Ingress: Traefik + Gateway API" below) a sixth `HelmRelease` for
+Traefik plus the `Gateway`/`HTTPRoute` under `gateway/`. Each of this
+project's own 5 services' `HelmRelease`s has `chart.spec.chart` pointing
+at `./charts/<service>` in this same repo via `sourceRef: {kind:
+GitRepository, name: flux-system}` -- no separate `HelmRepository`/OCI
+registry needed, since those charts live in the same Git repo Flux
+already watches. Traefik's `HelmRelease` is the one exception -- its
+chart comes from an upstream `HelmRepository` instead (see below), since
+it's third-party infra, not one of this project's own services.
 
 ### Explicit ordering via `dependsOn`
 
@@ -916,6 +929,81 @@ well-understood condition (CRDs via `Established`, then controller
 Deployments via `Available`) -- see the script and
 `k8s/flux-system/README.md` for the exact sequence.
 
+### Ingress: Traefik + Gateway API
+
+The dashboard is also reachable through an actual ingress path now, not
+just its direct NodePort (`30301`, still there and unchanged). Explicitly
+the Kubernetes **Gateway API**, not classic `Ingress` and not Traefik's
+own `IngressRoute` CRDs -- both are disabled in Traefik's own config
+(`providers.kubernetesIngress.enabled: false`,
+`providers.kubernetesCRD.enabled: false` in
+`k8s/releases/traefik-helmrelease.yaml`) so the only routing path in is
+the one this project actually defines.
+
+**Why Traefik needed a script, same as Flux.** k3s bundles its own
+Traefik by default, but both runtimes already disable it
+(`--k3s-arg="--disable=traefik"` in `cluster/runtimes/colima.sh`;
+`--disable=traefik` in `cluster/k3d-config.yaml`) -- this project installs
+its own version-pinned Traefik instead, the same reasoning as installing
+Flux itself via a pinned Helm chart rather than trusting whatever a given
+k3s release happens to bundle. Unlike Flux, though, Traefik has no
+chicken-and-egg bootstrap problem (Flux has to bootstrap itself since
+it's the thing that would otherwise apply itself; Traefik doesn't), so
+it's a completely normal Flux-managed `HelmRelease`
+(`k8s/releases/traefik-helmrelease.yaml`), sourced from an upstream
+`HelmRepository` (`k8s/sources/traefik-helmrepository.yaml`,
+`https://traefik.github.io/charts`) rather than a chart vendored into
+`charts/` -- Traefik is third-party infra this project consumes as-is,
+unlike its own 5 services.
+
+The **Gateway API CRDs** are the one piece that *does* need a script,
+for the same reason Flux's own CRDs do: they're upstream,
+community-maintained CRDs (`kubernetes-sigs/gateway-api`) that no Helm
+chart installs for you, and Traefik's Gateway API provider can't watch
+`GatewayClass`/`Gateway`/`HTTPRoute` objects until they exist.
+`cluster/install-gateway-api.sh` applies the pinned `v1.5.1` "standard"
+channel release, runs automatically at the end of `make cluster-up`
+(set `SCM_SKIP_GATEWAY_API=1` to skip, `make gateway-api-install` to run
+it standalone) -- same shape as `install-flux.sh`, including the
+`kubectl wait --for=condition=Established` step.
+
+**What's actually wired up:**
+
+- `k8s/releases/traefik-helmrelease.yaml` sets
+  `providers.kubernetesGateway.enabled: true`, which (per Traefik's own
+  chart) auto-creates a `GatewayClass` named `traefik`
+  (`controllerName: traefik.io/gateway-controller`). The chart's own
+  default `Gateway` is disabled (`gateway.enabled: false`) in favor of
+  hand-writing one in `k8s/gateway/gateway.yaml`, inside
+  `supply-chain-monitor` itself rather than Traefik's own `traefik`
+  namespace -- so it sits right next to the `HTTPRoute` and `Service` it
+  routes to.
+- `k8s/gateway/gateway.yaml` -- a `Gateway` named `scm-gateway`, one
+  `http` listener on port 80, routes restricted to its own namespace
+  (`allowedRoutes.namespaces.from: Same`).
+- `k8s/gateway/dashboard-httproute.yaml` -- an `HTTPRoute` matching any
+  path, routing to `scm-dashboard`'s existing Service on port 80. No
+  hostname restriction, so it matches any `Host` header.
+- Exposure: Traefik's Service is `NodePort` with a fixed port (`30080`),
+  matching every other Service in this project (registry `30500`,
+  monitor-api `30300`, dashboard `30301`) rather than the chart's default
+  `LoadBalancer` -- deliberately, so it behaves identically on both
+  runtimes instead of depending on k3s's Klipper LB vs. k3d's own
+  loadbalancer container doing the same thing. `cluster/k3d-config.yaml`
+  maps host `30080` the same way it already does for the other NodePorts;
+  on colima, it's reachable at the VM's own address (same
+  `--network-address` mechanism the other NodePorts already rely on).
+  No TLS/HTTPS yet -- `websecure` is explicitly disabled
+  (`ports.websecure.expose.default: false`) rather than exposing a 443
+  that can't complete a handshake; see Roadmap.
+
+Version pins (checked against the actual upstream sources, not assumed
+from memory, since both move independently of this project): Gateway
+API `v1.5.1` (the latest release at the time this was written -- verify
+against `kubernetes-sigs/gateway-api`'s releases before bumping), Traefik
+chart `41.0.2` / `appVersion v3.7.6` (the latest published chart per
+`https://traefik.github.io/charts/index.yaml`).
+
 ### `make deploy`: trigger a reconcile, then hand off
 
 Since Flux now owns every resource under `k8s/`, `make deploy` no longer
@@ -923,7 +1011,7 @@ runs `kubectl apply -k k8s/` itself -- doing so would just fight Flux for
 ownership of the same resources. Instead it: builds the local
 `monitor-api:dev` image, commits and pushes the current working tree (so
 the `GitRepository` has something new to see), forces an immediate
-reconcile of the source, root `Kustomization`, and all five
+reconcile of the source, root `Kustomization`, and all six
 `HelmRelease`s (via the `flux` CLI if installed, falling back to
 annotating the `GitRepository`/`Kustomization` to force an early
 re-sync), then rollout-restarts `monitor-api`/`scm-dashboard`
@@ -1081,3 +1169,10 @@ deploy` invocation.
   && make deploy` on a real machine and treat the first pass as an
   integration test of this migration, not just a routine deploy --
   report back anything that fails so it can be fixed.
+- **No TLS/HTTPS on the Gateway yet**: see "Ingress: Traefik + Gateway
+  API" -- the `websecure` listener is disabled rather than half-wired.
+  Adding it needs a certificate source (self-signed for local dev, or
+  cert-manager wired to Traefik for anything closer to real) and a
+  `websecure` listener + `certificateRefs` on `scm-gateway` -- worth
+  doing before this ever sits anywhere less trusted than a local dev
+  cluster, not required for it to work today.

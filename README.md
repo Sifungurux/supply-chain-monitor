@@ -17,15 +17,18 @@ cluster/               cluster create/destroy scripts (colima by default, podman
   runtimes/podman.sh    k3d-on-podman runtime path (experimental, see below)
   k3d-config.yaml       k3d config used only by the podman path
   install-flux.sh       installs Flux via Helm (`make flux-install`, or automatic via `make cluster-up`)
+  install-gateway-api.sh   installs the Gateway API CRDs (`make gateway-api-install`, or automatic via `make cluster-up`)
   postgres-restore.sh, postgres-list-backups.sh   on-demand Postgres backup restore/listing (`make db-restore`/`db-backups-list`)
 charts/                 every service deploys as a Helm chart now (see "GitOps (Flux)" below)
   registry/, clamav/, postgres/, monitor-api/, dashboard/   Chart.yaml + values.yaml + templates/
 k8s/                    what Flux actually reconciles (path: ./k8s) -- no raw per-service
-                        manifests anymore, just the namespace, Flux's own bootstrap
-                        self-reference, and a HelmRelease per service
-  namespace.yaml
+                        manifests anymore, just the namespaces, Flux's own bootstrap
+                        self-reference, a HelmRelease per service, and Traefik + Gateway API
+  namespace.yaml, traefik-namespace.yaml
   flux-system/          GitRepository + root Kustomization (gotk-sync.yaml), Flux install values.yaml
-  releases/             one HelmRelease per service, chart sourced from charts/ above
+  sources/              upstream HelmRepository for Traefik's chart (not vendored into charts/)
+  releases/             one HelmRelease per service (+ Traefik), chart sourced from charts/ above
+  gateway/               Gateway API: scm-gateway + the HTTPRoute to scm-dashboard (see "Ingress" below)
 services/monitor-api/   the Go API service source + tests (internal/.../*_test.go)
 dashboard/index.html    the dashboard itself (source of truth -- charts/dashboard/files/index.html is a copy of this)
 dashboard/tests/        dashboard test suite (Node + jsdom)
@@ -580,7 +583,7 @@ regardless; nothing actually reconciles until
 this content, and is reachable from the cluster.
 
 Once it is, `flux get kustomizations -A` and `flux get helmreleases -A`
-should show `flux-system` and all five releases `Ready`. **This exact
+should show `flux-system` and all six releases `Ready`. **This exact
 setup has not been run against a real cluster yet** (see the note under
 Quickstart) — the first time you do, please report back exactly what
 `kubectl -n supply-chain-monitor get pods`, `flux get helmreleases -A`,
@@ -589,6 +592,33 @@ and `make test-artifact` show, especially anything `NotReady`,
 missed dependency, a typo an actual Kubernetes API would catch that
 static YAML validation can't) gets fixed quickly rather than sitting
 undiscovered.
+
+### Ingress: Traefik + Gateway API
+
+The dashboard is also reachable through an ingress path now — Traefik,
+configured for the Kubernetes **Gateway API** specifically (not classic
+`Ingress`, not Traefik's own `IngressRoute` CRDs — both disabled). Its
+direct NodePort (`30301`) still works unchanged; this is an additional
+path in.
+
+```bash
+http://<vm-address-or-localhost>:30080   # routes through Traefik -> Gateway -> scm-dashboard
+```
+
+Both runtimes already disable k3s's *bundled* Traefik
+(`--k3s-arg="--disable=traefik"` / `--disable=traefik`) — this project
+installs its own version-pinned Traefik instead via a Flux `HelmRelease`
+(`k8s/releases/traefik-helmrelease.yaml`, chart from the upstream
+`https://traefik.github.io/charts` repo), same reproducibility reasoning
+as pinning Flux's own chart version. The Gateway API CRDs themselves are
+installed by `cluster/install-gateway-api.sh`, automatically at the end
+of `make cluster-up` (`SCM_SKIP_GATEWAY_API=1` to skip, `make
+gateway-api-install` to run standalone) — Traefik's chart doesn't
+install these for you, same shape of problem Flux's own CRDs have. See
+`docs/architecture.md`'s "Ingress: Traefik + Gateway API" for the full
+design, including the exact `GatewayClass`/`Gateway`/`HTTPRoute` wiring
+and the version pins used (checked against the real upstream sources at
+write time, not assumed). No TLS/HTTPS yet — see Known limitations.
 
 ## Tearing down
 
@@ -609,6 +639,14 @@ make cluster-destroy    # stops AND deletes the VM/machine + its data
   Treat the first `make cluster-up && make deploy` as a real
   integration test, not a routine deploy, and see "GitOps (Flux)"
   above for what to check and report back.
+- **Traefik + Gateway API is unverified against a real cluster too, and
+  has no TLS/HTTPS yet.** Same disclosure as the rest of this list —
+  the `GatewayClass`/`Gateway`/`HTTPRoute` wiring is statically valid
+  YAML, but has never actually routed a real request. Report back
+  whether `http://<vm-or-localhost>:30080` reaches the dashboard, and
+  whether `kubectl get gatewayclass,gateway,httproute -A` shows
+  everything `Accepted`/`Programmed`. See docs/architecture.md's
+  Roadmap for what adding TLS would need.
 - **The private-repo Git credentials (`make git-auth`) haven't been
   verified against the real repo either**, for the same reason: a
   sandboxed assistant session has no GitHub PAT to test with. An
