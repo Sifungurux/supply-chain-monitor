@@ -1,0 +1,11 @@
+{
+  "name": "scm-dashboard",
+  "private": true,
+  "description": "Test suite for the supply chain monitor dashboard (dashboard/index.html). The dashboard itself ships as a single static file with zero runtime dependencies -- these devDependencies are test-only.",
+  "scripts": {
+    "test": "node --test tests/"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}

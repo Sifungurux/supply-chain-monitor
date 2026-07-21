@@ -1,0 +1,328 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/api"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/k8sjob"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/pipeline"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
+)
+
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func getenvBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return b
+}
+
+func getenvInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+// buildPostgresDSN assembles a "postgres://..." connection string from
+// individual POSTGRES_* env vars. POSTGRES_DSN, if set, wins outright --
+// an escape hatch for anyone who wants to hand a full connection string
+// with query params this helper doesn't know about. Split out from
+// main() so it's unit-testable without a real database (see
+// main_test.go).
+func buildPostgresDSN() string {
+	if dsn := os.Getenv("POSTGRES_DSN"); dsn != "" {
+		return dsn
+	}
+	host := getenv("POSTGRES_HOST", "scm-postgres.supply-chain-monitor.svc.cluster.local")
+	port := getenv("POSTGRES_PORT", "5432")
+	user := getenv("POSTGRES_USER", "monitor_api")
+	pass := os.Getenv("POSTGRES_PASSWORD")
+	db := getenv("POSTGRES_DB", "monitor_api")
+	sslmode := getenv("POSTGRES_SSLMODE", "disable")
+
+	u := &url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(user, pass),
+		Host:     fmt.Sprintf("%s:%s", host, port),
+		Path:     "/" + db,
+		RawQuery: "sslmode=" + sslmode,
+	}
+	return u.String()
+}
+
+// connectStoreWithRetry retries NewPostgresStore with a fixed backoff.
+// Postgres and monitor-api start up concurrently in Kubernetes -- the
+// Percona pod can easily still be initializing its data directory (or
+// just not Ready yet) the first few times this pod tries to connect.
+// Failing fast and letting Kubernetes restart the whole pod would work
+// too, but retrying in-process avoids a crash-loop-backoff delay on
+// every fresh cluster bring-up.
+func connectStoreWithRetry(ctx context.Context, dsn string, attempts int, delay time.Duration) (*artifact.PostgresStore, error) {
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		store, err := artifact.NewPostgresStore(ctx, dsn)
+		if err == nil {
+			return store, nil
+		}
+		lastErr = err
+		log.Printf("postgres not ready yet (attempt %d/%d): %v", i+1, attempts, err)
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return nil, fmt.Errorf("giving up after %d attempts: %w", attempts, lastErr)
+}
+
+func main() {
+	// `monitor-api scan-worker` is the same binary running in a
+	// different mode: a single, one-shot unpack+malware-scan of one
+	// image artifact, then exit -- no HTTP server, no Postgres
+	// connection. This is what IsolatedUnpackerScanner
+	// (internal/scanner/isolated_unpacker.go) runs as a Kubernetes Job
+	// per scan, instead of calling UnpackerScanner directly inside the
+	// long-running API server process. See docs/architecture.md
+	// ("Isolating the unpack+scan step").
+	if len(os.Args) > 1 && os.Args[1] == "scan-worker" {
+		runScanWorker()
+		return
+	}
+	runAPIServer()
+}
+
+// runScanWorker unpacks and malware-scans exactly one image artifact
+// (SCM_SCAN_REF) and prints the result as JSON (scanner.WorkerResult)
+// to stdout, then exits. Intended to run inside a short-lived,
+// minimally-privileged Kubernetes Job pod (see k8s/monitor-api/rbac.yaml
+// and IsolatedUnpackerScanner), not as a long-running process.
+//
+// A scan error (couldn't pull the image, clamd unreachable, etc.) is
+// reported *inside* the printed JSON (WorkerResult.Error), and the
+// process still exits 0 -- the Job "succeeding" means "the worker ran
+// and reported something," which keeps IsolatedUnpackerScanner's Job-
+// completion handling to a single, simple path. Only a genuine setup
+// failure (missing SCM_SCAN_REF, can't reach clamd's config, can't
+// write the result) exits non-zero, since there's nothing meaningful
+// to report in that case.
+func runScanWorker() {
+	ref := os.Getenv("SCM_SCAN_REF")
+	if ref == "" {
+		fmt.Fprintln(os.Stderr, "scan-worker: SCM_SCAN_REF is required")
+		os.Exit(2)
+	}
+
+	clamAddr := getenv("CLAMAV_ADDR", "")
+	unpackerBin := getenv("UNPACKER_BIN", "unpacker")
+	unpackerInsecure := getenvBool("UNPACKER_INSECURE", true)
+	unpackerPublic := getenvBool("UNPACKER_PUBLIC", true)
+	unpackerMaxFileMB := getenvInt("UNPACKER_MAX_FILE_MB", 100)
+
+	s := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024)
+
+	// Matches the scan timeout the API server itself used to apply
+	// in-process (see internal/api/handlers.go) -- the Job's own
+	// activeDeadlineSeconds (k8s/monitor-api/rbac.yaml's Job template,
+	// built in internal/k8sjob) is set a little longer than this as a
+	// backstop, so this context timeout is what actually fires first
+	// in the normal case.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	findings, scanErr := s.Scan(ctx, ref)
+	result := scanner.WorkerResult{Findings: findings}
+	if scanErr != nil {
+		result.Error = scanErr.Error()
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	if err := enc.Encode(result); err != nil {
+		fmt.Fprintf(os.Stderr, "scan-worker: failed to write result: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// buildImageScanners picks the malware-scanning half of the `image`
+// artifact type's scanner list: the isolated, Kubernetes-Job-per-scan
+// path by default, or the in-process fallback when
+// DISABLE_SCAN_ISOLATION is set. Split out from runAPIServer
+// specifically so this decision is unit-testable (main_test.go)
+// without needing a real Kubernetes API client or a real trivy binary
+// -- neither scanner argument is ever actually invoked by this
+// function, just selected.
+func buildImageScanners(disableScanIsolation bool, trivy scanner.Scanner, inProcessUnpacker scanner.Scanner, isolatedUnpacker scanner.Scanner) []scanner.Scanner {
+	if disableScanIsolation {
+		return []scanner.Scanner{trivy, inProcessUnpacker}
+	}
+	return []scanner.Scanner{trivy, isolatedUnpacker}
+}
+
+func runAPIServer() {
+	listenAddr := getenv("LISTEN_ADDR", ":8080")
+	clamAddr := getenv("CLAMAV_ADDR", "")
+	registryAddr := getenv("REGISTRY_ADDR", "")
+	stagesEnv := getenv("PIPELINE_STAGES", "source,build,test,scan,sign,publish,deploy")
+
+	// unpacker (github.com/Sifungurux/unpacker) config, passed through
+	// to each scan-worker Job's env -- see IsolatedUnpackerScanner.
+	// Defaults assume a local, unauthenticated, plain-HTTP dev registry
+	// (scm-registry); tighten these before pointing at anything else.
+	unpackerBin := getenv("UNPACKER_BIN", "unpacker")
+	unpackerInsecure := getenvBool("UNPACKER_INSECURE", true)
+	unpackerPublic := getenvBool("UNPACKER_PUBLIC", true)
+	unpackerMaxFileMB := getenvInt("UNPACKER_MAX_FILE_MB", 100)
+
+	// trivy vulnerability DB config. Empty repository strings mean
+	// "trivy's own default" (public ghcr.io/mirror.gcr.io) -- fine with
+	// normal internet access. For an air-gapped cluster, seed a mirror
+	// with cluster/seed-trivy-db.sh and point these at it (see README).
+	trivyDB := scanner.TrivyDBConfig{
+		DBRepository:     getenv("TRIVY_DB_REPOSITORY", ""),
+		JavaDBRepository: getenv("TRIVY_JAVA_DB_REPOSITORY", ""),
+		SkipDBUpdate:     getenvBool("TRIVY_SKIP_DB_UPDATE", false),
+		SkipJavaDBUpdate: getenvBool("TRIVY_SKIP_JAVA_DB_UPDATE", false),
+	}
+
+	stages := strings.Split(stagesEnv, ",")
+	for i := range stages {
+		stages[i] = strings.TrimSpace(stages[i])
+	}
+
+	// Fail closed: no default, no "insecure mode" fallback. Every
+	// request (except /healthz) must carry this as
+	// `Authorization: Bearer <API_KEY>` -- see internal/api/router.go's
+	// withAuth. Sourced from a Secret (k8s/monitor-api/auth-secret.yaml),
+	// the same pattern already used for POSTGRES_PASSWORD.
+	apiKey := os.Getenv("API_KEY")
+	if apiKey == "" {
+		log.Fatalf("API_KEY is required and was not set")
+	}
+
+	// Artifacts are persisted in Postgres (Percona Distribution for
+	// PostgreSQL, deployed via k8s/postgres/) rather than in-memory --
+	// see docs/architecture.md for why. artifact.MemStore still exists
+	// and backs this package's own unit tests plus internal/api's
+	// handler tests, but production always talks to a real database.
+	ctx := context.Background()
+	dsn := buildPostgresDSN()
+	store, err := connectStoreWithRetry(ctx, dsn, 12, 5*time.Second)
+	if err != nil {
+		log.Fatalf("could not connect to postgres: %v", err)
+	}
+
+	stageTracker := pipeline.NewTracker(stages)
+
+	// file/sbom/sarif artifacts can now be OCI registry references
+	// (scm-registry by default), not just paths already sitting inside
+	// this pod -- FetchingScanner below pulls them via `oras pull`
+	// first. image artifacts don't need this: unpacker and trivy both
+	// already fetch the image themselves. See internal/scanner/fetch.go.
+	fetchPlainHTTP := getenvBool("FETCH_PLAIN_HTTP", true)
+	fetcher := scanner.NewRegistryFetcher(fetchPlainHTTP)
+
+	// Image malware scanning (unpack + ClamAV) normally runs in its own
+	// short-lived Kubernetes Job per scan, not in this process -- see
+	// IsolatedUnpackerScanner and docs/architecture.md ("Isolating the
+	// unpack+scan step"). That requires a real Kubernetes API client,
+	// which requires this pod to actually have a ServiceAccount token
+	// (k8s/monitor-api/serviceaccount.yaml -- deliberately flipped to
+	// automountServiceAccountToken: true for exactly this, scoped down
+	// tightly via k8s/monitor-api/rbac.yaml's Role) -- which a bare
+	// `docker run` outside any cluster does not have.
+	//
+	// DISABLE_SCAN_ISOLATION restores the ability to run this binary
+	// that way, for quick local iteration: it skips
+	// k8sjob.NewInClusterClient entirely (so its own log.Fatalf on a
+	// missing ServiceAccount token never fires) and falls back to
+	// running UnpackerScanner directly in-process, exactly like before
+	// the isolation work landed. Left at its default (isolation stays
+	// on) for every real deployment in k8s/ -- this is a deliberate,
+	// documented downgrade of the hardening in "Isolating the
+	// unpack+scan step" for local dev convenience, not something to
+	// flip on anywhere the pod might see untrusted image content
+	// beyond a throwaway local registry. See docs/architecture.md and
+	// README's "Running monitor-api outside a Kubernetes pod".
+	disableScanIsolation := getenvBool("DISABLE_SCAN_ISOLATION", false)
+	inProcessUnpacker := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024)
+
+	var isolatedUnpacker scanner.Scanner
+	if !disableScanIsolation {
+		k8sClient, err := k8sjob.NewInClusterClient()
+		if err != nil {
+			log.Fatalf("could not create kubernetes client for scan-worker jobs: %v (set DISABLE_SCAN_ISOLATION=true to run without one -- see README)", err)
+		}
+		workerImage := getenv("SCAN_WORKER_IMAGE", "monitor-api:dev")
+		isolatedUnpacker = scanner.NewIsolatedUnpackerScanner(k8sClient, scanner.IsolatedUnpackerConfig{
+			Image:             workerImage,
+			ClamAddr:          clamAddr,
+			UnpackerBin:       unpackerBin,
+			UnpackerInsecure:  unpackerInsecure,
+			UnpackerPublic:    unpackerPublic,
+			UnpackerMaxFileMB: unpackerMaxFileMB,
+		})
+	} else {
+		log.Printf("DISABLE_SCAN_ISOLATION=true: image malware scanning will run in-process, not in an isolated Job -- see README, \"Running monitor-api outside a Kubernetes pod\"")
+	}
+
+	scanners := scanner.Registry{
+		// image artifacts get both a CVE scan (Trivy, still run
+		// in-process -- it only reads package metadata, not arbitrary
+		// image content, a much smaller attack surface than unpacking)
+		// and a malware scan (unpack + ClamAV, isolated by default --
+		// see above).
+		artifact.TypeImage: buildImageScanners(disableScanIsolation, scanner.NewTrivyScanner(registryAddr, trivyDB), inProcessUnpacker, isolatedUnpacker),
+		artifact.TypeFile: {
+			scanner.NewFetchingScanner(fetcher, scanner.NewClamAVScanner(clamAddr)),
+		},
+		// trivy sbom shares the same air-gapped DB-mirror config as
+		// the image scanner above -- see internal/scanner/sbom.go.
+		artifact.TypeSBOM: {
+			scanner.NewFetchingScanner(fetcher, scanner.NewSBOMScanner(trivyDB)),
+		},
+		// SARIF is parsed, not re-scanned -- see internal/scanner/sarif.go.
+		artifact.TypeSARIF: {
+			scanner.NewFetchingScanner(fetcher, scanner.NewSARIFScanner()),
+		},
+	}
+
+	router := api.NewRouter(store, stageTracker, scanners, apiKey)
+
+	srv := &http.Server{
+		Addr:         listenAddr,
+		Handler:      router,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+	}
+
+	log.Printf("monitor-api listening on %s", listenAddr)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("server error: %v", err)
+	}
+}

@@ -1,0 +1,37 @@
+# Scopes exactly what monitor-api's own ServiceAccount token (see
+# serviceaccount.yaml -- automountServiceAccountToken flipped to true
+# for this) can do: create/get/delete a scan-worker Job and read its
+# pod's logs, and only within this one namespace. No access to any
+# other resource (Secrets, ConfigMaps, other namespaces, cluster-scoped
+# anything) -- see internal/k8sjob/client.go for the exact calls this
+# permits and docs/architecture.md for why monitor-api needs this at
+# all now.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: monitor-api-scan-jobs
+  namespace: supply-chain-monitor
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: monitor-api-scan-jobs
+  namespace: supply-chain-monitor
+subjects:
+  - kind: ServiceAccount
+    name: monitor-api
+    namespace: supply-chain-monitor
+roleRef:
+  kind: Role
+  name: monitor-api-scan-jobs
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,374 @@
+//go:build postgres_integration
+
+// This file only builds/runs with `-tags=postgres_integration` (see
+// `make test-postgres`), so the default `go test ./...` used by
+// `make test-api` -- and by CI, whenever that's wired up against the
+// user's own git server -- never needs a live Postgres. That's a
+// deliberate split: PostgresStore's SQL is worth verifying against a
+// real database, but every other test in this repo runs with nothing
+// but `go test` and no external services, and this shouldn't change
+// that.
+package artifact_test
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
+)
+
+func testDSN(t *testing.T) string {
+	t.Helper()
+	dsn := os.Getenv("POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("POSTGRES_TEST_DSN not set -- run via `make test-postgres`")
+	}
+	return dsn
+}
+
+// newTestPostgresStore connects with a short retry loop of its own,
+// since `make test-postgres` starts the Percona container and this
+// test back to back -- there's no guarantee Postgres is accepting
+// connections yet on the first attempt.
+func newTestPostgresStore(t *testing.T) *artifact.PostgresStore {
+	t.Helper()
+	dsn := testDSN(t)
+
+	ctx := context.Background()
+	var store *artifact.PostgresStore
+	var err error
+	for i := 0; i < 20; i++ {
+		store, err = artifact.NewPostgresStore(ctx, dsn)
+		if err == nil {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	if err != nil {
+		t.Fatalf("connect to test postgres at %s: %v", dsn, err)
+	}
+	t.Cleanup(store.Close)
+	return store
+}
+
+func TestPostgresStore_CreateGetListUpdate(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	a, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if a.ID == "" {
+		t.Fatal("expected a generated id")
+	}
+	if a.Status != artifact.StatusRegistered {
+		t.Fatalf("status = %q, want %q", a.Status, artifact.StatusRegistered)
+	}
+
+	got, err := s.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Ref != "alpine:3.19" {
+		t.Fatalf("ref = %q, want %q", got.Ref, "alpine:3.19")
+	}
+
+	if _, err := s.Get("does-not-exist"); err == nil {
+		t.Fatal("expected an error for a missing id")
+	}
+
+	updated, err := s.Update(a.ID, func(art *artifact.Artifact) {
+		art.Status = artifact.StatusScanned
+		art.CVEFindings = append(art.CVEFindings, artifact.Finding{ID: "CVE-2024-1", Source: "trivy"})
+		art.StageHistory = append(art.StageHistory, artifact.StageEvent{Stage: "build", Timestamp: time.Now().UTC()})
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if updated.Status != artifact.StatusScanned {
+		t.Fatalf("status after update = %q, want %q", updated.Status, artifact.StatusScanned)
+	}
+	if len(updated.CVEFindings) != 1 || updated.CVEFindings[0].ID != "CVE-2024-1" {
+		t.Fatalf("cve findings did not round-trip through the JSONB column: %+v", updated.CVEFindings)
+	}
+	if len(updated.StageHistory) != 1 || updated.StageHistory[0].Stage != "build" {
+		t.Fatalf("stage history did not round-trip through the JSONB column: %+v", updated.StageHistory)
+	}
+
+	// Re-fetch with a fresh Get to prove the update was actually
+	// persisted to Postgres, not just mutated on the in-memory struct
+	// Update() happened to return.
+	refetched, err := s.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get after update: %v", err)
+	}
+	if refetched.Status != artifact.StatusScanned || len(refetched.CVEFindings) != 1 {
+		t.Fatalf("update did not persist: %+v", refetched)
+	}
+
+	list, err := s.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	found := false
+	for _, item := range list {
+		if item.ID == a.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("List did not include the created artifact: %+v", list)
+	}
+
+	if _, err := s.Update("does-not-exist", func(*artifact.Artifact) {}); err == nil {
+		t.Fatal("expected an error updating a missing id")
+	}
+}
+
+// TestPostgresStore_UpdateSerializesConcurrentWritesToSameArtifact
+// exercises the one behavior MemStore's mutex gave for free and
+// PostgresStore has to earn deliberately: two goroutines racing to
+// Update the *same* artifact must not silently drop one of the two
+// mutations. Update()'s SELECT ... FOR UPDATE row lock inside a
+// transaction is what's supposed to guarantee this.
+func TestPostgresStore_UpdateSerializesConcurrentWritesToSameArtifact(t *testing.T) {
+	s := newTestPostgresStore(t)
+	a, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	const n = 20
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			_, err := s.Update(a.ID, func(art *artifact.Artifact) {
+				art.StageHistory = append(art.StageHistory, artifact.StageEvent{
+					Stage:     "build",
+					Timestamp: time.Now().UTC(),
+				})
+			})
+			errs <- err
+		}()
+	}
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent Update: %v", err)
+		}
+	}
+
+	got, err := s.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.StageHistory) != n {
+		t.Fatalf("stage_history has %d entries, want %d -- a concurrent update was lost", len(got.StageHistory), n)
+	}
+}
+
+// TestPostgresStore_FindByFindingID exercises the query the findings
+// table's normalization exists to make possible -- see
+// docs/architecture.md, "Normalizing findings and stage history into
+// their own tables." A JSONB-blob-per-artifact schema could only
+// answer "which artifacts have CVE X" by scanning and JSON-decoding
+// every single row; this uses the findings.finding_id index instead.
+func TestPostgresStore_FindByFindingID(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	affected, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := s.Create("debian:12", artifact.TypeImage); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// A unique finding ID per test run avoids collisions with rows any
+	// other test in this file leaves behind in the same shared
+	// database (none of these tests clean up after themselves today).
+	findingID := fmt.Sprintf("CVE-test-%d", time.Now().UnixNano())
+
+	if _, err := s.Update(affected.ID, func(a *artifact.Artifact) {
+		a.CVEFindings = append(a.CVEFindings, artifact.Finding{ID: findingID, Severity: "high", Source: "trivy"})
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	matches, err := s.FindByFindingID(findingID)
+	if err != nil {
+		t.Fatalf("FindByFindingID: %v", err)
+	}
+	if len(matches) != 1 || matches[0].ID != affected.ID {
+		t.Fatalf("matches = %+v, want just %q", matches, affected.ID)
+	}
+	if len(matches[0].CVEFindings) != 1 || matches[0].CVEFindings[0].ID != findingID {
+		t.Fatalf("matched artifact's findings = %+v", matches[0].CVEFindings)
+	}
+
+	none, err := s.FindByFindingID("CVE-definitely-does-not-exist")
+	if err != nil {
+		t.Fatalf("FindByFindingID: %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("expected no matches for an unused finding id, got %+v", none)
+	}
+}
+
+// dsnWithSearchPath points a DSN at a specific Postgres schema via the
+// search_path connection parameter, so a test can create its own
+// artifacts table (in its own schema, via the admin connection) and
+// then hand a scoped DSN to NewPostgresStore -- giving it full control
+// of exactly what "the existing schema" looks like at connect time,
+// isolated from whatever other tests in this same run have already
+// done against the default "public" schema. Assumes dsn already has a
+// query string (true for every DSN this project's own docs/Makefile
+// ever construct, e.g. "...?sslmode=disable"); appends with "?"
+// instead of "&" if not.
+func dsnWithSearchPath(dsn, schema string) string {
+	sep := "&"
+	if !strings.Contains(dsn, "?") {
+		sep = "?"
+	}
+	return dsn + sep + "search_path=" + schema
+}
+
+// TestPostgresStore_MigratesLegacyJSONBSchema proves the migration
+// path in migrateLegacyJSONBColumns actually works against a real
+// database: build the OLD single-table JSONB schema by hand (exactly
+// what PostgresStore used to create, before normalization), seed it
+// with data through every column including one the old schema never
+// had a column for at all (other_findings/SARIF -- see the comment on
+// migrateLegacyJSONBColumns), then let NewPostgresStore's migration
+// run and verify the data survived the move into the new normalized
+// tables and the old JSONB columns are actually gone afterward, not
+// just unused.
+func TestPostgresStore_MigratesLegacyJSONBSchema(t *testing.T) {
+	dsn := testDSN(t)
+	ctx := context.Background()
+
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect admin pool: %v", err)
+	}
+	defer admin.Close()
+	var pingErr error
+	for i := 0; i < 20; i++ {
+		if pingErr = admin.Ping(ctx); pingErr == nil {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	if pingErr != nil {
+		t.Fatalf("ping: %v", pingErr)
+	}
+
+	schemaName := fmt.Sprintf("migration_test_%d", time.Now().UnixNano())
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schemaName); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+schemaName+" CASCADE")
+	})
+
+	// The exact old single-table shape (see postgres_store.go's git
+	// history / docs/architecture.md), built by hand inside the
+	// dedicated schema rather than by an older version of this code,
+	// since that code no longer exists to call.
+	_, err = admin.Exec(ctx, `CREATE TABLE `+schemaName+`.artifacts (
+		id                TEXT PRIMARY KEY,
+		ref               TEXT NOT NULL,
+		type              TEXT NOT NULL,
+		status            TEXT NOT NULL,
+		current_stage     TEXT NOT NULL DEFAULT '',
+		stage_history     JSONB NOT NULL DEFAULT '[]',
+		cve_findings      JSONB NOT NULL DEFAULT '[]',
+		malware_findings  JSONB NOT NULL DEFAULT '[]',
+		last_scan_errors  JSONB NOT NULL DEFAULT '[]',
+		created_at        TIMESTAMPTZ NOT NULL,
+		updated_at        TIMESTAMPTZ NOT NULL
+	)`)
+	if err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+
+	const legacyID = "legacy-artifact-1"
+	now := time.Now().UTC()
+	_, err = admin.Exec(ctx, `
+		INSERT INTO `+schemaName+`.artifacts
+			(id, ref, type, status, current_stage, stage_history, cve_findings, malware_findings, last_scan_errors, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+	`,
+		legacyID, "alpine:3.19", "image", "scanned", "scan",
+		`[{"stage":"build","timestamp":"2026-01-01T00:00:00Z","note":"CI job #1"}]`,
+		`[{"id":"CVE-2024-9999","severity":"high","title":"legacy finding","source":"trivy"}]`,
+		`[{"id":"clamav-signature-match","severity":"critical","title":"legacy malware","source":"clamav"}]`,
+		`["legacy scanner error"]`,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+
+	schemaDSN := dsnWithSearchPath(dsn, schemaName)
+	store, err := artifact.NewPostgresStore(ctx, schemaDSN)
+	if err != nil {
+		t.Fatalf("NewPostgresStore against legacy schema: %v", err)
+	}
+	defer store.Close()
+
+	got, err := store.Get(legacyID)
+	if err != nil {
+		t.Fatalf("Get migrated artifact: %v", err)
+	}
+	if len(got.StageHistory) != 1 || got.StageHistory[0].Stage != "build" || got.StageHistory[0].Note != "CI job #1" {
+		t.Fatalf("migrated stage_history = %+v", got.StageHistory)
+	}
+	if len(got.CVEFindings) != 1 || got.CVEFindings[0].ID != "CVE-2024-9999" {
+		t.Fatalf("migrated cve_findings = %+v", got.CVEFindings)
+	}
+	if len(got.MalwareFindings) != 1 || got.MalwareFindings[0].ID != "clamav-signature-match" {
+		t.Fatalf("migrated malware_findings = %+v", got.MalwareFindings)
+	}
+	if len(got.LastScanErrors) != 1 || got.LastScanErrors[0] != "legacy scanner error" {
+		t.Fatalf("migrated last_scan_errors = %+v", got.LastScanErrors)
+	}
+	// The old schema never had a column for this at all -- nothing to
+	// migrate, but the new normalized table must still work for it
+	// going forward.
+	if len(got.OtherFindings) != 0 {
+		t.Fatalf("expected no other_findings (the old schema had nowhere to store them), got %+v", got.OtherFindings)
+	}
+
+	var stillHasLegacyColumn bool
+	err = admin.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_attribute
+			WHERE attrelid = ($1 || '.artifacts')::regclass
+			  AND attname = 'stage_history'
+			  AND NOT attisdropped
+		)
+	`, schemaName).Scan(&stillHasLegacyColumn)
+	if err != nil {
+		t.Fatalf("check legacy column: %v", err)
+	}
+	if stillHasLegacyColumn {
+		t.Fatal("expected the legacy stage_history JSONB column to be dropped after migration")
+	}
+
+	// Reconnecting against the now-migrated schema must be a no-op --
+	// not an error, and not a second attempt to migrate data that's
+	// already been migrated.
+	store2, err := artifact.NewPostgresStore(ctx, schemaDSN)
+	if err != nil {
+		t.Fatalf("NewPostgresStore a second time (already migrated): %v", err)
+	}
+	defer store2.Close()
+	if _, err := store2.Get(legacyID); err != nil {
+		t.Fatalf("Get after reconnecting to an already-migrated schema: %v", err)
+	}
+}

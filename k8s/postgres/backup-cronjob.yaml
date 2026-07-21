@@ -1,0 +1,90 @@
+# Daily pg_dump of scm-postgres into scm-postgres-backups (see
+# backup-pvc.yaml), gzip-compressed, with simple filename-based
+# retention (keeps the newest KEEP_BACKUPS files, deletes older ones)
+# -- see docs/architecture.md ("Postgres backups") and README's
+# "Backing up and restoring Postgres" for the human-facing how-to,
+# including on-demand backups (`make db-backup`) and restoring
+# (`make db-restore BACKUP=...`).
+#
+# Uses the same percona/percona-distribution-postgresql image as the
+# database itself specifically so pg_dump's version always matches the
+# server's -- pg_dump is generally forward-compatible with newer
+# servers but not guaranteed backward-compatible with older ones, and
+# using the same image sidesteps that question entirely.
+#
+# Deliberately NOT hardened the same way k8s/monitor-api's scan-worker
+# Job is (no forced non-root user, no read-only root filesystem): this
+# container only ever touches this cluster's own trusted database
+# credentials and its own dump output, never untrusted external
+# content, so that hardening's actual payoff here is much smaller, and
+# guessing the wrong non-root UID for this image (unverified in this
+# environment -- there's no way to test it here) risks silently
+# breaking every backup instead. Revisit if that trade-off ever stops
+# looking right.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scm-postgres-backup
+  namespace: supply-chain-monitor
+  labels:
+    app: scm-postgres-backup
+spec:
+  schedule: "0 2 * * *" # daily at 02:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: scm-postgres-backup
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: scm-postgres-backup
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: pg-dump
+              image: percona/percona-distribution-postgresql:17.10
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  ts=$(date -u +%Y%m%dT%H%M%SZ)
+                  out="/backups/scm-postgres-${ts}.sql.gz"
+                  echo "backing up ${POSTGRES_DB} to ${out}"
+                  export PGPASSWORD="$POSTGRES_PASSWORD"
+                  pg_dump -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" | gzip > "$out"
+                  echo "backup complete: $(du -h "$out" | cut -f1)"
+                  cd /backups
+                  count=$(ls -1t scm-postgres-*.sql.gz 2>/dev/null | wc -l)
+                  if [ "$count" -gt "$KEEP_BACKUPS" ]; then
+                    echo "pruning to the newest $KEEP_BACKUPS backups (had $count)"
+                    ls -1t scm-postgres-*.sql.gz | tail -n +$((KEEP_BACKUPS + 1)) | xargs -r rm -v --
+                  fi
+              env:
+                - name: POSTGRES_HOST
+                  value: scm-postgres.supply-chain-monitor.svc.cluster.local
+                - name: POSTGRES_PORT
+                  value: "5432"
+                - name: KEEP_BACKUPS
+                  value: "7"
+              envFrom:
+                - secretRef:
+                    name: scm-postgres-credentials
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "256Mi"
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: scm-postgres-backups

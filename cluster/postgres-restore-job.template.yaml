@@ -1,0 +1,41 @@
+# Template for cluster/postgres-restore.sh (`make db-restore
+# BACKUP=...`) -- __BACKUP_FILE__ is substituted with the real
+# filename via `sed` before this is applied. Not part of `kubectl
+# apply -k k8s/` (not in k8s/kustomization.yaml): this is a one-off,
+# destructive, on-demand operation, never something a normal deploy
+# should run.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scm-postgres-restore
+  namespace: supply-chain-monitor
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: restore
+          image: percona/percona-distribution-postgresql:17.10
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              export PGPASSWORD="$POSTGRES_PASSWORD"
+              echo "restoring __BACKUP_FILE__ into ${POSTGRES_DB}@${POSTGRES_HOST} -- this overwrites existing data"
+              gunzip -c /backups/__BACKUP_FILE__ | psql -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          env:
+            - name: POSTGRES_HOST
+              value: scm-postgres.supply-chain-monitor.svc.cluster.local
+          envFrom:
+            - secretRef:
+                name: scm-postgres-credentials
+          volumeMounts:
+            - name: backups
+              mountPath: /backups
+              readOnly: true
+      volumes:
+        - name: backups
+          persistentVolumeClaim:
+            claimName: scm-postgres-backups

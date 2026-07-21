@@ -1,0 +1,35 @@
+# Used only by the podman runtime path (cluster/runtimes/podman.sh).
+# The colima runtime (default) doesn't use k3d at all -- it runs k3s
+# natively via `colima start --kubernetes`.
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: supply-chain-monitor
+servers: 1
+agents: 1  # kept minimal on the podman path given the open macOS bugs noted in podman.sh
+ports:
+  # host -> loadbalancer, for future ingress use
+  - port: 8081:80
+    nodeFilters:
+      - loadbalancer
+  # NodePort for the in-cluster OCI registry (docker push/pull from host)
+  - port: 30500:30500
+    nodeFilters:
+      - server:0
+  # NodePort for monitor-api, so `curl localhost:30300/...` works without port-forward
+  - port: 30300:30300
+    nodeFilters:
+      - server:0
+  # NodePort for the dashboard (nginx), so http://localhost:30301 works without port-forward
+  - port: 30301:30301
+    nodeFilters:
+      - server:0
+options:
+  k3s:
+    extraArgs:
+      - arg: --disable=traefik
+        nodeFilters:
+          - server:*
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchCurrentContext: true

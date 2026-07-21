@@ -1,0 +1,28 @@
+# One-off Job used by cluster/postgres-list-backups.sh (`make
+# db-backups-list`) to list what's in the scm-postgres-backups PVC --
+# not part of `kubectl apply -k k8s/` (not in k8s/kustomization.yaml)
+# since it's meant to be created, read, and torn down on demand, not
+# stood up as part of the normal deployment.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scm-postgres-list-backups
+  namespace: supply-chain-monitor
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 60
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: list
+          image: percona/percona-distribution-postgresql:17.10
+          command: ["sh", "-c", "ls -lh /backups 2>/dev/null || echo '(no backups yet)'"]
+          volumeMounts:
+            - name: backups
+              mountPath: /backups
+              readOnly: true
+      volumes:
+        - name: backups
+          persistentVolumeClaim:
+            claimName: scm-postgres-backups

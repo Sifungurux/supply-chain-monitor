@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: monitor-api-config
+  namespace: supply-chain-monitor
+data:
+  LISTEN_ADDR: ":8080"
+  PIPELINE_STAGES: "source,build,test,scan,sign,publish,deploy"
+  CLAMAV_ADDR: "scm-clamav.supply-chain-monitor.svc.cluster.local:3310"
+  REGISTRY_ADDR: "scm-registry.supply-chain-monitor.svc.cluster.local:5000"
+  # Postgres (Percona Distribution for PostgreSQL, k8s/postgres/)
+  # holds every artifact/finding/stage-history record -- see
+  # docs/architecture.md for why the in-memory store was replaced.
+  # POSTGRES_PASSWORD is deliberately absent here: it comes from the
+  # scm-postgres-credentials Secret via monitor-api/deployment.yaml's
+  # secretKeyRef, not this plaintext ConfigMap.
+  POSTGRES_HOST: "scm-postgres.supply-chain-monitor.svc.cluster.local"
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: "monitor_api"
+  POSTGRES_DB: "monitor_api"
+  POSTGRES_SSLMODE: "disable"
+  # unpacker (github.com/Sifungurux/unpacker) pull settings, used to
+  # unpack image artifacts before ClamAV scans their contents. monitor-api
+  # itself never runs unpacker directly -- these are forwarded into the
+  # env of each per-scan Kubernetes Job it creates (see
+  # internal/scanner/isolated_unpacker.go and docs/architecture.md,
+  # "Isolating the unpack+scan step"). Defaults assume a local,
+  # unauthenticated, plain-HTTP dev registry (scm-registry) -- tighten
+  # before pointing this at anything else.
+  UNPACKER_INSECURE: "true"
+  UNPACKER_PUBLIC: "true"
+  UNPACKER_MAX_FILE_MB: "100"
+  # Image the scan-worker Job runs -- almost always the same image
+  # monitor-api itself runs from, since `monitor-api scan-worker` is
+  # the same binary in a different mode. Keep this in sync with
+  # deployment.yaml's own image tag.
+  SCAN_WORKER_IMAGE: "monitor-api:dev"
+  # Left false here -- this is the real in-cluster deployment, which
+  # does have the ServiceAccount token isolation needs (see
+  # serviceaccount.yaml). true is only ever meant for running the
+  # monitor-api binary standalone outside Kubernetes (`docker run`, no
+  # cluster at all) -- see README, "Running monitor-api outside a
+  # Kubernetes pod". Never set this true here without also accepting
+  # image malware scanning moving back in-process for real.
+  DISABLE_SCAN_ISOLATION: "false"
+  # file/sbom/sarif artifacts can be registered with an OCI registry
+  # reference instead of a path already inside this pod -- oras pull
+  # fetches them from scm-registry first (see internal/scanner/fetch.go).
+  # true matches scm-registry's plain-HTTP, unauthenticated setup, same
+  # assumption UNPACKER_INSECURE/UNPACKER_PUBLIC above already make.
+  FETCH_PLAIN_HTTP: "true"
+  # trivy's vulnerability DB (and the separate Java DB) are themselves
+  # OCI artifacts pulled from ghcr.io by default -- fine with normal
+  # internet access. For an air-gapped cluster: run
+  # cluster/seed-trivy-db.sh once, while still online, to mirror both
+  # into scm-registry, then uncomment and fill in the four lines below
+  # (see README's "Air-gapped operation" section).
+  # TRIVY_DB_REPOSITORY: "scm-registry.supply-chain-monitor.svc.cluster.local:5000/aquasecurity/trivy-db:2"
+  # TRIVY_JAVA_DB_REPOSITORY: "scm-registry.supply-chain-monitor.svc.cluster.local:5000/aquasecurity/trivy-java-db:1"
+  # TRIVY_SKIP_DB_UPDATE: "true"
+  # TRIVY_SKIP_JAVA_DB_UPDATE: "true"
