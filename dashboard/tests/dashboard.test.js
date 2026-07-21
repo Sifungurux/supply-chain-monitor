@@ -327,7 +327,7 @@ test('uses window.SCM_CONFIG (injected by the render-config initContainer) when 
     },
     beforeParseExtra(window) {
       // Simulates env.js, which the initContainer writes before nginx
-      // ever serves this page -- see charts/dashboard/templates/deployment.yaml.
+      // ever serves this page -- see charts/supply-chain-monitor/templates/dashboard/deployment.yaml.
       window.SCM_CONFIG = { apiBase: 'http://injected-host:30300', apiKey: 'injected-key' };
     }
   });

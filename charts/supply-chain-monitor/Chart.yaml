@@ -1,0 +1,20 @@
+apiVersion: v2
+name: supply-chain-monitor
+description: >-
+  The whole supply-chain-monitor application -- registry, clamav,
+  postgres, monitor-api, dashboard -- plus the Gateway API resources
+  that route to the dashboard (GatewayClass/Gateway/HTTPRoute), as one
+  flattened Helm chart: a single `helm install`/`helm upgrade`, one
+  values.yaml. Deployed via Flux's HelmRelease (see
+  k8s/releases/supply-chain-monitor-helmrelease.yaml), but this is a
+  completely normal Helm chart -- `helm install supply-chain-monitor
+  ./charts/supply-chain-monitor` works standalone too, with or without
+  Flux. Traefik itself (the ingress controller these Gateway API
+  resources attach to) is deliberately NOT part of this chart -- see
+  k8s/releases/traefik-helmrelease.yaml -- it's third-party
+  infrastructure shared by whatever's exposed through it, not part of
+  this application. See docs/architecture.md, "A single chart for the
+  whole application", for the full picture.
+type: application
+version: 0.1.0
+appVersion: "dev"

@@ -57,7 +57,7 @@ type PodSpec struct {
 	RestartPolicy string `json:"restartPolicy"`
 	// A separate, zero-RBAC ServiceAccount from monitor-api's own (see
 	// the scm-scan-worker ServiceAccount in
-	// charts/monitor-api/templates/serviceaccount.yaml) -- this pod
+	// charts/supply-chain-monitor/templates/monitor-api/serviceaccount.yaml) -- this pod
 	// parses untrusted image content and has no business calling the
 	// Kubernetes API itself.
 	ServiceAccountName           string              `json:"serviceAccountName,omitempty"`

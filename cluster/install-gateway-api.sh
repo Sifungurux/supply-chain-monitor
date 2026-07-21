@@ -9,12 +9,13 @@
 # gateway-api-install`.
 #
 # "standard" channel, not "experimental" -- this project only uses
-# HTTPRoute (see k8s/gateway/), which is standard-channel; the
-# experimental channel adds TCPRoute/TLSRoute and other things this repo
-# doesn't need yet. Pinned to v1.5.1 (the latest release as of this
-# writing) rather than tracking `main`, for the same reproducibility
-# reasons every other version pin in this project exists -- bump the
-# version below when you deliberately want a newer one.
+# HTTPRoute (see charts/supply-chain-monitor/templates/gateway/), which
+# is standard-channel; the experimental channel adds TCPRoute/TLSRoute
+# and other things this repo doesn't need yet. Pinned to v1.5.1 (the
+# latest release as of this writing) rather than tracking `main`, for
+# the same reproducibility reasons every other version pin in this
+# project exists -- bump the version below when you deliberately want a
+# newer one.
 #
 # Idempotent: `kubectl apply` is always safe to re-run.
 set -euo pipefail
@@ -51,10 +52,12 @@ gateway_api_install() {
   echo "Gateway API CRDs installed:"
   kubectl get crd -o name | grep 'gateway\.networking\.k8s\.io' || true
   echo
-  echo "Note: Traefik itself (the GatewayClass it registers, and the"
-  echo "Gateway/HTTPRoute routing to the dashboard) is Flux-managed --"
-  echo "see k8s/releases/traefik-helmrelease.yaml and k8s/gateway/ -- so"
-  echo "it only actually appears once this repo is pushed and Flux has"
+  echo "Note: Traefik itself is Flux-managed"
+  echo "(k8s/releases/traefik-helmrelease.yaml), and the"
+  echo "GatewayClass/Gateway/HTTPRoute routing to the dashboard are part"
+  echo "of the application chart"
+  echo "(charts/supply-chain-monitor/templates/gateway/) -- so none of"
+  echo "it actually appears until this repo is pushed and Flux has"
   echo "reconciled, same as every other service."
 }
 

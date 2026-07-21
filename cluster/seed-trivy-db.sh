@@ -33,9 +33,10 @@ oras cp --to-plain-http "ghcr.io/${JAVA_DB_REF}" "${REGISTRY}/${JAVA_DB_REF}"
 
 echo
 echo "Done. scm-registry now has its own copy of both trivy databases."
-echo "To make monitor-api use it, set trivyDB.enabled: true and fill in"
-echo "these values in charts/monitor-api/values.yaml's trivyDB section"
-echo "(or override them in k8s/releases/monitor-api-helmrelease.yaml's spec.values):"
+echo "To make monitor-api use it, set monitorApi.trivyDB.enabled: true and"
+echo "fill in these values in charts/supply-chain-monitor/values.yaml's"
+echo "monitorApi.trivyDB section (or override them in"
+echo "k8s/releases/supply-chain-monitor-helmrelease.yaml's spec.values):"
 echo
 echo "  TRIVY_DB_REPOSITORY: \"scm-registry.supply-chain-monitor.svc.cluster.local:5000/${DB_REF}\""
 echo "  TRIVY_JAVA_DB_REPOSITORY: \"scm-registry.supply-chain-monitor.svc.cluster.local:5000/${JAVA_DB_REF}\""

@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: scm-postgres-data
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.postgres.persistence.size }}
+{{- if .Values.postgres.backup.enabled }}
+---
+# Separate from scm-postgres-data (the live database's own PVC) on
+# purpose: a backup that lives on the exact same volume as the data it's
+# backing up wouldn't survive the one failure mode backups exist for in
+# the first place (that PVC/its underlying storage getting corrupted or
+# lost).
+#
+# This is a pre-install/pre-upgrade hook, not a normal chart resource --
+# deliberately, and paired with backup-pvc-primer-job.yaml. Most
+# single-node dev clusters' default StorageClass (e.g. k3s/k3d/colima's
+# "local-path") uses volumeBindingMode: WaitForFirstConsumer, which only
+# binds a PVC once some pod actually gets scheduled against it. This
+# PVC's only real consumer is scm-postgres-backup, a CronJob that
+# doesn't run until its own schedule fires -- so with no consumer at
+# install time, it would stay Pending forever, and Helm's readiness
+# wait would eventually time out on it (the exact error this fixes:
+# "PersistentVolumeClaim/.../scm-postgres-backups status: InProgress").
+# Making this a pre-install hook (applied before Helm's wait step even
+# starts) and following it immediately with a tiny primer Job that
+# mounts it once is enough to trigger binding, regardless of which
+# provisioner/StorageClass is actually in play.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: scm-postgres-backups
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.postgres.backup.persistence.size }}
+{{- end }}

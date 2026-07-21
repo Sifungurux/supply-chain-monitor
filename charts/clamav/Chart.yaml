@@ -1,9 +1,0 @@
-apiVersion: v2
-name: clamav
-description: >-
-  ClamAV daemon (scm-clamav) monitor-api talks to for malware scanning of
-  unpacked image/artifact contents. Deployed via Flux's HelmRelease (see
-  k8s/clamav-helmrelease.yaml).
-type: application
-version: 0.1.0
-appVersion: "1.5"

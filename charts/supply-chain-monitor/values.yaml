@@ -1,0 +1,224 @@
+# Default values for the whole supply-chain-monitor application -- one
+# flattened chart, replacing the previous 5 separate per-service charts
+# (registry/clamav/postgres/monitor-api/dashboard). See
+# docs/architecture.md, "A single chart for the whole application", for
+# why. Every key below is namespaced by service (registry.*, clamav.*,
+# postgres.*, monitorApi.*, dashboard.*, gateway.*) purely to avoid
+# collisions now that they all live in one values file -- nothing here
+# changes what actually gets deployed versus the old per-chart defaults.
+# Flux's HelmRelease (k8s/releases/supply-chain-monitor-helmrelease.yaml)
+# can override any of these via its own spec.values; a plain `helm
+# install -f my-values.yaml` works the same way outside Flux.
+
+registry:
+  image:
+    repository: registry
+    tag: "2"
+    pullPolicy: IfNotPresent
+  # REGISTRY_STORAGE_DELETE_ENABLED=true is needed for anything that ever
+  # deletes a tag/manifest (not exercised by this project's own tooling
+  # today, but cheap to leave on for a throwaway dev registry).
+  deleteEnabled: true
+  persistence:
+    size: 5Gi
+  service:
+    # NodePort so the registry is reachable from outside the cluster too
+    # (oras/docker pushing test images from your own machine, not just
+    # from inside a pod) -- matches how this project has always run it.
+    type: NodePort
+    port: 5000
+    nodePort: 30500
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+clamav:
+  image:
+    repository: clamav/clamav
+    tag: 1.5-debian13-slim
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  # First boot downloads the virus DB (freshclam) and can take a few
+  # minutes -- these generous probe settings are why.
+  readiness:
+    initialDelaySeconds: 60
+    periodSeconds: 15
+    failureThreshold: 20
+  liveness:
+    initialDelaySeconds: 90
+    periodSeconds: 30
+
+postgres:
+  image:
+    repository: percona/percona-distribution-postgresql
+    tag: "17.10"
+    pullPolicy: IfNotPresent
+  credentials:
+    user: monitor_api
+    db: monitor_api
+    # Dev-only placeholder -- change this (and switch to a real
+    # secret-management flow, e.g. sealed-secrets or an
+    # external-secrets operator) before this points at anything shared.
+    # Override via this HelmRelease's spec.values, never commit a real
+    # password here.
+    password: changeme123
+  persistence:
+    size: 5Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 768Mi
+  backup:
+    enabled: true
+    schedule: "0 2 * * *" # daily at 02:00 UTC
+    keepBackups: 7
+    persistence:
+      size: 5Gi
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+monitorApi:
+  image:
+    repository: monitor-api
+    tag: dev
+    pullPolicy: IfNotPresent
+  listenAddr: ":8080"
+  pipelineStages: "source,build,test,scan,sign,publish,deploy"
+  # Service name + port only -- templates/monitor-api/configmap.yaml
+  # builds the full in-cluster FQDN using .Release.Namespace, so these
+  # stay correct regardless of which namespace this chart is installed
+  # into.
+  clamav:
+    service: scm-clamav
+    port: "3310"
+  registry:
+    service: scm-registry
+    port: "5000"
+  # password deliberately isn't set here -- it comes from
+  # scm-postgres-credentials (templates/postgres/secret.yaml) via
+  # templates/monitor-api/deployment.yaml's secretKeyRef, never a
+  # plaintext value in the ConfigMap.
+  postgres:
+    service: scm-postgres
+    port: "5432"
+    user: "monitor_api"
+    db: "monitor_api"
+    sslmode: "disable"
+  # Dev-only API key for monitor-api's shared-key auth (see
+  # internal/api/router.go's withAuth). Generate a real random value
+  # (e.g. `openssl rand -hex 32`) and override it via this HelmRelease's
+  # spec.values before this points at anything shared -- same caveat as
+  # postgres.credentials.password.
+  apiKey: qwe4r56789009876543223456789
+  # unpacker (github.com/Sifungurux/unpacker) pull settings, forwarded
+  # into the env of each per-scan Kubernetes Job monitor-api creates.
+  # Defaults assume a local, unauthenticated, plain-HTTP dev registry
+  # (scm-registry) -- tighten before pointing this at anything else.
+  unpacker:
+    insecure: "true"
+    public: "true"
+    maxFileMB: "100"
+  # Almost always the same image monitor-api itself runs from, since
+  # `monitor-api scan-worker` is the same binary in a different mode.
+  # Left unset here so the template defaults it to
+  # monitorApi.image.repository:monitorApi.image.tag -- override only
+  # if the scan-worker really needs to run a different image/tag.
+  scanWorkerImage: ""
+  # false here (the real in-cluster deployment, which has the
+  # ServiceAccount token isolation needs). true is only ever meant for
+  # running the monitor-api binary standalone outside Kubernetes -- see
+  # README, "Running monitor-api outside a Kubernetes pod". Never set
+  # this true here without also accepting image malware scanning moving
+  # back in-process for real.
+  disableScanIsolation: "false"
+  # oras pull settings for file/sbom/sarif artifacts registered by OCI
+  # reference. true matches unpacker.insecure/unpacker.public's same
+  # plain-HTTP assumption.
+  fetchPlainHTTP: "true"
+  # Uncomment (and set enabled: true) for air-gapped operation -- see
+  # cluster/seed-trivy-db.sh and README's "Air-gapped operation".
+  trivyDB:
+    enabled: false
+    repository: ""
+    javaRepository: ""
+    skipUpdate: "true"
+    skipJavaUpdate: "true"
+  resources:
+    # ephemeral-storage right-sized down: unpacking a container image no
+    # longer happens in this pod -- it runs in its own per-scan
+    # Kubernetes Job, with its own separate ephemeral-storage limit.
+    # Memory stays bumped: trivy's first-run DB download+decompression
+    # is memory-hungry enough that a "trivy scan failed ...: signal:
+    # killed" error can be an OOM-kill.
+    requests:
+      cpu: "200m"
+      memory: "384Mi"
+      ephemeral-storage: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+      ephemeral-storage: "512Mi"
+
+dashboard:
+  image:
+    repository: nginx
+    tag: 1.27-alpine
+    pullPolicy: IfNotPresent
+  # Left empty by default: the dashboard already self-derives the right
+  # API address from window.location (same host it was loaded from, port
+  # 30300), so it works unmodified on both the colima and podman
+  # runtimes -- see docs/architecture.md, "A shipped bug, and what it
+  # changed." Set this only if that self-detection is wrong for your
+  # setup (e.g. a fixed ingress hostname that differs from the
+  # dashboard's own).
+  apiBase: ""
+  service:
+    nodePort: 30301
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 64Mi
+
+# Gateway API "skeleton": GatewayClass + Gateway + HTTPRoute routing to
+# the dashboard, all owned by this chart. Traefik itself -- the ingress
+# controller these attach to -- is deliberately separate (see
+# k8s/releases/traefik-helmrelease.yaml); this chart only owns the
+# routing objects, matching this project's general preference for
+# explicit, hand-written resources over relying on a controller chart's
+# own default-object convenience behavior (Traefik's chart could create
+# a default GatewayClass itself, but that's turned off in favor of this).
+gateway:
+  # Name of the GatewayClass this chart creates, and the name the
+  # Gateway below references via gatewayClassName.
+  gatewayClassName: traefik
+  # Must match Traefik's actual controller identity -- see
+  # k8s/releases/traefik-helmrelease.yaml and
+  # https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/
+  controllerName: traefik.io/gateway-controller
+  # 8000, not 80 -- must match one of Traefik's actual EntryPoint ports,
+  # not the externally-exposed NodePort (30080). See
+  # templates/gateway/gateway.yaml's own comment for the full story
+  # (this exact mismatch caused a real "404 page not found" on first
+  # deploy).
+  listenerPort: 8000

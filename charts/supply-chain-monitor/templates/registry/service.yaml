@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: scm-registry
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: scm-registry
+  ports:
+    - name: http
+      port: {{ .Values.registry.service.port }}
+      targetPort: {{ .Values.registry.service.port }}
+      {{- if eq .Values.registry.service.type "NodePort" }}
+      nodePort: {{ .Values.registry.service.nodePort }}
+      {{- end }}
+  type: {{ .Values.registry.service.type }}

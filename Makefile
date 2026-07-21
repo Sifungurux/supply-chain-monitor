@@ -59,14 +59,15 @@ gateway-api-install:
 build:
 	docker build -t $(IMAGE) services/monitor-api
 
-# Every service now deploys as a Helm chart via Flux (see charts/,
-# k8s/releases/, and docs/architecture.md's "All services on Flux +
-# Helm") -- so unlike before, this target no longer runs `kubectl apply
-# -k k8s/` itself. Flux owns that application now; `kubectl apply`-ing
-# the same resources here too would just fight it. Instead: commit and
-# push whatever's in the working tree (so Flux's GitRepository has
-# something new to see), force an immediate reconcile (rather than
-# waiting for Flux's normal poll interval), then rollout-restart
+# The whole application is a single Helm chart via Flux now (see
+# charts/supply-chain-monitor/, k8s/releases/supply-chain-monitor-helmrelease.yaml,
+# and docs/architecture.md's "A single chart for the whole application")
+# -- so unlike before, this target no longer runs `kubectl apply -k
+# k8s/` itself. Flux owns that application now; `kubectl apply`-ing the
+# same resources here too would just fight it. Instead: commit and push
+# whatever's in the working tree (so Flux's GitRepository has something
+# new to see), force an immediate reconcile (rather than waiting for
+# Flux's normal poll interval), then rollout-restart
 # monitor-api/dashboard specifically -- that last step is still needed
 # because the image tag (monitor-api:dev) doesn't change on a rebuild,
 # so neither Flux nor Helm can detect that a restart is warranted on
@@ -86,17 +87,13 @@ deploy: build
 	@if command -v flux >/dev/null 2>&1; then \
 		flux reconcile source git flux-system --timeout=2m && \
 		flux reconcile kustomization flux-system --with-source --timeout=3m && \
-		flux reconcile helmrelease postgres -n flux-system --timeout=2m && \
-		flux reconcile helmrelease registry -n flux-system --timeout=2m && \
-		flux reconcile helmrelease clamav -n flux-system --timeout=2m && \
-		flux reconcile helmrelease monitor-api -n flux-system --timeout=2m && \
-		flux reconcile helmrelease dashboard -n flux-system --timeout=2m && \
+		flux reconcile helmrelease supply-chain-monitor -n flux-system --timeout=3m && \
 		flux reconcile helmrelease traefik -n flux-system --timeout=2m ; \
 	else \
 		echo "('flux' CLI not found -- brew install fluxcd/tap/flux for a faster,"; \
 		echo " per-HelmRelease reconcile trigger. Falling back to annotating the"; \
 		echo " GitRepository/root Kustomization so they re-sync right away instead"; \
-		echo " of waiting up to their normal interval; the six HelmReleases will"; \
+		echo " of waiting up to their normal interval; the two HelmReleases will"; \
 		echo " pick up the change on their own next poll, within a few minutes.)"; \
 		kubectl -n flux-system annotate gitrepository/flux-system reconcile.fluxcd.io/requestedAt="$$(date +%s)" --overwrite; \
 		kubectl -n flux-system annotate kustomization/flux-system reconcile.fluxcd.io/requestedAt="$$(date +%s)" --overwrite; \
@@ -110,15 +107,16 @@ deploy: build
 	@echo "hands off rather than watching the cluster; run 'make logs' or"
 	@echo "'flux get helmreleases -A' any time to check on it."
 
-# Deletes everything Flux currently manages under k8s/ -- the six
-# HelmReleases (which helm-controller then correctly un-installs, taking
-# their Deployments/Services/etc. with them, Traefik included), the
-# Gateway/HTTPRoute, the namespaces, and Flux's own root Kustomization/
-# GitRepository. Flux's finalizers handle the cascade; this is just
-# telling the API server to delete what's currently built from k8s/,
-# the same as before the Helm conversion. Does NOT remove the Gateway
-# API CRDs themselves (cluster/install-gateway-api.sh) -- those are
-# cluster-wide infra outside Flux's remit, same as Flux's own CRDs.
+# Deletes everything Flux currently manages under k8s/ -- the two
+# HelmReleases (supply-chain-monitor and traefik, which helm-controller
+# then correctly un-installs, taking their Deployments/Services/
+# Gateway/HTTPRoute/etc. with them), the namespaces, and Flux's own root
+# Kustomization/GitRepository. Flux's finalizers handle the cascade;
+# this is just telling the API server to delete what's currently built
+# from k8s/, the same as before the Helm conversion. Does NOT remove
+# the Gateway API CRDs themselves (cluster/install-gateway-api.sh) --
+# those are cluster-wide infra outside Flux's remit, same as Flux's own
+# CRDs.
 undeploy:
 	kubectl delete -k k8s/ --ignore-not-found
 
@@ -141,10 +139,10 @@ db-shell:
 	kubectl -n supply-chain-monitor exec -it deploy/scm-postgres -- psql -U monitor_api -d monitor_api
 
 # Triggers an immediate pg_dump backup (see
-# charts/postgres/templates/backup-cronjob.yaml, which otherwise only
-# runs on its own daily schedule) as a one-off Job cloned from the same
-# CronJob template -- useful right before a risky change, or just to
-# confirm backups are actually working.
+# charts/supply-chain-monitor/templates/postgres/backup-cronjob.yaml,
+# which otherwise only runs on its own daily schedule) as a one-off Job
+# cloned from the same CronJob template -- useful right before a risky
+# change, or just to confirm backups are actually working.
 db-backup:
 	kubectl -n supply-chain-monitor create job --from=cronjob/scm-postgres-backup scm-postgres-backup-manual-$$(date +%s)
 	@echo "Triggered -- watch it with: kubectl -n supply-chain-monitor get jobs -l app=scm-postgres-backup -w"
@@ -226,12 +224,13 @@ lock-deps:
 	@echo "go.sum written to services/monitor-api/go.sum -- review with 'git diff' and commit it."
 
 # Catches the exact bug that shipped once already: dashboard/index.html
-# edited without updating the copy the dashboard chart actually serves
-# (charts/dashboard/files/index.html -- Helm's .Files.Get can only read
-# files inside the chart directory, so this is a real second copy, not a
-# symlink), so the running dashboard silently drifts from the source
-# file. Point whatever CI you wire up against your own git server at
-# this target (plus test-api and test-dashboard above).
+# edited without updating the copy the application chart actually
+# serves (charts/supply-chain-monitor/files/index.html -- Helm's
+# .Files.Get can only read files inside the chart directory, so this is
+# a real second copy, not a symlink), so the running dashboard silently
+# drifts from the source file. Point whatever CI you wire up against
+# your own git server at this target (plus test-api and test-dashboard
+# above).
 check-dashboard-configmap:
-	diff -q dashboard/index.html charts/dashboard/files/index.html || \
-		(echo "charts/dashboard/files/index.html is out of date -- run: cp dashboard/index.html charts/dashboard/files/index.html" && exit 1)
+	diff -q dashboard/index.html charts/supply-chain-monitor/files/index.html || \
+		(echo "charts/supply-chain-monitor/files/index.html is out of date -- run: cp dashboard/index.html charts/supply-chain-monitor/files/index.html" && exit 1)

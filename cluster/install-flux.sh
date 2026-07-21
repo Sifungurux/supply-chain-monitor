@@ -106,8 +106,8 @@ flux_install() {
     kubectl -n "${NAMESPACE}" get helmreleases
   fi
   echo
-  echo "Note: the flux-system GitRepository won't go Ready, and none of the"
-  echo "five HelmReleases under k8s/releases/ will reconcile, until:"
+  echo "Note: the flux-system GitRepository won't go Ready, and neither of the"
+  echo "two HelmReleases under k8s/releases/ will reconcile, until:"
   echo "  1. ${FLUX_SYSTEM_DIR}/gotk-sync.yaml's url actually points at a pushed,"
   echo "     reachable remote -- expected if you haven't pushed this repo yet."
   echo "  2. the flux-system-git-auth Secret exists with working credentials --"

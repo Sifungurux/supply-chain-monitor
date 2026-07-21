@@ -1,17 +1,22 @@
 # Root of what Flux reconciles (see k8s/flux-system/gotk-sync.yaml's
-# Kustomization -- path: ./k8s). Every service now deploys as a Helm
-# chart (see charts/) via a HelmRelease under releases/ -- there are no
-# raw Deployment/Service manifests left directly in this tree, only the
-# namespace, the Flux bootstrap self-reference, and the HelmReleases.
-# See docs/architecture.md, "All services on Flux + Helm".
+# Kustomization -- path: ./k8s). The whole application (registry,
+# clamav, postgres, monitor-api, dashboard, plus the Gateway API
+# resources routing to the dashboard) is a single Helm chart
+# (charts/supply-chain-monitor) via a single HelmRelease
+# (releases/supply-chain-monitor-helmrelease.yaml) -- see
+# docs/architecture.md, "A single chart for the whole application".
+# There are no raw Deployment/Service manifests left directly in this
+# tree, only the namespaces, the Flux bootstrap self-reference, and the
+# two HelmReleases below.
 #
-# traefik-namespace.yaml, sources/, releases/traefik-helmrelease.yaml,
-# and gateway/ add Traefik + the Gateway API as an ingress path to the
-# dashboard -- see docs/architecture.md, "Ingress: Traefik + Gateway
-# API". Unlike the other 5 HelmReleases, Traefik's chart comes from an
+# traefik-namespace.yaml, sources/, and releases/traefik-helmrelease.yaml
+# add Traefik as the ingress controller the application chart's
+# Gateway/HTTPRoute/GatewayClass attach to -- see docs/architecture.md,
+# "Ingress: Traefik + Gateway API". Traefik's chart comes from an
 # upstream HelmRepository (sources/traefik-helmrepository.yaml), not
-# charts/ in this repo -- it's third-party infra, not one of this
-# project's own services.
+# charts/ in this repo -- it's third-party infra, not part of this
+# application, which is why it stays its own HelmRelease rather than
+# folding into the single application chart.
 #
 # `make deploy` no longer runs `kubectl apply -k k8s/` directly (see
 # Makefile) -- it builds the local dev image, pushes/commits, and
@@ -22,12 +27,7 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - flux-system
-  - releases/registry-helmrelease.yaml
-  - releases/clamav-helmrelease.yaml
-  - releases/postgres-helmrelease.yaml
-  - releases/monitor-api-helmrelease.yaml
-  - releases/dashboard-helmrelease.yaml
+  - releases/supply-chain-monitor-helmrelease.yaml
   - traefik-namespace.yaml
   - sources/traefik-helmrepository.yaml
   - releases/traefik-helmrelease.yaml
-  - gateway

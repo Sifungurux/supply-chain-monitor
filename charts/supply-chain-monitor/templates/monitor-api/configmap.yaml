@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: monitor-api-config
+  namespace: {{ .Release.Namespace }}
+data:
+  LISTEN_ADDR: {{ .Values.monitorApi.listenAddr | quote }}
+  PIPELINE_STAGES: {{ .Values.monitorApi.pipelineStages | quote }}
+  CLAMAV_ADDR: {{ printf "%s.%s.svc.cluster.local:%s" .Values.monitorApi.clamav.service .Release.Namespace .Values.monitorApi.clamav.port | quote }}
+  REGISTRY_ADDR: {{ printf "%s.%s.svc.cluster.local:%s" .Values.monitorApi.registry.service .Release.Namespace .Values.monitorApi.registry.port | quote }}
+  # Postgres holds every artifact/finding/stage-history record -- see
+  # docs/architecture.md for why the in-memory store was replaced.
+  # POSTGRES_PASSWORD is deliberately absent here: it comes from the
+  # scm-postgres-credentials Secret (templates/postgres/secret.yaml) via
+  # this chart's monitor-api/deployment.yaml secretKeyRef, not this
+  # plaintext ConfigMap.
+  POSTGRES_HOST: {{ printf "%s.%s.svc.cluster.local" .Values.monitorApi.postgres.service .Release.Namespace | quote }}
+  POSTGRES_PORT: {{ .Values.monitorApi.postgres.port | quote }}
+  POSTGRES_USER: {{ .Values.monitorApi.postgres.user | quote }}
+  POSTGRES_DB: {{ .Values.monitorApi.postgres.db | quote }}
+  POSTGRES_SSLMODE: {{ .Values.monitorApi.postgres.sslmode | quote }}
+  # unpacker (github.com/Sifungurux/unpacker) pull settings, used to
+  # unpack image artifacts before ClamAV scans their contents.
+  # monitor-api itself never runs unpacker directly -- these are
+  # forwarded into the env of each per-scan Kubernetes Job it creates
+  # (see internal/scanner/isolated_unpacker.go and docs/architecture.md,
+  # "Isolating the unpack+scan step").
+  UNPACKER_INSECURE: {{ .Values.monitorApi.unpacker.insecure | quote }}
+  UNPACKER_PUBLIC: {{ .Values.monitorApi.unpacker.public | quote }}
+  UNPACKER_MAX_FILE_MB: {{ .Values.monitorApi.unpacker.maxFileMB | quote }}
+  # Almost always the same image monitor-api itself runs from, since
+  # `monitor-api scan-worker` is the same binary in a different mode --
+  # defaults to monitorApi.image.repository:monitorApi.image.tag unless
+  # scanWorkerImage is explicitly overridden.
+  SCAN_WORKER_IMAGE: {{ (.Values.monitorApi.scanWorkerImage | default (printf "%s:%s" .Values.monitorApi.image.repository .Values.monitorApi.image.tag)) | quote }}
+  # Left false here -- this is the real in-cluster deployment, which
+  # does have the ServiceAccount token isolation needs (see
+  # serviceaccount.yaml). true is only ever meant for running the
+  # monitor-api binary standalone outside Kubernetes -- see README,
+  # "Running monitor-api outside a Kubernetes pod".
+  DISABLE_SCAN_ISOLATION: {{ .Values.monitorApi.disableScanIsolation | quote }}
+  # file/sbom/sarif artifacts can be registered with an OCI registry
+  # reference instead of a path already inside this pod -- oras pull
+  # fetches them from scm-registry first (see internal/scanner/fetch.go).
+  FETCH_PLAIN_HTTP: {{ .Values.monitorApi.fetchPlainHTTP | quote }}
+  {{- if .Values.monitorApi.trivyDB.enabled }}
+  # air-gapped operation -- see cluster/seed-trivy-db.sh and README's
+  # "Air-gapped operation".
+  TRIVY_DB_REPOSITORY: {{ .Values.monitorApi.trivyDB.repository | quote }}
+  TRIVY_JAVA_DB_REPOSITORY: {{ .Values.monitorApi.trivyDB.javaRepository | quote }}
+  TRIVY_SKIP_DB_UPDATE: {{ .Values.monitorApi.trivyDB.skipUpdate | quote }}
+  TRIVY_SKIP_JAVA_DB_UPDATE: {{ .Values.monitorApi.trivyDB.skipJavaUpdate | quote }}
+  {{- end }}

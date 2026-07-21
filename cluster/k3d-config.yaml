@@ -9,12 +9,13 @@ servers: 1
 agents: 1  # kept minimal on the podman path given the open macOS bugs noted in podman.sh
 ports:
   # NodePort for Traefik (k8s/releases/traefik-helmrelease.yaml), so
-  # http://localhost:30080 routes through the Gateway API to the
-  # dashboard (k8s/gateway/) without a port-forward. Was a
-  # loadbalancer->80 mapping "for future ingress use" before that
-  # existed; switched to NodePort to match every other exposed port in
-  # this project and to behave identically on both the colima and
-  # podman/k3d runtimes.
+  # http://localhost:30080 routes through the Gateway API (the
+  # GatewayClass/Gateway/HTTPRoute in
+  # charts/supply-chain-monitor/templates/gateway/) to the dashboard
+  # without a port-forward. Was a loadbalancer->80 mapping "for future
+  # ingress use" before that existed; switched to NodePort to match
+  # every other exposed port in this project and to behave identically
+  # on both the colima and podman/k3d runtimes.
   - port: 30080:30080
     nodeFilters:
       - server:0

@@ -19,18 +19,19 @@ cluster/               cluster create/destroy scripts (colima by default, podman
   install-flux.sh       installs Flux via Helm (`make flux-install`, or automatic via `make cluster-up`)
   install-gateway-api.sh   installs the Gateway API CRDs (`make gateway-api-install`, or automatic via `make cluster-up`)
   postgres-restore.sh, postgres-list-backups.sh   on-demand Postgres backup restore/listing (`make db-restore`/`db-backups-list`)
-charts/                 every service deploys as a Helm chart now (see "GitOps (Flux)" below)
-  registry/, clamav/, postgres/, monitor-api/, dashboard/   Chart.yaml + values.yaml + templates/
+charts/supply-chain-monitor/   the whole application as ONE Helm chart (see "GitOps (Flux)" below)
+  Chart.yaml, values.yaml (namespaced per service: registry.*, clamav.*, postgres.*,
+    monitorApi.*, dashboard.*, gateway.*), templates/{registry,clamav,postgres,
+    monitor-api,dashboard,gateway}/, files/index.html
 k8s/                    what Flux actually reconciles (path: ./k8s) -- no raw per-service
                         manifests anymore, just the namespaces, Flux's own bootstrap
-                        self-reference, a HelmRelease per service, and Traefik + Gateway API
+                        self-reference, and two HelmReleases (the app, and Traefik)
   namespace.yaml, traefik-namespace.yaml
   flux-system/          GitRepository + root Kustomization (gotk-sync.yaml), Flux install values.yaml
   sources/              upstream HelmRepository for Traefik's chart (not vendored into charts/)
-  releases/             one HelmRelease per service (+ Traefik), chart sourced from charts/ above
-  gateway/               Gateway API: scm-gateway + the HTTPRoute to scm-dashboard (see "Ingress" below)
+  releases/             supply-chain-monitor-helmrelease.yaml (the app) + traefik-helmrelease.yaml
 services/monitor-api/   the Go API service source + tests (internal/.../*_test.go)
-dashboard/index.html    the dashboard itself (source of truth -- charts/dashboard/files/index.html is a copy of this)
+dashboard/index.html    the dashboard itself (source of truth -- charts/supply-chain-monitor/files/index.html is a copy of this)
 dashboard/tests/        dashboard test suite (Node + jsdom)
 docs/architecture.md    design notes, rationale, roadmap
 Makefile                cluster-up/down/destroy, build, deploy, port-forward, test
@@ -75,14 +76,14 @@ kubectl -n supply-chain-monitor get pods -w   # wait for everything to go Ready
 ```
 
 `make cluster-up` also installs Flux (see "GitOps (Flux)" below) —
-`SCM_SKIP_FLUX=1 make cluster-up` if you don't want that yet. Every
-service (registry, clamav, postgres, monitor-api, dashboard) deploys as
-a Helm chart via Flux now — `make deploy` no longer applies manifests
-directly, it pushes to Git and lets Flux do it (see "GitOps (Flux)").
-That means `make deploy` needs this repo to actually be pushed to a Git
-remote first — see that section for the one-time setup.
+`SCM_SKIP_FLUX=1 make cluster-up` if you don't want that yet. The whole
+application (registry, clamav, postgres, monitor-api, dashboard) is one
+Helm chart deployed via Flux now — `make deploy` no longer applies
+manifests directly, it pushes to Git and lets Flux do it (see "GitOps
+(Flux)"). That means `make deploy` needs this repo to actually be pushed
+to a Git remote first — see that section for the one-time setup.
 
-**This exact setup — full Helm-chart-per-service + Flux, path `./k8s` —
+**This exact setup — a single Helm chart + Flux, path `./k8s` —
 hasn't been run end-to-end on a real cluster yet.** It was built and
 statically validated (every chart's YAML, template logic, and the
 dashboard's embedded HTML were checked by hand and by script) but never
@@ -155,26 +156,28 @@ chart directory, so this is a real second copy, not a symlink —
 deploy:
 
 ```bash
-cp dashboard/index.html charts/dashboard/files/index.html
+cp dashboard/index.html charts/supply-chain-monitor/files/index.html
 make deploy
 ```
 
 ### Auto-configured API address/key
 
 The dashboard no longer needs anyone to open it and paste an API key
-in by hand. `charts/dashboard/templates/deployment.yaml` runs a small
+in by hand. `charts/supply-chain-monitor/templates/dashboard/deployment.yaml` runs a small
 initContainer before nginx starts that reads `API_KEY` from the same
 `scm-monitor-api-auth` Secret the monitor-api chart creates, and writes
 it (plus an optional API-address override from the
 `scm-dashboard-config` ConfigMap, empty/unset by default) into a
 generated `env.js` the page loads automatically. Rotate the key in one
-place (`charts/monitor-api/values.yaml`'s `apiKey`, or an override in
-`k8s/releases/monitor-api-helmrelease.yaml`'s `spec.values`) and
+place (`charts/supply-chain-monitor/values.yaml`'s `monitorApi.apiKey`,
+or an override in
+`k8s/releases/supply-chain-monitor-helmrelease.yaml`'s `spec.values`) and
 redeploy — both `monitor-api` and every dashboard pod pick up the new
 value, no manual re-entry anywhere. If you ever *do* want the dashboard
 to point at a fixed address instead of self-detecting one from
-`window.location`, set `apiBase` in `charts/dashboard/values.yaml` (or
-override it in `k8s/releases/dashboard-helmrelease.yaml`) and redeploy. See
+`window.location`, set `dashboard.apiBase` in
+`charts/supply-chain-monitor/values.yaml` (or override it in
+`k8s/releases/supply-chain-monitor-helmrelease.yaml`) and redeploy. See
 docs/architecture.md ("Configuring the dashboard via ConfigMap/Secret
 instead of by hand") for the full design and a real bug that was found
 and fixed while wiring this up (a ConfigMap name mismatch that left the
@@ -184,8 +187,9 @@ dashboard pod unable to mount its own HTML at all).
 
 Every endpoint except `/healthz` requires `Authorization: Bearer <key>`.
 The key is sourced from `API_KEY`, which `monitor-api` reads from the
-`scm-monitor-api-auth` Secret (rendered from `charts/monitor-api/values.yaml`'s
-`apiKey`) — override that value (never commit a real one) before this
+`scm-monitor-api-auth` Secret (rendered from
+`charts/supply-chain-monitor/values.yaml`'s `monitorApi.apiKey`) —
+override that value (never commit a real one) before this
 cluster is anything but local and throwaway, the same caveat as
 `scm-postgres-credentials`. A request with no key, the wrong key, or a
 missing `Bearer ` prefix gets a `401`.
@@ -305,8 +309,9 @@ artifacts, `/scan` now runs both:
 
 Both scanners' findings land on the same artifact — `cve_findings` from
 Trivy, `malware_findings` from ClamAV — told apart by `Finding.source`,
-not by artifact type. Relevant env vars (see `charts/monitor-api/values.yaml`'s
-`unpacker.*` keys, rendered into the ConfigMap by that chart):
+not by artifact type. Relevant env vars (see
+`charts/supply-chain-monitor/values.yaml`'s `monitorApi.unpacker.*`
+keys, rendered into the ConfigMap by that chart):
 `UNPACKER_INSECURE`, `UNPACKER_PUBLIC` (defaults assume our local,
 unauthenticated `scm-registry`), `UNPACKER_MAX_FILE_MB` (skip huge files
 when walking the unpacked image, default 100MB).
@@ -321,7 +326,7 @@ different mode) whose pod has a read-only root filesystem, every Linux
 capability dropped, runs as non-root, and has no Kubernetes
 ServiceAccount token at all. `monitor-api`'s own ServiceAccount gained
 just enough access to create/watch that Job and read its logs — see
-`charts/monitor-api/templates/rbac.yaml` and docs/architecture.md ("Isolating the
+`charts/supply-chain-monitor/templates/monitor-api/rbac.yaml` and docs/architecture.md ("Isolating the
 unpack+scan step") for exactly what that token can and can't do.
 One practical effect: each `/scan` on an image now pays for a pod
 being scheduled (usually a few seconds, since the image is normally
@@ -349,9 +354,11 @@ malware scanning runs in-process again (like every version of this
 code before isolation shipped), so a bug in `unpacker`/`umoci`/`oras-go`
 parsing a malicious image once again shares this process's blast
 radius with the API server and its Postgres connection. Leave it unset
-(the default, `false`) for every real deployment — `charts/monitor-api/values.yaml`'s
-`disableScanIsolation` already does. See docs/architecture.md ("Running monitor-api outside a
-Kubernetes pod") for the full reasoning.
+(the default, `false`) for every real deployment —
+`charts/supply-chain-monitor/values.yaml`'s
+`monitorApi.disableScanIsolation` already does. See
+docs/architecture.md ("Running monitor-api outside a Kubernetes pod")
+for the full reasoning.
 
 ## Database
 
@@ -360,10 +367,11 @@ Artifacts, findings, and stage history are stored in Postgres
 in-cluster) instead of in-memory, so a `monitor-api` pod restart no
 longer loses everything registered so far. `monitor-api` connects
 using `POSTGRES_HOST`/`PORT`/`USER`/`DB`/`SSLMODE` (rendered from
-`charts/monitor-api/values.yaml`'s `postgres.*` keys) plus
-`POSTGRES_PASSWORD` from the `scm-postgres-credentials` Secret (from
-`charts/postgres/values.yaml`'s `credentials.password`) — override
-that placeholder password (via `k8s/releases/postgres-helmrelease.yaml`'s
+`charts/supply-chain-monitor/values.yaml`'s `monitorApi.postgres.*`
+keys) plus `POSTGRES_PASSWORD` from the `scm-postgres-credentials`
+Secret (from `charts/supply-chain-monitor/values.yaml`'s
+`postgres.credentials.password`) — override that placeholder password
+(via `k8s/releases/supply-chain-monitor-helmrelease.yaml`'s
 `spec.values`, never committed directly) before this cluster is
 anything but local and throwaway. `POSTGRES_DSN` is also accepted as a
 full connection string override if you'd rather set one directly.
@@ -390,9 +398,9 @@ is handled since Postgres and `monitor-api` start up concurrently.
 
 A daily `pg_dump` (gzip-compressed, into its own PVC separate from the
 live data) runs automatically once deployed — see
-`charts/postgres/templates/backup-cronjob.yaml`. Retention keeps the
-newest 7 backups by default (`backup.keepBackups` in
-`charts/postgres/values.yaml`).
+`charts/supply-chain-monitor/templates/postgres/backup-cronjob.yaml`. Retention keeps the
+newest 7 backups by default (`postgres.backup.keepBackups` in
+`charts/supply-chain-monitor/values.yaml`).
 
 The backups PVC binds via a small pre-install Helm hook
 (`backup-pvc-primer-job.yaml`) rather than waiting for its first real
@@ -454,9 +462,10 @@ brew install oras            # if you don't already have it
 ./cluster/seed-trivy-db.sh   # mirrors both trivy DBs into localhost:30500
 ```
 
-Then set `trivyDB.enabled: true` and fill in `trivyDB.repository`/
-`trivyDB.javaRepository` in `charts/monitor-api/values.yaml` (the
-script prints the values to use) and redeploy:
+Then set `monitorApi.trivyDB.enabled: true` and fill in
+`monitorApi.trivyDB.repository`/`monitorApi.trivyDB.javaRepository` in
+`charts/supply-chain-monitor/values.yaml` (the script prints the values
+to use) and redeploy:
 
 ```bash
 make deploy
@@ -482,7 +491,7 @@ These run in containers (`golang:1.22-alpine`, `node:22-alpine`,
 install beyond Docker, which you already have via Colima or Podman. No
 CI workflow is wired up yet -- these `make`
 targets (plus `make check-dashboard-configmap`, which checks that
-`charts/dashboard/files/index.html` actually matches `dashboard/index.html`
+`charts/supply-chain-monitor/files/index.html` actually matches `dashboard/index.html`
 — the exact class of bug that shipped once already, see above) are
 meant to be the entry point whenever you set one up against your own
 git server.
@@ -527,24 +536,43 @@ git server.
 
 ## GitOps (Flux)
 
-Every service — registry, clamav, postgres, monitor-api, dashboard —
-deploys as a Helm chart via [Flux](https://fluxcd.io), not `kubectl
-apply -k` against raw manifests. See `docs/architecture.md`, "All
-services on Flux + Helm", for the full picture; the short version:
+The whole application — registry, clamav, postgres, monitor-api,
+dashboard, plus the Gateway API resources routing to the dashboard —
+deploys as **one Helm chart** via [Flux](https://fluxcd.io), not
+`kubectl apply -k` against raw manifests, and not 5 separate per-service
+charts either (an earlier iteration of this project's design — see
+docs/architecture.md, "A single chart for the whole application", for
+why it was consolidated). See `docs/architecture.md` for the full
+picture; the short version:
 
-- `charts/<service>/` — a real Helm chart per service (`Chart.yaml`,
-  `values.yaml`, `templates/`).
-- `k8s/releases/<service>-helmrelease.yaml` — a Flux `HelmRelease` per
-  service, sourcing its chart from `charts/<service>` in this same repo.
-  `monitor-api` `dependsOn` postgres/registry/clamav; `dashboard`
-  `dependsOn` monitor-api (it needs monitor-api's auth Secret to exist).
+- `charts/supply-chain-monitor/` — one real Helm chart for the entire
+  application (`Chart.yaml`, one `values.yaml` namespaced per service,
+  `templates/{registry,clamav,postgres,monitor-api,dashboard,gateway}/`).
+  A completely normal Helm chart — `helm install supply-chain-monitor
+  ./charts/supply-chain-monitor` works standalone too, with or without
+  Flux.
+- `k8s/releases/supply-chain-monitor-helmrelease.yaml` — the one Flux
+  `HelmRelease` for that chart, sourcing it from this same repo. No
+  `dependsOn` needed between the former 5 services anymore — they're
+  one Helm release now, so Helm's own resource-kind apply ordering
+  (Secrets/ConfigMaps/PVCs before Deployments/Jobs/CronJobs) covers what
+  `dependsOn` used to guarantee between separate `HelmRelease`s (e.g.
+  the dashboard's `render-config` initContainer reading monitor-api's
+  auth Secret still works, since Secrets apply before any Deployment).
+  `monitor-api`'s own `connectStoreWithRetry` remains the
+  belt-and-suspenders layer for Postgres specifically.
+- `k8s/releases/traefik-helmrelease.yaml` — a second, separate
+  `HelmRelease` for Traefik (the ingress controller), sourced from an
+  upstream `HelmRepository` rather than this repo's own charts/ — it's
+  third-party infrastructure, not part of the application, so it stays
+  its own release. See "Ingress: Traefik + Gateway API" below.
 - `k8s/flux-system/gotk-sync.yaml` — the `GitRepository` (pointing at
   `https://github.com/sifungurux/supply-chain-monitor.git`, branch
   `main`) and the root `Kustomization` (`path: ./k8s` — the whole tree,
   self-referencing).
 - `k8s/kustomization.yaml` — the plain kustomize file Flux actually
-  builds at that path: the namespace, the `flux-system` self-reference,
-  and all five `HelmRelease`s.
+  builds at that path: the namespaces, the `flux-system` self-reference,
+  and the two `HelmRelease`s above.
 
 **Installing Flux is automated** — `make cluster-up` installs it for you
 via `cluster/install-flux.sh` (the `fluxcd-community/flux2` Helm chart,
@@ -583,8 +611,8 @@ regardless; nothing actually reconciles until
 this content, and is reachable from the cluster.
 
 Once it is, `flux get kustomizations -A` and `flux get helmreleases -A`
-should show `flux-system` and all six releases `Ready`. **This exact
-setup has not been run against a real cluster yet** (see the note under
+should show `flux-system` and both releases (`supply-chain-monitor` and
+`traefik`) `Ready`. **This exact setup has not been run against a real cluster yet** (see the note under
 Quickstart) — the first time you do, please report back exactly what
 `kubectl -n supply-chain-monitor get pods`, `flux get helmreleases -A`,
 and `make test-artifact` show, especially anything `NotReady`,
@@ -636,7 +664,7 @@ make cluster-destroy    # stops AND deletes the VM/machine + its data
 
 ## Known limitations (v1 stub — see docs/architecture.md for the plan)
 
-- **This Helm-chart-per-service + Flux setup hasn't been run against a
+- **This single-chart + Flux setup hasn't been run against a
   real cluster yet.** Every chart and CR was written and statically
   validated (YAML parsing, template-balance checks, a from-scratch
   re-derivation of the dashboard's rendered ConfigMap) but never
@@ -661,7 +689,7 @@ make cluster-destroy    # stops AND deletes the VM/machine + its data
   repo request the same way it would a nonexistent one), but the actual
   `make git-auth && make git-test` pass with a real token is still
   yours to run and report back.
-- `charts/postgres/values.yaml`'s `credentials.password` ships a
+- `charts/supply-chain-monitor/values.yaml`'s `postgres.credentials.password` ships a
   placeholder in plaintext in the repo; fine for a local, throwaway
   cluster, not for anywhere the Postgres data itself matters. Daily
   backups exist now (see "Backing up and restoring Postgres"), but not

@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scm-clamav
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: scm-clamav
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scm-clamav
+  template:
+    metadata:
+      labels:
+        app: scm-clamav
+    spec:
+      containers:
+        - name: clamav
+          image: "{{ .Values.clamav.image.repository }}:{{ .Values.clamav.image.tag }}"
+          imagePullPolicy: {{ .Values.clamav.image.pullPolicy }}
+          ports:
+            - containerPort: 3310
+          resources:
+            {{- toYaml .Values.clamav.resources | nindent 12 }}
+          # first boot downloads the virus DB (freshclam) and can take a
+          # few minutes -- see values.yaml's readiness/liveness comment.
+          readinessProbe:
+            tcpSocket:
+              port: 3310
+            initialDelaySeconds: {{ .Values.clamav.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.clamav.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.clamav.readiness.failureThreshold }}
+          livenessProbe:
+            tcpSocket:
+              port: 3310
+            initialDelaySeconds: {{ .Values.clamav.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.clamav.liveness.periodSeconds }}

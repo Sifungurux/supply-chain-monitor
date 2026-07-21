@@ -1,0 +1,17 @@
+# "Skeleton" GatewayClass -- normally the ingress controller's own chart
+# creates this (Traefik's chart can, via gatewayClass.enabled), but
+# that's explicitly turned off in k8s/releases/traefik-helmrelease.yaml
+# so this application chart owns it instead, matching this project's
+# general preference for explicit, hand-written resources over relying
+# on a chart's own default-object convenience behavior (e.g.
+# k8s/flux-system/gotk-sync.yaml being hand-written instead of using
+# `flux bootstrap`). GatewayClass is cluster-scoped (no namespace) --
+# controllerName must match whatever ingress controller is actually
+# installed; currently Traefik (see k8s/releases/traefik-helmrelease.yaml
+# and https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/).
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: {{ .Values.gateway.gatewayClassName }}
+spec:
+  controllerName: {{ .Values.gateway.controllerName }}

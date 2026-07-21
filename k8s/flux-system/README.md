@@ -126,8 +126,8 @@ flux get kustomizations -A
 flux get helmreleases -A
 ```
 
-should show `flux-system` (the Kustomization) and all five HelmReleases
-(`registry`, `clamav`, `postgres`, `monitor-api`, `dashboard`) as
+should show `flux-system` (the Kustomization) and both HelmReleases
+(`supply-chain-monitor`, `traefik`) as
 `Ready` once the repo is pushed and reachable. That's the whole loop
 closed, from `git push` to running Deployments, with no `kubectl apply`
 on the deploy side involved at all from here on (`make deploy` triggers

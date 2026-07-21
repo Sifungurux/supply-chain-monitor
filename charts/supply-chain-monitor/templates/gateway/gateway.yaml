@@ -1,0 +1,38 @@
+# References the GatewayClass gatewayclass.yaml creates in this same
+# chart -- if Traefik's own HelmRelease hasn't reconciled yet (or the
+# Gateway API CRDs from cluster/install-gateway-api.sh aren't
+# installed), this Gateway simply sits with an unaccepted/unknown
+# status until both exist; no strict apply-ordering is required,
+# Flux/Traefik converge on their own.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: scm-gateway
+  namespace: {{ .Release.Namespace }}
+spec:
+  gatewayClassName: {{ .Values.gateway.gatewayClassName }}
+  listeners:
+    # listenerPort (8000 by default), not 80 -- deliberately. Traefik's
+    # own docs are explicit that a Gateway listener's port must match
+    # one of Traefik's actual configured EntryPoint ports
+    # (https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/#listeners),
+    # and Traefik's "web" EntryPoint (k8s/releases/traefik-helmrelease.yaml
+    # doesn't override ports.web.port) is configured on container port
+    # 8000 internally -- port 80 only exists one layer further out, as
+    # Traefik's Service's exposedPort/NodePort (30080) mapping onto that
+    # same container port. Using 80 here (matching the *external* port)
+    # looked reasonable but doesn't match anything Traefik itself knows
+    # about, so it silently programmed no route at all: every request
+    # landed on Traefik's own default "no route" handler instead
+    # (`404 page not found`, Go's stdlib http.NotFound text -- not
+    # nginx's 404 page, which is what tipped this off as a Traefik-level
+    # routing problem rather than the dashboard itself). Clients still
+    # connect at the external NodePort (30080) exactly as before --
+    # this port only affects how Traefik wires the Gateway to its own
+    # EntryPoint internally, nothing external changes.
+    - name: http
+      port: {{ .Values.gateway.listenerPort }}
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same

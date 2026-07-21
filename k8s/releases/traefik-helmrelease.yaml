@@ -1,10 +1,13 @@
 # Traefik as the cluster's ingress controller, configured for the
 # Kubernetes Gateway API specifically (not classic Ingress, and not
-# Traefik's own IngressRoute CRDs) -- see k8s/gateway/ for the
-# GatewayClass-consuming Gateway/HTTPRoute that actually route to the
-# dashboard, and docs/architecture.md ("Ingress: Traefik + Gateway API")
-# for the full picture, including why the version pins below matter and
-# how this interacts with k3s's own bundled Traefik.
+# Traefik's own IngressRoute CRDs) -- see
+# charts/supply-chain-monitor/templates/gateway/ for the
+# GatewayClass/Gateway/HTTPRoute that actually route to the dashboard
+# (owned by the application chart itself, not this chart -- see
+# gatewayClass.enabled below), and docs/architecture.md ("Ingress:
+# Traefik + Gateway API") for the full picture, including why the
+# version pins below matter and how this interacts with k3s's own
+# bundled Traefik.
 #
 # version 41.0.2 / appVersion v3.7.6 was the latest published chart as
 # of this writing (see https://traefik.github.io/charts/index.yaml) --
@@ -37,33 +40,33 @@ spec:
   timeout: 5m
   values:
     # This is the whole point: enables Traefik's Gateway API provider,
-    # which also auto-creates a GatewayClass named "traefik"
-    # (controllerName: traefik.io/gateway-controller) -- see
-    # k8s/gateway/gateway.yaml, which references that GatewayClass by
-    # name. Requires the Gateway API CRDs to already exist in the
-    # cluster (cluster/install-gateway-api.sh, run automatically by
+    # so it actually watches GatewayClass/Gateway/HTTPRoute objects.
+    # Requires the Gateway API CRDs to already exist in the cluster
+    # (cluster/install-gateway-api.sh, run automatically by
     # create-cluster.sh -- NOT something this chart installs itself).
     providers:
       kubernetesGateway:
         enabled: true
       # Not used by this project -- everything routes through the
-      # Gateway API (k8s/gateway/) instead. Disabling both keeps
-      # Traefik's watch/RBAC surface limited to what's actually in use;
-      # flip either back on if you introduce a classic Ingress or a
-      # Traefik-native IngressRoute later.
+      # Gateway API instead. Disabling both keeps Traefik's watch/RBAC
+      # surface limited to what's actually in use; flip either back on
+      # if you introduce a classic Ingress or a Traefik-native
+      # IngressRoute later.
       kubernetesIngress:
         enabled: false
       kubernetesCRD:
         enabled: false
 
+    # Both disabled: the application chart
+    # (charts/supply-chain-monitor/templates/gateway/) owns the
+    # GatewayClass, Gateway, and HTTPRoute itself now (a "skeleton" of
+    # all three, hand-written there rather than relying on this chart's
+    # own default-object convenience behavior). Leaving these enabled
+    # here too would create a second, competing GatewayClass/Gateway --
+    # Helm would refuse to install one of the two once it noticed
+    # another release already owns an object with the same name.
     gatewayClass:
-      enabled: true
-
-    # The chart's own default Gateway would be created in Traefik's own
-    # namespace (traefik) -- disabled here in favor of hand-writing our
-    # own in k8s/gateway/gateway.yaml, inside supply-chain-monitor
-    # itself, so the Gateway lives right next to the HTTPRoute (and
-    # Service) it routes to rather than split across namespaces.
+      enabled: false
     gateway:
       enabled: false
 

@@ -40,7 +40,7 @@ type IsolatedUnpackerConfig struct {
 	Image string
 	// ServiceAccount is the Job pod's ServiceAccount -- deliberately
 	// NOT monitor-api's own (see the scm-scan-worker ServiceAccount in
-	// charts/monitor-api/templates/serviceaccount.yaml, which has zero
+	// charts/supply-chain-monitor/templates/monitor-api/serviceaccount.yaml, which has zero
 	// RBAC bound to it).
 	ServiceAccount string
 

@@ -1,0 +1,58 @@
+# The whole application -- registry, clamav, postgres, monitor-api,
+# dashboard, and the Gateway API resources routing to the dashboard --
+# as a single HelmRelease pointing at the single flattened chart in
+# charts/supply-chain-monitor. Replaces what used to be 5 separate
+# HelmReleases (one per service, each with its own chart) -- see
+# docs/architecture.md, "A single chart for the whole application", for
+# why and what changed.
+#
+# No dependsOn needed between the former 5 services: they're all one
+# Helm release now, so Helm's own resource-kind apply ordering
+# (Secrets/ConfigMaps/PVCs before Deployments/Jobs/CronJobs, across the
+# whole chart) replaces what dependsOn used to guarantee between
+# separate HelmReleases -- e.g. the dashboard's render-config
+# initContainer reading monitor-api's scm-monitor-api-auth Secret still
+# works correctly, since that Secret is created in the same
+# apply-ordering wave as every other Secret, before any Deployment.
+# monitor-api's own connectStoreWithRetry (main.go) remains the
+# belt-and-suspenders layer for Postgres specifically not yet accepting
+# connections when monitor-api's own pod starts.
+#
+# Traefik itself is NOT part of this HelmRelease/chart -- see
+# k8s/releases/traefik-helmrelease.yaml -- it's third-party
+# infrastructure, not this application.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: supply-chain-monitor
+  namespace: flux-system
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: ./charts/supply-chain-monitor
+      sourceRef:
+        kind: GitRepository
+        name: flux-system
+        namespace: flux-system
+  targetNamespace: supply-chain-monitor
+  install:
+    createNamespace: true
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  # ClamAV's first boot (freshclam DB download) can take a few minutes --
+  # give wait a correspondingly generous timeout so a fresh install
+  # doesn't get marked failed while it's still just downloading (same
+  # reasoning the old, separate clamav-helmrelease.yaml had).
+  timeout: 5m
+  # image.tag stays "dev" (the chart's default) for local iteration --
+  # `make deploy` rebuilds monitor-api:dev and rollout-restarts the
+  # Deployment directly, since Flux/Helm alone can't detect a same-tag
+  # image change. Real credentials/API keys go here too, if this ever
+  # points at more than a throwaway local cluster (see values.yaml's own
+  # comments on postgres.credentials.password and monitorApi.apiKey).
+  values: {}
