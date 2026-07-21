@@ -17,8 +17,26 @@ metadata:
 spec:
   gatewayClassName: traefik
   listeners:
+    # port: 8000, not 80 -- deliberately. Traefik's own docs are explicit
+    # that a Gateway listener's port must match one of Traefik's actual
+    # configured EntryPoint ports
+    # (https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/#listeners),
+    # and the chart's "web" EntryPoint (k8s/releases/traefik-helmrelease.yaml
+    # doesn't override ports.web.port) is configured on container port
+    # 8000 internally -- port 80 only exists one layer further out, as
+    # the Service's exposedPort/NodePort (30080) mapping onto that same
+    # container port. Using 80 here (matching the *external* port)
+    # looked reasonable but doesn't match anything Traefik itself knows
+    # about, so it silently programmed no route at all: every request
+    # landed on Traefik's own default "no route" handler instead
+    # (`404 page not found`, Go's stdlib http.NotFound text -- not
+    # nginx's 404 page, which is what tipped this off as a Traefik-level
+    # routing problem rather than the dashboard itself). Clients still
+    # connect at the external NodePort (30080) exactly as before --
+    # this port only affects how Traefik wires the Gateway to its own
+    # EntryPoint internally, nothing external changes.
     - name: http
-      port: 80
+      port: 8000
       protocol: HTTP
       allowedRoutes:
         namespaces:

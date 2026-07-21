@@ -979,8 +979,9 @@ it standalone) -- same shape as `install-flux.sh`, including the
   namespace -- so it sits right next to the `HTTPRoute` and `Service` it
   routes to.
 - `k8s/gateway/gateway.yaml` -- a `Gateway` named `scm-gateway`, one
-  `http` listener on port 80, routes restricted to its own namespace
-  (`allowedRoutes.namespaces.from: Same`).
+  `http` listener on port **8000** (not 80 -- see below), routes
+  restricted to its own namespace (`allowedRoutes.namespaces.from:
+  Same`).
 - `k8s/gateway/dashboard-httproute.yaml` -- an `HTTPRoute` matching any
   path, routing to `scm-dashboard`'s existing Service on port 80. No
   hostname restriction, so it matches any `Host` header.
@@ -996,6 +997,28 @@ it standalone) -- same shape as `install-flux.sh`, including the
   No TLS/HTTPS yet -- `websecure` is explicitly disabled
   (`ports.websecure.expose.default: false`) rather than exposing a 443
   that can't complete a handshake; see Roadmap.
+
+**Why the Gateway's listener port is 8000, not 80.** Confirmed on a real
+first run: `curl <address>:30080` connected fine but returned a bare
+`404 page not found` -- Go's stdlib `http.NotFound` text, i.e. Traefik's
+own default "no route matched" response, not nginx's 404 page (the
+dashboard's own container). `kubectl get gateway` also showed the
+`PROGRAMMED` status column blank rather than `True`. Both pointed at
+Traefik never actually wiring up a route for this Gateway at all.
+Traefik's own docs are explicit that a Gateway listener's `port` must
+match one of Traefik's actual configured EntryPoint ports, not the
+externally-exposed one: the chart's `web` EntryPoint is configured on
+container port `8000` internally (see the chart's own
+`ports.web.port`/`gateway.listeners.web.port` defaults); port `80` only
+exists one layer further out, as the Service's `exposedPort`/NodePort
+(`30080`) mapping onto that same container port. The original
+`gateway.yaml` used `port: 80` (matching the *external* address,
+reasonably enough, but not what Traefik itself was told to listen for
+internally), so Traefik silently programmed no route at all. Fixed by
+setting the listener to `port: 8000` instead -- clients still connect at
+the external NodePort (`30080`) exactly as before; this port only
+affects how Traefik associates the Gateway with its own EntryPoint,
+nothing about the external address changes.
 
 Version pins (checked against the actual upstream sources, not assumed
 from memory, since both move independently of this project): Gateway

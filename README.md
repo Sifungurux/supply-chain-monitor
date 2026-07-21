@@ -601,9 +601,15 @@ configured for the Kubernetes **Gateway API** specifically (not classic
 direct NodePort (`30301`) still works unchanged; this is an additional
 path in.
 
-```bash
-http://<vm-address-or-localhost>:30080   # routes through Traefik -> Gateway -> scm-dashboard
-```
+Same per-runtime address split as every other NodePort in this project
+(see Quickstart):
+
+- **colima**: `http://<vm-address>:30080` — the VM address `create-cluster.sh`
+  prints (`--network-address` gives the VM its own routable IP; `localhost`
+  does *not* reach it, since colima doesn't forward NodePorts to the host's
+  loopback the way k3d's port mapping does).
+- **podman/k3d**: `http://localhost:30080` — forwarded via the `30080:30080`
+  mapping in `cluster/k3d-config.yaml`.
 
 Both runtimes already disable k3s's *bundled* Traefik
 (`--k3s-arg="--disable=traefik"` / `--disable=traefik`) — this project
