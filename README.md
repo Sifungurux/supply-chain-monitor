@@ -391,6 +391,16 @@ live data) runs automatically once deployed — see
 newest 7 backups by default (`backup.keepBackups` in
 `charts/postgres/values.yaml`).
 
+The backups PVC binds via a small pre-install Helm hook
+(`backup-pvc-primer-job.yaml`) rather than waiting for its first real
+consumer — needed because that consumer is the daily CronJob, and on
+most single-node dev clusters' default StorageClass, a PVC only binds
+once some pod is actually scheduled against it. Without this, the
+first `helm upgrade`/`flux reconcile` for postgres would time out with
+`PersistentVolumeClaim/.../scm-postgres-backups status: 'InProgress'`
+— see docs/architecture.md ("Why scm-postgres-backups needed a
+pre-install hook") if you hit that.
+
 ```bash
 make db-backup          # trigger an on-demand backup right now, don't wait for the schedule
 make db-backups-list    # see what's available

@@ -1,0 +1,43 @@
+{{- if .Values.backup.enabled }}
+# Pairs with scm-postgres-backups' pre-install/pre-upgrade hook
+# annotations in pvc.yaml -- see that file's comment for the full "why".
+# Short version: this Job's only job is to mount scm-postgres-backups
+# and exit immediately, which is enough to make a
+# WaitForFirstConsumer-mode StorageClass actually bind the volume,
+# before Helm's own readiness wait starts watching for it. Without
+# this, the PVC has no real consumer until scm-postgres-backup (the
+# CronJob) first fires on its schedule, and Helm/Flux's wait times out
+# well before then.
+#
+# Reuses the postgres image already being pulled for the main
+# Deployment/CronJob rather than adding a second image to pull.
+# hook-weight -4 (vs. the PVC's -5) guarantees the PVC exists first;
+# hook-delete-policy cleans the Job up after each run so re-upgrades
+# don't leave a trail of completed Jobs behind.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scm-postgres-backups-primer
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-4"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 120
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: primer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          command: ["sh", "-c", "echo scm-postgres-backups primed && exit 0"]
+          volumeMounts:
+            - name: backups
+              mountPath: /backups
+      volumes:
+        - name: backups
+          persistentVolumeClaim:
+            claimName: scm-postgres-backups
+{{- end }}

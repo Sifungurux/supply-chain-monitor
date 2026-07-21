@@ -762,6 +762,34 @@ operational complexity (a place to archive WAL segments to, and a
 restore procedure that replays them) that isn't justified yet for a
 local dev cluster -- see Roadmap.
 
+**Why `scm-postgres-backups` needed a pre-install hook.** The first
+real `make cluster-up && make flux-install` run against a live cluster
+hit exactly this: `helm upgrade` for the postgres release timed out
+with `PersistentVolumeClaim/.../scm-postgres-backups status:
+'InProgress'`. The cause: single-node dev clusters' default
+StorageClass (k3s/k3d/colima's `local-path`) sets
+`volumeBindingMode: WaitForFirstConsumer` -- correct behavior in
+general, since it lets the provisioner see which node a pod actually
+lands on before creating storage there, but it means a PVC only binds
+once some pod is scheduled against it. `scm-postgres-data` never had
+this problem because the postgres `Deployment` consumes it immediately,
+in the same install batch. `scm-postgres-backups` did, because its only
+real consumer is `scm-postgres-backup`, a `CronJob` that doesn't run
+until its own schedule fires -- so at install time nothing ever
+schedules a pod against it, it never leaves `Pending`, and Helm's
+readiness wait (which treats a Pending PVC as not-yet-ready) eventually
+times out waiting for a binding that was never going to happen on its
+own. The fix, in `charts/postgres/templates/pvc.yaml` and the new
+`backup-pvc-primer-job.yaml`: mark the PVC itself as a
+`pre-install,pre-upgrade` Helm hook (so it's created before Helm's
+normal apply-then-wait sequence even starts) immediately followed by a
+second hook -- a trivial Job that just mounts the volume and exits.
+That Job is the "first consumer" the StorageClass is waiting for, so
+the PVC binds before Helm ever starts watching for readiness. This
+sidesteps the whole issue without assuming anything about which
+StorageClass/provisioner is actually in play, unlike hardcoding a
+different `volumeBindingMode` would have required.
+
 **Running monitor-api outside a Kubernetes pod.** Isolating the
 unpack+scan step (see above) came with a real, documented regression:
 `runAPIServer` started unconditionally calling
@@ -804,7 +832,7 @@ repo genuinely can't do for itself are all below.
 charts/
   registry/       Chart.yaml, values.yaml, templates/{pvc,deployment,service}.yaml
   clamav/         Chart.yaml, values.yaml, templates/{deployment,service}.yaml
-  postgres/       Chart.yaml, values.yaml, templates/{secret,pvc,deployment,service,backup-cronjob}.yaml
+  postgres/       Chart.yaml, values.yaml, templates/{secret,pvc,deployment,service,backup-cronjob,backup-pvc-primer-job}.yaml
   monitor-api/    Chart.yaml, values.yaml, templates/{serviceaccount,rbac,auth-secret,configmap,deployment,service}.yaml
   dashboard/      Chart.yaml, values.yaml, templates/{configmap,deployment,service}.yaml, files/index.html
 k8s/
