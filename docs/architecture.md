@@ -877,6 +877,17 @@ applies `k8s/flux-system/gotk-sync.yaml` (the `GitRepository`/root
 here instead). See `k8s/flux-system/README.md` for exactly what the
 script does and why the Helm route needs that extra file at all.
 
+Confirmed on a real first run: the chart's CRDs can transiently report
+`InProgress` to Helm's own `--wait` readiness check and time out
+(`Error: resource CustomResourceDefinition/.../...toolkit.fluxcd.io not
+ready ... context deadline exceeded`) even though they finish
+establishing within seconds -- a rough edge of this specific community
+chart, not a real failure. Fixed by not using `helm ... --wait` for the
+install itself and instead waiting on each resource type's own
+well-understood condition (CRDs via `Established`, then controller
+Deployments via `Available`) -- see the script and
+`k8s/flux-system/README.md` for the exact sequence.
+
 ### `make deploy`: trigger a reconcile, then hand off
 
 Since Flux now owns every resource under `k8s/`, `make deploy` no longer
@@ -904,7 +915,23 @@ deploy` invocation.
    install and `make deploy` both succeed regardless, but nothing
    actually reconciles until that remote exists, has this content
    pushed to it, and is reachable from the cluster.
-2. **A real cluster, Docker, kubectl, and Helm on your own machine.**
+2. **This repo is private, so the `GitRepository` also needs real
+   credentials.** `gotk-sync.yaml`'s `GitRepository.spec.secretRef`
+   points at a `flux-system-git-auth` Secret (username + GitHub PAT)
+   that isn't and shouldn't be committed anywhere -- create it with
+   `make git-auth`, then confirm it actually works with `make git-test`
+   (a plain `git ls-remote` using the same credentials, which fails or
+   succeeds in seconds instead of waiting on Flux's own retry loop).
+   Attempting to verify this from a sandboxed assistant session
+   confirmed the expected failure mode: `git ls-remote` against the
+   repo URL with no credentials fails immediately (git can't prompt for
+   a username non-interactively), and a plain `curl` to the repo's page
+   returns `404` -- GitHub's deliberate behavior for private repos
+   accessed without auth, indistinguishable from a repo that doesn't
+   exist, so the same error shows up whether the token is wrong or the
+   repo just isn't there. See `k8s/flux-system/README.md`'s "Private
+   repo authentication" for the full setup and that reasoning.
+3. **A real cluster, Docker, kubectl, and Helm on your own machine.**
    None of the automation above can be executed or verified from inside
    a sandboxed assistant session -- `make cluster-up` drives Colima (a
    local macOS VM manager) and `make deploy` drives `git`/`kubectl`/`flux`
@@ -913,7 +940,7 @@ deploy` invocation.
    ready to run; running them and reporting back what happens (or what
    errors out) is the one part of this loop that has to happen on your
    own machine.
-3. Once both are true, `flux get kustomizations -A` and `flux get
+4. Once all three are true, `flux get kustomizations -A` and `flux get
    helmreleases -A` should show `flux-system` and all five releases as
    `Ready` -- that's the loop closed end to end, from `git push` to
    running Deployments, with artifact registration and scanning

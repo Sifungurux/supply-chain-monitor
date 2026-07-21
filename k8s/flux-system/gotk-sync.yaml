@@ -16,6 +16,19 @@
 # Applied automatically by cluster/install-flux.sh (`make flux-install`,
 # or automatically at the end of `make cluster-up`) right after the Helm
 # install -- see README.md in this directory for the full sequence.
+#
+# secretRef below is required because sifungurux/supply-chain-monitor is
+# a *private* GitHub repo -- without it, Flux's source-controller gets an
+# anonymous HTTPS clone, which GitHub answers with a 404 (private repos
+# 404 rather than 403 for unauthenticated requests, so you won't see an
+# auth-specific error -- just "repository not found" in
+# `flux get gitrepositories` / `kubectl describe gitrepository`). The
+# Secret itself is never committed here -- create it with
+# `make git-auth` (wraps cluster/git-auth-secret.sh), then verify the
+# credentials actually work with `make git-test` *before* relying on
+# Flux to reconcile, since Flux's own retry loop gives much slower
+# feedback than a direct `git ls-remote`. See README.md in this
+# directory ("Private repo authentication") for the full setup.
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: GitRepository
 metadata:
@@ -26,6 +39,8 @@ spec:
   url: https://github.com/sifungurux/supply-chain-monitor.git
   ref:
     branch: main
+  secretRef:
+    name: flux-system-git-auth
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization

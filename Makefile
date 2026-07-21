@@ -2,7 +2,7 @@
 SCM_RUNTIME  ?= colima
 IMAGE        := monitor-api:dev
 
-.PHONY: cluster-up cluster-down cluster-destroy flux-install build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard check-dashboard-configmap db-shell lock-deps db-backup db-restore db-backups-list
+.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard check-dashboard-configmap db-shell lock-deps db-backup db-restore db-backups-list
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -22,6 +22,23 @@ cluster-destroy:
 # k8s/flux-system/README.md.
 flux-install:
 	./cluster/install-flux.sh
+
+# sifungurux/supply-chain-monitor is a private repo, so Flux's
+# GitRepository needs real credentials to clone it -- these two targets
+# set that up and verify it, in that order:
+#   make git-auth   creates/updates the flux-system-git-auth Secret
+#                    (prompts for a GitHub username + PAT, or reads
+#                    GIT_USERNAME/GIT_PASSWORD from the environment)
+#   make git-test    does a direct `git ls-remote` with those same
+#                    credentials, so you find out in seconds whether
+#                    they actually work instead of waiting on Flux's
+#                    own (much slower) reconcile/retry loop.
+# See k8s/flux-system/README.md's "Private repo authentication".
+git-auth:
+	./cluster/git-auth-secret.sh
+
+git-test:
+	./cluster/test-git-connection.sh
 
 # On the colima runtime, this is all you need -- colima's k3s (docker
 # runtime) shares the same image store as `docker build`, so there's no

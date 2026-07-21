@@ -539,6 +539,20 @@ not `flux bootstrap` — see `k8s/flux-system/README.md` for why). Skip it
 with `SCM_SKIP_FLUX=1 make cluster-up`, or run it standalone against an
 already-running cluster with `make flux-install`.
 
+**This repo is private, so the `GitRepository` also needs credentials**
+— `gotk-sync.yaml`'s `secretRef` points at a `flux-system-git-auth`
+Secret that's never committed. Set it up once per cluster:
+
+```bash
+make git-auth   # prompts for a GitHub username + personal access token
+make git-test   # confirms those credentials actually work (git ls-remote),
+                # in seconds — don't wait on Flux's own retry loop to tell you
+```
+
+See `k8s/flux-system/README.md`'s "Private repo authentication" for
+token scope details and why a wrong token and a nonexistent repo look
+identical (GitHub returns 404 for both, on purpose).
+
 **`make deploy` no longer applies manifests directly** — it builds the
 local `monitor-api:dev` image, commits and pushes the working tree,
 triggers an immediate Flux reconcile (via the `flux` CLI if installed,
@@ -585,6 +599,14 @@ make cluster-destroy    # stops AND deletes the VM/machine + its data
   Treat the first `make cluster-up && make deploy` as a real
   integration test, not a routine deploy, and see "GitOps (Flux)"
   above for what to check and report back.
+- **The private-repo Git credentials (`make git-auth`) haven't been
+  verified against the real repo either**, for the same reason: a
+  sandboxed assistant session has no GitHub PAT to test with. An
+  unauthenticated `git ls-remote`/`curl` from that sandbox confirmed
+  the expected failure (no creds → can't clone; GitHub 404s a private
+  repo request the same way it would a nonexistent one), but the actual
+  `make git-auth && make git-test` pass with a real token is still
+  yours to run and report back.
 - `charts/postgres/values.yaml`'s `credentials.password` ships a
   placeholder in plaintext in the repo; fine for a local, throwaway
   cluster, not for anywhere the Postgres data itself matters. Daily
