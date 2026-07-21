@@ -22,7 +22,16 @@ spec:
         # pipelineStages wouldn't actually restart the running pod.
         # Doesn't help with a same-tag *image* rebuild though -- that's
         # what `make deploy`'s explicit rollout restart is still for.
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        #
+        # $.Template.BasePath is always "<chart>/templates" -- the
+        # chart-root templates dir, NOT directory-relative to whichever
+        # template is currently rendering (a wrong assumption that broke
+        # this exact line during the single-chart consolidation, once
+        # configmap.yaml moved from a flat templates/ into
+        # templates/monitor-api/). Hence the explicit "/monitor-api/"
+        # segment below instead of relying on BasePath to already
+        # include it.
+        checksum/config: {{ include (print $.Template.BasePath "/monitor-api/configmap.yaml") . | sha256sum }}
     spec:
       serviceAccountName: monitor-api
       containers:
