@@ -1,0 +1,1696 @@
+---
+# Source: supply-chain-monitor/templates/monitor-api/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: monitor-api
+  namespace: default
+# Deliberately flipped from false to true: monitor-api creates and
+# watches a Kubernetes Job per image scan (see
+# internal/scanner/isolated_unpacker.go and docs/architecture.md,
+# "Isolating the unpack+scan step") instead of unpacking and scanning
+# arbitrary, potentially malicious image content in its own process --
+# it genuinely needs to call the Kubernetes API now. rbac.yaml's Role
+# scopes what this token can actually do down to exactly that (create/
+# get/delete Jobs and read Pod logs, in this namespace only) rather
+# than leaving it with cluster-wide access. The unpack+scan step itself
+# still never sees this token -- it runs in a separate pod under
+# scm-scan-worker's ServiceAccount below, which has none at all.
+automountServiceAccountToken: true
+---
+# Source: supply-chain-monitor/templates/monitor-api/serviceaccount.yaml
+# Used only by the per-scan Jobs internal/scanner/isolated_unpacker.go
+# creates -- deliberately separate from monitor-api's own ServiceAccount
+# above. No Role is ever bound to this one: the pod that unpacks and
+# parses untrusted image content has zero Kubernetes API access, not
+# just a token-less version of monitor-api's own scoped-down access.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scm-scan-worker
+  namespace: default
+automountServiceAccountToken: false
+
+---
+# Source: supply-chain-monitor/templates/monitor-api/auth-secret.yaml
+# Dev-only API key for monitor-api's shared-key auth -- see
+# values.yaml's monitorApi.apiKey comment for the "generate a real one
+# before this points at anything shared" caveat.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: scm-monitor-api-auth
+  namespace: default
+type: Opaque
+stringData:
+  API_KEY: "qwe4r56789009876543223456789"
+
+---
+# Source: supply-chain-monitor/templates/postgres/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  # Hard-coded name -- monitor-api's own templates
+  # (templates/monitor-api/deployment.yaml) read this exact Secret name
+  # via secretKeyRef, so it can't be templated with the release name
+  # without also updating that reference.
+  name: scm-postgres-credentials
+  namespace: default
+type: Opaque
+stringData:
+  POSTGRES_USER: "monitor_api"
+  POSTGRES_PASSWORD: "changeme123"
+  POSTGRES_DB: "monitor_api"
+
+---
+# Source: supply-chain-monitor/templates/dashboard/configmap.yaml
+# Embeds dashboard/index.html (copied into this chart at
+# files/index.html -- Helm's .Files.Get can only read files inside the
+# chart directory, not arbitrary repo paths, and .Files paths are always
+# relative to the chart root regardless of which templates/ subfolder
+# this file itself lives in) verbatim, so the running dashboard always
+# matches the source file exactly. `make check-dashboard-configmap`
+# catches drift between the two -- see Makefile and docs/architecture.md
+# for why this check exists (a real bug shipped once from these silently
+# going out of sync).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scm-dashboard-html
+  namespace: default
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Supply chain monitor</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/2.44.0/iconfont/tabler-icons.min.css" />
+    <style>
+      :root {
+        --scm-bg: #F1EFE8;
+        --scm-surface: #FFFFFF;
+        --scm-border: #D3D1C7;
+        --scm-border-strong: #B4B2A9;
+        --scm-text: #2C2C2A;
+        --scm-text-secondary: #5F5E5A;
+        --scm-text-muted: #888780;
+        --scm-accent-bg: #E6F1FB;
+        --scm-accent-text: #0C447C;
+        --scm-accent-border: #85B7EB;
+        --scm-danger-bg: #FCEBEB;
+        --scm-danger-text: #791F1F;
+        --scm-danger-border: #F09595;
+        --scm-success-bg: #EAF3DE;
+        --scm-success-text: #27500A;
+        --scm-success-border: #97C459;
+        --scm-warning-bg: #FAEEDA;
+        --scm-warning-text: #633806;
+        --scm-warning-border: #EF9F27;
+        --scm-radius: 8px;
+        --scm-radius-lg: 12px;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --scm-bg: #201F1D;
+          --scm-surface: #2C2C2A;
+          --scm-border: #444441;
+          --scm-border-strong: #5F5E5A;
+          --scm-text: #F1EFE8;
+          --scm-text-secondary: #B4B2A9;
+          --scm-text-muted: #888780;
+          --scm-accent-bg: #0C447C;
+          --scm-accent-text: #B5D4F4;
+          --scm-accent-border: #185FA5;
+          --scm-danger-bg: #501313;
+          --scm-danger-text: #F7C1C1;
+          --scm-danger-border: #A32D2D;
+          --scm-success-bg: #173404;
+          --scm-success-text: #C0DD97;
+          --scm-success-border: #3B6D11;
+          --scm-warning-bg: #412402;
+          --scm-warning-text: #FAC775;
+          --scm-warning-border: #854F0B;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--scm-bg);
+        color: var(--scm-text);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px 64px; }
+      header { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+      h1 { font-size: 20px; font-weight: 500; margin: 0; flex: 1 1 auto; min-width: 200px; }
+      h2 { font-size: 15px; font-weight: 500; margin: 0 0 10px; }
+      .api-row { display: flex; align-items: center; gap: 8px; }
+      .api-row label { color: var(--scm-text-secondary); font-size: 12px; }
+      input, select, button {
+        font: inherit;
+        border-radius: var(--scm-radius);
+        border: 0.5px solid var(--scm-border-strong);
+        background: var(--scm-surface);
+        color: var(--scm-text);
+        padding: 7px 10px;
+      }
+      input:focus, select:focus, button:focus { outline: 2px solid var(--scm-accent-border); outline-offset: 1px; }
+      button { cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+      button:hover { border-color: var(--scm-text-secondary); }
+      button:disabled { opacity: 0.55; cursor: default; }
+      button.primary { background: var(--scm-text); color: var(--scm-bg); border-color: var(--scm-text); }
+      #api-base { width: 200px; }
+      #api-key { width: 160px; }
+      #status { font-size: 12px; color: var(--scm-text-secondary); }
+      #status.error { color: var(--scm-danger-text); }
+      section { margin-bottom: 28px; }
+      .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+      .card {
+        background: var(--scm-surface); border: 0.5px solid var(--scm-border);
+        border-radius: var(--scm-radius-lg); padding: 14px 16px;
+      }
+      .card .n { font-size: 24px; font-weight: 500; }
+      .card .l { font-size: 12px; color: var(--scm-text-secondary); }
+      .stages { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+      .stage-pill {
+        flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+        background: var(--scm-surface); border: 0.5px solid var(--scm-border);
+        border-radius: 999px; padding: 6px 14px; font-size: 13px; white-space: nowrap;
+      }
+      .stage-pill .count {
+        background: var(--scm-accent-bg); color: var(--scm-accent-text);
+        border-radius: 999px; padding: 1px 8px; font-size: 12px; font-weight: 500;
+      }
+      .register-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+      .register-form input[type="text"] { flex: 1 1 260px; }
+      table { width: 100%; border-collapse: collapse; background: var(--scm-surface); border-radius: var(--scm-radius-lg); overflow: hidden; border: 0.5px solid var(--scm-border); }
+      th, td { text-align: left; padding: 10px 12px; border-bottom: 0.5px solid var(--scm-border); font-size: 13px; vertical-align: middle; }
+      th { color: var(--scm-text-secondary); font-weight: 500; font-size: 12px; }
+      tr:last-child td { border-bottom: none; }
+      tr.detail-row td { background: var(--scm-bg); }
+      .ref { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+      .badge {
+        display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 500;
+        border: 0.5px solid transparent;
+      }
+      .badge-neutral { background: var(--scm-border); color: var(--scm-text-secondary); }
+      .badge-accent { background: var(--scm-accent-bg); color: var(--scm-accent-text); border-color: var(--scm-accent-border); }
+      .badge-success { background: var(--scm-success-bg); color: var(--scm-success-text); border-color: var(--scm-success-border); }
+      .badge-warning { background: var(--scm-warning-bg); color: var(--scm-warning-text); border-color: var(--scm-warning-border); }
+      .badge-danger { background: var(--scm-danger-bg); color: var(--scm-danger-text); border-color: var(--scm-danger-border); }
+      .count-zero { color: var(--scm-text-muted); }
+      .count-nonzero { color: var(--scm-danger-text); font-weight: 500; }
+      .actions { display: flex; gap: 6px; }
+      .actions button { padding: 5px 10px; font-size: 12.5px; }
+      .empty { color: var(--scm-text-secondary); padding: 24px; text-align: center; }
+      .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; padding: 4px 4px 12px; }
+      .detail-col h3 { font-size: 12px; text-transform: none; color: var(--scm-text-secondary); font-weight: 500; margin: 0 0 8px; }
+      .finding { border-radius: var(--scm-radius); padding: 6px 10px; margin-bottom: 6px; font-size: 12.5px; }
+      .finding-fixed { opacity: 0.65; }
+      .timeline-item { font-size: 12.5px; padding: 4px 0; border-bottom: 0.5px solid var(--scm-border); }
+      .timeline-item:last-child { border-bottom: none; }
+      .muted { color: var(--scm-text-muted); font-size: 12.5px; }
+      .errs { color: var(--scm-danger-text); font-size: 12.5px; }
+      i.ti { font-size: 16px; vertical-align: -2px; }
+    </style>
+    </head>
+    <body>
+    <div class="wrap">
+      <header>
+        <h1><i class="ti ti-shield-check" aria-hidden="true"></i> Supply chain monitor</h1>
+        <div class="api-row">
+          <label for="api-base">API</label>
+          <input id="api-base" type="text" />
+          <label for="api-key">Key</label>
+          <input id="api-key" type="password" autocomplete="off" />
+          <button id="save-api"><i class="ti ti-check" aria-hidden="true"></i></button>
+        </div>
+        <button id="refresh"><i class="ti ti-refresh" aria-hidden="true"></i> Refresh</button>
+        <span id="status">Connecting…</span>
+      </header>
+    
+      <section>
+        <div class="cards" id="cards"></div>
+      </section>
+    
+      <section>
+        <h2>Pipeline stages</h2>
+        <div class="stages" id="stages"></div>
+      </section>
+    
+      <section>
+        <h2>Register an artifact</h2>
+        <form class="register-form" id="register-form">
+          <input type="text" id="reg-ref" placeholder="alpine:3.19, /path/to/file, ghcr.io/org/chart:1.0" required />
+          <select id="reg-type">
+            <option value="image">image</option>
+            <option value="file">file</option>
+            <option value="sbom">sbom</option>
+            <option value="sarif">sarif</option>
+          </select>
+          <button type="submit" class="primary"><i class="ti ti-plus" aria-hidden="true"></i> Register</button>
+        </form>
+      </section>
+    
+      <section>
+        <h2>Artifacts</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Ref</th><th>Type</th><th>Status</th><th>Stage</th><th>CVEs</th><th>Malware</th><th>Other</th><th>Updated</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="artifact-rows"></tbody>
+        </table>
+      </section>
+    </div>
+    
+    <!--
+      env.js is NOT part of this file -- it's generated at container
+      startup by charts/supply-chain-monitor/templates/dashboard/deployment.yaml's render-config
+      initContainer, from the scm-monitor-api-auth Secret and
+      scm-dashboard-config ConfigMap (see docs/architecture.md,
+      "Configuring the dashboard via ConfigMap/Secret instead of by
+      hand"). It sets window.SCM_CONFIG = { apiBase, apiKey } before the
+      script below runs. Opening this file directly (or in a test) without
+      that initContainer just means the request 404s/fails and
+      window.SCM_CONFIG stays undefined -- the script below already
+      handles that by falling back to the old manual-entry behavior.
+    -->
+    <script src="env.js"></script>
+    <script>
+    (function () {
+      // Default to the same host the dashboard itself was loaded from, just
+      // on the API's NodePort (30300) instead of the dashboard's (30301).
+      // This self-adapts whether you're on localhost (podman runtime) or a
+      // Colima VM address (colima runtime, where NodePorts aren't reachable
+      // via "localhost" at all) -- a hardcoded "localhost" default broke
+      // the colima path outright. Still overridable and remembered below.
+      var DEFAULT_API_BASE = window.location.protocol + '//' + window.location.hostname + ':30300';
+      // window.SCM_CONFIG is set by env.js (see the comment above this
+      // script tag) -- rendered at container startup from the
+      // scm-monitor-api-auth Secret and scm-dashboard-config ConfigMap, so
+      // a fresh browser gets a working API key and (optionally) a fixed
+      // API address with no manual step. localStorage still wins over it
+      // if a person has explicitly typed/saved a different value in the
+      // fields below -- that's a deliberate escape hatch (pointing this
+      // one browser tab at a different environment temporarily), not the
+      // normal path.
+      var injected = window.SCM_CONFIG || {};
+    
+      var state = {
+        apiBase: localStorage.getItem('scm-api-base') || injected.apiBase || DEFAULT_API_BASE,
+        // Every request to monitor-api now requires `Authorization: Bearer
+        // <key>` (see internal/api/router.go's withAuth).
+        apiKey: localStorage.getItem('scm-api-key') || injected.apiKey || '',
+        stages: [],
+        artifacts: [],
+        expanded: null,
+        busy: {}
+      };
+    
+      var els = {
+        apiBase: document.getElementById('api-base'),
+        apiKey: document.getElementById('api-key'),
+        saveApi: document.getElementById('save-api'),
+        refresh: document.getElementById('refresh'),
+        status: document.getElementById('status'),
+        cards: document.getElementById('cards'),
+        stages: document.getElementById('stages'),
+        rows: document.getElementById('artifact-rows'),
+        form: document.getElementById('register-form'),
+        ref: document.getElementById('reg-ref'),
+        type: document.getElementById('reg-type')
+      };
+      els.apiBase.value = state.apiBase;
+      els.apiKey.value = state.apiKey;
+    
+      function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+          return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+      }
+    
+      function timeAgo(iso) {
+        if (!iso) return '—';
+        var diff = (Date.now() - new Date(iso).getTime()) / 1000;
+        if (diff < 60) return Math.max(0, Math.round(diff)) + 's ago';
+        if (diff < 3600) return Math.round(diff / 60) + 'm ago';
+        if (diff < 86400) return Math.round(diff / 3600) + 'h ago';
+        return Math.round(diff / 86400) + 'd ago';
+      }
+    
+      function statusBadge(status) {
+        var map = {
+          registered: 'badge-neutral',
+          scanning: 'badge-warning',
+          scanned: 'badge-success',
+          failed: 'badge-danger'
+        };
+        return '<span class="badge ' + (map[status] || 'badge-neutral') + '">' + esc(status) + '</span>';
+      }
+    
+      function severityBadge(sev) {
+        var s = (sev || '').toLowerCase();
+        var cls = 'badge-neutral';
+        if (s === 'critical' || s === 'high') cls = 'badge-danger';
+        else if (s === 'medium') cls = 'badge-warning';
+        return '<span class="badge ' + cls + '">' + esc(sev || 'unknown') + '</span>';
+      }
+    
+      // findingIsNew flags a finding as newly discovered on the artifact's
+      // most recent scan/submission, so the dashboard can call it out
+      // rather than showing it exactly the same as a finding that's been
+      // open for months. There's no explicit "was this discovered on the
+      // very last update" flag from the API -- instead this compares
+      // first_seen_at against the artifact's own updated_at: the backend
+      // (MergeFindings, called from inside the same store.Update() as the
+      // one that sets updated_at) stamps a brand-new finding's first_seen_at
+      // with the same "now" used for that update, so the two timestamps
+      // land within milliseconds of each other in practice. A several-
+      // second window comfortably absorbs that slack without ever mistaking
+      // an old, still-open finding for a new one on some later, unrelated
+      // update.
+      function findingIsNew(f, a) {
+        if (!f.first_seen_at || !a.updated_at || f.status === 'fixed') return false;
+        var diffMs = Math.abs(new Date(f.first_seen_at).getTime() - new Date(a.updated_at).getTime());
+        return diffMs < 5000;
+      }
+    
+      // renderFinding is the one place that decides how a single finding
+      // looks, for all three buckets (CVE/malware/other) -- so "new" and
+      // "fixed" render identically everywhere instead of each bucket's map()
+      // callback growing its own slightly-different copy.
+      //   showId: CVE/SARIF findings lead with their ID (e.g. "CVE-2024-1234"),
+      //     with the title (if any) appended -- malware findings lead with
+      //     the title (a signature name) since their ID is just a constant
+      //     ("clamav-signature-match") with no information of its own.
+      function renderFinding(f, a, showId) {
+        var label = showId
+          ? esc(f.id) + (f.title ? ' — ' + esc(f.title) : '')
+          : esc(f.title || f.id);
+    
+        var lifecycleBadge = '';
+        if (f.status === 'fixed') {
+          lifecycleBadge = ' <span class="badge badge-success">Fixed ' + esc(timeAgo(f.resolved_at)) + '</span>';
+        } else if (findingIsNew(f, a)) {
+          lifecycleBadge = ' <span class="badge badge-accent">New</span>';
+        }
+    
+        var rowCls = 'finding badge-neutral' + (f.status === 'fixed' ? ' finding-fixed' : '');
+        return '<div class="' + rowCls + '">' + severityBadge(f.severity) + ' ' + label + lifecycleBadge + '</div>';
+      }
+    
+      function countCell(n) {
+        return '<span class="' + (n > 0 ? 'count-nonzero' : 'count-zero') + '">' + n + '</span>';
+      }
+    
+      // openFindings is what every "how many CVEs does this have" count
+      // (the summary cards, the per-artifact table columns) should be
+      // counting -- a "fixed" finding stays in the array as a permanent
+      // record (see MergeFindings/renderFinding above), so counting the raw
+      // array length would make every resolved CVE or cleaned-up malware
+      // match look like it's still an active problem. Treats a missing/
+      // unset status as open rather than excluding it, so this fails safe
+      // toward showing a finding rather than silently hiding it.
+      function openFindings(list) {
+        return (list || []).filter(function (f) { return f.status !== 'fixed'; });
+      }
+    
+      async function fetchJSON(path, opts) {
+        opts = opts || {};
+        var headers = Object.assign({}, opts.headers || {});
+        if (state.apiKey) headers['Authorization'] = 'Bearer ' + state.apiKey;
+        var res = await fetch(state.apiBase + path, Object.assign({}, opts, { headers: headers }));
+        var body = null;
+        try { body = await res.json(); } catch (e) { /* no body */ }
+        if (!res.ok) {
+          // Called out distinctly from other errors: a 401 almost always
+          // means the "Key" field above is empty or stale, not that
+          // anything is actually broken.
+          if (res.status === 401) {
+            throw new Error('Unauthorized — check the API key above');
+          }
+          var msg = (body && body.error) ? body.error : (res.status + ' ' + res.statusText);
+          throw new Error(msg);
+        }
+        return body;
+      }
+    
+      function setStatus(text, isError) {
+        els.status.textContent = text;
+        els.status.className = isError ? 'error' : '';
+      }
+    
+      async function loadAll() {
+        try {
+          var stagesRes = await fetchJSON('/api/v1/pipeline/stages');
+          var artifacts = await fetchJSON('/api/v1/artifacts');
+          state.stages = (stagesRes && stagesRes.stages) || [];
+          state.artifacts = artifacts || [];
+          setStatus('Connected to ' + state.apiBase, false);
+          render();
+        } catch (err) {
+          setStatus("Couldn't reach " + state.apiBase + ' — ' + err.message, true);
+        }
+      }
+    
+      function render() {
+        renderCards();
+        renderStages();
+        renderRows();
+      }
+    
+      function renderCards() {
+        var total = state.artifacts.length;
+        var scanning = state.artifacts.filter(function (a) { return a.status === 'scanning'; }).length;
+        var withCVEs = state.artifacts.filter(function (a) { return openFindings(a.cve_findings).length > 0; }).length;
+        var withMalware = state.artifacts.filter(function (a) { return openFindings(a.malware_findings).length > 0; }).length;
+        var withOther = state.artifacts.filter(function (a) { return openFindings(a.other_findings).length > 0; }).length;
+        var cards = [
+          ['Artifacts', total],
+          ['Scanning now', scanning],
+          ['With CVEs', withCVEs],
+          ['With malware', withMalware],
+          ['With other findings', withOther]
+        ];
+        els.cards.innerHTML = cards.map(function (c) {
+          return '<div class="card"><div class="n">' + c[1] + '</div><div class="l">' + c[0] + '</div></div>';
+        }).join('');
+      }
+    
+      function renderStages() {
+        if (!state.stages.length) {
+          els.stages.innerHTML = '<span class="muted">No pipeline stages configured.</span>';
+          return;
+        }
+        var counts = {};
+        var unassigned = 0;
+        state.artifacts.forEach(function (a) {
+          if (a.current_stage) counts[a.current_stage] = (counts[a.current_stage] || 0) + 1;
+          else unassigned++;
+        });
+        var pills = state.stages.map(function (s) {
+          return '<div class="stage-pill">' + esc(s) + '<span class="count">' + (counts[s] || 0) + '</span></div>';
+        });
+        pills.push('<div class="stage-pill">unassigned<span class="count">' + unassigned + '</span></div>');
+        els.stages.innerHTML = pills.join('');
+      }
+    
+      function renderRows() {
+        if (!state.artifacts.length) {
+          els.rows.innerHTML = '<tr><td colspan="9" class="empty">No artifacts yet. Register one above to get started.</td></tr>';
+          return;
+        }
+        var rows = [];
+        state.artifacts
+          .slice()
+          .sort(function (a, b) { return new Date(b.updated_at) - new Date(a.updated_at); })
+          .forEach(function (a) {
+            var busy = !!state.busy[a.id];
+            rows.push(
+              '<tr data-id="' + esc(a.id) + '">' +
+                '<td class="ref" title="' + esc(a.ref) + '">' + esc(a.ref) + '</td>' +
+                '<td>' + esc(a.type) + '</td>' +
+                '<td>' + statusBadge(a.status) + '</td>' +
+                '<td>' + (a.current_stage ? esc(a.current_stage) : '<span class="muted">—</span>') + '</td>' +
+                '<td>' + countCell(openFindings(a.cve_findings).length) + '</td>' +
+                '<td>' + countCell(openFindings(a.malware_findings).length) + '</td>' +
+                '<td>' + countCell(openFindings(a.other_findings).length) + '</td>' +
+                '<td class="muted">' + timeAgo(a.updated_at) + '</td>' +
+                '<td class="actions">' +
+                  '<button data-action="scan" data-id="' + esc(a.id) + '" ' + (busy ? 'disabled' : '') + '>' +
+                    (busy ? 'Scanning…' : '<i class="ti ti-player-play" aria-hidden="true"></i> Scan') +
+                  '</button>' +
+                  '<button data-action="toggle" data-id="' + esc(a.id) + '">' +
+                    (state.expanded === a.id ? 'Hide' : 'Details') +
+                  '</button>' +
+                '</td>' +
+              '</tr>'
+            );
+            if (state.expanded === a.id) rows.push(renderDetailRow(a));
+          });
+        els.rows.innerHTML = rows.join('');
+      }
+    
+      function renderDetailRow(a) {
+        var stageHistory = (a.stage_history || []).slice().reverse();
+        var cve = a.cve_findings || [];
+        var mal = a.malware_findings || [];
+        var other = a.other_findings || [];
+        var errs = a.last_scan_errors || [];
+    
+        var historyHtml = stageHistory.length
+          ? stageHistory.map(function (e) {
+              return '<div class="timeline-item"><strong>' + esc(e.stage) + '</strong> — ' +
+                new Date(e.timestamp).toLocaleString() +
+                (e.note ? '<br><span class="muted">' + esc(e.note) + '</span>' : '') + '</div>';
+            }).join('')
+          : '<span class="muted">No stage events recorded yet.</span>';
+    
+        var cveHtml = cve.length
+          ? cve.map(function (f) { return renderFinding(f, a, true); }).join('')
+          : '<span class="muted">No CVE findings.</span>';
+    
+        var malHtml = mal.length
+          ? mal.map(function (f) { return renderFinding(f, a, false); }).join('')
+          : '<span class="muted">No malware findings.</span>';
+    
+        var otherHtml = other.length
+          ? other.map(function (f) { return renderFinding(f, a, true); }).join('')
+          : '<span class="muted">No other findings.</span>';
+    
+        var errsHtml = errs.length
+          ? '<div class="errs">' + errs.map(esc).join('<br>') + '</div>'
+          : '';
+    
+        return (
+          '<tr class="detail-row"><td colspan="9">' +
+            '<div class="detail-grid">' +
+              '<div class="detail-col"><h3>Pipeline history</h3>' + historyHtml + '</div>' +
+              '<div class="detail-col"><h3>CVE findings</h3>' + cveHtml + '</div>' +
+              '<div class="detail-col"><h3>Malware findings</h3>' + malHtml + '</div>' +
+              '<div class="detail-col"><h3>Other findings (SARIF, etc.)</h3>' + otherHtml + '</div>' +
+            '</div>' +
+            errsHtml +
+          '</td></tr>'
+        );
+      }
+    
+      async function scanArtifact(id) {
+        state.busy[id] = true;
+        renderRows();
+        try {
+          await fetchJSON('/api/v1/artifacts/' + id + '/scan', { method: 'POST' });
+        } catch (err) {
+          setStatus('Scan failed for ' + id + ' — ' + err.message, true);
+        } finally {
+          delete state.busy[id];
+          await loadAll();
+        }
+      }
+    
+      els.rows.addEventListener('click', function (ev) {
+        var btn = ev.target.closest('button[data-action]');
+        if (!btn) return;
+        var id = btn.getAttribute('data-id');
+        var action = btn.getAttribute('data-action');
+        if (action === 'scan') scanArtifact(id);
+        if (action === 'toggle') {
+          state.expanded = state.expanded === id ? null : id;
+          renderRows();
+        }
+      });
+    
+      els.form.addEventListener('submit', async function (ev) {
+        ev.preventDefault();
+        var ref = els.ref.value.trim();
+        if (!ref) return;
+        try {
+          await fetchJSON('/api/v1/artifacts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ref: ref, type: els.type.value })
+          });
+          els.ref.value = '';
+          setStatus('Artifact registered', false);
+          await loadAll();
+        } catch (err) {
+          setStatus('Could not register artifact — ' + err.message, true);
+        }
+      });
+    
+      els.saveApi.addEventListener('click', function () {
+        state.apiBase = els.apiBase.value.trim() || DEFAULT_API_BASE;
+        state.apiKey = els.apiKey.value.trim();
+        localStorage.setItem('scm-api-base', state.apiBase);
+        localStorage.setItem('scm-api-key', state.apiKey);
+        loadAll();
+      });
+      els.refresh.addEventListener('click', loadAll);
+    
+      loadAll();
+      setInterval(loadAll, 10000);
+    })();
+    </script>
+    </body>
+    </html>
+---
+# Source: supply-chain-monitor/templates/dashboard/configmap.yaml
+# Optional override for the dashboard's own API address -- see
+# values.yaml's dashboard.apiBase comment.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scm-dashboard-config
+  namespace: default
+data:
+  DASHBOARD_API_BASE: ""
+
+---
+# Source: supply-chain-monitor/templates/monitor-api/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: monitor-api-config
+  namespace: default
+data:
+  LISTEN_ADDR: ":8080"
+  PIPELINE_STAGES: "source,build,test,scan,sign,publish,deploy"
+  CLAMAV_ADDR: "scm-clamav.default.svc.cluster.local:3310"
+  REGISTRY_ADDR: "scm-registry.default.svc.cluster.local:5000"
+  # Postgres holds every artifact/finding/stage-history record -- see
+  # docs/architecture.md for why the in-memory store was replaced.
+  # POSTGRES_PASSWORD is deliberately absent here: it comes from the
+  # scm-postgres-credentials Secret (templates/postgres/secret.yaml) via
+  # this chart's monitor-api/deployment.yaml secretKeyRef, not this
+  # plaintext ConfigMap.
+  POSTGRES_HOST: "scm-postgres.default.svc.cluster.local"
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: "monitor_api"
+  POSTGRES_DB: "monitor_api"
+  POSTGRES_SSLMODE: "disable"
+  # unpacker (github.com/Sifungurux/unpacker) pull settings, used to
+  # unpack image artifacts before ClamAV scans their contents.
+  # monitor-api itself never runs unpacker directly -- these are
+  # forwarded into the env of each per-scan Kubernetes Job it creates
+  # (see internal/scanner/isolated_unpacker.go and docs/architecture.md,
+  # "Isolating the unpack+scan step").
+  UNPACKER_INSECURE: "true"
+  UNPACKER_PUBLIC: "true"
+  UNPACKER_MAX_FILE_MB: "100"
+  # Almost always the same image monitor-api itself runs from, since
+  # `monitor-api scan-worker` is the same binary in a different mode --
+  # defaults to monitorApi.image.repository:monitorApi.image.tag unless
+  # scanWorkerImage is explicitly overridden.
+  SCAN_WORKER_IMAGE: "monitor-api:dev"
+  # Left false here -- this is the real in-cluster deployment, which
+  # does have the ServiceAccount token isolation needs (see
+  # serviceaccount.yaml). true is only ever meant for running the
+  # monitor-api binary standalone outside Kubernetes -- see README,
+  # "Running monitor-api outside a Kubernetes pod".
+  DISABLE_SCAN_ISOLATION: "false"
+  # file/sbom/sarif artifacts can be registered with an OCI registry
+  # reference instead of a path already inside this pod -- oras pull
+  # fetches them from scm-registry first (see internal/scanner/fetch.go).
+  FETCH_PLAIN_HTTP: "true"
+  # The shared, centrally-refreshed vulnerability-DB cache
+  # IsolatedTrivyScanner mounts read-only into each trivy scan-worker
+  # Job -- see trivy-db-cache-pvc.yaml/trivy-db-cache-primer-job.yaml/
+  # trivy-db-refresh-cronjob.yaml and docs/architecture.md ("Isolating
+  # Trivy scanning"). Independent of TRIVY_DB_REPOSITORY below (that's
+  # about *where* trivy pulls a DB from; this is about *where on disk*
+  # the isolated worker looks for the one already pulled).
+  TRIVY_CACHE_CLAIM: "scm-trivy-db-cache"
+  TRIVY_CACHE_DIR: "/trivy-cache"
+
+---
+# Source: supply-chain-monitor/templates/postgres/pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: scm-postgres-data
+  namespace: default
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+# Source: supply-chain-monitor/templates/registry/pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  # Hard-coded name (not templated with the Helm release name) on
+  # purpose: this project's other tooling (Makefile, docs, scripts)
+  # already refers to scm-registry-data by this exact name, and there's
+  # only ever one release of this chart in the cluster.
+  name: scm-registry-data
+  namespace: default
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+# Source: supply-chain-monitor/templates/monitor-api/rbac.yaml
+# Scopes exactly what monitor-api's own ServiceAccount token (see
+# serviceaccount.yaml -- automountServiceAccountToken flipped to true
+# for this) can do: create/get/delete a scan-worker Job and read its
+# pod's logs, and only within this one namespace. No access to any
+# other resource (Secrets, ConfigMaps, other namespaces, cluster-scoped
+# anything) -- see internal/k8sjob/client.go for the exact calls this
+# permits and docs/architecture.md for why monitor-api needs this at
+# all now.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: monitor-api-scan-jobs
+  namespace: default
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+# Source: supply-chain-monitor/templates/monitor-api/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: monitor-api-scan-jobs
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: monitor-api
+    namespace: default
+roleRef:
+  kind: Role
+  name: monitor-api-scan-jobs
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Source: supply-chain-monitor/templates/clamav/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: scm-clamav
+  namespace: default
+spec:
+  selector:
+    app: scm-clamav
+  ports:
+    - name: clamd
+      port: 3310
+      targetPort: 3310
+  type: ClusterIP
+
+---
+# Source: supply-chain-monitor/templates/dashboard/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: scm-dashboard
+  namespace: default
+spec:
+  selector:
+    app: scm-dashboard
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      nodePort: 30301
+  type: NodePort
+
+---
+# Source: supply-chain-monitor/templates/monitor-api/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: monitor-api
+  namespace: default
+spec:
+  selector:
+    app: monitor-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30300
+  type: NodePort
+
+---
+# Source: supply-chain-monitor/templates/postgres/service.yaml
+# ClusterIP only -- unlike scm-registry/monitor-api/dashboard, nothing
+# outside the cluster needs to reach Postgres directly. monitor-api
+# talks to it at scm-postgres.<namespace>.svc.cluster.local:5432 (see
+# values.yaml's monitorApi.postgres.* defaults).
+apiVersion: v1
+kind: Service
+metadata:
+  name: scm-postgres
+  namespace: default
+spec:
+  selector:
+    app: scm-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  type: ClusterIP
+
+---
+# Source: supply-chain-monitor/templates/registry/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: scm-registry
+  namespace: default
+spec:
+  selector:
+    app: scm-registry
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+      nodePort: 30500
+  type: NodePort
+
+---
+# Source: supply-chain-monitor/templates/clamav/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scm-clamav
+  namespace: default
+  labels:
+    app: scm-clamav
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scm-clamav
+  template:
+    metadata:
+      labels:
+        app: scm-clamav
+    spec:
+      containers:
+        - name: clamav
+          image: "clamav/clamav:1.5-debian13-slim"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3310
+          resources:
+            limits:
+              cpu: "1"
+              memory: 2Gi
+            requests:
+              cpu: 250m
+              memory: 1Gi
+          # first boot downloads the virus DB (freshclam) and can take a
+          # few minutes -- see values.yaml's readiness/liveness comment.
+          readinessProbe:
+            tcpSocket:
+              port: 3310
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 20
+          livenessProbe:
+            tcpSocket:
+              port: 3310
+            initialDelaySeconds: 90
+            periodSeconds: 30
+
+---
+# Source: supply-chain-monitor/templates/dashboard/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scm-dashboard
+  namespace: default
+  labels:
+    app: scm-dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scm-dashboard
+  template:
+    metadata:
+      labels:
+        app: scm-dashboard
+      annotations:
+        # Forces a new pod any time the embedded index.html or
+        # DASHBOARD_API_BASE changes -- see monitor-api's deployment.yaml
+        # for the same pattern and why it's needed, and for why the path
+        # below has an explicit "/dashboard/" segment instead of relying
+        # on $.Template.BasePath to already include it ($.Template.BasePath
+        # is always "<chart>/templates", not the subdirectory of the
+        # currently-rendering template).
+        checksum/config: ef4692d881cc0e5c660b6c6f05a28b4274adf6dccf0cb5340ba09a52ab639d99
+    spec:
+      automountServiceAccountToken: false
+      # The dashboard used to require a person to paste the API key
+      # into a browser field by hand -- fine for one person on one
+      # laptop, annoying (and easy to get wrong) for anyone else who
+      # opens the page. This initContainer renders env.js (a plain
+      # `window.SCM_CONFIG = {...}` assignment) from the *same*
+      # scm-monitor-api-auth Secret monitor-api itself reads, so the
+      # dashboard is pre-configured with a working key with zero manual
+      # steps -- see docs/architecture.md ("Configuring the dashboard
+      # via ConfigMap/Secret instead of by hand").
+      initContainers:
+        - name: render-config
+          image: "nginx:1.27-alpine"
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              cp /config-src/index.html /html/index.html
+              # Escape backslashes and double quotes so an odd API_KEY
+              # or DASHBOARD_API_BASE value can't break out of the JS
+              # string literal below -- good enough for this project's
+              # scope (a local dev cluster), not a substitute for a
+              # real templating engine if this ever needs to be
+              # hardened further.
+              ESCAPED_KEY=$(printf '%s' "$API_KEY" | sed 's/\\/\\\\/g; s/"/\\"/g')
+              ESCAPED_BASE=$(printf '%s' "$DASHBOARD_API_BASE" | sed 's/\\/\\\\/g; s/"/\\"/g')
+              printf 'window.SCM_CONFIG = { apiBase: "%s", apiKey: "%s" };\n' "$ESCAPED_BASE" "$ESCAPED_KEY" > /html/env.js
+          env:
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  # Same Secret templates/monitor-api/auth-secret.yaml
+                  # creates -- both live in the same chart/namespace now,
+                  # so this cross-service Secret reference works the
+                  # same way it did as two separate charts.
+                  name: scm-monitor-api-auth
+                  key: API_KEY
+            - name: DASHBOARD_API_BASE
+              valueFrom:
+                configMapKeyRef:
+                  name: scm-dashboard-config
+                  key: DASHBOARD_API_BASE
+          volumeMounts:
+            - name: dashboard-html
+              mountPath: /config-src
+              readOnly: true
+            - name: html
+              mountPath: /html
+      containers:
+        - name: nginx
+          image: "nginx:1.27-alpine"
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            # Serves the initContainer's rendered output (index.html +
+            # env.js), not the ConfigMap directly -- nginx never sees
+            # the Secret itself, only what render-config already wrote
+            # into this emptyDir.
+            - name: html
+              mountPath: /usr/share/nginx/html
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+          resources:
+            limits:
+              cpu: 200m
+              memory: 64Mi
+            requests:
+              cpu: 25m
+              memory: 32Mi
+      volumes:
+        - name: dashboard-html
+          configMap:
+            name: scm-dashboard-html
+        - name: html
+          emptyDir: {}
+
+---
+# Source: supply-chain-monitor/templates/monitor-api/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: monitor-api
+  namespace: default
+  labels:
+    app: monitor-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: monitor-api
+  template:
+    metadata:
+      labels:
+        app: monitor-api
+      annotations:
+        # Forces a new ReplicaSet (and pod) any time the ConfigMap's
+        # rendered content changes, even though the image tag itself
+        # (monitor-api:dev) usually doesn't -- without this, `helm
+        # upgrade`/Flux reconciling a values change to, say,
+        # pipelineStages wouldn't actually restart the running pod.
+        # Doesn't help with a same-tag *image* rebuild though -- that's
+        # what `make deploy`'s explicit rollout restart is still for.
+        #
+        # $.Template.BasePath is always "<chart>/templates" -- the
+        # chart-root templates dir, NOT directory-relative to whichever
+        # template is currently rendering (a wrong assumption that broke
+        # this exact line during the single-chart consolidation, once
+        # configmap.yaml moved from a flat templates/ into
+        # templates/monitor-api/). Hence the explicit "/monitor-api/"
+        # segment below instead of relying on BasePath to already
+        # include it.
+        checksum/config: c146a4cd44f79b174d0ddd2ba0c8b11b714c758df504f6a124595d9b9f7f2fa8
+    spec:
+      serviceAccountName: monitor-api
+      containers:
+        - name: monitor-api
+          image: "monitor-api:dev"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: monitor-api-config
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: scm-postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: scm-monitor-api-auth
+                  key: API_KEY
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            # main.go blocks startup on connectStoreWithRetry (up to 12
+            # attempts, 5s apart -- worst case ~60s) if Postgres isn't
+            # accepting connections yet, which is routine on a fresh
+            # deploy where both pods start at once. The process doesn't
+            # even open :8080 until that finishes, so readiness probes
+            # just harmlessly fail (connection refused) until it does.
+            initialDelaySeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            # Unlike readinessProbe, a liveness failure kills the pod --
+            # this needs enough total slack (initialDelay +
+            # periodSeconds * failureThreshold) to outlast the ~60s
+            # worst-case connectStoreWithRetry loop above, or a slow
+            # Postgres bring-up would get the still-retrying
+            # monitor-api pod killed and restarted right as it was
+            # about to succeed.
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            limits:
+              cpu: "1"
+              ephemeral-storage: 2048Mi
+              memory: 1Gi
+            requests:
+              cpu: 200m
+              ephemeral-storage: 256Mi
+              memory: 384Mi
+
+---
+# Source: supply-chain-monitor/templates/postgres/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scm-postgres
+  namespace: default
+  labels:
+    app: scm-postgres
+spec:
+  replicas: 1
+  # Single replica, no rolling update (a second pod can't share the same
+  # PVC read-write) -- Recreate avoids two Postgres pods ever fighting
+  # over the same data directory during a rollout.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: scm-postgres
+  template:
+    metadata:
+      labels:
+        app: scm-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: "percona/percona-distribution-postgresql:17.10"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: scm-postgres-credentials
+          env:
+            # PGDATA points at a subdirectory of the mounted volume, not
+            # the mount point itself -- the postgres image's own docs
+            # call this out, since some volume drivers seed the mount
+            # point with a lost+found dir that trips up initdb's
+            # "directory exists but is not empty" check.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            limits:
+              cpu: "1"
+              memory: 768Mi
+            requests:
+              cpu: 250m
+              memory: 256Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: scm-postgres-data
+
+---
+# Source: supply-chain-monitor/templates/registry/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scm-registry
+  namespace: default
+  labels:
+    app: scm-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scm-registry
+  template:
+    metadata:
+      labels:
+        app: scm-registry
+    spec:
+      containers:
+        - name: registry
+          image: "registry:2"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5000
+          env:
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: "true"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/registry
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+            initialDelaySeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+            initialDelaySeconds: 5
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: scm-registry-data
+
+---
+# Source: supply-chain-monitor/templates/monitor-api/trivy-db-refresh-cronjob.yaml
+# Keeps scm-trivy-db-cache current after trivy-db-cache-primer-job's
+# one-time install-time download -- every isolated Trivy scan-worker
+# Job (IsolatedTrivyScanner) always passes --skip-db-update /
+# --skip-java-db-update (see main.go's runScanWorker), so without this
+# CronJob the DB would stay frozen at whatever it was the day this
+# chart was first installed. Mirrors
+# templates/postgres/backup-cronjob.yaml's shape closely -- see that
+# file's comment for the general pattern.
+#
+# Reuses monitor-api's own image, same as the primer Job -- trivy is
+# already installed into it.
+#
+# concurrencyPolicy: Forbid (same as the postgres backup CronJob):
+# two overlapping refreshes writing into the same PVC at once is only
+# ever wasted work, never a correctness problem worth allowing, so
+# there's no reason to let it happen.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scm-trivy-db-refresh
+  namespace: default
+  labels:
+    app: scm-trivy-db-refresh
+spec:
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: scm-trivy-db-refresh
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app: scm-trivy-db-refresh
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: trivy-db-refresh
+              image: "monitor-api:dev"
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  args=""
+                  [ -n "${TRIVY_DB_REPOSITORY:-}" ] && args="--db-repository ${TRIVY_DB_REPOSITORY}"
+                  echo "refreshing trivy vulnerability DB in ${TRIVY_CACHE_DIR}"
+                  trivy image --cache-dir "${TRIVY_CACHE_DIR}" --download-db-only ${args}
+                  javaargs=""
+                  [ -n "${TRIVY_JAVA_DB_REPOSITORY:-}" ] && javaargs="--java-db-repository ${TRIVY_JAVA_DB_REPOSITORY}"
+                  echo "refreshing trivy java DB in ${TRIVY_CACHE_DIR}"
+                  trivy image --cache-dir "${TRIVY_CACHE_DIR}" --download-java-db-only ${javaargs}
+                  echo "trivy DB cache refreshed"
+              env:
+                - name: TRIVY_CACHE_DIR
+                  value: "/trivy-cache"
+                - name: TRIVY_DB_REPOSITORY
+                  value: ""
+                - name: TRIVY_JAVA_DB_REPOSITORY
+                  value: ""
+              volumeMounts:
+                - name: trivy-cache
+                  mountPath: "/trivy-cache"
+              resources:
+                limits:
+                  cpu: 500m
+                  memory: 768Mi
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+          volumes:
+            - name: trivy-cache
+              persistentVolumeClaim:
+                claimName: scm-trivy-db-cache
+
+---
+# Source: supply-chain-monitor/templates/postgres/backup-cronjob.yaml
+# Daily pg_dump of scm-postgres into scm-postgres-backups, gzip-compressed,
+# with simple filename-based retention (keeps the newest keepBackups
+# files, deletes older ones) -- see docs/architecture.md ("Postgres
+# backups") and README's "Backing up and restoring Postgres" for the
+# human-facing how-to, including on-demand backups (`make db-backup`)
+# and restoring (`make db-restore BACKUP=...`).
+#
+# Uses the same image as the database itself specifically so pg_dump's
+# version always matches the server's -- pg_dump is generally
+# forward-compatible with newer servers but not guaranteed
+# backward-compatible with older ones, and using the same image
+# sidesteps that question entirely.
+#
+# Deliberately NOT hardened the same way monitor-api's scan-worker Job
+# is (no forced non-root user, no read-only root filesystem): this
+# container only ever touches this cluster's own trusted database
+# credentials and its own dump output, never untrusted external
+# content, so that hardening's actual payoff here is much smaller.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scm-postgres-backup
+  namespace: default
+  labels:
+    app: scm-postgres-backup
+spec:
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: scm-postgres-backup
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: scm-postgres-backup
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: pg-dump
+              image: "percona/percona-distribution-postgresql:17.10"
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  ts=$(date -u +%Y%m%dT%H%M%SZ)
+                  out="/backups/scm-postgres-${ts}.sql.gz"
+                  echo "backing up ${POSTGRES_DB} to ${out}"
+                  export PGPASSWORD="$POSTGRES_PASSWORD"
+                  pg_dump -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" | gzip > "$out"
+                  echo "backup complete: $(du -h "$out" | cut -f1)"
+                  cd /backups
+                  count=$(ls -1t scm-postgres-*.sql.gz 2>/dev/null | wc -l)
+                  if [ "$count" -gt "$KEEP_BACKUPS" ]; then
+                    echo "pruning to the newest $KEEP_BACKUPS backups (had $count)"
+                    ls -1t scm-postgres-*.sql.gz | tail -n +$((KEEP_BACKUPS + 1)) | xargs -r rm -v --
+                  fi
+              env:
+                - name: POSTGRES_HOST
+                  value: scm-postgres.default.svc.cluster.local
+                - name: POSTGRES_PORT
+                  value: "5432"
+                - name: KEEP_BACKUPS
+                  value: "7"
+              envFrom:
+                - secretRef:
+                    name: scm-postgres-credentials
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+              resources:
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: scm-postgres-backups
+
+---
+# Source: supply-chain-monitor/templates/gateway/gateway.yaml
+# References the GatewayClass gatewayclass.yaml creates in this same
+# chart -- if Traefik's own HelmRelease hasn't reconciled yet (or the
+# Gateway API CRDs from cluster/install-gateway-api.sh aren't
+# installed), this Gateway simply sits with an unaccepted/unknown
+# status until both exist; no strict apply-ordering is required,
+# Flux/Traefik converge on their own.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: scm-gateway
+  namespace: default
+spec:
+  gatewayClassName: traefik
+  listeners:
+    # listenerPort (8000 by default), not 80 -- deliberately. Traefik's
+    # own docs are explicit that a Gateway listener's port must match
+    # one of Traefik's actual configured EntryPoint ports
+    # (https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/#listeners),
+    # and Traefik's "web" EntryPoint (k8s/releases/traefik-helmrelease.yaml
+    # doesn't override ports.web.port) is configured on container port
+    # 8000 internally -- port 80 only exists one layer further out, as
+    # Traefik's Service's exposedPort/NodePort (30080) mapping onto that
+    # same container port. Using 80 here (matching the *external* port)
+    # looked reasonable but doesn't match anything Traefik itself knows
+    # about, so it silently programmed no route at all: every request
+    # landed on Traefik's own default "no route" handler instead
+    # (`404 page not found`, Go's stdlib http.NotFound text -- not
+    # nginx's 404 page, which is what tipped this off as a Traefik-level
+    # routing problem rather than the dashboard itself). Clients still
+    # connect at the external NodePort (30080) exactly as before --
+    # this port only affects how Traefik wires the Gateway to its own
+    # EntryPoint internally, nothing external changes.
+    - name: http
+      port: 8000
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same
+
+---
+# Source: supply-chain-monitor/templates/gateway/gatewayclass.yaml
+# "Skeleton" GatewayClass -- normally the ingress controller's own chart
+# creates this (Traefik's chart can, via gatewayClass.enabled), but
+# that's explicitly turned off in k8s/releases/traefik-helmrelease.yaml
+# so this application chart owns it instead, matching this project's
+# general preference for explicit, hand-written resources over relying
+# on a chart's own default-object convenience behavior (e.g.
+# k8s/flux-system/gotk-sync.yaml being hand-written instead of using
+# `flux bootstrap`). GatewayClass is cluster-scoped (no namespace) --
+# controllerName must match whatever ingress controller is actually
+# installed; currently Traefik (see k8s/releases/traefik-helmrelease.yaml
+# and https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/).
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: traefik
+spec:
+  controllerName: traefik.io/gateway-controller
+
+---
+# Source: supply-chain-monitor/templates/gateway/httproute.yaml
+# Routes everything through scm-gateway (see gateway.yaml) to the
+# dashboard's own Service (templates/dashboard/service.yaml) -- no
+# hostname restriction, so this matches on any Host header, reachable at
+# whatever address/port Traefik itself is exposed on (NodePort 30080 --
+# see k8s/releases/traefik-helmrelease.yaml). The dashboard's existing
+# direct NodePort (30301) still works unchanged; this is an additional
+# path in, not a replacement.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: scm-dashboard
+  namespace: default
+spec:
+  parentRefs:
+    - name: scm-gateway
+      sectionName: http
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: scm-dashboard
+          port: 80
+---
+# Source: supply-chain-monitor/templates/monitor-api/trivy-db-cache-pvc.yaml
+# The vulnerability DB every isolated Trivy scan-worker Job
+# (IsolatedTrivyScanner) reads -- pre-downloaded and kept warm by
+# trivy-db-cache-primer-job.yaml (once, at install/upgrade time) and
+# trivy-db-refresh-cronjob.yaml (daily thereafter), rather than each
+# scan-worker Job downloading its own copy. See
+# docs/architecture.md ("Isolating Trivy scanning") for the full
+# rationale; short version: trivy's vulnerability DB is opened
+# read-only internally, so many scan-worker Jobs can safely share one
+# copy of it concurrently, but the DB itself is large enough (and
+# public-internet-fetched often enough) that downloading it fresh per
+# scan would make every scan slow and network-dependent.
+#
+# A pre-install/pre-upgrade hook, exactly like
+# templates/postgres/pvc.yaml's scm-postgres-backups PVC, and for the
+# identical reason: most single-node dev clusters' default StorageClass
+# (e.g. k3d/colima's "local-path") uses volumeBindingMode:
+# WaitForFirstConsumer, which only binds a PVC once some pod actually
+# gets scheduled against it. Without a hook, this PVC would have no
+# real consumer until either the primer Job below or the first real
+# scan-worker Job runs -- and a scan-worker Job only ever runs on
+# demand, so with no hook this PVC would sit Pending indefinitely and
+# Helm/Flux's readiness wait would eventually time out on it.
+#
+# hook-weight -5 (same as scm-postgres-backups) so this exists before
+# the primer Job (-4) tries to mount it.
+#
+# ReadWriteOnce, not ReadWriteMany: this project's dev clusters
+# (colima/k3d) are single-node, so every pod that mounts this PVC --
+# the primer Job, the refresh CronJob, and however many concurrent
+# scan-worker Jobs -- lands on the same node anyway, and RWO allows
+# any number of pods on that one node to mount it simultaneously (RWO
+# restricts to one *node*, not one *pod*). A genuinely multi-node
+# cluster would need a ReadWriteMany-capable StorageClass (e.g. NFS)
+# instead -- flagged here rather than silently assumed away.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: scm-trivy-db-cache
+  namespace: default
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+
+---
+# Source: supply-chain-monitor/templates/postgres/pvc.yaml
+# Separate from scm-postgres-data (the live database's own PVC) on
+# purpose: a backup that lives on the exact same volume as the data it's
+# backing up wouldn't survive the one failure mode backups exist for in
+# the first place (that PVC/its underlying storage getting corrupted or
+# lost).
+#
+# This is a pre-install/pre-upgrade hook, not a normal chart resource --
+# deliberately, and paired with backup-pvc-primer-job.yaml. Most
+# single-node dev clusters' default StorageClass (e.g. k3s/k3d/colima's
+# "local-path") uses volumeBindingMode: WaitForFirstConsumer, which only
+# binds a PVC once some pod actually gets scheduled against it. This
+# PVC's only real consumer is scm-postgres-backup, a CronJob that
+# doesn't run until its own schedule fires -- so with no consumer at
+# install time, it would stay Pending forever, and Helm's readiness
+# wait would eventually time out on it (the exact error this fixes:
+# "PersistentVolumeClaim/.../scm-postgres-backups status: InProgress").
+# Making this a pre-install hook (applied before Helm's wait step even
+# starts) and following it immediately with a tiny primer Job that
+# mounts it once is enough to trigger binding, regardless of which
+# provisioner/StorageClass is actually in play.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: scm-postgres-backups
+  namespace: default
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+# Source: supply-chain-monitor/templates/monitor-api/trivy-db-cache-primer-job.yaml
+# Populates scm-trivy-db-cache with a real, usable vulnerability DB
+# once, at install/upgrade time -- pairs with trivy-db-cache-pvc.yaml's
+# hook annotations (see that file's comment for the WaitForFirstConsumer
+# "why"). Unlike scm-postgres-backups-primer (which only touches its
+# PVC to trigger binding, since scm-postgres-backup won't actually run
+# until its own schedule fires), this primer does the real work: every
+# scan-worker Job created before trivy-db-refresh-cronjob's first
+# scheduled run needs *something* to read, and --skip-db-update means
+# it will never try to fetch one itself.
+#
+# Reuses monitor-api's own image rather than pulling a separate trivy
+# image -- trivy is already installed into it (see Dockerfile), the
+# same reason the isolated scan-worker Jobs do this too.
+#
+# hook-weight -4 (after the PVC's -5, before anything that expects a
+# populated cache to exist). Not hardened like the actual scan-worker
+# Jobs (no forced non-root user, no read-only root filesystem) --
+# same reasoning as scm-postgres-backup: this only ever touches
+# trivy's own public DB source and its own cache directory, never
+# untrusted external content.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scm-trivy-db-cache-primer
+  namespace: default
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-4"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: primer
+          image: "monitor-api:dev"
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              args=""
+              [ -n "${TRIVY_DB_REPOSITORY:-}" ] && args="--db-repository ${TRIVY_DB_REPOSITORY}"
+              echo "downloading trivy vulnerability DB into ${TRIVY_CACHE_DIR}"
+              trivy image --cache-dir "${TRIVY_CACHE_DIR}" --download-db-only ${args}
+              javaargs=""
+              [ -n "${TRIVY_JAVA_DB_REPOSITORY:-}" ] && javaargs="--java-db-repository ${TRIVY_JAVA_DB_REPOSITORY}"
+              echo "downloading trivy java DB into ${TRIVY_CACHE_DIR}"
+              trivy image --cache-dir "${TRIVY_CACHE_DIR}" --download-java-db-only ${javaargs}
+              echo "trivy DB cache primed"
+          env:
+            - name: TRIVY_CACHE_DIR
+              value: "/trivy-cache"
+            - name: TRIVY_DB_REPOSITORY
+              value: ""
+            - name: TRIVY_JAVA_DB_REPOSITORY
+              value: ""
+          volumeMounts:
+            - name: trivy-cache
+              mountPath: "/trivy-cache"
+          resources:
+            limits:
+              cpu: 500m
+              memory: 768Mi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+      volumes:
+        - name: trivy-cache
+          persistentVolumeClaim:
+            claimName: scm-trivy-db-cache
+
+---
+# Source: supply-chain-monitor/templates/postgres/backup-pvc-primer-job.yaml
+# Pairs with scm-postgres-backups' pre-install/pre-upgrade hook
+# annotations in pvc.yaml -- see that file's comment for the full "why".
+# Short version: this Job's only job is to mount scm-postgres-backups
+# and exit immediately, which is enough to make a
+# WaitForFirstConsumer-mode StorageClass actually bind the volume,
+# before Helm's own readiness wait starts watching for it. Without
+# this, the PVC has no real consumer until scm-postgres-backup (the
+# CronJob) first fires on its schedule, and Helm/Flux's wait times out
+# well before then.
+#
+# Reuses the postgres image already being pulled for the main
+# Deployment/CronJob rather than adding a second image to pull.
+# hook-weight -4 (vs. the PVC's -5) guarantees the PVC exists first;
+# hook-delete-policy cleans the Job up after each run so re-upgrades
+# don't leave a trail of completed Jobs behind.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scm-postgres-backups-primer
+  namespace: default
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-4"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 120
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: primer
+          image: "percona/percona-distribution-postgresql:17.10"
+          command: ["sh", "-c", "echo scm-postgres-backups primed && exit 0"]
+          volumeMounts:
+            - name: backups
+              mountPath: /backups
+      volumes:
+        - name: backups
+          persistentVolumeClaim:
+            claimName: scm-postgres-backups
+
