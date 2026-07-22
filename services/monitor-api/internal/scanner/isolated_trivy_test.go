@@ -1,0 +1,197 @@
+package scanner
+
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/k8sjob"
+)
+
+// Reuses fakeJobClient from isolated_unpacker_test.go -- both types
+// share the same jobClient interface, so the same fake covers both
+// without duplicating it.
+
+// recordingJobClient wraps fakeJobClient to additionally capture every
+// Job passed to CreateJob -- needed for
+// TestIsolatedTrivyScanner_Scan_MountsCacheVolumeReadOnly, which has to
+// inspect the actual Job spec IsolatedTrivyScanner built (fakeJobClient
+// alone discards it).
+type recordingJobClient struct {
+	fakeJobClient
+	onCreate    func()
+	createdJobs []*k8sjob.Job
+}
+
+func (f *recordingJobClient) CreateJob(ctx context.Context, job *k8sjob.Job) error {
+	f.createdJobs = append(f.createdJobs, job)
+	if f.onCreate != nil {
+		f.onCreate()
+	}
+	return f.fakeJobClient.CreateJob(ctx, job)
+}
+
+func newTrivyScanner(t *testing.T, client jobClient) *IsolatedTrivyScanner {
+	t.Helper()
+	return NewIsolatedTrivyScanner(client, IsolatedTrivyConfig{
+		Image:          "monitor-api:dev",
+		CacheClaimName: "scm-trivy-db-cache",
+		PollInterval:   time.Millisecond, // fast polling in tests
+	})
+}
+
+func TestIsolatedTrivyScanner_Scan_HappyPath(t *testing.T) {
+	client := &fakeJobClient{
+		namespace:      "test-ns",
+		statusSequence: []jobStatusResult{{}, {succeeded: true}}, // "still running" once, then done
+		podName:        "scm-scan-abc-xyz",
+		logs:           `{"findings":[{"id":"CVE-2024-1","severity":"HIGH","title":"some issue","source":"trivy"}]}`,
+	}
+	s := newTrivyScanner(t, client)
+
+	findings, err := s.Scan(context.Background(), "alpine:3.19")
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(findings) != 1 || findings[0].ID != "CVE-2024-1" {
+		t.Fatalf("findings = %+v", findings)
+	}
+	if atomic.LoadInt32(&client.deleteCalled) != 1 {
+		t.Fatal("expected the job to be deleted exactly once after a successful scan")
+	}
+}
+
+func TestIsolatedTrivyScanner_Scan_CleansUpEvenOnFailure(t *testing.T) {
+	client := &fakeJobClient{
+		namespace:      "test-ns",
+		statusSequence: []jobStatusResult{{failed: true}},
+	}
+	s := newTrivyScanner(t, client)
+
+	if _, err := s.Scan(context.Background(), "alpine:3.19"); err == nil {
+		t.Fatal("expected an error when the job itself fails")
+	}
+	if atomic.LoadInt32(&client.deleteCalled) != 1 {
+		t.Fatal("expected cleanup (DeleteJob) even when the scan fails")
+	}
+}
+
+func TestIsolatedTrivyScanner_Scan_CreateJobError(t *testing.T) {
+	client := &fakeJobClient{
+		namespace: "test-ns",
+		createErr: errors.New("jobs.batch is forbidden"),
+	}
+	s := newTrivyScanner(t, client)
+
+	if _, err := s.Scan(context.Background(), "alpine:3.19"); err == nil {
+		t.Fatal("expected an error when the job can't even be created")
+	}
+	if atomic.LoadInt32(&client.deleteCalled) != 1 {
+		t.Fatal("expected DeleteJob to still run as a harmless cleanup attempt")
+	}
+}
+
+func TestIsolatedTrivyScanner_Scan_WorkerReportedError(t *testing.T) {
+	client := &fakeJobClient{
+		namespace:      "test-ns",
+		statusSequence: []jobStatusResult{{succeeded: true}},
+		podName:        "scm-scan-abc-xyz",
+		logs:           `{"findings":null,"error":"trivy scan failed for \"alpine:3.19\": db not found"}`,
+	}
+	s := newTrivyScanner(t, client)
+
+	if _, err := s.Scan(context.Background(), "alpine:3.19"); err == nil {
+		t.Fatal("expected the worker-reported error to surface")
+	}
+}
+
+func TestIsolatedTrivyScanner_Scan_UnparseableLogs(t *testing.T) {
+	client := &fakeJobClient{
+		namespace:      "test-ns",
+		statusSequence: []jobStatusResult{{succeeded: true}},
+		podName:        "scm-scan-abc-xyz",
+		logs:           "not json at all",
+	}
+	s := newTrivyScanner(t, client)
+
+	if _, err := s.Scan(context.Background(), "alpine:3.19"); err == nil {
+		t.Fatal("expected an error when the job's logs aren't valid WorkerResult JSON")
+	}
+}
+
+func TestIsolatedTrivyScanner_Scan_TimesOutIfNeverFinishes(t *testing.T) {
+	client := &fakeJobClient{
+		namespace:      "test-ns",
+		statusSequence: []jobStatusResult{{}}, // always "still running"
+	}
+	s := newTrivyScanner(t, client)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	if _, err := s.Scan(ctx, "alpine:3.19"); err == nil {
+		t.Fatal("expected a timeout error when the job never finishes")
+	}
+	if atomic.LoadInt32(&client.deleteCalled) != 1 {
+		t.Fatal("expected cleanup even after a timeout -- cleanup must use its own context, not the expired one")
+	}
+}
+
+// Confirms the Job this scanner builds actually mounts the shared DB
+// cache PVC read-only -- the whole point of this type versus just
+// running IsolatedUnpackerConfig's Job builder with different env.
+func TestIsolatedTrivyScanner_Scan_MountsCacheVolumeReadOnly(t *testing.T) {
+	var seenJobViaCreate bool
+	client := &recordingJobClient{
+		fakeJobClient: fakeJobClient{
+			namespace:      "test-ns",
+			statusSequence: []jobStatusResult{{succeeded: true}},
+			podName:        "scm-scan-abc-xyz",
+			logs:           `{"findings":[]}`,
+		},
+		onCreate: func() { seenJobViaCreate = true },
+	}
+	s := newTrivyScanner(t, client)
+
+	if _, err := s.Scan(context.Background(), "alpine:3.19"); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if !seenJobViaCreate {
+		t.Fatal("expected CreateJob to be called")
+	}
+	if len(client.createdJobs) != 1 {
+		t.Fatalf("expected exactly 1 created job, got %d", len(client.createdJobs))
+	}
+	job := client.createdJobs[0]
+
+	foundReadOnlyMount := false
+	for _, vm := range job.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if vm.MountPath == "/trivy-cache" {
+			if !vm.ReadOnly {
+				t.Fatal("expected the trivy DB cache volume mount to be ReadOnly")
+			}
+			foundReadOnlyMount = true
+		}
+	}
+	if !foundReadOnlyMount {
+		t.Fatal("expected a volume mount at /trivy-cache")
+	}
+
+	foundPVCVolume := false
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.PersistentVolumeClaim != nil {
+			if v.PersistentVolumeClaim.ClaimName != "scm-trivy-db-cache" {
+				t.Fatalf("claimName = %q, want scm-trivy-db-cache", v.PersistentVolumeClaim.ClaimName)
+			}
+			if !v.PersistentVolumeClaim.ReadOnly {
+				t.Fatal("expected the PVC volume source itself to also be marked ReadOnly")
+			}
+			foundPVCVolume = true
+		}
+	}
+	if !foundPVCVolume {
+		t.Fatal("expected a persistentVolumeClaim-backed volume")
+	}
+}

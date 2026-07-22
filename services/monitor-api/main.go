@@ -118,17 +118,26 @@ func main() {
 	runAPIServer()
 }
 
-// runScanWorker unpacks and malware-scans exactly one image artifact
-// (SCM_SCAN_REF) and prints the result as JSON (scanner.WorkerResult)
-// to stdout, then exits. Intended to run inside a short-lived,
-// minimally-privileged Kubernetes Job pod (see
-// charts/supply-chain-monitor/templates/monitor-api/rbac.yaml and IsolatedUnpackerScanner),
-// not as a long-running process.
+// runScanWorker scans exactly one artifact (SCM_SCAN_REF) and prints
+// the result as JSON (scanner.WorkerResult) to stdout, then exits.
+// Intended to run inside a short-lived, minimally-privileged
+// Kubernetes Job pod (see
+// charts/supply-chain-monitor/templates/monitor-api/rbac.yaml,
+// IsolatedUnpackerScanner, and IsolatedTrivyScanner), not as a
+// long-running process.
+//
+// SCM_TRIVY_MODE selects which scan this invocation actually runs:
+// unset (the default) means the original unpack+ClamAV malware scan;
+// "image" or "sbom" means a trivy CVE scan instead (IsolatedTrivyScanner
+// sets this). Both trivy modes reuse TrivyScanner/SBOMScanner as-is --
+// the only thing that changes for the isolated path is TrivyDBConfig
+// pointing at the read-only shared cache mount instead of trivy's own
+// default location, and always skipping DB updates (see below).
 //
 // A scan error (couldn't pull the image, clamd unreachable, etc.) is
 // reported *inside* the printed JSON (WorkerResult.Error), and the
 // process still exits 0 -- the Job "succeeding" means "the worker ran
-// and reported something," which keeps IsolatedUnpackerScanner's Job-
+// and reported something," which keeps both isolated scanners' Job-
 // completion handling to a single, simple path. Only a genuine setup
 // failure (missing SCM_SCAN_REF, can't reach clamd's config, can't
 // write the result) exits non-zero, since there's nothing meaningful
@@ -140,14 +149,6 @@ func runScanWorker() {
 		os.Exit(2)
 	}
 
-	clamAddr := getenv("CLAMAV_ADDR", "")
-	unpackerBin := getenv("UNPACKER_BIN", "unpacker")
-	unpackerInsecure := getenvBool("UNPACKER_INSECURE", true)
-	unpackerPublic := getenvBool("UNPACKER_PUBLIC", true)
-	unpackerMaxFileMB := getenvInt("UNPACKER_MAX_FILE_MB", 100)
-
-	s := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024)
-
 	// Matches the scan timeout the API server itself used to apply
 	// in-process (see internal/api/handlers.go) -- the Job's own
 	// activeDeadlineSeconds (the Job template built in internal/k8sjob,
@@ -158,7 +159,42 @@ func runScanWorker() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	findings, scanErr := s.Scan(ctx, ref)
+	var findings []artifact.Finding
+	var scanErr error
+
+	switch trivyMode := os.Getenv("SCM_TRIVY_MODE"); trivyMode {
+	case "image", "sbom":
+		// The shared trivy-db-cache PVC (see
+		// charts/supply-chain-monitor/templates/monitor-api/trivy-db-cache-pvc.yaml)
+		// is mounted read-only here -- freshness is entirely the primer
+		// Job/refresh CronJob's job, not this worker's, so DB updates
+		// are always skipped regardless of TRIVY_SKIP_DB_UPDATE (that
+		// env var only governs the separate in-process fallback path,
+		// see runAPIServer's trivyDB). SkipDBUpdate/SkipJavaDBUpdate
+		// forced true rather than read from env also means a scan never
+		// wastes time on a network round-trip that would fail anyway
+		// against a read-only mount.
+		trivyDB := scanner.TrivyDBConfig{
+			SkipDBUpdate:     true,
+			SkipJavaDBUpdate: true,
+			CacheDir:         getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
+		}
+		if trivyMode == "image" {
+			findings, scanErr = scanner.NewTrivyScanner("", trivyDB).Scan(ctx, ref)
+		} else {
+			findings, scanErr = scanner.NewSBOMScanner(trivyDB).Scan(ctx, ref)
+		}
+	default:
+		clamAddr := getenv("CLAMAV_ADDR", "")
+		unpackerBin := getenv("UNPACKER_BIN", "unpacker")
+		unpackerInsecure := getenvBool("UNPACKER_INSECURE", true)
+		unpackerPublic := getenvBool("UNPACKER_PUBLIC", true)
+		unpackerMaxFileMB := getenvInt("UNPACKER_MAX_FILE_MB", 100)
+
+		s := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024)
+		findings, scanErr = s.Scan(ctx, ref)
+	}
+
 	result := scanner.WorkerResult{Findings: findings}
 	if scanErr != nil {
 		result.Error = scanErr.Error()
@@ -171,19 +207,23 @@ func runScanWorker() {
 	}
 }
 
-// buildImageScanners picks the malware-scanning half of the `image`
-// artifact type's scanner list: the isolated, Kubernetes-Job-per-scan
-// path by default, or the in-process fallback when
-// DISABLE_SCAN_ISOLATION is set. Split out from runAPIServer
-// specifically so this decision is unit-testable (main_test.go)
-// without needing a real Kubernetes API client or a real trivy binary
-// -- neither scanner argument is ever actually invoked by this
-// function, just selected.
-func buildImageScanners(disableScanIsolation bool, trivy scanner.Scanner, inProcessUnpacker scanner.Scanner, isolatedUnpacker scanner.Scanner) []scanner.Scanner {
+// buildImageScanners picks both halves of the `image` artifact type's
+// scanner list -- the CVE scanner (trivy) and the malware scanner
+// (unpack + ClamAV) -- consistently: the isolated, Kubernetes-Job-per-
+// scan path for both by default, or the in-process fallback for both
+// when DISABLE_SCAN_ISOLATION is set. A single flag governing both
+// scanners keeps "isolation is on" vs. "isolation is off" one coherent
+// mental model instead of two independently-toggleable ones (see
+// DISABLE_SCAN_ISOLATION's own comment in runAPIServer). Split out from
+// runAPIServer specifically so this decision is unit-testable
+// (main_test.go) without needing a real Kubernetes API client or a
+// real trivy binary -- none of the four scanner arguments is ever
+// actually invoked by this function, just selected.
+func buildImageScanners(disableScanIsolation bool, trivyInProcess, trivyIsolated, inProcessUnpacker, isolatedUnpacker scanner.Scanner) []scanner.Scanner {
 	if disableScanIsolation {
-		return []scanner.Scanner{trivy, inProcessUnpacker}
+		return []scanner.Scanner{trivyInProcess, inProcessUnpacker}
 	}
-	return []scanner.Scanner{trivy, isolatedUnpacker}
+	return []scanner.Scanner{trivyIsolated, isolatedUnpacker}
 }
 
 func runAPIServer() {
@@ -250,11 +290,13 @@ func runAPIServer() {
 	fetchPlainHTTP := getenvBool("FETCH_PLAIN_HTTP", true)
 	fetcher := scanner.NewRegistryFetcher(fetchPlainHTTP)
 
-	// Image malware scanning (unpack + ClamAV) normally runs in its own
-	// short-lived Kubernetes Job per scan, not in this process -- see
-	// IsolatedUnpackerScanner and docs/architecture.md ("Isolating the
-	// unpack+scan step"). That requires a real Kubernetes API client,
-	// which requires this pod to actually have a ServiceAccount token
+	// Image malware scanning (unpack + ClamAV) and image CVE scanning
+	// (trivy) both normally run in their own short-lived Kubernetes Job
+	// per scan, not in this process -- see IsolatedUnpackerScanner,
+	// IsolatedTrivyScanner, and docs/architecture.md ("Isolating the
+	// unpack+scan step" and "Isolating Trivy scanning"). That requires a
+	// real Kubernetes API client, which requires this pod to actually
+	// have a ServiceAccount token
 	// (charts/supply-chain-monitor/templates/monitor-api/serviceaccount.yaml -- deliberately
 	// flipped to automountServiceAccountToken: true for exactly this,
 	// scoped down tightly via charts/supply-chain-monitor/templates/monitor-api/rbac.yaml's
@@ -265,18 +307,21 @@ func runAPIServer() {
 	// that way, for quick local iteration: it skips
 	// k8sjob.NewInClusterClient entirely (so its own log.Fatalf on a
 	// missing ServiceAccount token never fires) and falls back to
-	// running UnpackerScanner directly in-process, exactly like before
-	// the isolation work landed. Left at its default (isolation stays
-	// on) for every real deployment in k8s/ -- this is a deliberate,
-	// documented downgrade of the hardening in "Isolating the
-	// unpack+scan step" for local dev convenience, not something to
-	// flip on anywhere the pod might see untrusted image content
-	// beyond a throwaway local registry. See docs/architecture.md and
-	// README's "Running monitor-api outside a Kubernetes pod".
+	// running UnpackerScanner and TrivyScanner directly in-process,
+	// exactly like before the isolation work landed. Left at its
+	// default (isolation stays on) for every real deployment in k8s/ --
+	// this is a deliberate, documented downgrade of the hardening in
+	// "Isolating the unpack+scan step"/"Isolating Trivy scanning" for
+	// local dev convenience, not something to flip on anywhere the pod
+	// might see untrusted image content beyond a throwaway local
+	// registry. See docs/architecture.md and README's "Running
+	// monitor-api outside a Kubernetes pod".
 	disableScanIsolation := getenvBool("DISABLE_SCAN_ISOLATION", false)
 	inProcessUnpacker := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024)
+	inProcessTrivy := scanner.NewTrivyScanner(registryAddr, trivyDB)
 
 	var isolatedUnpacker scanner.Scanner
+	var isolatedTrivyImage scanner.Scanner
 	if !disableScanIsolation {
 		k8sClient, err := k8sjob.NewInClusterClient()
 		if err != nil {
@@ -291,22 +336,42 @@ func runAPIServer() {
 			UnpackerPublic:    unpackerPublic,
 			UnpackerMaxFileMB: unpackerMaxFileMB,
 		})
+		// Shares the same Kubernetes API client and worker image as
+		// isolatedUnpacker above -- both are just different scan-worker
+		// Job shapes the same monitor-api binary runs. See
+		// IsolatedTrivyScanner's comment for why the DB cache is a
+		// separately-refreshed PVC rather than downloaded per scan.
+		isolatedTrivyImage = scanner.NewIsolatedTrivyScanner(k8sClient, scanner.IsolatedTrivyConfig{
+			Image:          workerImage,
+			SubCommand:     "image",
+			CacheClaimName: getenv("TRIVY_CACHE_CLAIM", "scm-trivy-db-cache"),
+			CacheMountPath: getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
+		})
 	} else {
-		log.Printf("DISABLE_SCAN_ISOLATION=true: image malware scanning will run in-process, not in an isolated Job -- see README, \"Running monitor-api outside a Kubernetes pod\"")
+		log.Printf("DISABLE_SCAN_ISOLATION=true: image malware scanning and trivy CVE scanning will both run in-process, not in isolated Jobs -- see README, \"Running monitor-api outside a Kubernetes pod\"")
 	}
 
 	scanners := scanner.Registry{
-		// image artifacts get both a CVE scan (Trivy, still run
-		// in-process -- it only reads package metadata, not arbitrary
-		// image content, a much smaller attack surface than unpacking)
-		// and a malware scan (unpack + ClamAV, isolated by default --
-		// see above).
-		artifact.TypeImage: buildImageScanners(disableScanIsolation, scanner.NewTrivyScanner(registryAddr, trivyDB), inProcessUnpacker, isolatedUnpacker),
+		// image artifacts get both a CVE scan (trivy) and a malware scan
+		// (unpack + ClamAV) -- both isolated into their own scan-worker
+		// Job by default, both falling back in-process together under
+		// DISABLE_SCAN_ISOLATION. See buildImageScanners.
+		artifact.TypeImage: buildImageScanners(disableScanIsolation, inProcessTrivy, isolatedTrivyImage, inProcessUnpacker, isolatedUnpacker),
 		artifact.TypeFile: {
 			scanner.NewFetchingScanner(fetcher, scanner.NewClamAVScanner(clamAddr)),
 		},
 		// trivy sbom shares the same air-gapped DB-mirror config as
 		// the image scanner above -- see internal/scanner/sbom.go.
+		// Deliberately still in-process, unlike TypeImage's trivy scan:
+		// FetchingScanner already pulls the SBOM into a local file
+		// inside *this* pod before Scan runs, so isolating it into a
+		// separate scan-worker Job would need that Job to independently
+		// re-fetch the file itself (a local path in this pod isn't
+		// visible to a different pod). SBOM inputs are also small text
+		// documents, not full container images, so the eviction-risk
+		// motivation for isolating TypeImage's scan barely applies here.
+		// IsolatedTrivyScanner still supports SubCommand: "sbom" for
+		// when this gets revisited -- see docs/architecture.md's Roadmap.
 		artifact.TypeSBOM: {
 			scanner.NewFetchingScanner(fetcher, scanner.NewSBOMScanner(trivyDB)),
 		},

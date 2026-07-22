@@ -115,17 +115,31 @@ type Capabilities struct {
 }
 
 type Volume struct {
-	Name     string          `json:"name"`
-	EmptyDir *EmptyDirVolume `json:"emptyDir,omitempty"`
+	Name                  string           `json:"name"`
+	EmptyDir              *EmptyDirVolume  `json:"emptyDir,omitempty"`
+	PersistentVolumeClaim *PVCVolumeSource `json:"persistentVolumeClaim,omitempty"`
 }
 
 // EmptyDirVolume has no fields yet -- its presence is what matters
 // (serializes as "emptyDir": {}), not any options on it.
 type EmptyDirVolume struct{}
 
+// PVCVolumeSource references an existing PersistentVolumeClaim by name
+// -- used by IsolatedTrivyScanner to mount the shared, centrally
+// -refreshed vulnerability-DB cache (scm-trivy-db-cache) into each
+// scan-worker Job. ReadOnly is set here AND on the VolumeMount below
+// (belt-and-suspenders, matching ContainerSecurityContext's existing
+// defense-in-depth style): a scan-worker Job has no business writing
+// to the shared DB, only the dedicated primer Job/refresh CronJob do.
+type PVCVolumeSource struct {
+	ClaimName string `json:"claimName"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
+}
+
 type VolumeMount struct {
 	Name      string `json:"name"`
 	MountPath string `json:"mountPath"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
 }
 
 func boolPtr(b bool) *bool    { return &b }
@@ -151,6 +165,16 @@ type ScanJobConfig struct {
 	CPULimit                string
 	MemoryLimit             string
 	EphemeralStorageLimit   string
+
+	// ExtraVolumes/ExtraVolumeMounts add to (never replace) the scratch
+	// emptyDir every scan-worker Job already gets at /tmp. Introduced
+	// for IsolatedTrivyScanner, which mounts the shared
+	// scm-trivy-db-cache PVC read-only alongside it -- but deliberately
+	// general (a []Volume/[]VolumeMount pair, not a single PVC-shaped
+	// field) so this doesn't need to change again for whatever the next
+	// isolated scanner turns out to need.
+	ExtraVolumes      []Volume
+	ExtraVolumeMounts []VolumeMount
 }
 
 // NewScanJob builds a hardened, single-container, single-run Job spec
@@ -219,14 +243,14 @@ func NewScanJob(cfg ScanJobConfig) *Job {
 								ReadOnlyRootFilesystem:   boolPtr(true),
 								Capabilities:             &Capabilities{Drop: []string{"ALL"}},
 							},
-							VolumeMounts: []VolumeMount{
+							VolumeMounts: append([]VolumeMount{
 								{Name: "scratch", MountPath: "/tmp"},
-							},
+							}, cfg.ExtraVolumeMounts...),
 						},
 					},
-					Volumes: []Volume{
+					Volumes: append([]Volume{
 						{Name: "scratch", EmptyDir: &EmptyDirVolume{}},
-					},
+					}, cfg.ExtraVolumes...),
 				},
 			},
 		},

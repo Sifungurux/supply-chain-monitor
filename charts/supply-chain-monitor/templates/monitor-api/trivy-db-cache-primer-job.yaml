@@ -1,0 +1,67 @@
+# Populates scm-trivy-db-cache with a real, usable vulnerability DB
+# once, at install/upgrade time -- pairs with trivy-db-cache-pvc.yaml's
+# hook annotations (see that file's comment for the WaitForFirstConsumer
+# "why"). Unlike scm-postgres-backups-primer (which only touches its
+# PVC to trigger binding, since scm-postgres-backup won't actually run
+# until its own schedule fires), this primer does the real work: every
+# scan-worker Job created before trivy-db-refresh-cronjob's first
+# scheduled run needs *something* to read, and --skip-db-update means
+# it will never try to fetch one itself.
+#
+# Reuses monitor-api's own image rather than pulling a separate trivy
+# image -- trivy is already installed into it (see Dockerfile), the
+# same reason the isolated scan-worker Jobs do this too.
+#
+# hook-weight -4 (after the PVC's -5, before anything that expects a
+# populated cache to exist). Not hardened like the actual scan-worker
+# Jobs (no forced non-root user, no read-only root filesystem) --
+# same reasoning as scm-postgres-backup: this only ever touches
+# trivy's own public DB source and its own cache directory, never
+# untrusted external content.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scm-trivy-db-cache-primer
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-4"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: primer
+          image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              args=""
+              [ -n "${TRIVY_DB_REPOSITORY:-}" ] && args="--db-repository ${TRIVY_DB_REPOSITORY}"
+              echo "downloading trivy vulnerability DB into ${TRIVY_CACHE_DIR}"
+              trivy image --cache-dir "${TRIVY_CACHE_DIR}" --download-db-only ${args}
+              javaargs=""
+              [ -n "${TRIVY_JAVA_DB_REPOSITORY:-}" ] && javaargs="--java-db-repository ${TRIVY_JAVA_DB_REPOSITORY}"
+              echo "downloading trivy java DB into ${TRIVY_CACHE_DIR}"
+              trivy image --cache-dir "${TRIVY_CACHE_DIR}" --download-java-db-only ${javaargs}
+              echo "trivy DB cache primed"
+          env:
+            - name: TRIVY_CACHE_DIR
+              value: {{ .Values.monitorApi.trivyCache.mountPath | quote }}
+            - name: TRIVY_DB_REPOSITORY
+              value: {{ .Values.monitorApi.trivyDB.repository | quote }}
+            - name: TRIVY_JAVA_DB_REPOSITORY
+              value: {{ .Values.monitorApi.trivyDB.javaRepository | quote }}
+          volumeMounts:
+            - name: trivy-cache
+              mountPath: {{ .Values.monitorApi.trivyCache.mountPath | quote }}
+          resources:
+            {{- toYaml .Values.monitorApi.trivyCache.resources | nindent 12 }}
+      volumes:
+        - name: trivy-cache
+          persistentVolumeClaim:
+            claimName: {{ .Values.monitorApi.trivyCache.pvcName }}

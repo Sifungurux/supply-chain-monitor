@@ -36,6 +36,26 @@ func TestSBOMScanner_Args(t *testing.T) {
 				"/tmp/app.cdx.json",
 			},
 		},
+		{
+			// Mirrors TestTrivyScanner_Args' equivalent case -- confirms
+			// `trivy sbom` gets the same --cache-dir/--cache-backend
+			// memory pair `trivy image` does, since IsolatedTrivyScanner
+			// uses this same SBOMScanner for SBOM-mode scan-worker Jobs.
+			name: "cache-dir adds --cache-backend memory alongside it",
+			db: TrivyDBConfig{
+				SkipDBUpdate:     true,
+				SkipJavaDBUpdate: true,
+				CacheDir:         "/trivy-cache",
+			},
+			want: []string{
+				"sbom", "--quiet", "--format", "json",
+				"--skip-db-update",
+				"--skip-java-db-update",
+				"--cache-dir", "/trivy-cache",
+				"--cache-backend", "memory",
+				"/tmp/app.cdx.json",
+			},
+		},
 	}
 
 	for _, tc := range cases {

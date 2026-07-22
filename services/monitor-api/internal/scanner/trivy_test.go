@@ -50,6 +50,26 @@ func TestTrivyScanner_Args(t *testing.T) {
 				"alpine:3.19",
 			},
 		},
+		{
+			// IsolatedTrivyScanner's shape: a shared, read-only cache dir
+			// plus --cache-backend memory to avoid the scan-cache's
+			// BoltDB single-process lock (see TrivyDBConfig.CacheDir's
+			// comment).
+			name: "cache-dir adds --cache-backend memory alongside it",
+			db: TrivyDBConfig{
+				SkipDBUpdate:     true,
+				SkipJavaDBUpdate: true,
+				CacheDir:         "/trivy-cache",
+			},
+			want: []string{
+				"image", "--quiet", "--format", "json",
+				"--skip-db-update",
+				"--skip-java-db-update",
+				"--cache-dir", "/trivy-cache",
+				"--cache-backend", "memory",
+				"alpine:3.19",
+			},
+		},
 	}
 
 	for _, tc := range cases {

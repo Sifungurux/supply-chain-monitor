@@ -43,6 +43,15 @@ data:
   # reference instead of a path already inside this pod -- oras pull
   # fetches them from scm-registry first (see internal/scanner/fetch.go).
   FETCH_PLAIN_HTTP: {{ .Values.monitorApi.fetchPlainHTTP | quote }}
+  # The shared, centrally-refreshed vulnerability-DB cache
+  # IsolatedTrivyScanner mounts read-only into each trivy scan-worker
+  # Job -- see trivy-db-cache-pvc.yaml/trivy-db-cache-primer-job.yaml/
+  # trivy-db-refresh-cronjob.yaml and docs/architecture.md ("Isolating
+  # Trivy scanning"). Independent of TRIVY_DB_REPOSITORY below (that's
+  # about *where* trivy pulls a DB from; this is about *where on disk*
+  # the isolated worker looks for the one already pulled).
+  TRIVY_CACHE_CLAIM: {{ .Values.monitorApi.trivyCache.pvcName | quote }}
+  TRIVY_CACHE_DIR: {{ .Values.monitorApi.trivyCache.mountPath | quote }}
   {{- if .Values.monitorApi.trivyDB.enabled }}
   # air-gapped operation -- see cluster/seed-trivy-db.sh and README's
   # "Air-gapped operation".

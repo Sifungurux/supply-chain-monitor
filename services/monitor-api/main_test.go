@@ -71,35 +71,37 @@ func (n *namedScanner) Scan(context.Context, string) ([]artifact.Finding, error)
 }
 
 // TestBuildImageScanners pins down the one behavioral difference
-// DISABLE_SCAN_ISOLATION is supposed to make: which malware scanner
-// backs the `image` artifact type. This is the only part of the
+// DISABLE_SCAN_ISOLATION is supposed to make: which CVE scanner and
+// which malware scanner back the `image` artifact type, chosen
+// consistently together. This is the only part of the
 // isolation-fallback logic (see runAPIServer's comment, "Running
 // monitor-api outside a Kubernetes pod") that's testable without a
 // real Kubernetes API client or a real trivy binary -- deliberately
 // split out of runAPIServer for exactly that reason.
 func TestBuildImageScanners(t *testing.T) {
-	trivy := &namedScanner{"trivy"}
+	trivyInProcess := &namedScanner{"trivy-in-process"}
+	trivyIsolated := &namedScanner{"trivy-isolated"}
 	inProcess := &namedScanner{"in-process-unpacker"}
 	isolated := &namedScanner{"isolated-unpacker"}
 
-	t.Run("isolation enabled (default): uses the isolated scanner", func(t *testing.T) {
-		got := buildImageScanners(false, trivy, inProcess, isolated)
-		if len(got) != 2 || got[0] != scanner.Scanner(trivy) || got[1] != scanner.Scanner(isolated) {
-			t.Fatalf("scanners = %+v, want [trivy, isolated]", got)
+	t.Run("isolation enabled (default): uses both isolated scanners", func(t *testing.T) {
+		got := buildImageScanners(false, trivyInProcess, trivyIsolated, inProcess, isolated)
+		if len(got) != 2 || got[0] != scanner.Scanner(trivyIsolated) || got[1] != scanner.Scanner(isolated) {
+			t.Fatalf("scanners = %+v, want [trivy-isolated, isolated-unpacker]", got)
 		}
 	})
 
-	t.Run("DISABLE_SCAN_ISOLATION=true: uses the in-process scanner instead", func(t *testing.T) {
-		got := buildImageScanners(true, trivy, inProcess, isolated)
-		if len(got) != 2 || got[0] != scanner.Scanner(trivy) || got[1] != scanner.Scanner(inProcess) {
-			t.Fatalf("scanners = %+v, want [trivy, in-process]", got)
+	t.Run("DISABLE_SCAN_ISOLATION=true: uses both in-process scanners instead", func(t *testing.T) {
+		got := buildImageScanners(true, trivyInProcess, trivyIsolated, inProcess, isolated)
+		if len(got) != 2 || got[0] != scanner.Scanner(trivyInProcess) || got[1] != scanner.Scanner(inProcess) {
+			t.Fatalf("scanners = %+v, want [trivy-in-process, in-process-unpacker]", got)
 		}
-		// The isolated scanner (nil in runAPIServer's real
+		// Neither isolated scanner (nil in runAPIServer's real
 		// DISABLE_SCAN_ISOLATION=true path, since k8sjob.NewInClusterClient
-		// is never even called) must never appear in the result.
+		// is never even called) must ever appear in the result.
 		for _, s := range got {
-			if s == scanner.Scanner(isolated) {
-				t.Fatal("isolated scanner leaked into the in-process scanner list")
+			if s == scanner.Scanner(isolated) || s == scanner.Scanner(trivyIsolated) {
+				t.Fatal("an isolated scanner leaked into the in-process scanner list")
 			}
 		}
 	})

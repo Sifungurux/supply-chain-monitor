@@ -1,0 +1,47 @@
+# The vulnerability DB every isolated Trivy scan-worker Job
+# (IsolatedTrivyScanner) reads -- pre-downloaded and kept warm by
+# trivy-db-cache-primer-job.yaml (once, at install/upgrade time) and
+# trivy-db-refresh-cronjob.yaml (daily thereafter), rather than each
+# scan-worker Job downloading its own copy. See
+# docs/architecture.md ("Isolating Trivy scanning") for the full
+# rationale; short version: trivy's vulnerability DB is opened
+# read-only internally, so many scan-worker Jobs can safely share one
+# copy of it concurrently, but the DB itself is large enough (and
+# public-internet-fetched often enough) that downloading it fresh per
+# scan would make every scan slow and network-dependent.
+#
+# A pre-install/pre-upgrade hook, exactly like
+# templates/postgres/pvc.yaml's scm-postgres-backups PVC, and for the
+# identical reason: most single-node dev clusters' default StorageClass
+# (e.g. k3d/colima's "local-path") uses volumeBindingMode:
+# WaitForFirstConsumer, which only binds a PVC once some pod actually
+# gets scheduled against it. Without a hook, this PVC would have no
+# real consumer until either the primer Job below or the first real
+# scan-worker Job runs -- and a scan-worker Job only ever runs on
+# demand, so with no hook this PVC would sit Pending indefinitely and
+# Helm/Flux's readiness wait would eventually time out on it.
+#
+# hook-weight -5 (same as scm-postgres-backups) so this exists before
+# the primer Job (-4) tries to mount it.
+#
+# ReadWriteOnce, not ReadWriteMany: this project's dev clusters
+# (colima/k3d) are single-node, so every pod that mounts this PVC --
+# the primer Job, the refresh CronJob, and however many concurrent
+# scan-worker Jobs -- lands on the same node anyway, and RWO allows
+# any number of pods on that one node to mount it simultaneously (RWO
+# restricts to one *node*, not one *pod*). A genuinely multi-node
+# cluster would need a ReadWriteMany-capable StorageClass (e.g. NFS)
+# instead -- flagged here rather than silently assumed away.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.monitorApi.trivyCache.pvcName }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.monitorApi.trivyCache.persistence.size }}

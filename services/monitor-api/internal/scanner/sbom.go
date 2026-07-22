@@ -39,6 +39,12 @@ func (s *SBOMScanner) args(ref string) []string {
 }
 
 func (s *SBOMScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding, error) {
+	// See TrivyScanner.Scan's identical call (trivy.go) for why this is
+	// here: trivy's local scan-cache grows unbounded per distinct
+	// input scanned otherwise, and this shares that same cache with
+	// `trivy image`.
+	defer cleanScanCache()
+
 	cmd := exec.CommandContext(ctx, "trivy", s.args(ref)...)
 
 	var stdout, stderr bytes.Buffer

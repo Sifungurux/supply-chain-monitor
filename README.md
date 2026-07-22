@@ -364,7 +364,8 @@ malware the same way a plain file can — Trivy only checks known
 package-level CVEs, it doesn't look at file contents. For `image`
 artifacts, `/scan` now runs both:
 
-- **Trivy** — CVE scan against package metadata (as before).
+- **Trivy** — CVE scan against package metadata (as before, but now
+  isolated the same way ClamAV's malware scan is — see below).
 - **[unpacker](https://github.com/Sifungurux/unpacker) + ClamAV** —
   `unpacker` pulls the image and reconstructs its filesystem into a
   plain directory (oras-go/crane + umoci), then every regular file
@@ -396,6 +397,32 @@ One practical effect: each `/scan` on an image now pays for a pod
 being scheduled (usually a few seconds, since the image is normally
 already cached) on top of the scan itself.
 
+**Trivy's CVE scan for `image` artifacts runs in its own Job too, the
+same way.** `IsolatedTrivyScanner` mirrors the unpack+malware-scan
+isolation above almost exactly (same `monitor-api scan-worker` binary,
+same hardened pod spec), governed by the same
+`DISABLE_SCAN_ISOLATION` flag — there's one on/off switch for
+isolation, not two. The one real difference: trivy needs its
+vulnerability DB to actually scan anything, and downloading that fresh
+inside every scan-worker Job would make every scan slow and
+network-dependent. Instead, a shared `PersistentVolumeClaim`
+(`scm-trivy-db-cache`) holds a copy of the DB that a dedicated primer
+Job downloads at install/upgrade time and a daily `CronJob`
+(`scm-trivy-db-refresh`, `charts/supply-chain-monitor/values.yaml`'s
+`monitorApi.trivyCache.refreshSchedule`, `0 3 * * *` UTC by default)
+keeps current — every scan-worker Job mounts this PVC **read-only** and
+never tries to update it itself. This is safe to share across many
+concurrent scans because trivy opens its vulnerability DB read-only
+internally; see docs/architecture.md ("Isolating Trivy scanning") for
+the fuller reasoning, including why trivy's *separate* scan-cache
+(a different thing from the DB, and NOT safe to share the same way)
+is kept in-memory per Job instead (`--cache-backend memory`) rather
+than on that same PVC.
+`sbom`-type artifacts' trivy scan is **not** isolated yet — it still
+runs in-process, since the SBOM file it scans is already fetched onto
+monitor-api's own local filesystem by the time `Scan` runs (see
+docs/architecture.md's Roadmap).
+
 ### Running monitor-api outside a Kubernetes pod
 
 Isolating the unpack+scan step (above) means `monitor-api` now needs a
@@ -414,10 +441,11 @@ docker run --rm -p 8080:8080 \
 ```
 
 This is a real, deliberate downgrade, not a free convenience: image
-malware scanning runs in-process again (like every version of this
-code before isolation shipped), so a bug in `unpacker`/`umoci`/`oras-go`
-parsing a malicious image once again shares this process's blast
-radius with the API server and its Postgres connection. Leave it unset
+malware scanning *and* image CVE scanning both run in-process again
+(like every version of this code before isolation shipped), so a bug
+in `unpacker`/`umoci`/`oras-go`/`trivy` parsing a malicious image once
+again shares this process's blast radius with the API server and its
+Postgres connection. Leave it unset
 (the default, `false`) for every real deployment —
 `charts/supply-chain-monitor/values.yaml`'s
 `monitorApi.disableScanIsolation` already does. See
@@ -540,6 +568,17 @@ From then on `monitor-api` points trivy at the mirrored DBs in
 default (`TRIVY_SKIP_DB_UPDATE`/`TRIVY_SKIP_JAVA_DB_UPDATE`). Leave the
 four lines commented out (the default) for a normal, internet-connected
 setup — trivy's own defaults are used and nothing changes.
+
+One wrinkle since image-type CVE scans moved into their own Job (see
+"Trivy's CVE scan for `image` artifacts runs in its own Job too"
+above): a scan-worker Job never fetches or updates the DB itself
+anymore, only `scm-trivy-db-cache-primer`/`scm-trivy-db-refresh` do, on
+your behalf, into the shared `scm-trivy-db-cache` PVC. So in an
+air-gapped cluster, it's specifically *those* two — not each individual
+scan — that need to reach `monitorApi.trivyDB.repository`/
+`javaRepository` (`scm-registry` by default); `monitorApi.trivyDB.*`
+still configures where they pull from either way, this just moves
+*which* thing in the cluster actually does the pulling.
 
 ## Testing
 

@@ -161,6 +161,33 @@ monitorApi:
     javaRepository: ""
     skipUpdate: "true"
     skipJavaUpdate: "true"
+  # The shared PersistentVolumeClaim IsolatedTrivyScanner mounts
+  # read-only into every trivy scan-worker Job, kept warm by
+  # trivy-db-cache-primer-job.yaml (install/upgrade time) and
+  # trivy-db-refresh-cronjob.yaml (on refreshSchedule thereafter) --
+  # see docs/architecture.md, "Isolating Trivy scanning". Independent
+  # of trivyDB above (that config is about which upstream/mirror
+  # repository to pull *from*; this is about the shared on-disk cache
+  # every isolated scan-worker Job actually reads).
+  trivyCache:
+    pvcName: scm-trivy-db-cache
+    mountPath: /trivy-cache
+    persistence:
+      # trivy's vulnerability DB + Java DB together are typically a few
+      # hundred MB -- 2Gi is generous headroom on top of that, cheap on
+      # a local-path StorageClass.
+      size: 2Gi
+    # Offset from postgres.backup.schedule's 02:00 so the two don't
+    # contend for disk/CPU on a single-node dev cluster at the same
+    # moment.
+    refreshSchedule: "0 3 * * *" # daily at 03:00 UTC
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 768Mi
   resources:
     # ephemeral-storage right-sized down: unpacking a container image no
     # longer happens in this pod -- it runs in its own per-scan

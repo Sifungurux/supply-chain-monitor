@@ -1,0 +1,73 @@
+# Keeps scm-trivy-db-cache current after trivy-db-cache-primer-job's
+# one-time install-time download -- every isolated Trivy scan-worker
+# Job (IsolatedTrivyScanner) always passes --skip-db-update /
+# --skip-java-db-update (see main.go's runScanWorker), so without this
+# CronJob the DB would stay frozen at whatever it was the day this
+# chart was first installed. Mirrors
+# templates/postgres/backup-cronjob.yaml's shape closely -- see that
+# file's comment for the general pattern.
+#
+# Reuses monitor-api's own image, same as the primer Job -- trivy is
+# already installed into it.
+#
+# concurrencyPolicy: Forbid (same as the postgres backup CronJob):
+# two overlapping refreshes writing into the same PVC at once is only
+# ever wasted work, never a correctness problem worth allowing, so
+# there's no reason to let it happen.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scm-trivy-db-refresh
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: scm-trivy-db-refresh
+spec:
+  schedule: {{ .Values.monitorApi.trivyCache.refreshSchedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: scm-trivy-db-refresh
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app: scm-trivy-db-refresh
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: trivy-db-refresh
+              image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  args=""
+                  [ -n "${TRIVY_DB_REPOSITORY:-}" ] && args="--db-repository ${TRIVY_DB_REPOSITORY}"
+                  echo "refreshing trivy vulnerability DB in ${TRIVY_CACHE_DIR}"
+                  trivy image --cache-dir "${TRIVY_CACHE_DIR}" --download-db-only ${args}
+                  javaargs=""
+                  [ -n "${TRIVY_JAVA_DB_REPOSITORY:-}" ] && javaargs="--java-db-repository ${TRIVY_JAVA_DB_REPOSITORY}"
+                  echo "refreshing trivy java DB in ${TRIVY_CACHE_DIR}"
+                  trivy image --cache-dir "${TRIVY_CACHE_DIR}" --download-java-db-only ${javaargs}
+                  echo "trivy DB cache refreshed"
+              env:
+                - name: TRIVY_CACHE_DIR
+                  value: {{ .Values.monitorApi.trivyCache.mountPath | quote }}
+                - name: TRIVY_DB_REPOSITORY
+                  value: {{ .Values.monitorApi.trivyDB.repository | quote }}
+                - name: TRIVY_JAVA_DB_REPOSITORY
+                  value: {{ .Values.monitorApi.trivyDB.javaRepository | quote }}
+              volumeMounts:
+                - name: trivy-cache
+                  mountPath: {{ .Values.monitorApi.trivyCache.mountPath | quote }}
+              resources:
+                {{- toYaml .Values.monitorApi.trivyCache.resources | nindent 16 }}
+          volumes:
+            - name: trivy-cache
+              persistentVolumeClaim:
+                claimName: {{ .Values.monitorApi.trivyCache.pvcName }}

@@ -280,6 +280,120 @@ For a v1 skeleton, invoking the `trivy` CLI directly per scan is far
 less code and is a drop-in swap later (the `Scanner` interface doesn't
 care how `TrivyScanner` gets its answer).
 
+**Fixed: monitor-api's own pod getting evicted after scanning several
+images.** Confirmed on a real cluster: `kubectl describe pod` showed
+`Warning Evicted ... Pod ephemeral local storage usage exceeds the
+total limit of containers`, on `monitor-api`'s own pod -- not a
+scan-worker Job. Root cause: `TrivyScanner`/`SBOMScanner` both still
+run `trivy` in-process inside `monitor-api` itself (only the
+unpacker+ClamAV malware path was ever moved into its own isolated Job
+-- see "Isolating the unpack+scan step" -- CVE scanning wasn't, per
+"Why no trivy-server yet" just above). Trivy keeps a local, on-disk
+analysis cache of every image/SBOM it's ever scanned (separate from the
+vulnerability DB cache, which is deliberately kept warm across scans via
+`TrivyDBConfig`/`dbArgs`) and never evicts it on its own -- so scanning
+enough distinct images in a row grows `monitor-api`'s container
+filesystem without bound, eventually exceeding its ephemeral-storage
+limit regardless of how generous that limit is, and kubelet evicts the
+whole pod (killing every scan in flight, not just the one that pushed
+it over).
+Fixed by calling `trivy clean --scan-cache` (`cleanScanCache`,
+`internal/scanner/trivy.go`) after every `TrivyScanner`/`SBOMScanner`
+scan, success or failure -- trivy's supported way to clear just the
+per-image analysis cache since v0.53 (the older `--clear-cache`/
+`--reset` flags were removed as breaking changes). Deliberately
+`--scan-cache` only, not `--all` or `--vuln-db` -- clearing the
+vulnerability DB too would mean re-downloading it on the very next
+scan, defeating the whole point of `SkipDBUpdate`/air-gapped DB
+mirroring. Runs on its own fresh `context.Background()` with a 30s
+timeout, the same pattern `IsolatedUnpackerScanner`'s Job cleanup
+already uses (see isolated_unpacker.go) and for the same reason:
+cleanup must run regardless of whether the scan's own `ctx` is already
+canceled or past its deadline. A cleanup failure is logged, never
+returned -- it's not the scan's problem, and must never mask a real
+scan result.
+Trade-off worth naming: this means trivy re-analyzes an image from
+scratch every time, even if you scan the exact same ref twice in a
+row -- a little slower per repeat scan, in exchange for bounded disk
+usage regardless of how many distinct images get scanned over the
+pod's lifetime. Correct-and-slower over fast-and-unbounded, consistent
+with how this project has resolved similar trade-offs elsewhere.
+
+**Isolating Trivy scanning.** `cleanScanCache` (just above) fixed the
+eviction *symptom*, but the underlying asymmetry it papered over was
+worth revisiting: malware scanning (unpack + ClamAV) already runs in
+its own per-scan Kubernetes Job (see "Isolating the unpack+scan step"
+below), while CVE scanning (trivy) still ran directly inside
+`monitor-api`'s own long-running pod, for the reasons in "Why no
+trivy-server yet" above. That meant trivy -- a third-party binary
+parsing untrusted image/SBOM content, same as `unpacker`/`umoci` --
+was the one scanner whose bugs, crashes, or resource spikes could still
+take down the API server pod itself, findings store connection and
+all. `image`-type artifacts' trivy scan now moves into its own
+scan-worker Job too (`IsolatedTrivyScanner`,
+`internal/scanner/isolated_trivy.go`), governed by the same
+`DISABLE_SCAN_ISOLATION` flag as the malware path -- one flag means
+"isolation on" or "isolation off" stays a single coherent choice
+rather than two independently-toggleable ones.
+
+The obvious naive approach -- give each scan-worker Job its own empty
+cache dir and let trivy download the DB fresh every time -- would make
+every single scan slow and dependent on reaching trivy's DB source (or
+an air-gapped mirror) over the network, which defeats half the point of
+scanning at all. Instead, a shared, cluster-local
+`PersistentVolumeClaim` (`scm-trivy-db-cache`,
+`trivy-db-cache-pvc.yaml`) holds a pre-downloaded copy of the DB, kept
+warm by a dedicated primer Job at install/upgrade time
+(`trivy-db-cache-primer-job.yaml`, a Helm pre-install/pre-upgrade hook
+weighted to run right after the PVC itself -- mirrors
+`backup-pvc-primer-job.yaml`'s `WaitForFirstConsumer`-binding trick,
+but this primer does real work too: without it, every scan-worker Job
+between install and the refresh CronJob's first scheduled run would
+have nothing to read) and a daily refresh `CronJob`
+(`trivy-db-refresh-cronjob.yaml`). Every `IsolatedTrivyScanner` Job
+mounts this PVC **read-only** (`ReadOnly: true` set on both the volume
+mount and the PVC volume source itself, in
+`internal/k8sjob/job.go`'s new `PVCVolumeSource`/`VolumeMount.ReadOnly`
+fields -- belt-and-suspenders, the same defense-in-depth style already
+used for `ContainerSecurityContext`) and always passes
+`--skip-db-update`/`--skip-java-db-update` (`main.go`'s `runScanWorker`,
+regardless of what `TRIVY_SKIP_DB_UPDATE` is set to -- that env var
+only governs the separate in-process fallback path): DB freshness is
+now entirely the primer Job/refresh CronJob's responsibility, never the
+scan-worker's.
+
+Sharing that DB across many concurrent scan-worker Jobs is safe for a
+reason confirmed directly against trivy's own docs, not assumed:
+trivy's vulnerability DB is opened read-only internally, so any number
+of processes can read it at once with no lock contention. What isn't
+safe to share is trivy's *separate* scan cache (the per-image/SBOM
+analysis-results cache `cleanScanCache` exists to bound, above) -- it's
+backed by BoltDB, which holds an exclusive file lock, so two processes
+pointed at the same on-disk scan cache would contend or fail outright.
+`TrivyDBConfig.CacheDir` (set only by `IsolatedTrivyScanner`, left
+empty for the in-process `TrivyScanner`/`SBOMScanner`) handles this by
+also adding `--cache-backend memory` whenever it's set: the scan cache
+lives only in that one Job's process memory instead of a shared file,
+and is simply discarded when the Job's pod exits -- trivy's own
+documented "Solution 1 (Recommended)" for running scans concurrently
+(<https://trivy.dev/docs/latest/guide/references/troubleshooting/>,
+"Cache lock errors"). No `cleanScanCache` call is needed inside the
+isolated worker at all: with `--cache-backend memory`, nothing is ever
+written to disk for it to clean up.
+
+Scoped to `image`-type artifacts only for now. `sbom`-type artifacts'
+trivy scan (`SBOMScanner`) deliberately stays in-process: `ref` there
+is already a local file path inside *this* pod by the time `Scan` runs
+(`FetchingScanner` pulls it via `oras` first), and a separate
+scan-worker Job's pod can't see a path that only exists inside
+monitor-api's own filesystem -- isolating it would mean teaching the
+scan-worker Job to independently re-fetch the SBOM itself, not just
+forward a ref. SBOM documents are also small text/JSON, not full
+container images, so the eviction-risk motivation above barely applies
+to them regardless. `IsolatedTrivyScanner`/`IsolatedTrivyConfig`
+already support a `SubCommand: "sbom"` mode for exactly this, should it
+get revisited (see Roadmap).
+
 **SBOM and SARIF artifacts now actually get scanned.** Both types
 existed in the `Artifact` model from the start but had no scanner
 registered against them -- a `/scan` call just 501'd. They needed
@@ -1342,6 +1456,23 @@ deploy` invocation.
   false "fixed"), just coarser than it could be. Fixing this properly
   means tracking which scanner(s) feed which bucket and gating
   `detectFixed` per bucket instead of globally across the whole scan.
+- **SBOM trivy scanning still runs in-process**: `IsolatedTrivyScanner`
+  supports a `SubCommand: "sbom"` mode, but `main.go` only wires up
+  `SubCommand: "image"` today (see "Isolating Trivy scanning"). Moving
+  `sbom`-type scans into a Job too means giving that Job's pod its own
+  way to fetch the SBOM (`oras pull`, matching `FetchingScanner`)
+  rather than assuming a path that only exists inside monitor-api's own
+  filesystem.
+- **trivy-db-refresh-cronjob writes to the same PVC isolated
+  scan-worker Jobs read from concurrently**: `concurrencyPolicy: Forbid`
+  keeps at most one refresh running at a time, but there's no
+  coordination between a refresh in progress and a scan-worker Job
+  reading the DB at that same moment. In practice this is very unlikely
+  to matter (trivy's DB download replaces files atomically rather than
+  writing over them in place, and the refresh window is short relative
+  to how rarely it runs), but it's an assumption, not a guarantee --
+  worth a closer look before leaning on this for anything
+  latency/correctness-sensitive.
 - **Pinned dependencies**: `go.sum` still isn't committed (couldn't be
   generated correctly in the sandbox this project was built in -- no
   real Go toolchain, no network access to the module proxy -- see the
