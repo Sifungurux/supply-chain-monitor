@@ -31,6 +31,24 @@ spec:
   chart:
     spec:
       chart: ./charts/supply-chain-monitor
+      # Confirmed the hard way: reconcileStrategy defaults to
+      # "ChartVersion", which -- per Flux's own docs -- only builds a
+      # new chart artifact when Chart.yaml's `version:` field changes.
+      # For a GitRepository-sourced chart (ours), that's almost never
+      # what you want: Chart.yaml's version stayed frozen at 0.1.0
+      # through many real template changes (including this whole
+      # isolated-Trivy-scanning feature), so Flux never rebuilt the
+      # chart or upgraded the release at all -- `flux get helmreleases`
+      # kept showing "Helm install succeeded ... .v1" forever, even
+      # though `kubectl get gitrepository ... -o jsonpath='{.status.artifact.revision}'`
+      # matched HEAD exactly the whole time. "Revision" makes Flux
+      # rebuild the chart (and therefore actually reconcile the
+      # release) whenever the GitRepository's resolved commit changes,
+      # which is the behavior this project's "every push deploys"
+      # workflow (see Makefile's `deploy` target) always assumed was
+      # already happening. See docs/architecture.md ("GitRepository
+      # revision matching HEAD is not enough").
+      reconcileStrategy: Revision
       sourceRef:
         kind: GitRepository
         name: flux-system

@@ -1403,6 +1403,56 @@ done; it doesn't babysit the cluster afterward, since Flux keeps
 reconciling continuously and independently of any particular `make
 deploy` invocation.
 
+**Fixed: chart template changes never actually reaching the cluster,
+despite every `make deploy` reporting success.** Confirmed on a real
+cluster while shipping the isolated-Trivy-scanning feature: the
+scan-worker pod failed with `persistentvolumeclaim "scm-trivy-db-cache"
+not found`, even though that PVC's template had been committed, pushed,
+and `make deploy` had run (with no errors) since. `flux get
+helmreleases -A` showed the release stuck at `supply-chain-monitor
+-supply-chain-monitor.v1` -- i.e. the *very first* install, never
+upgraded -- while `kubectl get gitrepository -n flux-system flux-system
+-o jsonpath='{.status.artifact.revision}'` matched `git rev-parse HEAD`
+*exactly*. So Flux's `GitRepository` genuinely had the latest commit;
+the problem was one layer up.
+
+Root cause: `k8s/releases/supply-chain-monitor-helmrelease.yaml`'s
+`chart.spec` pulls the chart from a `GitRepository` (`sourceRef.kind:
+GitRepository`), and Flux's `chart.spec.reconcileStrategy` defaults to
+`ChartVersion` -- per Flux's own docs (source-controller, "Helm
+Charts"), `ChartVersion` "is used for creating a new artifact when the
+chart version changes in a `HelmRepository`," while `Revision` "is
+used for creating a new artifact when the source revision changes in a
+`GitRepository` or a `Bucket` Source." Left at its default, Flux only
+ever rebuilds the underlying `HelmChart` artifact -- the thing
+helm-controller actually installs/upgrades from -- when
+`charts/supply-chain-monitor/Chart.yaml`'s `version:` field changes.
+That field had stayed at `0.1.0` through every template change made in
+this whole project (the finding-lifecycle feature, the submitFindings
+endpoint, this Trivy-isolation work, all of it), so Flux had silently
+never rebuilt the chart at all, no matter how many commits landed or
+how many times `flux reconcile helmrelease` ran -- that command
+re-runs the reconciliation *decision*, and the decision under
+`ChartVersion` was "nothing changed" every single time.
+
+Fixed by setting `reconcileStrategy: Revision` explicitly on
+`supply-chain-monitor`'s `HelmRelease` (traefik's `HelmRelease` is
+correctly left on the `ChartVersion` default -- it sources from a real
+`HelmRepository` with an explicit `version: "41.0.2"` pin, exactly the
+case `ChartVersion` is for). With `Revision`, any new `GitRepository`
+commit is enough on its own to trigger a fresh chart build and a real
+Helm upgrade, matching what this project's "every push deploys"
+workflow (`make deploy`'s commit-and-push, the automatic timestamped
+`deploy:` commits) always assumed was already happening.
+
+One consequence worth naming: this fix is not retroactive on its own.
+The very next `make deploy` (or manual `flux reconcile helmrelease
+supply-chain-monitor -n flux-system --with-source`) after this change
+lands should finally apply *everything* that was silently queued up
+across every past chart change, not just the trivy-db-cache PVC --
+expect a larger-than-usual diff the first time this actually reconciles
+for real.
+
 ### What this repo genuinely can't do for itself
 
 1. **This project needs to actually be a pushed Git repository.** Flux

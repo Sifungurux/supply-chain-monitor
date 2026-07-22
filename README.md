@@ -655,8 +655,21 @@ picture; the short version:
   ./charts/supply-chain-monitor` works standalone too, with or without
   Flux.
 - `k8s/releases/supply-chain-monitor-helmrelease.yaml` — the one Flux
-  `HelmRelease` for that chart, sourcing it from this same repo. No
-  `dependsOn` needed between the former 5 services anymore — they're
+  `HelmRelease` for that chart, sourcing it from this same repo, with
+  `chart.spec.reconcileStrategy: Revision` set explicitly — **this
+  matters**. Left at Flux's default (`ChartVersion`), a chart sourced
+  from a `GitRepository` (ours) only gets rebuilt when
+  `Chart.yaml`'s `version:` field itself changes, which is very easy to
+  forget on routine template edits. Confirmed this the hard way: chart
+  changes sat committed and pushed, `make deploy` reported success
+  every time, `flux get helmreleases -A` showed `Ready: True`, and yet
+  the actual release never moved past its very first install (`.v1`)
+  — see docs/architecture.md, "Fixed: chart template changes never
+  actually reaching the cluster." `Revision` makes any new commit
+  enough on its own to trigger a real rebuild+upgrade, matching what
+  this repo's whole "every push deploys" workflow already assumes is
+  happening.
+  No `dependsOn` needed between the former 5 services anymore — they're
   one Helm release now, so Helm's own resource-kind apply ordering
   (Secrets/ConfigMaps/PVCs before Deployments/Jobs/CronJobs) covers what
   `dependsOn` used to guarantee between separate `HelmRelease`s (e.g.
