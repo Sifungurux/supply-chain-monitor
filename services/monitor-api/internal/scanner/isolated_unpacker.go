@@ -159,21 +159,30 @@ func (s *IsolatedUnpackerScanner) Scan(ctx context.Context, ref string) ([]artif
 		EphemeralStorageLimit:   s.cfg.EphemeralStorageLimit,
 	})
 
-	if err := s.client.CreateJob(ctx, job); err != nil {
-		return nil, fmt.Errorf("create scan job for %q: %w", ref, err)
-	}
-
 	// Cleanup always runs, and always with its own short-lived,
 	// never-already-canceled context -- ctx may be at (or past) its
 	// deadline by the time we get here (e.g. the poll loop below timed
 	// out), and internal/api/handlers.go already learned this lesson
 	// once: never make cleanup/completion depend on a context that
-	// might already be dead.
+	// might already be dead. Registered *before* CreateJob is even
+	// attempted, not after: a defer only runs if control reached the
+	// defer statement, so registering it after the CreateJob
+	// error-check meant a CreateJob failure returned before cleanup was
+	// ever armed -- a real bug (caught by go test actually running for
+	// the first time, not by this file's own review, since no Go
+	// toolchain exists in the sandbox this project was originally built
+	// in). CreateJob can fail after the Job was actually created
+	// server-side (e.g. the response timed out but the API server still
+	// processed it), so DeleteJob still needs to at least try.
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		_ = s.client.DeleteJob(cleanupCtx, name)
 	}()
+
+	if err := s.client.CreateJob(ctx, job); err != nil {
+		return nil, fmt.Errorf("create scan job for %q: %w", ref, err)
+	}
 
 	if err := s.waitForCompletion(ctx, name); err != nil {
 		return nil, fmt.Errorf("scan job for %q: %w", ref, err)

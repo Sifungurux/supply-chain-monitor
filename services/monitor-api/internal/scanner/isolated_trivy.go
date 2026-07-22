@@ -174,18 +174,22 @@ func (s *IsolatedTrivyScanner) Scan(ctx context.Context, ref string) ([]artifact
 		EphemeralStorageLimit:   s.cfg.EphemeralStorageLimit,
 	})
 
-	if err := s.client.CreateJob(ctx, job); err != nil {
-		return nil, fmt.Errorf("create trivy scan job for %q: %w", ref, err)
-	}
-
-	// See IsolatedUnpackerScanner.Scan's identical comment: cleanup
-	// always runs, on its own short-lived context that's never
-	// already-canceled, since ctx may be dead by the time we get here.
+	// See IsolatedUnpackerScanner.Scan's identical comment: this must be
+	// registered *before* CreateJob is attempted, not after -- a defer
+	// only runs if control actually reached the defer statement, so
+	// registering it after a CreateJob error-check-and-return meant
+	// cleanup silently never ran on a CreateJob failure. Runs on its
+	// own short-lived context that's never already-canceled, since ctx
+	// may be dead by the time we get here.
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		_ = s.client.DeleteJob(cleanupCtx, name)
 	}()
+
+	if err := s.client.CreateJob(ctx, job); err != nil {
+		return nil, fmt.Errorf("create trivy scan job for %q: %w", ref, err)
+	}
 
 	if err := s.waitForCompletion(ctx, name); err != nil {
 		return nil, fmt.Errorf("trivy scan job for %q: %w", ref, err)
