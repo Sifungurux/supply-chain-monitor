@@ -35,7 +35,7 @@ RUN CGO_ENABLED=0 go build -o /out/umoci ./cmd/umoci
 # since the project has no tagged releases yet -- bump UNPACKER_COMMIT
 # to update.
 FROM golang:1.25-alpine AS unpacker-build
-ARG UNPACKER_COMMIT=6cd1397568099474f1b949b8adb65f711292465c
+ARG UNPACKER_COMMIT=df8cdd2c6f070de034612e7d244cffd460ca1454
 RUN apk add --no-cache git
 WORKDIR /src/unpacker
 RUN git init . \
