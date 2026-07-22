@@ -196,7 +196,7 @@ missing `Bearer ` prefix gets a `401`.
 
 ```bash
 curl -s localhost:8080/api/v1/artifacts \
-  -H 'Authorization: Bearer changeme-api-key'
+  -H 'Authorization: Bearer qwe4r56789009876543223456789'
 ```
 
 See docs/architecture.md ("Adding API authentication") for why a
@@ -222,30 +222,36 @@ limiting).
 Example flow:
 
 ```bash
-AUTH='-H Authorization:Bearer\ changeme-api-key'
+# a bash array, not a plain string -- keeps "Authorization: Bearer <key>"
+# as one argument through expansion instead of being word-split on the
+# space (a plain `AUTH='-H Authorization:Bearer\ <key>'` string looks
+# like it should work but silently truncates the header at the space
+# when $AUTH is expanded unquoted below; use "${AUTH[@]}", quoted, with
+# an array instead)
+AUTH=(-H "Authorization: Bearer qwe4r56789009876543223456789")
 
 # register a container image artifact
-curl -s -X POST localhost:8080/api/v1/artifacts $AUTH \
+curl -s -X POST localhost:8080/api/v1/artifacts "${AUTH[@]}" \
   -H 'Content-Type: application/json' \
   -d '{"ref":"alpine:3.19","type":"image"}'
 # => {"id":"...", "ref":"alpine:3.19", "type":"image", "status":"registered", ...}
 
 # tell the monitor it just left the "build" stage of your pipeline
-curl -s -X POST localhost:8080/api/v1/artifacts/<id>/stage $AUTH \
+curl -s -X POST localhost:8080/api/v1/artifacts/<id>/stage "${AUTH[@]}" \
   -H 'Content-Type: application/json' \
   -d '{"stage":"build","note":"CI job #482"}'
 
 # scan it: for type=image this runs Trivy (CVEs) *and* unpacker+ClamAV
 # (malware) and merges both into the same artifact
-curl -s -X POST localhost:8080/api/v1/artifacts/<id>/scan $AUTH
+curl -s -X POST localhost:8080/api/v1/artifacts/<id>/scan "${AUTH[@]}"
 
 # check results -- cve_findings from trivy, malware_findings from clamav,
 # other_findings from parsed SARIF (SAST/secrets/IaC, not CVE or malware)
-curl -s localhost:8080/api/v1/artifacts/<id> $AUTH
+curl -s localhost:8080/api/v1/artifacts/<id> "${AUTH[@]}"
 
 # find every artifact still affected by a given finding (e.g. after a
 # fix ships, confirm nothing registered still carries this CVE)
-curl -s localhost:8080/api/v1/findings/CVE-2024-1234/artifacts $AUTH
+curl -s localhost:8080/api/v1/findings/CVE-2024-1234/artifacts "${AUTH[@]}"
 ```
 
 ### SBOM and SARIF scanning
@@ -280,7 +286,7 @@ oras push --plain-http localhost:30500/scans/app-sarif:1 results.sarif
 
 # register it -- ref is the registry reference, not a local path
 curl -s -X POST localhost:8080/api/v1/artifacts \
-  -H 'Authorization: Bearer changeme-api-key' \
+  -H 'Authorization: Bearer qwe4r56789009876543223456789' \
   -H 'Content-Type: application/json' \
   -d '{"ref":"scm-registry.supply-chain-monitor.svc.cluster.local:5000/scans/app-sarif:1","type":"sarif"}'
 ```

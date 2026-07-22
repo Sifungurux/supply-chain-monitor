@@ -161,10 +161,10 @@ db-restore:
 
 # quick smoke test against a port-forwarded API (run `make port-forward`
 # first). SCM_API_KEY must match whatever's in scm-monitor-api-auth (the
-# Secret's placeholder, changeme-api-key, unless you've rotated it) --
-# every endpoint but /healthz requires it now (see README's
-# Authentication section).
-SCM_API_KEY ?= changeme-api-key
+# dev-only default in charts/supply-chain-monitor/values.yaml's
+# monitorApi.apiKey, unless you've rotated it) -- every endpoint but
+# /healthz requires it now (see README's Authentication section).
+SCM_API_KEY ?= qwe4r56789009876543223456789
 test-artifact:
 	curl -s -X POST localhost:8080/api/v1/artifacts \
 		-H "Authorization: Bearer $(SCM_API_KEY)" \
