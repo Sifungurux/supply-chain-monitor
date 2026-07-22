@@ -254,24 +254,28 @@ compressed tarballs, not a filesystem clamd can point at — `clamdscan`
 or the INSTREAM protocol both expect an actual file's bytes, not an OCI
 manifest plus blobs. `UnpackerScanner`
 (`internal/scanner/unpacker.go`) shells out to `unpacker`
-(github.com/Sifungurux/unpacker, built from source into the
-`monitor-api` image — see Dockerfile) to pull the image (oras-go, with
-a go-containerregistry/crane fallback for plain Docker images) and
-unpack it via `umoci` into `<tmp>/image/`, a plain directory. From
-there it's identical to scanning any other file: walk the tree, stream
-each regular file to clamd over the same INSTREAM client
-`ClamAVScanner` uses (factored out into `clamd_client.go` so both
-scanners share one implementation). Files above `UNPACKER_MAX_FILE_MB`
-(default 100MB) are skipped rather than streamed, and if every single
-file in an image fails to reach clamd, that's surfaced as an error
-instead of silently reporting a "clean" image that was never actually
-scanned.
-`unpacker` and `umoci` are both built from source in the Dockerfile
-(rather than downloading `unpacker`'s prebuilt release or umoci's
-amd64-only release binary) specifically so this also works unmodified
-on an Apple Silicon Mac's arm64 Colima/Podman VM. `unpacker` has no
-tagged releases yet, so its build stage pins an exact commit SHA
-(`UNPACKER_COMMIT` in the Dockerfile) rather than tracking `main`.
+(github.com/Sifungurux/unpacker, downloaded as a prebuilt release
+tarball into the `monitor-api` image — see Dockerfile) to pull the
+image (oras-go, with a go-containerregistry/crane fallback for plain
+Docker images) and unpack it via `umoci` into `<tmp>/image/`, a plain
+directory. From there it's identical to scanning any other file: walk
+the tree, stream each regular file to clamd over the same INSTREAM
+client `ClamAVScanner` uses (factored out into `clamd_client.go` so
+both scanners share one implementation). Files above
+`UNPACKER_MAX_FILE_MB` (default 100MB) are skipped rather than
+streamed, and if every single file in an image fails to reach clamd,
+that's surfaced as an error instead of silently reporting a "clean"
+image that was never actually scanned.
+`umoci` is still built from source in the Dockerfile (its own upstream
+release binary is amd64-only, and building from source is what makes
+this also work unmodified on an Apple Silicon Mac's arm64 Colima/Podman
+VM). `unpacker` used to be built from source too, pinned to an exact
+commit SHA (`UNPACKER_COMMIT`) since it had no tagged releases --
+fixed once v0.5.1 shipped real `linux_amd64`/`linux_arm64` release
+tarballs (goreleaser): it now downloads the same way `oras` already
+did, dropping an entire build stage. Bump `UNPACKER_VERSION` in the
+Dockerfile to pick up a newer release; there's no commit SHA to track
+anymore.
 
 **Why no trivy-server yet.** Trivy's client/server mode shares a
 vulnerability DB across scans, which matters once you're scanning a lot
@@ -393,6 +397,34 @@ container images, so the eviction-risk motivation above barely applies
 to them regardless. `IsolatedTrivyScanner`/`IsolatedTrivyConfig`
 already support a `SubCommand: "sbom"` mode for exactly this, should it
 get revisited (see Roadmap).
+
+**Fixed: isolated Trivy scan-worker Jobs producing "unparseable
+output."** Confirmed on a real cluster on the very first isolated
+Trivy scan attempted: `IsolatedTrivyScanner` failed every scan with
+`trivy scan job ... produced unparseable output: invalid character '/'
+after top-level value`. Root cause: `TrivyScanner.Scan`/
+`SBOMScanner.Scan` still unconditionally ran `cleanScanCache()` (the
+`trivy clean --scan-cache` cleanup from "Fixed: monitor-api's own pod
+getting evicted..." above), including when running *inside* an
+isolated scan-worker Job -- where it's not just unnecessary
+(`--cache-backend memory` means there's no on-disk scan cache to clean
+at all) but actively broken: the cleanup tries to touch trivy's
+*default* cache location, not the mounted `--cache-dir`, and that
+default location sits on the scan-worker Job's deliberately read-only
+root filesystem, so the cleanup always failed. `cleanScanCache`'s
+`log.Printf` about that failure then landed on the exact same combined
+stdout+stderr stream `runScanWorker` prints its single `WorkerResult`
+JSON document to -- and that's the stream `IsolatedTrivyScanner` reads
+back via the pod's logs, expecting *only* that one JSON document. The
+stray log line, not any real scan problem, is what broke the parse.
+Fixed by gating `cleanScanCache()` behind `TrivyDBConfig.CacheDir ==
+""` in both scanners -- true (clean up) for the in-process path, false
+(skip entirely) for the isolated path, since `CacheDir` is only ever
+set by `IsolatedTrivyScanner` in the first place. A reminder that
+`WorkerResult`'s "exactly one JSON document on stdout" contract is
+only as safe as every code path a scan-worker Job can reach through --
+worth keeping in mind for anything else that ever gets added to either
+scanner.
 
 **SBOM and SARIF artifacts now actually get scanned.** Both types
 existed in the `Artifact` model from the start but had no scanner

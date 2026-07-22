@@ -39,11 +39,19 @@ func (s *SBOMScanner) args(ref string) []string {
 }
 
 func (s *SBOMScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding, error) {
-	// See TrivyScanner.Scan's identical call (trivy.go) for why this is
-	// here: trivy's local scan-cache grows unbounded per distinct
-	// input scanned otherwise, and this shares that same cache with
-	// `trivy image`.
-	defer cleanScanCache()
+	// See TrivyScanner.Scan's identical (and identically-guarded) call
+	// in trivy.go for the full reasoning: trivy's local scan-cache
+	// grows unbounded per distinct input scanned otherwise, and this
+	// shares that same cache with `trivy image` -- but only when
+	// CacheDir is unset (the in-process path). When it's set
+	// (IsolatedTrivyScanner's scan-worker Job), --cache-backend memory
+	// already means there's nothing on disk to clean, and the cleanup
+	// attempt itself fails against the Job's read-only root filesystem,
+	// corrupting the WorkerResult JSON runScanWorker prints to stdout
+	// with a stray log line on the same combined log stream.
+	if s.db.CacheDir == "" {
+		defer cleanScanCache()
+	}
 
 	cmd := exec.CommandContext(ctx, "trivy", s.args(ref)...)
 

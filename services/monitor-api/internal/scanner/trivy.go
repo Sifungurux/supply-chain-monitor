@@ -145,7 +145,25 @@ func (t *TrivyScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding
 	// limit and getting the whole pod kubelet-evicted -- not a
 	// scan-worker Job, since TrivyScanner (unlike the unpacker+ClamAV
 	// path) still runs in-process. See cleanScanCache's own comment.
-	defer cleanScanCache()
+	//
+	// Only when CacheDir is unset, though -- CacheDir being set means
+	// this is IsolatedTrivyScanner's scan-worker Job, which already
+	// passes --cache-backend memory (see TrivyDBConfig.CacheDir's
+	// comment), so there's no on-disk scan cache to clean in the first
+	// place. Confirmed on a real cluster that skipping this check was a
+	// real bug, not just an unnecessary call: `trivy clean --scan-cache`
+	// tried to touch trivy's *default* cache location (not the mounted
+	// --cache-dir), which sits on the scan-worker Job's deliberately
+	// read-only root filesystem, so the cleanup itself failed every
+	// time -- and cleanScanCache's log.Printf about that failure landed
+	// on the same combined stdout+stderr stream runScanWorker's
+	// WorkerResult JSON is printed to, which IsolatedTrivyScanner reads
+	// back via the pod's logs expecting *only* that one JSON document.
+	// The stray log line broke the parse outright ("unparseable
+	// output"), not just added noise.
+	if t.db.CacheDir == "" {
+		defer cleanScanCache()
+	}
 
 	cmd := exec.CommandContext(ctx, "trivy", t.args(ref)...)
 
