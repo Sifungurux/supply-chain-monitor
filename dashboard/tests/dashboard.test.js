@@ -247,6 +247,103 @@ test('renders SARIF/other findings in their own count column and detail section'
   dom.window.close();
 });
 
+test('a fixed finding shows a Fixed badge, dims, and drops out of open-finding counts', async () => {
+  const withFixed = [{
+    id: 'a5',
+    ref: 'alpine:3.19',
+    type: 'image',
+    status: 'scanned',
+    current_stage: 'scan',
+    stage_history: [],
+    cve_findings: [
+      {
+        id: 'CVE-2024-5555',
+        severity: 'high',
+        title: 'now patched',
+        source: 'trivy',
+        status: 'fixed',
+        first_seen_at: '2026-07-01T00:00:00Z',
+        resolved_at: '2026-07-19T10:00:00Z'
+      }
+    ],
+    malware_findings: [],
+    last_scan_errors: [],
+    created_at: '2026-07-01T00:00:00Z',
+    updated_at: '2026-07-19T10:00:00Z'
+  }];
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(withFixed);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  // "With CVEs" card must not count an artifact whose only CVE is fixed.
+  const cardNumbers = [...doc.querySelectorAll('#cards .n')].map((n) => n.textContent);
+  assert.equal(cardNumbers[2], '0', 'a fixed-only CVE should not count toward "With CVEs"');
+
+  // The table's own CVE count column must likewise read 0, not 1.
+  const cveCountCell = doc.querySelector('#artifact-rows tr[data-id="a5"] td:nth-child(5)');
+  assert.equal(cveCountCell.textContent.trim(), '0');
+
+  doc.querySelector('button[data-action="toggle"][data-id="a5"]').click();
+  const detailHtml = doc.querySelector('tr.detail-row').innerHTML;
+  assert.match(detailHtml, /now patched/);
+  assert.match(detailHtml, /Fixed/);
+  assert.match(detailHtml, /finding-fixed/);
+
+  dom.window.close();
+});
+
+test('a finding first seen on the artifact\'s most recent update gets a New badge', async () => {
+  const withNew = [{
+    id: 'a6',
+    ref: 'alpine:3.19',
+    type: 'image',
+    status: 'scanned',
+    current_stage: 'scan',
+    stage_history: [],
+    cve_findings: [
+      // Discovered on this very update -- first_seen_at matches updated_at.
+      { id: 'CVE-2024-9001', severity: 'critical', title: 'brand new', source: 'trivy', status: 'open', first_seen_at: '2026-07-19T10:00:00Z' },
+      // Been open for weeks -- must not also get flagged "New".
+      { id: 'CVE-2024-1', severity: 'high', title: 'old news', source: 'trivy', status: 'open', first_seen_at: '2026-06-01T00:00:00Z' }
+    ],
+    malware_findings: [],
+    last_scan_errors: [],
+    created_at: '2026-06-01T00:00:00Z',
+    updated_at: '2026-07-19T10:00:00Z'
+  }];
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(withNew);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  doc.querySelector('button[data-action="toggle"][data-id="a6"]').click();
+  const detailHtml = doc.querySelector('tr.detail-row').innerHTML;
+
+  const newBadgeCount = (detailHtml.match(/>New</g) || []).length;
+  assert.equal(newBadgeCount, 1, 'exactly the just-discovered finding should get a New badge');
+  assert.match(detailHtml, /brand new/);
+  assert.match(detailHtml, /old news/);
+
+  dom.window.close();
+});
+
 test('sends the saved API key as a Bearer Authorization header on every request', async () => {
   const calls = [];
   const dom = buildDom({

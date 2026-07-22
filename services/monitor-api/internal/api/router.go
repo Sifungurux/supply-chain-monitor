@@ -31,6 +31,7 @@ func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner
 	mux.HandleFunc("GET /api/v1/findings/{findingID}/artifacts", h.findByFindingID)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/scan", h.scanArtifact)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/stage", h.updateStage)
+	mux.HandleFunc("POST /api/v1/artifacts/{id}/findings", h.submitFindings)
 
 	// withCORS must wrap withAuth, not the other way around: a CORS
 	// preflight OPTIONS request never carries the Authorization header

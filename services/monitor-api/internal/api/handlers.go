@@ -175,14 +175,24 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 		status = artifact.StatusFailed
 	}
 
-	// Note: this replaces prior findings wholesale, including with
-	// empty results if every scanner failed this round -- a known v1
-	// limitation (see docs/architecture.md).
+	// detectFixed gates whether MergeFindings is allowed to mark
+	// anything as fixed this round: if any registered scanner errored,
+	// this round's report can't be trusted as a complete picture of
+	// every bucket (e.g. Trivy erroring while ClamAV succeeds would
+	// otherwise make every previously-open CVE look "fixed" just
+	// because Trivy didn't run, not because any of them got patched).
+	// A fully clean run (no scanErrors at all) is the only time a
+	// missing finding safely means "actually fixed." See merge.go's own
+	// doc comment for the full reasoning, including the corresponding
+	// per-bucket-not-per-scanner precision this simplification gives
+	// up (documented as a roadmap item, not silently ignored).
+	now := time.Now().UTC()
+	detectFixed := len(scanErrors) == 0
 	updated, updErr := h.store.Update(id, func(art *artifact.Artifact) {
 		art.Status = status
-		art.CVEFindings = cveFindings
-		art.MalwareFindings = malwareFindings
-		art.OtherFindings = otherFindings
+		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, cveFindings, now, detectFixed)
+		art.MalwareFindings = artifact.MergeFindings(art.MalwareFindings, malwareFindings, now, detectFixed)
+		art.OtherFindings = artifact.MergeFindings(art.OtherFindings, otherFindings, now, detectFixed)
 		art.LastScanErrors = scanErrors
 	})
 	if updErr != nil {
@@ -224,6 +234,110 @@ func (h *handler) updateStage(w http.ResponseWriter, r *http.Request) {
 			Timestamp: time.Now().UTC(),
 			Note:      req.Note,
 		})
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// validFindingsBucket checks the bucket name submitFindings was given.
+// These three literal strings are an API-contract detail of this
+// package -- kept separate from internal/artifact/postgres_store.go's
+// own bucketCVE/bucketMalware/bucketOther constants, which exist for a
+// different reason (Postgres table rows) and MemStore doesn't use at
+// all. Matches the same "cve"/"malware"/"other" vocabulary scanArtifact
+// already sorts Finding.Source into above, just made explicit here
+// instead of inferred from a Source string.
+func validFindingsBucket(bucket string) bool {
+	switch bucket {
+	case "cve", "malware", "other":
+		return true
+	default:
+		return false
+	}
+}
+
+type submitFindingsRequest struct {
+	// Bucket picks which of the artifact's three finding buckets this
+	// call writes into ("cve", "malware", or "other" -- see
+	// artifact.Artifact's CVEFindings/MalwareFindings/OtherFindings).
+	Bucket   string             `json:"bucket"`
+	Findings []artifact.Finding `json:"findings"`
+}
+
+// submitFindings lets a system other than monitor-api's own registered
+// scanners -- an external pipeline's malware scanner, a SAST tool run
+// in CI, anything that already produced results elsewhere -- record
+// those results directly against an artifact, with no fetch or re-scan
+// of Ref involved at all.
+//
+// This exists because scanArtifact (the only other write path into
+// CVEFindings/MalwareFindings/OtherFindings) always calls a registered
+// Scanner's Scan(ctx, ref), which always does its own fetch+scan of ref
+// internally -- there was previously no path for "here are findings I
+// already computed, just store them." See docs/architecture.md
+// ("Submitting external findings directly") for the full reasoning,
+// including why this is a new endpoint rather than another Scanner
+// implementation (a Scanner's contract is "given a ref, go compute
+// findings" -- this handler's input already *is* the findings, so it
+// doesn't fit that shape).
+//
+// Deliberately touches only the one bucket named in the request,
+// unlike scanArtifact (which merges into all three buckets every call,
+// since it always re-runs every registered scanner for the type at
+// once). An external system submitting its own malware results has no
+// way to know what Trivy or a SARIF import already found for this same
+// artifact, so touching the other two buckets here would risk
+// corrupting real data.
+//
+// The one bucket it does touch is merged, not replaced, via
+// MergeFindings -- exactly like scanArtifact, so a finding that stops
+// being reported shows up as fixed (with ResolvedAt set) rather than
+// just vanishing, and a finding reported again keeps its original
+// FirstSeenAt rather than looking newly discovered. Always merges with
+// detectFixed=true: unlike scanArtifact (which has to worry about a
+// scanner erroring mid-run), this endpoint's contract is that the
+// caller is asserting a complete current result for the bucket it
+// named, so "not in this report" always safely means "fixed."
+func (h *handler) submitFindings(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var req submitFindingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if !validFindingsBucket(req.Bucket) {
+		writeError(w, http.StatusBadRequest, "bucket must be one of cve, malware, other")
+		return
+	}
+	if req.Findings == nil {
+		req.Findings = []artifact.Finding{}
+	}
+
+	now := time.Now().UTC()
+	updated, err := h.store.Update(id, func(art *artifact.Artifact) {
+		switch req.Bucket {
+		case "cve":
+			art.CVEFindings = artifact.MergeFindings(art.CVEFindings, req.Findings, now, true)
+		case "malware":
+			art.MalwareFindings = artifact.MergeFindings(art.MalwareFindings, req.Findings, now, true)
+		case "other":
+			art.OtherFindings = artifact.MergeFindings(art.OtherFindings, req.Findings, now, true)
+		}
+		// A registered-but-never-scanned artifact submitting findings
+		// this way has meaningfully been scanned now, even though
+		// scanArtifact never ran -- reflect that in Status so it shows
+		// up correctly in the dashboard/list views. An artifact that's
+		// already scanning/scanned/failed keeps its existing status;
+		// this call only ever touches one bucket, so it shouldn't
+		// override a status a fuller scan already set.
+		if art.Status == artifact.StatusRegistered {
+			art.Status = artifact.StatusScanned
+		}
 	})
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())

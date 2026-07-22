@@ -219,6 +219,84 @@ func TestPostgresStore_FindByFindingID(t *testing.T) {
 	}
 }
 
+// TestPostgresStore_FindingLifecycleRoundTrips proves MergeFindings'
+// Status/FirstSeenAt/ResolvedAt actually persist and reload correctly
+// through the findings table's new columns, not just in the pure-Go
+// unit tests in merge_test.go -- this is the one place that would catch
+// a column ordering mistake in insertFinding/loadFindings/
+// fillChildrenBatch (see postgres_store.go), which the pure-Go tests
+// can't, since they never touch SQL at all.
+func TestPostgresStore_FindingLifecycleRoundTrips(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	a, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	firstScan := time.Now().UTC()
+	_, err = s.Update(a.ID, func(art *artifact.Artifact) {
+		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, []artifact.Finding{
+			{ID: "CVE-lifecycle-1", Severity: "high", Source: "trivy"},
+		}, firstScan, true)
+	})
+	if err != nil {
+		t.Fatalf("Update (first scan): %v", err)
+	}
+
+	got, err := s.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get after first scan: %v", err)
+	}
+	if len(got.CVEFindings) != 1 {
+		t.Fatalf("cve findings after first scan = %+v", got.CVEFindings)
+	}
+	f := got.CVEFindings[0]
+	if f.Status != artifact.FindingStatusOpen {
+		t.Fatalf("status = %q, want %q", f.Status, artifact.FindingStatusOpen)
+	}
+	if f.ResolvedAt != nil {
+		t.Fatalf("resolved_at = %v, want nil", f.ResolvedAt)
+	}
+	// Postgres TIMESTAMPTZ has microsecond precision; allow a small
+	// tolerance rather than requiring bit-for-bit equality with the
+	// Go-side time.Time that was written.
+	if diff := f.FirstSeenAt.Sub(firstScan); diff < -time.Second || diff > time.Second {
+		t.Fatalf("first_seen_at = %v, want close to %v", f.FirstSeenAt, firstScan)
+	}
+	originalFirstSeen := f.FirstSeenAt
+
+	// Second scan, later: CVE-lifecycle-1 no longer reported -> fixed.
+	secondScan := firstScan.Add(1 * time.Hour)
+	_, err = s.Update(a.ID, func(art *artifact.Artifact) {
+		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, nil, secondScan, true)
+	})
+	if err != nil {
+		t.Fatalf("Update (second scan): %v", err)
+	}
+
+	got, err = s.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get after second scan: %v", err)
+	}
+	if len(got.CVEFindings) != 1 {
+		t.Fatalf("expected the fixed finding to still be present (not deleted), got %+v", got.CVEFindings)
+	}
+	f = got.CVEFindings[0]
+	if f.Status != artifact.FindingStatusFixed {
+		t.Fatalf("status = %q, want %q", f.Status, artifact.FindingStatusFixed)
+	}
+	if f.ResolvedAt == nil {
+		t.Fatal("resolved_at is nil, want it set once the finding stopped being reported")
+	}
+	if diff := f.ResolvedAt.Sub(secondScan); diff < -time.Second || diff > time.Second {
+		t.Fatalf("resolved_at = %v, want close to %v", f.ResolvedAt, secondScan)
+	}
+	if diff := f.FirstSeenAt.Sub(originalFirstSeen); diff < -time.Second || diff > time.Second {
+		t.Fatalf("first_seen_at changed across the second scan: got %v, want unchanged %v", f.FirstSeenAt, originalFirstSeen)
+	}
+}
+
 // dsnWithSearchPath points a DSN at a specific Postgres schema via the
 // search_path connection parameter, so a test can create its own
 // artifacts table (in its own schema, via the admin connection) and
@@ -333,6 +411,16 @@ func TestPostgresStore_MigratesLegacyJSONBSchema(t *testing.T) {
 	}
 	if len(got.MalwareFindings) != 1 || got.MalwareFindings[0].ID != "clamav-signature-match" {
 		t.Fatalf("migrated malware_findings = %+v", got.MalwareFindings)
+	}
+	// The legacy JSONB blobs never had Status/FirstSeenAt/ResolvedAt at
+	// all -- insertFinding must default them sensibly (open, stamped
+	// with roughly the migration time) rather than leaving a zero-value
+	// FirstSeenAt sitting in the new NOT NULL column.
+	if got.CVEFindings[0].Status != artifact.FindingStatusOpen {
+		t.Fatalf("migrated finding status = %q, want %q", got.CVEFindings[0].Status, artifact.FindingStatusOpen)
+	}
+	if got.CVEFindings[0].FirstSeenAt.IsZero() {
+		t.Fatal("migrated finding has a zero first_seen_at -- insertFinding should have defaulted it")
 	}
 	if len(got.LastScanErrors) != 1 || got.LastScanErrors[0] != "legacy scanner error" {
 		t.Fatalf("migrated last_scan_errors = %+v", got.LastScanErrors)

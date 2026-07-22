@@ -648,6 +648,140 @@ none of the ~10 pre-existing handler tests needed individual changes.
 Authorization header being sent, the 401 message, and the key
 surviving a save-and-reload.
 
+**Submitting external findings directly.** Every write path into
+`CVEFindings`/`MalwareFindings`/`OtherFindings` used to run through
+`scanArtifact` (`POST /api/v1/artifacts/{id}/scan`), which always calls
+a registered `Scanner`'s `Scan(ctx, ref)` -- and every `Scanner`
+implementation always does its own fetch-and-scan of `ref` internally
+(pull the image and run ClamAV, fetch and parse a SARIF file, shell out
+to trivy). There was no path for "some other system already ran its
+own scan somewhere else -- an external pipeline's own malware scanner,
+a SAST tool run in CI -- here are the results, just record them," short
+of faking up a SARIF file and pushing it through the `sarif` artifact
+type (which still means a fetch+parse, and lands everything in
+`OtherFindings` regardless of what actually produced it).
+`POST /api/v1/artifacts/{id}/findings` (`internal/api/handlers.go`'s
+`submitFindings`) closes that gap: it accepts `{bucket, findings}`
+directly in the request body and writes `findings` straight into
+whichever of the three buckets `bucket` names ("cve", "malware", or
+"other"), with no `Scanner`, no fetch, no re-scan of `ref` involved at
+all. This didn't need any change to the storage layer -- `Finding.Source`
+was already a free-form string and Postgres already had a proper
+`malware` bucket end to end (see "Normalizing findings and stage
+history into their own tables" above); the gap was purely that nothing
+in the API let a caller write to those buckets except by triggering a
+real scan.
+The one deliberate difference from `scanArtifact`: this endpoint only
+ever touches the *one* bucket named in the request, never all three.
+`scanArtifact` touches all three every call because it always re-runs
+every registered scanner for the type at once -- but an external system
+calling `/findings` has no way to know what Trivy or a prior SARIF
+import already found for the same artifact, so disturbing the other two
+buckets here would silently corrupt real data every time an external
+pipeline reported its own malware result. (What "touches" means for the
+one bucket it does write is itself worth its own explanation -- see
+"Tracking finding lifecycle: open, new, and fixed" immediately below;
+it's a merge now, not a replace, for both this endpoint and
+`scanArtifact`.)
+Status handling is similarly conservative: an artifact still in
+`StatusRegistered` (never scanned at all) moves to `StatusScanned` once
+it receives findings this way, since that's a meaningful, correct
+status change -- but an artifact that's already `scanning`/`scanned`/
+`failed` keeps its existing status, since a single `/findings` call
+touching one bucket shouldn't override whatever a fuller scan already
+concluded.
+Test coverage: `internal/api/handlers_test.go` gained
+`TestSubmitFindings` (happy path, status transitions from `registered`
+to `scanned`), `TestSubmitFindings_LeavesOtherBucketsAlone` (runs a real
+`scanArtifact` first, then confirms a `/findings` call doesn't touch
+the CVE bucket that produced), `TestSubmitFindings_InvalidBucket`,
+`TestSubmitFindings_UnknownArtifact`, and
+`TestSubmitFindings_SecondCallMarksMissingFindingAsFixed`.
+
+**Tracking finding lifecycle: open, new, and fixed.** Both
+`scanArtifact` and `submitFindings` originally replaced a bucket
+wholesale on every call -- correct enough for "what's currently true,"
+but it meant a CVE that got patched, or a malware match that got
+cleaned up, just silently vanished from the next response with no
+record it had ever been there, let alone that it got fixed. There was
+also no way to tell "this CVE just showed up" from "this CVE has been
+sitting here for three months" -- both looked identical, a flat list
+with no notion of when.
+`Finding` (`internal/artifact/model.go`) gained three fields to fix
+this: `Status` (`"open"` or `"fixed"`), `FirstSeenAt`, and `ResolvedAt`
+(nil while open). `MergeFindings` (`internal/artifact/merge.go`) is the
+one place that ever sets them, given a bucket's existing findings and a
+freshly reported set, matched by ID:
+- Still reported: stays `open`, keeps its original `FirstSeenAt` (a
+  finding doesn't look newly discovered just because a scan re-ran),
+  everything else (severity/title/source) refreshed from the latest
+  report.
+- Reported for the first time: `open`, `FirstSeenAt` = now.
+- Was reported, isn't anymore: becomes `fixed`, `ResolvedAt` = now --
+  but stays in the bucket rather than disappearing, so "what got fixed
+  and when" stays answerable indefinitely (the same "keep history,
+  don't overwrite it" instinct as `StageHistory`, just applied to
+  findings).
+- Already `fixed` and still not reported: left completely untouched --
+  `ResolvedAt` doesn't get bumped forward every subsequent scan just
+  because it's still gone.
+- A regression (fixed, then reported again): flips back to `open`,
+  `ResolvedAt` clears, but `FirstSeenAt` still reflects the *original*
+  discovery date, not the regression.
+A `detectFixed` flag gates the "no longer reported -> fixed" transition
+specifically, and it's the reason `scanArtifact` and `submitFindings`
+call `MergeFindings` differently. `submitFindings` always passes
+`true`: the endpoint's whole contract is that the caller is asserting a
+complete current result for the bucket it named, so "not in this
+report" always safely means fixed. `scanArtifact` passes
+`len(scanErrors) == 0` -- i.e. only a fully clean run (every registered
+scanner for the type succeeded) is trusted enough to mark anything
+fixed. Without this, one scanner failing (say ClamAV can't reach the
+cluster this round while Trivy succeeds) would make every previously-
+open CVE look "fixed" simply because Trivy's bucket had nothing new to
+compare against a report that never happened, not because anything was
+actually patched. The corresponding known gap: this is per-*type*, not
+per-bucket -- any scanner erroring blocks fix-detection for every
+bucket that round, even ones whose own scanner succeeded (see Roadmap).
+Persistence: the `findings` table gained three columns (`status`,
+`first_seen_at`, `resolved_at`), added via idempotent `ALTER TABLE ...
+ADD COLUMN IF NOT EXISTS` statements in `schemaStatements` -- no
+separate conditional migration needed the way the earlier JSONB->
+normalized-tables move required, since `IF NOT EXISTS` already covers
+"an older findings table might not have these yet." Pre-existing rows
+get `first_seen_at` backfilled to the migration time (`DEFAULT NOW()`)
+since their real discovery date was never recorded -- an approximation,
+not a fabricated history. `insertFinding` also defaults `Status`/
+`FirstSeenAt` for any `Finding` that arrives without them set (true for
+rows `migrateLegacyJSONBColumns` copies from the old schema, which
+predates this feature entirely).
+The dashboard (`dashboard/index.html`) renders this directly:
+`renderFinding` shows a `Fixed <time ago>` badge (and dims the row) for
+anything with `status: "fixed"`, and a `New` badge for anything whose
+`first_seen_at` lands within a few seconds of the artifact's own
+`updated_at` (both get stamped from the same `now` inside one
+`store.Update()` call when a finding is first merged in as new, so
+they land within milliseconds of each other in practice -- a several-
+second window comfortably absorbs that without ever flagging an old,
+still-open finding as new on some later, unrelated update). The
+summary cards and per-artifact count columns both switched from
+counting a bucket's raw length to counting only `status !== "fixed"`
+entries (`openFindings`), so a resolved CVE stops inflating "With
+CVEs" once it's fixed instead of counting forever.
+Test coverage: `internal/artifact/merge_test.go` (new/still-open/fixed/
+already-fixed/regression/detectFixed=false/mixed-bucket cases),
+`internal/artifact/postgres_store_integration_test.go` gained
+`TestPostgresStore_FindingLifecycleRoundTrips` (proves the three new
+columns actually round-trip through real SQL, not just the pure-Go
+merge logic) and an assertion in the legacy-migration test that
+migrated findings default to `open`/a non-zero `FirstSeenAt`.
+`internal/api/handlers_test.go` gained
+`TestScanArtifact_SecondScanMarksMissingFindingAsFixed` and
+`TestScanArtifact_PartialFailureDoesNotMarkFindingsFixed` (the
+`detectFixed` behavior specifically). `dashboard/tests/dashboard.test.js`
+gained cases for the `Fixed` badge/dimming/count-exclusion and the
+`New` badge.
+
 **Configuring the dashboard via ConfigMap/Secret instead of by hand.**
 The dashboard originally required a person to paste the API key into
 its "Key" field by hand, once per browser -- fine for whoever set it
@@ -1199,6 +1333,15 @@ deploy` invocation.
 
 ## Roadmap / open gaps
 
+- **Fix-detection is per-type, not per-bucket**: `scanArtifact` only
+  lets `MergeFindings` mark anything `fixed` when every registered
+  scanner for the artifact's type succeeded that round (see "Tracking
+  finding lifecycle: open, new, and fixed"). If, say, ClamAV errors
+  while Trivy succeeds, CVE fix-detection is blocked too that round,
+  even though Trivy's own report was completely fine. Safe (never a
+  false "fixed"), just coarser than it could be. Fixing this properly
+  means tracking which scanner(s) feed which bucket and gating
+  `detectFixed` per bucket instead of globally across the whole scan.
 - **Pinned dependencies**: `go.sum` still isn't committed (couldn't be
   generated correctly in the sandbox this project was built in -- no
   real Go toolchain, no network access to the module proxy -- see the

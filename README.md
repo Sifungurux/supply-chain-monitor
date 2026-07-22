@@ -214,6 +214,7 @@ limiting).
 | GET    | `/api/v1/artifacts`                | list all tracked artifacts                 |
 | GET    | `/api/v1/artifacts/{id}`           | get one artifact (findings, current stage) |
 | POST   | `/api/v1/artifacts/{id}/scan`      | run the scanner appropriate for its type   |
+| POST   | `/api/v1/artifacts/{id}/findings`  | record findings an external system already computed `{bucket, findings}` |
 | POST   | `/api/v1/artifacts/{id}/stage`     | record a pipeline-stage transition         |
 | GET    | `/api/v1/findings/{findingID}/artifacts` | every artifact affected by a given finding ID (e.g. a CVE) |
 
@@ -253,6 +254,63 @@ curl -s localhost:8080/api/v1/artifacts/<id> "${AUTH[@]}"
 # fix ships, confirm nothing registered still carries this CVE)
 curl -s localhost:8080/api/v1/findings/CVE-2024-1234/artifacts "${AUTH[@]}"
 ```
+
+### Submitting findings from an external scanner
+
+`/scan` always has monitor-api run one of its own registered scanners
+(Trivy, unpacker+ClamAV, ...) against `ref` itself. If a scan already
+happened somewhere else -- an external pipeline's own malware scanner,
+a SAST tool run in CI -- and you just want to record the result,
+`/api/v1/artifacts/{id}/findings` takes the findings directly instead,
+with no fetch or re-scan of `ref` involved at all:
+
+```bash
+curl -s -X POST localhost:8080/api/v1/artifacts/<id>/findings "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "bucket": "malware",
+    "findings": [
+      {"id": "eicar-test-signature", "severity": "critical", "title": "EICAR test file detected", "source": "external-clamav"}
+    ]
+  }'
+```
+
+`bucket` is one of `cve`, `malware`, `other` -- matching
+`cve_findings`/`malware_findings`/`other_findings` on the artifact.
+This call only ever touches the one bucket named, unlike `/scan`
+(which re-runs every scanner for the type and touches all three), so
+submitting external malware results here won't disturb CVE findings a
+real Trivy scan already produced against the same artifact. An
+artifact still in `registered` status moves to `scanned` after its
+first `/findings` call; an artifact that's already
+`scanning`/`scanned`/`failed` keeps its existing status.
+
+### Finding lifecycle: open, new, and fixed
+
+Both `/scan` and `/findings` **merge** each round's report into the
+bucket's existing findings rather than replacing it wholesale. Every
+finding carries a `status` (`"open"` or `"fixed"`), a `first_seen_at`,
+and a `resolved_at` (set once it's fixed):
+
+- A finding reported again keeps its original `first_seen_at` -- it
+  doesn't look newly discovered just because a scan re-ran.
+- A finding that stops being reported becomes `"fixed"`, with
+  `resolved_at` set -- it stays visible (so "what got fixed, and when"
+  is answerable), it just isn't currently open anymore.
+- A finding reported once, then absent, then reported again (a
+  regression) goes back to `"open"` and `resolved_at` clears -- but
+  `first_seen_at` still reflects the original discovery date.
+- `/scan` only marks anything fixed on a fully clean run -- if any
+  registered scanner for the type errored, existing findings are left
+  exactly as they were rather than risk a scanner failure looking like
+  "everything got fixed." `/findings` always trusts the caller's report
+  as complete for the bucket named.
+
+`GET /api/v1/artifacts/{id}` and the dashboard both reflect this: the
+count columns and summary cards only count `open` findings (a fixed CVE
+doesn't inflate "With CVEs"), and the detail view shows a `Fixed`
+badge with how long ago, or a `New` badge for anything discovered on
+the most recent update.
 
 ### SBOM and SARIF scanning
 
@@ -716,8 +774,13 @@ make cluster-destroy    # stops AND deletes the VM/machine + its data
 - SARIF severity falls back to a rough three-level mapping
   (error/warning/note → high/medium/low) unless a rule carries a
   `security-severity` score, which not every SARIF producer sets.
-- Re-running `/scan` replaces prior findings wholesale, including with
-  empty results if every scanner fails that round.
+- `/scan`'s fixed-detection is per-*type*, not per-scanner: if any
+  registered scanner for the artifact's type errors, no bucket gets to
+  mark anything fixed that round, even if the scanner(s) covering some
+  other bucket succeeded cleanly (e.g. Trivy succeeding while ClamAV
+  errors means CVE fixes go undetected that round too, not just
+  malware). Safe (never a false "fixed"), just coarser than it could
+  be; would need per-bucket error tracking in `scanArtifact` to fix.
 - Both registry-fetching paths hardcode unauthenticated, plain-HTTP
   access — `unpacker` via `--insecure --public`, the file/sbom/sarif
   fetcher via `FETCH_PLAIN_HTTP` — fine for the local `scm-registry`;

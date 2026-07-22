@@ -125,6 +125,7 @@
   .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; padding: 4px 4px 12px; }
   .detail-col h3 { font-size: 12px; text-transform: none; color: var(--scm-text-secondary); font-weight: 500; margin: 0 0 8px; }
   .finding { border-radius: var(--scm-radius); padding: 6px 10px; margin-bottom: 6px; font-size: 12.5px; }
+  .finding-fixed { opacity: 0.65; }
   .timeline-item { font-size: 12.5px; padding: 4px 0; border-bottom: 0.5px solid var(--scm-border); }
   .timeline-item:last-child { border-bottom: none; }
   .muted { color: var(--scm-text-muted); font-size: 12.5px; }
@@ -276,8 +277,63 @@
     return '<span class="badge ' + cls + '">' + esc(sev || 'unknown') + '</span>';
   }
 
+  // findingIsNew flags a finding as newly discovered on the artifact's
+  // most recent scan/submission, so the dashboard can call it out
+  // rather than showing it exactly the same as a finding that's been
+  // open for months. There's no explicit "was this discovered on the
+  // very last update" flag from the API -- instead this compares
+  // first_seen_at against the artifact's own updated_at: the backend
+  // (MergeFindings, called from inside the same store.Update() as the
+  // one that sets updated_at) stamps a brand-new finding's first_seen_at
+  // with the same "now" used for that update, so the two timestamps
+  // land within milliseconds of each other in practice. A several-
+  // second window comfortably absorbs that slack without ever mistaking
+  // an old, still-open finding for a new one on some later, unrelated
+  // update.
+  function findingIsNew(f, a) {
+    if (!f.first_seen_at || !a.updated_at || f.status === 'fixed') return false;
+    var diffMs = Math.abs(new Date(f.first_seen_at).getTime() - new Date(a.updated_at).getTime());
+    return diffMs < 5000;
+  }
+
+  // renderFinding is the one place that decides how a single finding
+  // looks, for all three buckets (CVE/malware/other) -- so "new" and
+  // "fixed" render identically everywhere instead of each bucket's map()
+  // callback growing its own slightly-different copy.
+  //   showId: CVE/SARIF findings lead with their ID (e.g. "CVE-2024-1234"),
+  //     with the title (if any) appended -- malware findings lead with
+  //     the title (a signature name) since their ID is just a constant
+  //     ("clamav-signature-match") with no information of its own.
+  function renderFinding(f, a, showId) {
+    var label = showId
+      ? esc(f.id) + (f.title ? ' — ' + esc(f.title) : '')
+      : esc(f.title || f.id);
+
+    var lifecycleBadge = '';
+    if (f.status === 'fixed') {
+      lifecycleBadge = ' <span class="badge badge-success">Fixed ' + esc(timeAgo(f.resolved_at)) + '</span>';
+    } else if (findingIsNew(f, a)) {
+      lifecycleBadge = ' <span class="badge badge-accent">New</span>';
+    }
+
+    var rowCls = 'finding badge-neutral' + (f.status === 'fixed' ? ' finding-fixed' : '');
+    return '<div class="' + rowCls + '">' + severityBadge(f.severity) + ' ' + label + lifecycleBadge + '</div>';
+  }
+
   function countCell(n) {
     return '<span class="' + (n > 0 ? 'count-nonzero' : 'count-zero') + '">' + n + '</span>';
+  }
+
+  // openFindings is what every "how many CVEs does this have" count
+  // (the summary cards, the per-artifact table columns) should be
+  // counting -- a "fixed" finding stays in the array as a permanent
+  // record (see MergeFindings/renderFinding above), so counting the raw
+  // array length would make every resolved CVE or cleaned-up malware
+  // match look like it's still an active problem. Treats a missing/
+  // unset status as open rather than excluding it, so this fails safe
+  // toward showing a finding rather than silently hiding it.
+  function openFindings(list) {
+    return (list || []).filter(function (f) { return f.status !== 'fixed'; });
   }
 
   async function fetchJSON(path, opts) {
@@ -327,9 +383,9 @@
   function renderCards() {
     var total = state.artifacts.length;
     var scanning = state.artifacts.filter(function (a) { return a.status === 'scanning'; }).length;
-    var withCVEs = state.artifacts.filter(function (a) { return (a.cve_findings || []).length > 0; }).length;
-    var withMalware = state.artifacts.filter(function (a) { return (a.malware_findings || []).length > 0; }).length;
-    var withOther = state.artifacts.filter(function (a) { return (a.other_findings || []).length > 0; }).length;
+    var withCVEs = state.artifacts.filter(function (a) { return openFindings(a.cve_findings).length > 0; }).length;
+    var withMalware = state.artifacts.filter(function (a) { return openFindings(a.malware_findings).length > 0; }).length;
+    var withOther = state.artifacts.filter(function (a) { return openFindings(a.other_findings).length > 0; }).length;
     var cards = [
       ['Artifacts', total],
       ['Scanning now', scanning],
@@ -377,9 +433,9 @@
             '<td>' + esc(a.type) + '</td>' +
             '<td>' + statusBadge(a.status) + '</td>' +
             '<td>' + (a.current_stage ? esc(a.current_stage) : '<span class="muted">—</span>') + '</td>' +
-            '<td>' + countCell((a.cve_findings || []).length) + '</td>' +
-            '<td>' + countCell((a.malware_findings || []).length) + '</td>' +
-            '<td>' + countCell((a.other_findings || []).length) + '</td>' +
+            '<td>' + countCell(openFindings(a.cve_findings).length) + '</td>' +
+            '<td>' + countCell(openFindings(a.malware_findings).length) + '</td>' +
+            '<td>' + countCell(openFindings(a.other_findings).length) + '</td>' +
             '<td class="muted">' + timeAgo(a.updated_at) + '</td>' +
             '<td class="actions">' +
               '<button data-action="scan" data-id="' + esc(a.id) + '" ' + (busy ? 'disabled' : '') + '>' +
@@ -412,23 +468,15 @@
       : '<span class="muted">No stage events recorded yet.</span>';
 
     var cveHtml = cve.length
-      ? cve.map(function (f) {
-          return '<div class="finding badge-neutral">' + severityBadge(f.severity) + ' ' + esc(f.id) +
-            (f.title ? ' — ' + esc(f.title) : '') + '</div>';
-        }).join('')
+      ? cve.map(function (f) { return renderFinding(f, a, true); }).join('')
       : '<span class="muted">No CVE findings.</span>';
 
     var malHtml = mal.length
-      ? mal.map(function (f) {
-          return '<div class="finding badge-neutral">' + severityBadge(f.severity) + ' ' + esc(f.title || f.id) + '</div>';
-        }).join('')
+      ? mal.map(function (f) { return renderFinding(f, a, false); }).join('')
       : '<span class="muted">No malware findings.</span>';
 
     var otherHtml = other.length
-      ? other.map(function (f) {
-          return '<div class="finding badge-neutral">' + severityBadge(f.severity) + ' ' + esc(f.id) +
-            (f.title ? ' — ' + esc(f.title) : '') + '</div>';
-        }).join('')
+      ? other.map(function (f) { return renderFinding(f, a, true); }).join('')
       : '<span class="muted">No other findings.</span>';
 
     var errsHtml = errs.length

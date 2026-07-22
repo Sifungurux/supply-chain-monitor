@@ -76,6 +76,24 @@ var schemaStatements = []string{
 		source      TEXT NOT NULL DEFAULT '' -- e.g. "trivy", "clamav", "sarif"
 	)`,
 	`CREATE INDEX IF NOT EXISTS findings_artifact_id_idx ON findings (artifact_id)`,
+	// Added for finding lifecycle tracking (see merge.go's MergeFindings
+	// and docs/architecture.md, "Tracking finding lifecycle: open vs
+	// fixed"). `ADD COLUMN IF NOT EXISTS` is idempotent the same way the
+	// `CREATE TABLE IF NOT EXISTS` statements above are, so these are
+	// safe to run unconditionally on every startup, including against a
+	// findings table created before this feature existed -- no separate
+	// migrate-if-old-schema branch needed the way
+	// migrateLegacyJSONBColumns had to for the earlier JSONB->normalized
+	// migration, since ADD COLUMN IF NOT EXISTS already covers "this
+	// might already exist" cleanly. DEFAULT NOW() on first_seen_at means
+	// pre-existing rows (findings persisted before this migration ran)
+	// get stamped with the migration time, not their real original
+	// discovery date, which was never recorded -- an approximation,
+	// clearly not a fabricated history, and the best available given
+	// that data was never captured.
+	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'open'`,
+	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ`,
 	// Powers FindByFindingID -- "every artifact still affected by
 	// CVE-2024-X" -- without scanning every artifact's findings, which
 	// is exactly the query the old JSONB-blob schema couldn't answer
@@ -287,9 +305,23 @@ func (s *PostgresStore) migrateLegacyJSONBColumns(ctx context.Context) error {
 	return nil
 }
 
+// insertFinding defaults Status/FirstSeenAt when a caller hands it a
+// Finding that doesn't have them set -- true for every finding
+// migrateLegacyJSONBColumns copies in (json.Unmarshal'd from the old
+// schema, which never had these fields at all), and harmless for the
+// normal path (MergeFindings, in every other caller, always sets both
+// explicitly before a Finding ever reaches here).
 func insertFinding(ctx context.Context, q pgxIface, artifactID, bucket string, f Finding) error {
-	_, err := q.Exec(ctx, `INSERT INTO findings (artifact_id, bucket, finding_id, severity, title, source) VALUES ($1, $2, $3, $4, $5, $6)`,
-		artifactID, bucket, f.ID, f.Severity, f.Title, f.Source)
+	status := f.Status
+	if status == "" {
+		status = FindingStatusOpen
+	}
+	firstSeenAt := f.FirstSeenAt
+	if firstSeenAt.IsZero() {
+		firstSeenAt = time.Now().UTC()
+	}
+	_, err := q.Exec(ctx, `INSERT INTO findings (artifact_id, bucket, finding_id, severity, title, source, status, first_seen_at, resolved_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		artifactID, bucket, f.ID, f.Severity, f.Title, f.Source, status, firstSeenAt, f.ResolvedAt)
 	return err
 }
 
@@ -381,7 +413,7 @@ func loadStageHistory(ctx context.Context, q pgxIface, artifactID string) ([]Sta
 }
 
 func loadFindings(ctx context.Context, q pgxIface, artifactID, bucket string) ([]Finding, error) {
-	rows, err := q.Query(ctx, `SELECT finding_id, severity, title, source FROM findings WHERE artifact_id = $1 AND bucket = $2 ORDER BY id`, artifactID, bucket)
+	rows, err := q.Query(ctx, `SELECT finding_id, severity, title, source, status, first_seen_at, resolved_at FROM findings WHERE artifact_id = $1 AND bucket = $2 ORDER BY id`, artifactID, bucket)
 	if err != nil {
 		return nil, err
 	}
@@ -390,7 +422,7 @@ func loadFindings(ctx context.Context, q pgxIface, artifactID, bucket string) ([
 	out := make([]Finding, 0)
 	for rows.Next() {
 		var f Finding
-		if err := rows.Scan(&f.ID, &f.Severity, &f.Title, &f.Source); err != nil {
+		if err := rows.Scan(&f.ID, &f.Severity, &f.Title, &f.Source, &f.Status, &f.FirstSeenAt, &f.ResolvedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
@@ -494,14 +526,14 @@ func (s *PostgresStore) fillChildrenBatch(ctx context.Context, ids []string, byI
 	}
 	stageRows.Close()
 
-	findingRows, err := s.pool.Query(ctx, `SELECT artifact_id, bucket, finding_id, severity, title, source FROM findings WHERE artifact_id = ANY($1) ORDER BY artifact_id, id`, ids)
+	findingRows, err := s.pool.Query(ctx, `SELECT artifact_id, bucket, finding_id, severity, title, source, status, first_seen_at, resolved_at FROM findings WHERE artifact_id = ANY($1) ORDER BY artifact_id, id`, ids)
 	if err != nil {
 		return fmt.Errorf("batch load findings: %w", err)
 	}
 	for findingRows.Next() {
 		var artifactID, bucket string
 		var f Finding
-		if err := findingRows.Scan(&artifactID, &bucket, &f.ID, &f.Severity, &f.Title, &f.Source); err != nil {
+		if err := findingRows.Scan(&artifactID, &bucket, &f.ID, &f.Severity, &f.Title, &f.Source, &f.Status, &f.FirstSeenAt, &f.ResolvedAt); err != nil {
 			findingRows.Close()
 			return fmt.Errorf("scan findings row: %w", err)
 		}
