@@ -175,7 +175,7 @@ monitorApi:
     limits:
       cpu: "1"
       memory: "1Gi"
-      ephemeral-storage: "512Mi"
+      ephemeral-storage: "2048Mi"
 
 dashboard:
   image:
