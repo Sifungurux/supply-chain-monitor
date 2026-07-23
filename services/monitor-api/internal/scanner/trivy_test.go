@@ -1,7 +1,9 @@
 package scanner
 
 import (
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -145,5 +147,79 @@ func TestTrivyScanner_Bucket(t *testing.T) {
 	s := NewTrivyScanner("scm-registry:5000", TrivyDBConfig{})
 	if got := s.Bucket(); got != "cve" {
 		t.Errorf("Bucket() = %q, want %q", got, "cve")
+	}
+}
+
+// TestWrapTrivyScanError_ManifestUnknown confirms a "manifest unknown"
+// registry failure -- trivy's error when the requested tag/digest just
+// doesn't exist -- gets collapsed to one plain-English line instead of
+// surfacing trivy's full docker/containerd/podman/remote fallback dump
+// verbatim. The stderr fixture below is trimmed from a real failure
+// this project hit scanning a test image whose tag had been retagged
+// upstream (see docs/architecture.md, "Bulk-registering artifacts").
+func TestWrapTrivyScanError_ManifestUnknown(t *testing.T) {
+	rawStderr := `FATAL	Fatal error	run error: image scan error: scan error: unable to initialize a scan service: unable to initialize artifact: unable to initialize container image: unable to find the specified image "gcr.io/kubebuilder/kube-rbac-proxy:v0.13.1" in ["docker" "containerd" "podman" "remote"]: 4 errors occurred:
+	* docker error: unable to inspect the image (gcr.io/kubebuilder/kube-rbac-proxy:v0.13.1): failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory
+	* containerd error: containerd socket not found: /run/containerd/containerd.sock
+	* podman error: unable to initialize Podman client: no podman socket found: stat podman/podman.sock: no such file or directory
+	* remote error: GET https://gcr.io/v2/kubebuilder/kube-rbac-proxy/manifests/v0.13.1: MANIFEST_UNKNOWN: Failed to fetch "v0.13.1"
+`
+	err := wrapTrivyScanError("gcr.io/kubebuilder/kube-rbac-proxy:v0.13.1", errors.New("exit status 1"), rawStderr)
+	if err == nil {
+		t.Fatal("expected a non-nil error")
+	}
+
+	msg := err.Error()
+	if !strings.Contains(msg, "gcr.io/kubebuilder/kube-rbac-proxy:v0.13.1") {
+		t.Errorf("message %q should still name the ref that failed", msg)
+	}
+	if !strings.Contains(msg, "not found in the registry") {
+		t.Errorf("message %q should give the simplified explanation", msg)
+	}
+	// The whole point: none of trivy's own fallback-attempt noise (the
+	// docker/containerd/podman socket errors, which are expected and
+	// irrelevant in an isolated scan-worker Job with none of those
+	// runtimes present) should leak into the simplified message.
+	for _, noisy := range []string{"docker error", "containerd error", "podman error", "docker.sock", "4 errors occurred"} {
+		if strings.Contains(msg, noisy) {
+			t.Errorf("message %q still contains raw trivy noise %q, want it collapsed away", msg, noisy)
+		}
+	}
+}
+
+// TestWrapTrivyScanError_OtherFailuresKeepRawStderr confirms this only
+// special-cases "manifest unknown" -- every other kind of trivy failure
+// (a real bug, a genuinely broken environment, an unexpected new error
+// shape) still gets its raw stderr included, since collapsing an
+// unfamiliar failure down to a generic message would throw away
+// information nobody has decided yet is safe to discard.
+func TestWrapTrivyScanError_OtherFailuresKeepRawStderr(t *testing.T) {
+	rawStderr := "FATAL\tsome unrelated trivy failure that has nothing to do with a missing manifest\n"
+	err := wrapTrivyScanError("alpine:3.19", errors.New("exit status 1"), rawStderr)
+	if err == nil {
+		t.Fatal("expected a non-nil error")
+	}
+	if !strings.Contains(err.Error(), "some unrelated trivy failure") {
+		t.Errorf("message %q should still include the raw stderr for an unrecognized failure", err.Error())
+	}
+}
+
+// TestWrapTrivyScanError_UnsupportedArtifactTypeIsNotManifestUnknown
+// guards against over-matching: the AI-model-artifact media-type
+// mismatch this project hit previously (see docs/architecture.md's
+// Roadmap, "AI model artifact scanning") also comes from trivy's
+// "remote error" fallback line and shares some surrounding text, but
+// it is a different problem (an artifact trivy fundamentally can't
+// scan, not a missing tag) and must not get relabeled as "not found in
+// the registry" -- that would actively mislead whoever reads it into
+// thinking a retry with a corrected ref would help.
+func TestWrapTrivyScanError_UnsupportedArtifactTypeIsNotManifestUnknown(t *testing.T) {
+	rawStderr := `* remote error: unsupported artifact type "application/vnd.cncf.model.manifest.v1+json" for image "ai/gemma4:e4b"`
+	err := wrapTrivyScanError("ai/gemma4:e4b", errors.New("exit status 1"), rawStderr)
+	if strings.Contains(err.Error(), "not found in the registry") {
+		t.Errorf("message %q should not be relabeled as a missing manifest -- this is an unsupported media type, a different problem", err.Error())
+	}
+	if !strings.Contains(err.Error(), "unsupported artifact type") {
+		t.Errorf("message %q should keep the raw stderr for this unrecognized case", err.Error())
 	}
 }

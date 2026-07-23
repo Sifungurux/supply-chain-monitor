@@ -88,7 +88,7 @@
     { "ref": "gcr.io/etcd-development/etcd:v3.5.12", "type": "image" },
     { "ref": "gcr.io/cadvisor/cadvisor:v0.49.1", "type": "image" },
     { "ref": "gcr.io/google-samples/hello-app:1.0", "type": "image" },
-    { "ref": "gcr.io/kubebuilder/kube-rbac-proxy:v0.13.1", "type": "image" },
+    { "ref": "quay.io/brancz/kube-rbac-proxy:v0.19.1", "type": "image" },
     { "ref": "gcr.io/google-containers/echoserver:1.10", "type": "image" },
     { "ref": "public.ecr.aws/docker/library/nginx:latest", "type": "image" },
     { "ref": "public.ecr.aws/docker/library/redis:7.2", "type": "image" },

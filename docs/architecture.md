@@ -1626,6 +1626,43 @@ may eventually 404 or get retagged, which is itself a fine thing to
 exercise given `bulkCreateArtifacts`'s partial-failure behavior only
 covers registration, not the scan step that follows.
 
+**Fixed: a missing image tag produced an unreadable trivy error.**
+Scanning an artifact whose ref's tag no longer exists in its registry
+(mistyped, retagged, or removed upstream -- something the 100-image
+test batch in `testdata/bulk-test-images.json` hit for real, see
+"Bulk-registering artifacts" above) surfaced trivy's raw failure
+verbatim: three irrelevant docker/containerd/podman "socket not found"
+lines (expected noise -- an isolated scan-worker Job never has those
+runtimes, see `IsolatedTrivyScanner`'s own comment) ahead of the one
+line that actually mattered, `MANIFEST_UNKNOWN: Failed to fetch`,
+several sentences into a wall of text.
+
+`wrapTrivyScanError` (`internal/scanner/trivy.go`) now recognizes that
+specific case -- stderr containing both `MANIFEST_UNKNOWN` and `Failed
+to fetch` -- and returns a single plain-English line instead ("image
+tag or digest not found in the registry -- check that the ref is
+correct and the tag still exists"). Every other trivy failure keeps its
+raw stderr included, unchanged: an unfamiliar failure is exactly when
+the extra detail is worth keeping, so only this one common, well-
+understood, actionable case gets collapsed. `TestWrapTrivyScanError_OtherFailuresKeepRawStderr`
+covers that directly, and `TestWrapTrivyScanError_UnsupportedArtifactTypeIsNotManifestUnknown`
+specifically guards against over-matching: the AI-model media-type
+mismatch this project hit previously (`ai/gemma4:e4b`'s `unsupported
+artifact type`, see the Roadmap below) shares some surrounding "remote
+error" text but is a genuinely different problem -- a ref that exists
+but can't be scanned, not one that's missing -- and must not get
+relabeled as "not found," which would mislead whoever reads it into
+retrying with a corrected ref that was never the issue.
+
+This lives in `TrivyScanner.Scan` itself rather than in
+`IsolatedTrivyScanner`, even though the isolated path is what actually
+runs in production: `runScanWorker` (`main.go`) calls the exact same
+`TrivyScanner.Scan` code inside the scan-worker Job, and
+`IsolatedTrivyScanner.Scan` just forwards whatever error string comes
+back (`WorkerResult.Error`) unchanged -- so fixing the one shared
+function covers both the in-process and isolated paths with no
+duplicated logic.
+
 ## All services on Flux + Helm
 
 Every service in this project -- `registry`, `clamav`, `postgres`,

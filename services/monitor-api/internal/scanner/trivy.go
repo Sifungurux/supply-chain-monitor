@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -177,10 +178,36 @@ func (t *TrivyScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("trivy scan failed for %q: %w (%s)", ref, err, stderr.String())
+		return nil, wrapTrivyScanError(ref, err, stderr.String())
 	}
 
 	return parseTrivyVulnerabilities(stdout.Bytes())
+}
+
+// wrapTrivyScanError turns a failed trivy invocation into the error
+// Scan returns. Most failures get trivy's raw stderr included verbatim
+// -- an unfamiliar failure is exactly when the extra detail is worth
+// keeping, even at the cost of some noise -- but "manifest unknown"
+// (trivy's registry client couldn't find the requested tag/digest at
+// all) is common enough, and unhelpful enough in its raw form, to
+// special-case.
+//
+// The raw form is genuinely bad: trivy tries docker, containerd, podman,
+// and the remote registry in turn before giving up, so a single missing
+// tag prints three irrelevant "socket not found" lines (expected noise
+// in an isolated scan-worker Job, which deliberately has none of those
+// runtimes -- see IsolatedTrivyScanner's own comment) ahead of the one
+// line that actually matters. None of that plumbing detail helps
+// whoever's reading the error decide what to do next; "this ref doesn't
+// exist in the registry, go check it" does. This is a real, recurring
+// case in practice, not a hypothetical -- registries retag and remove
+// images over time (see docs/architecture.md, "Bulk-registering
+// artifacts" for a concrete example this project hit).
+func wrapTrivyScanError(ref string, err error, stderr string) error {
+	if strings.Contains(stderr, "MANIFEST_UNKNOWN") && strings.Contains(stderr, "Failed to fetch") {
+		return fmt.Errorf("trivy scan failed for %q: image tag or digest not found in the registry -- check that the ref is correct and the tag still exists (it may have been removed, retagged, or replaced upstream)", ref)
+	}
+	return fmt.Errorf("trivy scan failed for %q: %w (%s)", ref, err, stderr)
 }
 
 // cleanScanCache purges trivy's local image/SBOM analysis cache (the
