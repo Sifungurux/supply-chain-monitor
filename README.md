@@ -538,6 +538,44 @@ first `helm upgrade`/`flux reconcile` for postgres would time out with
 — see docs/architecture.md ("Why scm-postgres-backups needed a
 pre-install hook") if you hit that.
 
+**If `scm-postgres-backups` shows up stuck in `Terminating` after a
+`make deploy`:** this was a real bug (fixed in `pvc.yaml` — see
+docs/architecture.md, "Fixed: `scm-postgres-backups` was getting
+deleted and recreated on every single `make deploy`") where the PVC
+had no explicit `helm.sh/hook-delete-policy`, so it silently inherited
+Helm's destructive `before-hook-creation` default and got
+deleted-then-recreated on every upgrade — losing every backup on it,
+and hanging in `Terminating` if a pod (a recent backup CronJob run, or
+the primer Job) was still mounting it at that exact moment. **The live
+database itself (`scm-postgres-data`) is never touched by this — only
+the separate backup-copy PVC is at risk.** If you're on a chart version
+from before the fix, or you're currently looking at a stuck PVC:
+
+```bash
+# 1. Find whatever pod is still mounting it -- that's what's holding
+#    the kubernetes.io/pvc-protection finalizer open.
+kubectl get pods -n supply-chain-monitor -o json \
+  | jq -r '.items[] | select(.spec.volumes[]?.persistentVolumeClaim.claimName=="scm-postgres-backups") | .metadata.name'
+
+# 2. Delete that pod (a completed backup-CronJob pod or the primer
+#    Job's pod, almost always) so the finalizer can clear.
+kubectl delete pod -n supply-chain-monitor <pod-name>
+
+# 3. Before the PVC actually finishes disappearing, if you want a
+#    chance at recovering whatever backups were on it: find its
+#    PersistentVolume and flip its reclaim policy to Retain. Once the
+#    PVC (and then the PV) are gone with the default Delete policy, the
+#    underlying storage -- and the backup files on it -- are gone too;
+#    Retain keeps the PV (and its data) around in a Released state
+#    instead, for manual recovery later.
+PV=$(kubectl get pvc scm-postgres-backups -n supply-chain-monitor -o jsonpath='{.spec.volumeName}')
+kubectl patch pv "$PV" -p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'
+```
+
+Then pull the chart fix (`pvc.yaml`'s explicit `hook-delete-policy`) and
+redeploy — the next upgrade creates a fresh `scm-postgres-backups` PVC
+and leaves it alone from then on.
+
 ```bash
 make db-backup          # trigger an on-demand backup right now, don't wait for the schedule
 make db-backups-list    # see what's available

@@ -30,6 +30,27 @@ spec:
 # starts) and following it immediately with a tiny primer Job that
 # mounts it once is enough to trigger binding, regardless of which
 # provisioner/StorageClass is actually in play.
+#
+# Fixed: this PVC was getting silently deleted and recreated on every
+# single `helm upgrade` (i.e. every `make deploy`), wiping every backup
+# on it in the process. Cause: Helm's hook-delete-policy annotation
+# defaults to "before-hook-creation" when left unset -- meaning "delete
+# whatever this hook resource was on the previous release, then create
+# it fresh" -- and this PVC never set that annotation explicitly, so it
+# silently inherited that default. That's the right default for the
+# primer Job below (a Job should be replaced each run), but it's
+# actively dangerous for a PVC whose entire purpose is to persist data
+# *across* upgrades. Explicitly overriding it to "hook-failed" keeps
+# this a valid pre-install/pre-upgrade hook (so the ordering/binding
+# trick above still works) while making sure Helm only ever deletes it
+# if hook execution is considered to have failed -- which never happens
+# for a bare PVC create, since there's no async success/failure state
+# for Helm to poll the way there is for the primer Job. "resource-policy:
+# keep" is a second, independent safety net on top -- it tells Helm to
+# never delete this object outside the hook lifecycle either (e.g. if a
+# future refactor ever removes the hook annotations by accident, or
+# on `helm uninstall`), so a mistake here has to clear two independent
+# guards, not one, before it can take out backup data.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -38,6 +59,8 @@ metadata:
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": hook-failed
+    "helm.sh/resource-policy": keep
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:

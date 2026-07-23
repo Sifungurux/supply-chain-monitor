@@ -1168,6 +1168,61 @@ sidesteps the whole issue without assuming anything about which
 StorageClass/provisioner is actually in play, unlike hardcoding a
 different `volumeBindingMode` would have required.
 
+**Fixed: `scm-postgres-backups` was getting deleted and recreated on
+every single `make deploy`, taking every backup on it down with it.**
+Making the PVC itself a `pre-install,pre-upgrade` hook (just above)
+fixed the original binding problem, but introduced a worse one nobody
+noticed until backups started actually disappearing: neither
+`pvc.yaml` nor `trivy-db-cache-pvc.yaml` (the same pattern, added later
+for the isolated Trivy scanner's shared DB cache -- see "Isolating
+Trivy scanning") ever set a `helm.sh/hook-delete-policy` annotation.
+Left unset, Helm's hook system doesn't leave a hook resource alone by
+default -- it defaults to `before-hook-creation`, meaning "before
+creating this hook resource on this release, delete whatever instance
+of it the previous release left behind." That's exactly the right
+behavior for the primer Jobs sitting right next to these PVCs (a Job
+should be thrown away and replaced each run, which is why those
+already carry an explicit `before-hook-creation,hook-succeeded`
+policy) -- but it's actively destructive for a PVC whose entire reason
+to exist is persisting data *across* upgrades. Every `make deploy`
+(which pushes to git, Flux reconciles, and the HelmController runs the
+equivalent of `helm upgrade`) was silently deleting the real
+`scm-postgres-backups` PVC object and creating a brand-new, empty one
+in its place -- and if a pod happened to still be mounting the old one
+at that moment (a recent `scm-postgres-backup` CronJob run, or the
+primer Job's own pod lingering post-completion), the delete would hang
+in `Terminating` until that finalizer cleared, blocking the whole
+`flux reconcile helmrelease` call `make deploy` waits on.
+Fixed by explicitly setting `"helm.sh/hook-delete-policy": hook-failed`
+on both PVCs -- any explicit value overrides Helm's implicit
+`before-hook-creation` default, and `hook-failed` in practice never
+fires for a bare PVC create (there's no async success/failure state
+for Helm to poll the way there is for a Job), so this keeps the
+pre-install/pre-upgrade ordering trick intact while removing the
+destructive deletion entirely. `scm-postgres-backups` additionally
+gets `"helm.sh/resource-policy": keep`, a second, independent guard
+that stops Helm from deleting it outside the hook lifecycle too (e.g.
+`helm uninstall`, or a future refactor that drops the hook annotations
+by accident) -- deliberately not applied to the Trivy DB cache PVC,
+since that one holds a re-downloadable cache, not irreplaceable data,
+so only the hook-delete-policy fix was worth making there.
+The live database itself was never at risk from this bug --
+`scm-postgres-data` (the actual Postgres data PVC) has no hook
+annotations at all and was completely unaffected; only the *backup
+copies* on the separate `scm-postgres-backups` volume were being wiped
+on every deploy, and only the Trivy vulnerability DB *cache* (not any
+scan result) on the other PVC.
+If this already happened to a running cluster before this fix
+shipped: a PVC visibly stuck `Terminating` means the object hasn't
+finished deleting yet, which means its underlying `PersistentVolume`
+likely hasn't been reclaimed yet either (for `local-path`-style
+provisioners, the actual `rm -rf` of the on-disk data only happens
+*after* the PV is released, which only happens after the PVC fully
+clears) -- there may still be a narrow window to patch the PV's
+`persistentVolumeReclaimPolicy` to `Retain` before that finalizer
+clears, if the backup contents are worth recovering. See README's
+"Backing up and restoring Postgres" for the recovery commands.
+
 **Running monitor-api outside a Kubernetes pod.** Isolating the
 unpack+scan step (see above) came with a real, documented regression:
 `runAPIServer` started unconditionally calling

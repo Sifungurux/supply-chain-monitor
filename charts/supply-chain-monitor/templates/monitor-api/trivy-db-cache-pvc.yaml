@@ -24,6 +24,17 @@
 # hook-weight -5 (same as scm-postgres-backups) so this exists before
 # the primer Job (-4) tries to mount it.
 #
+# hook-delete-policy: hook-failed, explicitly -- same fix, same reason,
+# as templates/postgres/pvc.yaml's scm-postgres-backups PVC (see that
+# file's comment for the full "why"). Left unset, this PVC would
+# silently inherit Helm's "before-hook-creation" default and get
+# deleted-then-recreated on every single upgrade, throwing away the
+# warm DB cache and forcing every scan-worker Job after a `make deploy`
+# to wait on trivy-db-cache-primer-job.yaml re-downloading the whole
+# vulnerability DB from scratch -- purely a performance/robustness hit
+# here rather than real data loss (unlike the postgres backups case),
+# but the same bug and the same one-line fix.
+#
 # ReadWriteOnce, not ReadWriteMany: this project's dev clusters
 # (colima/k3d) are single-node, so every pod that mounts this PVC --
 # the primer Job, the refresh CronJob, and however many concurrent
@@ -40,6 +51,7 @@ metadata:
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": hook-failed
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:
