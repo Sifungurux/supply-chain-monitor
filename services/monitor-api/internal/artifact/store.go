@@ -26,6 +26,13 @@ type Store interface {
 	// history into their own tables"). MemStore answers this with a
 	// linear scan; PostgresStore uses the findings.finding_id index.
 	FindByFindingID(findingID string) ([]*Artifact, error)
+	// Delete permanently removes an artifact and everything recorded
+	// against it (stage history, findings, scan errors) -- there is no
+	// undo and no soft-delete/archive semantics (see
+	// docs/architecture.md, "Deleting an artifact"). Returns an error
+	// if id doesn't exist, the same "not found" convention Get/Update
+	// already use.
+	Delete(id string) error
 }
 
 // MemStore is a thread-safe, in-memory Store implementation.
@@ -100,6 +107,17 @@ func (s *MemStore) Update(id string, mutate func(*Artifact)) (*Artifact, error) 
 	mutate(a)
 	a.UpdatedAt = time.Now().UTC()
 	return a, nil
+}
+
+func (s *MemStore) Delete(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.data[id]; !ok {
+		return fmt.Errorf("artifact %q not found", id)
+	}
+	delete(s.data, id)
+	return nil
 }
 
 func (s *MemStore) FindByFindingID(findingID string) ([]*Artifact, error) {

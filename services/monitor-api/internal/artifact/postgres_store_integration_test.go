@@ -130,6 +130,84 @@ func TestPostgresStore_CreateGetListUpdate(t *testing.T) {
 	}
 }
 
+// TestPostgresStore_Delete confirms Delete actually removes the
+// artifacts row AND that the ON DELETE CASCADE foreign keys on
+// stage_history/findings/scan_errors do their job -- not just that
+// Get/List stop seeing the artifact (which cascading alone wouldn't
+// prove), but that no orphaned child rows are left behind either. Uses
+// its own raw pgxpool connection (same pattern
+// TestPostgresStore_MigratesLegacyJSONBSchema uses) to query those
+// child tables directly, since Store's own interface has no way to ask
+// "how many rows exist for this artifact_id."
+func TestPostgresStore_Delete(t *testing.T) {
+	dsn := testDSN(t)
+	s := newTestPostgresStore(t)
+
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect admin pool: %v", err)
+	}
+	defer admin.Close()
+
+	a, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := s.Update(a.ID, func(art *artifact.Artifact) {
+		art.CVEFindings = append(art.CVEFindings, artifact.Finding{ID: "CVE-2024-1", Source: "trivy"})
+		art.StageHistory = append(art.StageHistory, artifact.StageEvent{Stage: "build", Timestamp: time.Now().UTC()})
+		art.LastScanErrors = append(art.LastScanErrors, "clamav: connection refused")
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	countRows := func(table string) int {
+		t.Helper()
+		var n int
+		if err := admin.QueryRow(ctx, "SELECT count(*) FROM "+table+" WHERE artifact_id = $1", a.ID).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		return n
+	}
+
+	if countRows("findings") == 0 || countRows("stage_history") == 0 || countRows("scan_errors") == 0 {
+		t.Fatal("expected child rows to exist before delete (test setup didn't work)")
+	}
+
+	if err := s.Delete(a.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if _, err := s.Get(a.ID); err == nil {
+		t.Fatal("expected Get to fail for a deleted artifact")
+	}
+
+	list, err := s.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, item := range list {
+		if item.ID == a.ID {
+			t.Fatalf("List still includes the deleted artifact: %+v", item)
+		}
+	}
+
+	for _, table := range []string{"findings", "stage_history", "scan_errors"} {
+		if n := countRows(table); n != 0 {
+			t.Fatalf("expected ON DELETE CASCADE to remove every %s row for the deleted artifact, found %d left behind", table, n)
+		}
+	}
+
+	if err := s.Delete("does-not-exist"); err == nil {
+		t.Fatal("expected an error deleting a missing id")
+	}
+
+	if err := s.Delete(a.ID); err == nil {
+		t.Fatal("expected an error deleting the same id twice")
+	}
+}
+
 // TestPostgresStore_UpdateSerializesConcurrentWritesToSameArtifact
 // exercises the one behavior MemStore's mutex gave for free and
 // PostgresStore has to earn deliberately: two goroutines racing to

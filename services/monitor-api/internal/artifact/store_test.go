@@ -92,6 +92,35 @@ func TestMemStore_FindByFindingID(t *testing.T) {
 	}
 }
 
+func TestMemStore_Delete(t *testing.T) {
+	s := artifact.NewMemStore()
+
+	a, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := s.Delete(a.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if _, err := s.Get(a.ID); err == nil {
+		t.Fatal("expected Get to fail for a deleted artifact")
+	}
+
+	if list, err := s.List(); err != nil || len(list) != 0 {
+		t.Fatalf("expected an empty store after delete, got %d (err=%v)", len(list), err)
+	}
+
+	if err := s.Delete("does-not-exist"); err == nil {
+		t.Fatal("expected an error deleting a missing id")
+	}
+
+	if err := s.Delete(a.ID); err == nil {
+		t.Fatal("expected an error deleting the same id twice")
+	}
+}
+
 func TestTypeValid(t *testing.T) {
 	valid := []artifact.Type{artifact.TypeImage, artifact.TypeFile, artifact.TypeSBOM, artifact.TypeSARIF}
 	for _, ty := range valid {

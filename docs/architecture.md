@@ -1980,6 +1980,28 @@ for real.
   entry.
 - ~~**SBOM trivy scanning still runs in-process**~~ **Fixed**: see
   "Fixed: SBOM trivy scanning still ran in-process" below.
+- **AI model artifact scanning (possible future feature, not
+  prioritized yet)**: `image`-typed refs that are actually AI models
+  packaged as OCI artifacts (e.g. Docker Model Runner's `ai/*` naming
+  convention, artifactType `application/vnd.cncf.model.manifest.v1+json`)
+  fail trivy immediately with "unsupported artifact type" -- trivy's
+  image scanner only understands container image manifests. A
+  prototype shim wiring ProtectAI's `modelscan` in as an additional
+  `ExternalScanner` (see "Pluggable external scanners" above) already
+  exists at `cluster/modelscan-to-findings.sh`, tested against faked
+  `oras`/`modelscan` binaries for its exit-code handling, but isn't
+  wired into any chart values -- picking this back up means writing the
+  derived-image Dockerfile, confirming `modelscan`'s actual JSON output
+  schema against a live scan (not just its documented severity levels),
+  and deciding whether trivy should keep being attempted on these refs
+  at all (it will keep failing regardless -- harmless on its own now
+  that fix-detection is gated per bucket, just noisy) or whether AI
+  model artifacts deserve their own artifact type instead. Also worth
+  knowing going in: `modelscan` only understands Pickle/H5/SavedModel/
+  Keras-V3 model files, not the safetensors/GGUF formats most modern
+  LLM weights actually ship as (which are considered safer against
+  deserialization attacks by design already) -- so it won't add
+  meaningful coverage for every model artifact, just Pickle-family ones.
 - **trivy-db-refresh-cronjob writes to the same PVC isolated
   scan-worker Jobs read from concurrently**: `concurrencyPolicy: Forbid`
   keeps at most one refresh running at a time, but there's no

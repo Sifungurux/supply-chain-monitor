@@ -86,6 +86,24 @@ func (h *handler) getArtifact(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a)
 }
 
+// deleteArtifact permanently removes an artifact -- its stage history,
+// findings, and scan errors go with it (PostgresStore relies on
+// ON DELETE CASCADE for the child tables; MemStore just drops the map
+// entry). There is no undo and no soft-delete/archive semantics -- see
+// docs/architecture.md ("Deleting an artifact") for that reasoning.
+// Returns 404 for an id that doesn't exist, the same convention
+// getArtifact/updateStage already use, rather than treating "already
+// gone" as a successful no-op the way some DELETE APIs do -- consistent
+// with every other id-scoped endpoint in this file.
+func (h *handler) deleteArtifact(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.store.Delete(id); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "id": id})
+}
+
 // findByFindingID answers "every artifact still affected by finding
 // X" -- the query internal/artifact's normalized findings table exists
 // to make possible (see docs/architecture.md, "Normalizing findings

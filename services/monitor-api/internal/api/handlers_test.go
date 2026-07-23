@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -197,6 +198,75 @@ func TestListAndGetArtifact(t *testing.T) {
 	rec = doJSON(t, h, http.MethodGet, "/api/v1/artifacts/does-not-exist", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestDeleteArtifact_Success confirms a successful delete: 200 with a
+// small confirmation body, the artifact then 404s on Get, and it's
+// gone from List too -- not just "the row still exists but is
+// hidden," an actual removal.
+func TestDeleteArtifact_Success(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	rec := doJSON(t, h, http.MethodDelete, "/api/v1/artifacts/"+created.ID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["status"] != "deleted" || body["id"] != created.ID {
+		t.Fatalf("response body = %+v, want status=deleted and id=%q", body, created.ID)
+	}
+
+	rec = doJSON(t, h, http.MethodGet, "/api/v1/artifacts/"+created.ID, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("Get after delete: status = %d, want 404", rec.Code)
+	}
+
+	rec = doJSON(t, h, http.MethodGet, "/api/v1/artifacts", nil)
+	var list []artifact.Artifact
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	for _, a := range list {
+		if a.ID == created.ID {
+			t.Fatalf("List after delete still includes the deleted artifact: %+v", a)
+		}
+	}
+}
+
+// TestDeleteArtifact_MissingIDReturns404 matches getArtifact's own
+// convention for an unknown id -- a DELETE on something that was never
+// there (or already deleted) is a 404, not a successful no-op.
+func TestDeleteArtifact_MissingIDReturns404(t *testing.T) {
+	h, _ := newTestRouter(scanner.Registry{})
+
+	rec := doJSON(t, h, http.MethodDelete, "/api/v1/artifacts/does-not-exist", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestDeleteArtifact_DeletingTwiceReturns404TheSecondTime guards
+// against a regression where Delete might treat "already gone" as
+// success on a second call (some DELETE APIs are deliberately
+// idempotent that way -- this one isn't, matching every other
+// id-scoped endpoint's 404-on-unknown-id behavior).
+func TestDeleteArtifact_DeletingTwiceReturns404TheSecondTime(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	rec := doJSON(t, h, http.MethodDelete, "/api/v1/artifacts/"+created.ID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first delete: status = %d, want 200", rec.Code)
+	}
+
+	rec = doJSON(t, h, http.MethodDelete, "/api/v1/artifacts/"+created.ID, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("second delete: status = %d, want 404", rec.Code)
 	}
 }
 
@@ -931,6 +1001,13 @@ func TestAuth_OptionsPreflightExempt(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204 (no Authorization header sent)", rec.Code)
+	}
+	// Regression check: DELETE must be in the preflight's allowed
+	// methods, or a browser's real DELETE /api/v1/artifacts/{id} call
+	// from the dashboard would fail preflight before it's even
+	// attempted -- the same reasoning GET/POST are already listed here.
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "DELETE") {
+		t.Fatalf("Access-Control-Allow-Methods = %q, want it to include DELETE", got)
 	}
 }
 

@@ -34,6 +34,7 @@ func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner
 	mux.HandleFunc("POST /api/v1/artifacts", h.createArtifact)
 	mux.HandleFunc("GET /api/v1/artifacts", h.listArtifacts)
 	mux.HandleFunc("GET /api/v1/artifacts/{id}", h.getArtifact)
+	mux.HandleFunc("DELETE /api/v1/artifacts/{id}", h.deleteArtifact)
 	mux.HandleFunc("GET /api/v1/findings/{findingID}/artifacts", h.findByFindingID)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/scan", h.scanArtifact)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/stage", h.updateStage)
@@ -97,7 +98,7 @@ func withAuth(next http.Handler, apiKey string) http.Handler {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

@@ -698,6 +698,34 @@ func (s *PostgresStore) Update(id string, mutate func(*Artifact)) (*Artifact, er
 	return a, nil
 }
 
+// Delete permanently removes an artifact. Unlike Update, this doesn't
+// need a transaction or a FOR UPDATE row lock: a single DELETE
+// statement is already atomic, and there's no read-then-write race to
+// protect against the way Update has (Update loads a whole Artifact
+// into Go memory, mutates it, then writes it back -- genuinely
+// racy without a lock; Delete just removes a row outright). The child
+// tables (stage_history, findings, scan_errors) all declare
+// `artifact_id ... REFERENCES artifacts(id) ON DELETE CASCADE` (see
+// schemaStatements above), so deleting the one artifacts row is
+// sufficient -- Postgres removes every dependent row itself, in the
+// same statement's transaction, with no separate DELETE needed here
+// for each child table the way Update's re-insert dance requires.
+//
+// RowsAffected() (rather than a separate SELECT first) is what
+// distinguishes "deleted" from "didn't exist" -- one round trip instead
+// of two, and no race between a check and the delete itself.
+func (s *PostgresStore) Delete(id string) error {
+	ctx := context.Background()
+	tag, err := s.pool.Exec(ctx, `DELETE FROM artifacts WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete artifact: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("artifact %q not found", id)
+	}
+	return nil
+}
+
 // FindByFindingID answers "every artifact still affected by finding X"
 // via the findings.finding_id index -- the query the old single-table
 // JSONB schema could only answer by scanning and JSON-decoding every
