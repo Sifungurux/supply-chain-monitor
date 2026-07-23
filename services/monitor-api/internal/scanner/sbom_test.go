@@ -68,3 +68,12 @@ func TestSBOMScanner_Args(t *testing.T) {
 		})
 	}
 }
+
+// TestSBOMScanner_Bucket confirms SBOMScanner declares BucketAffinity
+// as "cve", same as TrivyScanner (both share parseTrivyVulnerabilities).
+func TestSBOMScanner_Bucket(t *testing.T) {
+	s := NewSBOMScanner(TrivyDBConfig{})
+	if got := s.Bucket(); got != "cve" {
+		t.Errorf("Bucket() = %q, want %q", got, "cve")
+	}
+}

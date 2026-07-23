@@ -175,3 +175,13 @@ func TestIsolatedUnpackerScanner_Scan_TimesOutIfNeverFinishes(t *testing.T) {
 		t.Fatal("expected cleanup even after a timeout -- cleanup must use its own context, not the expired one")
 	}
 }
+
+// TestIsolatedUnpackerScanner_Bucket confirms IsolatedUnpackerScanner
+// declares BucketAffinity as "malware" -- it just runs UnpackerScanner's
+// own code (always Source: "clamav") inside a Job.
+func TestIsolatedUnpackerScanner_Bucket(t *testing.T) {
+	s := newScanner(t, &fakeJobClient{namespace: "test-ns"})
+	if got := s.Bucket(); got != "malware" {
+		t.Errorf("Bucket() = %q, want %q", got, "malware")
+	}
+}

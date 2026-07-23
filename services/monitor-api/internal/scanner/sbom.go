@@ -28,6 +28,11 @@ func NewSBOMScanner(db TrivyDBConfig) *SBOMScanner {
 	return &SBOMScanner{db: db}
 }
 
+// Bucket implements BucketAffinity: parseTrivyVulnerabilities (shared
+// with TrivyScanner) always sets Source: "trivy" -- classifyBucket's
+// default case, "cve".
+func (s *SBOMScanner) Bucket() string { return "cve" }
+
 // args builds the trivy CLI invocation. Split out from Scan for the
 // same reason TrivyScanner.args is: unit-testable without running
 // trivy (see sbom_test.go).

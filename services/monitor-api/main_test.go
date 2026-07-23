@@ -57,6 +57,64 @@ func TestBuildPostgresDSN(t *testing.T) {
 			t.Fatalf("password was not escaped in dsn: %q", got)
 		}
 	})
+
+	t.Run("pool settings are omitted by default (pgxpool's own default applies)", func(t *testing.T) {
+		t.Setenv("POSTGRES_DSN", "")
+		t.Setenv("POSTGRES_HOST", "scm-postgres.supply-chain-monitor.svc.cluster.local")
+		t.Setenv("POSTGRES_PORT", "5432")
+		t.Setenv("POSTGRES_USER", "monitor_api")
+		t.Setenv("POSTGRES_PASSWORD", "s3cret")
+		t.Setenv("POSTGRES_DB", "monitor_api")
+		t.Setenv("POSTGRES_SSLMODE", "disable")
+		t.Setenv("POSTGRES_POOL_MAX_CONNS", "")
+		t.Setenv("POSTGRES_POOL_MIN_CONNS", "")
+
+		got := buildPostgresDSN()
+		want := "postgres://monitor_api:s3cret@scm-postgres.supply-chain-monitor.svc.cluster.local:5432/monitor_api?sslmode=disable"
+		if got != want {
+			t.Fatalf("dsn = %q, want %q (pool settings unset should leave the dsn unchanged from before pooling was configurable)", got, want)
+		}
+	})
+
+	t.Run("pool settings are appended as query params when configured", func(t *testing.T) {
+		t.Setenv("POSTGRES_DSN", "")
+		t.Setenv("POSTGRES_HOST", "localhost")
+		t.Setenv("POSTGRES_PORT", "5432")
+		t.Setenv("POSTGRES_USER", "monitor_api")
+		t.Setenv("POSTGRES_PASSWORD", "s3cret")
+		t.Setenv("POSTGRES_DB", "monitor_api")
+		t.Setenv("POSTGRES_SSLMODE", "disable")
+		t.Setenv("POSTGRES_POOL_MAX_CONNS", "10")
+		t.Setenv("POSTGRES_POOL_MIN_CONNS", "2")
+
+		got := buildPostgresDSN()
+		if !strings.Contains(got, "pool_max_conns=10") {
+			t.Errorf("dsn = %q, want it to contain pool_max_conns=10", got)
+		}
+		if !strings.Contains(got, "pool_min_conns=2") {
+			t.Errorf("dsn = %q, want it to contain pool_min_conns=2", got)
+		}
+	})
+
+	t.Run("only max is set: min is omitted, not defaulted to something", func(t *testing.T) {
+		t.Setenv("POSTGRES_DSN", "")
+		t.Setenv("POSTGRES_HOST", "localhost")
+		t.Setenv("POSTGRES_PORT", "5432")
+		t.Setenv("POSTGRES_USER", "monitor_api")
+		t.Setenv("POSTGRES_PASSWORD", "s3cret")
+		t.Setenv("POSTGRES_DB", "monitor_api")
+		t.Setenv("POSTGRES_SSLMODE", "disable")
+		t.Setenv("POSTGRES_POOL_MAX_CONNS", "10")
+		t.Setenv("POSTGRES_POOL_MIN_CONNS", "")
+
+		got := buildPostgresDSN()
+		if !strings.Contains(got, "pool_max_conns=10") {
+			t.Errorf("dsn = %q, want it to contain pool_max_conns=10", got)
+		}
+		if strings.Contains(got, "pool_min_conns") {
+			t.Errorf("dsn = %q, want no pool_min_conns param when POSTGRES_POOL_MIN_CONNS is unset", got)
+		}
+	})
 }
 
 // namedScanner is a trivial Scanner double used only so this test can
@@ -103,6 +161,29 @@ func TestBuildImageScanners(t *testing.T) {
 			if s == scanner.Scanner(isolated) || s == scanner.Scanner(trivyIsolated) {
 				t.Fatal("an isolated scanner leaked into the in-process scanner list")
 			}
+		}
+	})
+}
+
+// TestBuildSBOMScanners is buildImageScanners' own test, mirrored for
+// buildSBOMScanners (see docs/architecture.md, "Isolating SBOM trivy
+// scanning") -- the same DISABLE_SCAN_ISOLATION choice, just for the
+// single sbom-type scanner instead of image's two.
+func TestBuildSBOMScanners(t *testing.T) {
+	inProcess := &namedScanner{"sbom-in-process"}
+	isolated := &namedScanner{"sbom-isolated"}
+
+	t.Run("isolation enabled (default): uses the isolated scanner", func(t *testing.T) {
+		got := buildSBOMScanners(false, inProcess, isolated)
+		if len(got) != 1 || got[0] != scanner.Scanner(isolated) {
+			t.Fatalf("scanners = %+v, want [sbom-isolated]", got)
+		}
+	})
+
+	t.Run("DISABLE_SCAN_ISOLATION=true: uses the in-process scanner instead", func(t *testing.T) {
+		got := buildSBOMScanners(true, inProcess, isolated)
+		if len(got) != 1 || got[0] != scanner.Scanner(inProcess) {
+			t.Fatalf("scanners = %+v, want [sbom-in-process]", got)
 		}
 	})
 }

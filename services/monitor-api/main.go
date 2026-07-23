@@ -50,6 +50,18 @@ func getenvInt(key string, fallback int) int {
 	return n
 }
 
+func getenvFloat(key string, fallback float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fallback
+	}
+	return f
+}
+
 // buildPostgresDSN assembles a "postgres://..." connection string from
 // individual POSTGRES_* env vars. POSTGRES_DSN, if set, wins outright --
 // an escape hatch for anyone who wants to hand a full connection string
@@ -67,12 +79,33 @@ func buildPostgresDSN() string {
 	db := getenv("POSTGRES_DB", "monitor_api")
 	sslmode := getenv("POSTGRES_SSLMODE", "disable")
 
+	query := "sslmode=" + sslmode
+
+	// pgxpool honors pool_max_conns/pool_min_conns as DSN query params
+	// (see NewPostgresStore, which just hands this string straight to
+	// pgxpool.New) -- left unset by default (0) so anyone running this
+	// binary directly (README, "Running monitor-api outside a
+	// Kubernetes pod") gets pgxpool's own untouched default (currently
+	// max(4, runtime.NumCPU()*4) max conns, 0 min conns), same as
+	// before this existed. The chart (values.yaml's
+	// monitorApi.postgres.pool) sets real, deliberate values for the
+	// in-cluster deployment instead of leaving them at that CPU-derived
+	// default, which has no relationship at all to Postgres's own
+	// max_connections limit or to how many other things (other
+	// monitor-api replicas, if this ever scales beyond one) share it.
+	if maxConns := getenvInt("POSTGRES_POOL_MAX_CONNS", 0); maxConns > 0 {
+		query += fmt.Sprintf("&pool_max_conns=%d", maxConns)
+	}
+	if minConns := getenvInt("POSTGRES_POOL_MIN_CONNS", 0); minConns > 0 {
+		query += fmt.Sprintf("&pool_min_conns=%d", minConns)
+	}
+
 	u := &url.URL{
 		Scheme:   "postgres",
 		User:     url.UserPassword(user, pass),
 		Host:     fmt.Sprintf("%s:%s", host, port),
 		Path:     "/" + db,
-		RawQuery: "sslmode=" + sslmode,
+		RawQuery: query,
 	}
 	return u.String()
 }
@@ -182,7 +215,22 @@ func runScanWorker() {
 		if trivyMode == "image" {
 			findings, scanErr = scanner.NewTrivyScanner("", trivyDB).Scan(ctx, ref)
 		} else {
-			findings, scanErr = scanner.NewSBOMScanner(trivyDB).Scan(ctx, ref)
+			// sbom mode: ref may be an OCI registry reference (scm-registry
+			// by default), not a path already inside this pod -- unlike
+			// "image" mode, where trivy resolves ref itself, this Job has
+			// no access to whatever monitor-api's own pod might have
+			// already fetched (different pod, different filesystem), so
+			// it fetches its own copy first via the same RegistryFetcher
+			// the in-process path uses (internal/scanner/fetch.go). See
+			// docs/architecture.md ("Isolating SBOM trivy scanning").
+			fetcher := scanner.NewRegistryFetcher(getenvBool("FETCH_PLAIN_HTTP", true))
+			path, cleanup, fetchErr := fetcher.Fetch(ctx, ref)
+			defer cleanup()
+			if fetchErr != nil {
+				scanErr = fmt.Errorf("fetch sbom artifact %q: %w", ref, fetchErr)
+			} else {
+				findings, scanErr = scanner.NewSBOMScanner(trivyDB).Scan(ctx, path)
+			}
 		}
 	default:
 		clamAddr := getenv("CLAMAV_ADDR", "")
@@ -224,6 +272,19 @@ func buildImageScanners(disableScanIsolation bool, trivyInProcess, trivyIsolated
 		return []scanner.Scanner{trivyInProcess, inProcessUnpacker}
 	}
 	return []scanner.Scanner{trivyIsolated, isolatedUnpacker}
+}
+
+// buildSBOMScanners picks the sbom artifact type's single scanner the
+// same way buildImageScanners picks image's two: the isolated,
+// Kubernetes-Job-per-scan path by default, or the in-process
+// FetchingScanner+SBOMScanner fallback under DISABLE_SCAN_ISOLATION.
+// Split out for the same reason buildImageScanners is: unit-testable
+// (main_test.go) without needing a real Kubernetes API client.
+func buildSBOMScanners(disableScanIsolation bool, inProcess, isolated scanner.Scanner) []scanner.Scanner {
+	if disableScanIsolation {
+		return []scanner.Scanner{inProcess}
+	}
+	return []scanner.Scanner{isolated}
 }
 
 // registerExternalScanners adds each operator-configured external
@@ -374,6 +435,7 @@ func runAPIServer() {
 
 	var isolatedUnpacker scanner.Scanner
 	var isolatedTrivyImage scanner.Scanner
+	var isolatedTrivySBOM scanner.Scanner
 	if !disableScanIsolation {
 		k8sClient, err := k8sjob.NewInClusterClient()
 		if err != nil {
@@ -399,8 +461,21 @@ func runAPIServer() {
 			CacheClaimName: getenv("TRIVY_CACHE_CLAIM", "scm-trivy-db-cache"),
 			CacheMountPath: getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
 		})
+		// Same again for sbom-type artifacts (see docs/architecture.md,
+		// "Isolating SBOM trivy scanning") -- FetchPlainHTTP is set here
+		// (unlike isolatedTrivyImage above) because this Job has to fetch
+		// the SBOM document itself before scanning it; see
+		// IsolatedTrivyConfig.FetchPlainHTTP's own comment and
+		// runScanWorker's "sbom" case for where that actually happens.
+		isolatedTrivySBOM = scanner.NewIsolatedTrivyScanner(k8sClient, scanner.IsolatedTrivyConfig{
+			Image:          workerImage,
+			SubCommand:     "sbom",
+			CacheClaimName: getenv("TRIVY_CACHE_CLAIM", "scm-trivy-db-cache"),
+			CacheMountPath: getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
+			FetchPlainHTTP: fetchPlainHTTP,
+		})
 	} else {
-		log.Printf("DISABLE_SCAN_ISOLATION=true: image malware scanning and trivy CVE scanning will both run in-process, not in isolated Jobs -- see README, \"Running monitor-api outside a Kubernetes pod\"")
+		log.Printf("DISABLE_SCAN_ISOLATION=true: image malware scanning, trivy CVE scanning, and sbom trivy scanning will all run in-process, not in isolated Jobs -- see README, \"Running monitor-api outside a Kubernetes pod\"")
 	}
 
 	scanners := scanner.Registry{
@@ -412,21 +487,16 @@ func runAPIServer() {
 		artifact.TypeFile: {
 			scanner.NewFetchingScanner(fetcher, scanner.NewClamAVScanner(clamAddr)),
 		},
-		// trivy sbom shares the same air-gapped DB-mirror config as
-		// the image scanner above -- see internal/scanner/sbom.go.
-		// Deliberately still in-process, unlike TypeImage's trivy scan:
-		// FetchingScanner already pulls the SBOM into a local file
-		// inside *this* pod before Scan runs, so isolating it into a
-		// separate scan-worker Job would need that Job to independently
-		// re-fetch the file itself (a local path in this pod isn't
-		// visible to a different pod). SBOM inputs are also small text
-		// documents, not full container images, so the eviction-risk
-		// motivation for isolating TypeImage's scan barely applies here.
-		// IsolatedTrivyScanner still supports SubCommand: "sbom" for
-		// when this gets revisited -- see docs/architecture.md's Roadmap.
-		artifact.TypeSBOM: {
-			scanner.NewFetchingScanner(fetcher, scanner.NewSBOMScanner(trivyDB)),
-		},
+		// trivy sbom shares the same air-gapped DB-mirror config as the
+		// image scanner above -- see internal/scanner/sbom.go. Isolated
+		// into its own scan-worker Job by default now too (see
+		// docs/architecture.md, "Isolating SBOM trivy scanning"): that
+		// Job fetches its own copy of the SBOM (runScanWorker's "sbom"
+		// case) rather than relying on a local path only this pod could
+		// see, exactly mirroring how the in-process fallback below
+		// (FetchingScanner+SBOMScanner, used under
+		// DISABLE_SCAN_ISOLATION) already fetches it itself.
+		artifact.TypeSBOM: buildSBOMScanners(disableScanIsolation, scanner.NewFetchingScanner(fetcher, scanner.NewSBOMScanner(trivyDB)), isolatedTrivySBOM),
 		// SARIF is parsed, not re-scanned -- see internal/scanner/sarif.go.
 		artifact.TypeSARIF: {
 			scanner.NewFetchingScanner(fetcher, scanner.NewSARIFScanner()),
@@ -448,7 +518,16 @@ func runAPIServer() {
 		}
 	}
 
-	router := api.NewRouter(store, stageTracker, scanners, apiKey)
+	// Per-key request throttling -- see internal/api/ratelimit.go and
+	// router.go's withRateLimit. RATE_LIMIT_RPS <= 0 (the default, 0)
+	// disables it outright, since a lot of deployments (small clusters,
+	// local dev, a single trusted CI caller) have no real need for this
+	// and it shouldn't surprise anyone by throttling requests they never
+	// asked to be throttled.
+	rateLimitRPS := getenvFloat("RATE_LIMIT_RPS", 0)
+	rateLimitBurst := getenvFloat("RATE_LIMIT_BURST", 0)
+
+	router := api.NewRouter(store, stageTracker, scanners, apiKey, rateLimitRPS, rateLimitBurst)
 
 	srv := &http.Server{
 		Addr:         listenAddr,

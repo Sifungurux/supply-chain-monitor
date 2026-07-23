@@ -452,6 +452,18 @@ the fuller reasoning, including why trivy's *separate* scan-cache
 (a different thing from the DB, and NOT safe to share the same way)
 is kept in-memory per Job instead (`--cache-backend memory`) rather
 than on that same PVC.
+
+**`sbom` artifacts are scanned in an isolated Job too, the same way.**
+`IsolatedTrivyScanner` (`SubCommand: "sbom"`) covers this now, governed
+by the same `DISABLE_SCAN_ISOLATION` flag as `image` above — no
+separate switch. The one thing this Job has to do that `image`'s
+doesn't: an `sbom` artifact's ref may be an OCI registry reference
+rather than a path already on disk, and a scan-worker Job's pod can't
+see whatever monitor-api's own pod might have already fetched, so it
+fetches its own copy first (the same `oras pull`-backed fetch
+`FetchingScanner` already does in-process). See docs/architecture.md
+("Fixed: SBOM trivy scanning still ran in-process") for the full
+reasoning.
 `sbom`-type artifacts' trivy scan is **not** isolated yet — it still
 runs in-process, since the SBOM file it scans is already fetched onto
 monitor-api's own local filesystem by the time `Scan` runs (see
@@ -573,6 +585,35 @@ the raw ref, since an image/CVE scanner is expected to resolve it
 itself, same as trivy. See docs/architecture.md ("Pluggable external
 scanners") for the full design.
 
+### Rate limiting
+
+`monitorApi.rateLimit` in `charts/supply-chain-monitor/values.yaml`
+throttles requests per API key, so one misbehaving or compromised
+caller can't overwhelm the scan pipeline or database:
+
+```yaml
+monitorApi:
+  rateLimit:
+    requestsPerSecond: 20
+    burst: 40
+```
+
+`requestsPerSecond: 0` (the default) disables it entirely. `/healthz`
+is always exempt, so liveness/readiness probes are never affected.
+Since every caller currently shares one `API_KEY` (see "Authentication"
+below), this is effectively one global limit rather than per-client
+until per-client keys exist — see docs/architecture.md ("Fixed: nothing
+throttled request volume per API key").
+
+### Scaling ClamAV
+
+`clamav.replicas` in `charts/supply-chain-monitor/values.yaml` (default
+`1`) controls how many ClamAV pods run behind `scm-clamav`'s Service.
+Raise it if malware scans start queuing behind clamd connections faster
+than one instance keeps up — each pod freshclams its own DB
+independently (no shared storage), so this scales cleanly with no
+other change needed.
+
 ## Database
 
 Artifacts, findings, and stage history are stored in Postgres
@@ -592,6 +633,12 @@ full connection string override if you'd rather set one directly.
 ```bash
 make db-shell   # opens a psql shell in the scm-postgres pod
 ```
+
+Connection pool size is set via `monitorApi.postgres.pool.maxConns`/
+`.minConns` in values.yaml (defaults `10`/`2`) rather than left at
+pgxpool's own CPU-count-derived default, which has no relationship to
+Postgres's own `max_connections` limit. Raise `maxConns` if this chart
+is ever scaled to more than one `monitor-api` replica.
 
 Findings and stage history live in their own tables (`stage_history`,
 `findings`, `scan_errors`), not as JSONB blobs on the `artifacts` row —

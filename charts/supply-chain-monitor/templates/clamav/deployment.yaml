@@ -6,7 +6,15 @@ metadata:
   labels:
     app: scm-clamav
 spec:
-  replicas: 1
+  # Configurable (default 1, see values.yaml's clamav.replicas comment)
+  # -- each pod independently freshclams its own virus DB into its own
+  # ephemeral storage (no shared PVC here), so scaling this up is just
+  # "more independent ClamAV instances behind the same Service", not a
+  # coordination problem the way scaling something with shared state
+  # would be. scm-clamav's Service (service.yaml) already load-balances
+  # across however many pods match this selector, so no other template
+  # needs to change for this to take effect.
+  replicas: {{ .Values.clamav.replicas }}
   selector:
     matchLabels:
       app: scm-clamav

@@ -19,6 +19,11 @@ data:
   POSTGRES_USER: {{ .Values.monitorApi.postgres.user | quote }}
   POSTGRES_DB: {{ .Values.monitorApi.postgres.db | quote }}
   POSTGRES_SSLMODE: {{ .Values.monitorApi.postgres.sslmode | quote }}
+  # pgxpool connection pool sizing -- see main.go's buildPostgresDSN and
+  # values.yaml's monitorApi.postgres.pool comment for why these aren't
+  # just left at pgxpool's own CPU-derived default.
+  POSTGRES_POOL_MAX_CONNS: {{ .Values.monitorApi.postgres.pool.maxConns | quote }}
+  POSTGRES_POOL_MIN_CONNS: {{ .Values.monitorApi.postgres.pool.minConns | quote }}
   # unpacker (github.com/Sifungurux/unpacker) pull settings, used to
   # unpack image artifacts before ClamAV scans their contents.
   # monitor-api itself never runs unpacker directly -- these are
@@ -72,3 +77,10 @@ data:
   # monitorApi.externalScanners actually clears it on the next upgrade
   # instead of leaving a stale ConfigMap key around.
   EXTERNAL_SCANNERS: {{ .Values.monitorApi.externalScanners | toJson | quote }}
+  # Per-key request rate limiting -- see internal/api/ratelimit.go and
+  # values.yaml's monitorApi.rateLimit comment. requestsPerSecond <= 0
+  # (the default) disables it. Always set (not conditional) so turning
+  # it off again from a nonzero value actually clears/updates the
+  # ConfigMap key on the next upgrade.
+  RATE_LIMIT_RPS: {{ .Values.monitorApi.rateLimit.requestsPerSecond | quote }}
+  RATE_LIMIT_BURST: {{ .Values.monitorApi.rateLimit.burst | quote }}

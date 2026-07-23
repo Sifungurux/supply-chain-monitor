@@ -59,6 +59,11 @@ func NewUnpackerScanner(clamAddr, unpackerBin string, insecure, public bool, max
 	}
 }
 
+// Bucket implements BucketAffinity: this scanner's findings always come
+// from scanFileWithClamd (same as ClamAVScanner) with Source: "clamav",
+// which classifyBucket always maps to "malware".
+func (u *UnpackerScanner) Bucket() string { return "malware" }
+
 func (u *UnpackerScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding, error) {
 	tmpDir, err := os.MkdirTemp("", "scm-unpack-*")
 	if err != nil {

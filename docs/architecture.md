@@ -1316,6 +1316,229 @@ plus whatever `COPY`/`RUN apk add` the chosen tool needs) and pointing
 external scanners" for a worked example wiring Grype in this way,
 including the shim script's exact shape.
 
+**Fixed: `scanArtifact`'s registered scanners ran one after another,
+not concurrently -- a real problem now that a type's scanner list can
+grow arbitrarily long.** Every scanner for a type (trivy, unpacker,
+now potentially several operator-configured `ExternalScanner`s) shared
+one 5-minute context, and the original loop called each `Scan` in
+turn: N scanners each taking a couple of minutes meant N times that
+long overall, with no benefit to running them one at a time (they're
+fully independent -- none depends on another's output). Worse, a slow
+scanner ate directly into the time budget every scanner *after* it in
+the list had left to work with, so adding a slow external scanner
+could starve trivy/ClamAV of their share of the 5 minutes and fail
+them with a context-deadline error that had nothing to do with
+anything actually being wrong with them -- which then blocks
+fix-detection for that whole scan round (see "Fix-detection is
+per-type, not per-bucket" in Roadmap).
+Fixed by running every scanner in its own goroutine, all started
+before any of them are waited on (`sync.WaitGroup`), writing results
+into a pre-sized `[]scanResult` slice indexed by scanner position --
+safe without a mutex since each goroutine only ever touches its own
+index, and distinct slice elements are independent memory under Go's
+memory model. Findings are then classified into buckets in a second
+pass over that slice, in the scanners' original order, so behavior and
+error ordering are identical to the sequential version; only *when*
+each scanner runs changed.
+One thing this had to get right that the sequential version got for
+free: net/http's own per-connection panic recovery only protects the
+goroutine handling the HTTP request itself, not additional goroutines
+that handler spawns. A buggy `Scanner` (in-process code, or -- now
+that scanners can be arbitrary operator-configured commands via
+`ExternalScanner` -- a bug surfaced by a third-party tool's output)
+panicking would previously have crashed the one in-flight request;
+running it on its own goroutine without a `recover()` would instead
+crash the *entire monitor-api process*, taking down every other
+in-flight scan and request with it. Each goroutine wraps its call in a
+deferred `recover()` that turns a panic into an ordinary scan error
+(`"scanner panicked: ..."`), exactly as if that scanner had returned an
+`error` normally.
+`TestScanArtifact_ScannersRunConcurrently` proves the actual latency
+win (three 150ms-sleeping fake scanners complete in well under their
+combined 450ms); `TestScanArtifact_ScannerPanicIsRecovered` proves a
+panicking scanner surfaces as a recorded error rather than crashing the
+test process -- the test binary reaching its own assertions at all is
+most of what that test demonstrates.
+
+**Fixed: `ExternalScanner` read a command's stdout/stderr into an
+unbounded `bytes.Buffer`.** Every other input this app parses has some
+natural ceiling (an image's package list, a SARIF report) or comes from
+a trusted in-cluster component (trivy, ClamAV) -- an operator-configured
+`ExternalScanner` command is the first place this app runs something
+that could be arbitrarily buggy or, if its config was ever compromised,
+outright malicious, with no cap at all on how much it could write to
+either stream. `limitedBuffer` (`internal/scanner/external.go`) wraps
+`bytes.Buffer` and refuses any write that would push it past
+`maxExternalScannerOutputBytes` (10MiB, comfortably more than a
+legitimate findings list would ever need), returning an error instead
+-- which `os/exec`'s own internal copy from the child process's pipes
+treats as an ordinary copy failure, surfaced back through `cmd.Run()`
+exactly like any other command error. No special-casing needed in
+`Scan` itself beyond swapping `bytes.Buffer` for `*limitedBuffer` as
+`cmd.Stdout`/`cmd.Stderr`.
+
+**Fixed: nothing throttled request volume per API key.** Before this,
+a single misbehaving client -- a buggy retry loop, a compromised key,
+even just an over-eager script -- could fire an unbounded number of
+`/scan` requests at monitor-api, each of which fans out into every
+registered scanner for that artifact type; at real scale that's enough
+to starve the shared trivy-db-cache PVC, the pgxpool connection pool,
+and every other legitimate caller at once. `internal/api/ratelimit.go`
+adds a small hand-rolled token-bucket `rateLimiter` (deliberately not
+`golang.org/x/time/rate` -- the algorithm is small enough that adding a
+dependency isn't worth it, consistent with this service's stdlib-only
+design), and `router.go`'s new `withRateLimit` middleware applies it
+per API key (keyed on the literal `Authorization` header value).
+
+Two placement decisions matter here. First, `withRateLimit` is wired
+*inside* `withAuth` in `NewRouter` -- i.e. a request only reaches the
+limiter after it's already proven it holds a valid key. Rate-limiting
+*before* auth would let an unauthenticated attacker grow the limiter's
+internal bucket map without bound just by sending a different bogus
+`Authorization` value on every request; gating on auth first means the
+map can never have more entries than there are valid keys (today,
+exactly one -- see the Roadmap entry on single-shared-key auth below).
+Second, `/healthz` is explicitly exempted in `withRateLimit` itself
+(belt-and-suspenders on top of it being unreachable there anyway, since
+`withAuth` already returns early for that path) so a liveness/readiness
+probe can never be the request that trips the limiter and gets a pod
+killed over it.
+
+Configured via `RATE_LIMIT_RPS`/`RATE_LIMIT_BURST`
+(`monitorApi.rateLimit.requestsPerSecond`/`.burst` in values.yaml).
+`requestsPerSecond <= 0` -- the default -- disables rate limiting
+outright, since plenty of deployments (a small cluster, local dev, a
+single trusted CI caller) have no real need for it and it shouldn't
+surprise anyone by throttling requests they never asked to be
+throttled.
+
+**Fixed: ClamAV's replica count was hardcoded to 1.** Every malware
+scan (image and file artifacts both go through it -- see "Why images
+need unpacking") holds a clamd connection for the scan's duration, so
+under concurrent load a single instance becomes the bottleneck the rest
+of the pipeline queues behind, however fast trivy/the external scanners
+run in parallel next to it (see the scanArtifact parallelization fix
+above). `clamav.replicas` in values.yaml (default `1`, unchanged
+out of the box) now drives `templates/clamav/deployment.yaml`'s
+`spec.replicas`. Safe to raise freely: each pod runs its own
+`freshclam` independently into its own ephemeral storage (there's no
+shared PVC between ClamAV pods, unlike e.g. the trivy DB cache), and
+`scm-clamav`'s Service already load-balances `clamd` connections across
+however many pods match its selector -- so this is "more independent
+instances behind the same Service," not a coordination problem.
+
+**Fixed: `artifacts` had no index beyond its primary key.**
+`PostgresStore.List` and `FindByFindingID` both run
+`ORDER BY created_at DESC` over the whole table -- every dashboard load
+hits `List`, so without an index that's a full table scan plus an
+explicit sort on every single call, which gets steadily worse as the
+number of scanned artifacts grows. `artifacts_created_at_idx` (an index
+on `created_at DESC`, added in `postgres_store.go`'s `schemaStatements`
+right after the `artifacts` table's own `CREATE TABLE`, so it's created
+on both a fresh install and an existing deployment's next
+`migrate()` run) turns both queries into an index scan instead.
+
+Deliberately **not** indexing `status` or `updated_at`, even though
+they look like obvious next targets (and were originally planned as
+part of this same fix): grepping the actual query patterns in
+`postgres_store.go` shows neither column is ever filtered or sorted on
+anywhere in this codebase today -- every `WHERE` clause against
+`artifacts` is `WHERE id = $1`. An index only pays for itself if a real
+query uses it; adding one speculatively just taxes every future
+`INSERT`/`UPDATE` (each has to maintain it) for zero current benefit.
+Worth revisiting the moment a real filter (e.g. "show only failed
+artifacts") lands.
+
+**Fixed: `pgxpool` connection limits were left at their built-in
+default.** `NewPostgresStore` (`internal/artifact/postgres_store.go`)
+calls `pgxpool.New(ctx, dsn)` with no explicit pool configuration, so
+it inherited pgxpool's own default of `max(4, runtime.NumCPU()*4)` max
+connections -- a number with no relationship at all to Postgres's own
+`max_connections` limit or to how many other things might be sharing
+it. `buildPostgresDSN` (`main.go`) now optionally appends
+`pool_max_conns`/`pool_min_conns` query params (pgxpool parses these
+straight out of the DSN, so no code change was needed in
+`NewPostgresStore` itself) from `POSTGRES_POOL_MAX_CONNS`/
+`POSTGRES_POOL_MIN_CONNS`. Both default to `0`, meaning "don't
+override" -- preserves pgxpool's untouched default for anyone running
+the binary directly (README, "Running monitor-api outside a Kubernetes
+pod") -- but `values.yaml`'s `monitorApi.postgres.pool` sets deliberate
+values (`maxConns: 10`, `minConns: 2`) for the actual in-cluster
+deployment, comfortable headroom for a single monitor-api replica
+against Percona's default `max_connections` without leaving the number
+to chance. Raise `maxConns` if this chart is ever scaled to more than
+one monitor-api replica.
+
+**Fixed: fix-detection was gated per-type, not per-bucket.**
+`scanArtifact` used to let a single scan-wide `detectFixed` bool decide
+whether *any* bucket's missing findings counted as fixed: if any
+registered scanner errored, fix-detection was blocked for every bucket
+that round, even for buckets that scanner could never have touched
+(ClamAV erroring blocking CVE fix-detection, say, even though Trivy's
+own report that round was completely fine). Safe -- never a false
+"fixed" -- just coarser than it needed to be.
+
+`scanner.BucketAffinity` (`internal/scanner/scanner.go`) is a new
+optional interface a `Scanner` can implement to declare, statically,
+which single bucket ("cve", "malware", "misconfiguration", "secret", or
+"other") it only ever produces findings for. `TrivyScanner`,
+`SBOMScanner`, `ClamAVScanner`, `UnpackerScanner`, and their isolated
+Job-based equivalents (`IsolatedTrivyScanner`, `IsolatedUnpackerScanner`)
+all implement it -- each one's own code hardcodes a single `Source`
+(`"trivy"` or `"clamav"`) that `classifyBucket` always maps to the same
+bucket, so this is a safe, non-speculative claim to make.
+`FetchingScanner` forwards to whatever it wraps, so wrapping one of
+these for registry-fetch support (`file`/`sbom`/`sarif` types) doesn't
+lose the declaration.
+
+`scanArtifact` now builds a `blockedBuckets` set instead of one global
+bool: a failed scanner that declares its bucket only blocks that one
+bucket; a failed scanner that *doesn't* implement `BucketAffinity`
+still conservatively blocks all five, exactly as before. Deliberately
+**not** implemented by `SARIFScanner` or `ExternalScanner`: a single
+SARIF document can mix CVEs, misconfigurations, secrets, and generic
+SAST issues all in one file, and an `ExternalScanner`'s own wire
+contract lets each finding set its own `category` independent of any
+configured default -- neither can honestly promise a single bucket, and
+guessing wrong would risk a real false "fixed" instead of just being
+coarse. See `TestScanArtifact_FailureOnlyBlocksItsOwnBucket` (the fix)
+alongside `TestScanArtifact_PartialFailureDoesNotMarkFindingsFixed`
+(the still-correct conservative fallback for unknown-affinity
+scanners) in `handlers_test.go`.
+
+**Fixed: SBOM trivy scanning still ran in-process.** `image` artifacts
+have scanned via an isolated scan-worker Job (`IsolatedTrivyScanner`)
+since "Isolating Trivy scanning" landed, but `sbom` artifacts kept
+using the in-process `FetchingScanner`-wrapped `SBOMScanner` -- a third-
+party binary (`trivy`) parsing untrusted input directly inside the same
+long-running process that holds every artifact's findings and the
+Postgres connection, exactly the blast-radius problem isolation exists
+to avoid for `image`.
+
+The blocker had been that `IsolatedTrivyScanner`'s `SubCommand: "sbom"`
+mode just forwards the artifact's `ref` straight into the scan-worker
+Job's environment (`SCM_SCAN_REF`) -- fine for `image` (trivy resolves
+an image ref itself), but an `sbom` artifact's `ref` may be an OCI
+registry reference or a local path already fetched into *monitor-api's
+own* pod by `FetchingScanner`, and a separate Job's pod has no way to
+see that pod's filesystem. `main.go`'s `runScanWorker` now fetches its
+own copy in the `"sbom"` case, via the same `RegistryFetcher`
+(`internal/scanner/fetch.go`) the in-process path already uses, before
+handing the resulting local path to `SBOMScanner.Scan` -- mirroring
+exactly what `FetchingScanner` already did in-process, just running
+inside the Job instead. `IsolatedTrivyConfig.FetchPlainHTTP` carries the
+same `FETCH_PLAIN_HTTP` setting the in-process path already respects
+into the Job's env so the two paths can't silently disagree about it.
+
+`runAPIServer` now builds an `isolatedTrivySBOM` scanner alongside
+`isolatedTrivyImage`, and a new `buildSBOMScanners` helper (mirroring
+`buildImageScanners`) picks between it and the in-process fallback
+based on `DISABLE_SCAN_ISOLATION` -- so `sbom` now follows the exact
+same isolated-by-default, in-process-under-DISABLE_SCAN_ISOLATION
+pattern `image` already does, with no new chart values needed (it
+reuses `TRIVY_CACHE_CLAIM`/`TRIVY_CACHE_DIR`/`FETCH_PLAIN_HTTP`/
+`SCAN_WORKER_IMAGE`, all already wired for `image`'s isolation).
+
 ## All services on Flux + Helm
 
 Every service in this project -- `registry`, `clamav`, `postgres`,
@@ -1748,22 +1971,15 @@ for real.
 
 ## Roadmap / open gaps
 
-- **Fix-detection is per-type, not per-bucket**: `scanArtifact` only
-  lets `MergeFindings` mark anything `fixed` when every registered
-  scanner for the artifact's type succeeded that round (see "Tracking
-  finding lifecycle: open, new, and fixed"). If, say, ClamAV errors
-  while Trivy succeeds, CVE fix-detection is blocked too that round,
-  even though Trivy's own report was completely fine. Safe (never a
-  false "fixed"), just coarser than it could be. Fixing this properly
-  means tracking which scanner(s) feed which bucket and gating
-  `detectFixed` per bucket instead of globally across the whole scan.
-- **SBOM trivy scanning still runs in-process**: `IsolatedTrivyScanner`
-  supports a `SubCommand: "sbom"` mode, but `main.go` only wires up
-  `SubCommand: "image"` today (see "Isolating Trivy scanning"). Moving
-  `sbom`-type scans into a Job too means giving that Job's pod its own
-  way to fetch the SBOM (`oras pull`, matching `FetchingScanner`)
-  rather than assuming a path that only exists inside monitor-api's own
-  filesystem.
+- ~~**Fix-detection is per-type, not per-bucket**~~ **Fixed** for
+  scanners with a statically known bucket: see "Fixed: fix-detection
+  was gated per-type, not per-bucket" below. Still coarse (blocks every
+  bucket on failure) for SARIFScanner and any operator's
+  ExternalScanner, since neither can honestly declare a single bucket
+  -- documented there, not silently swept under this now-mostly-resolved
+  entry.
+- ~~**SBOM trivy scanning still runs in-process**~~ **Fixed**: see
+  "Fixed: SBOM trivy scanning still ran in-process" below.
 - **trivy-db-refresh-cronjob writes to the same PVC isolated
   scan-worker Jobs read from concurrently**: `concurrencyPolicy: Forbid`
   keeps at most one refresh running at a time, but there's no
@@ -1848,11 +2064,15 @@ for real.
   hasn't restarted yet fails with 401s until it does. A two-key grace
   period (accept either the old or new key for a while) would make
   rotation safe to do without a coordinated cutover.
-- **No rate limiting**: a valid key (or a leaked one) can call any
-  endpoint as fast as the client can send requests -- nothing here
-  throttles per-key request volume, so a single misbehaving or
-  compromised caller could still overwhelm the scan pipeline or the
-  database.
+- ~~**No rate limiting**~~ **Fixed**: per-key request throttling now
+  exists (`internal/api/ratelimit.go`'s `rateLimiter`, wired in via
+  `withRateLimit` -- see "Fixed: nothing throttled request volume per
+  API key" above) and is configurable via
+  `monitorApi.rateLimit.requestsPerSecond`/`.burst`. Off by default
+  (`requestsPerSecond: 0`), so operators who want this protection need
+  to turn it on -- and since every caller shares one `API_KEY` today
+  (see the single-shared-key gap above), it's effectively one global
+  budget rather than truly per-caller until per-client keys land.
 - **Dashboard config rendering is `sed`-based, not a real templating
   engine**: `render-config`'s escaping (backslashes/double quotes) is
   adequate for a flat API key and a plain URL, but would need

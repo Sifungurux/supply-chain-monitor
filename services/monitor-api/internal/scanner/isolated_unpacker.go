@@ -130,6 +130,11 @@ func randomJobName() (string, error) {
 	return "scm-scan-" + hex.EncodeToString(b), nil
 }
 
+// Bucket implements BucketAffinity: this Job always runs
+// UnpackerScanner's exact code (see runScanWorker in main.go), which
+// only ever produces Source: "clamav" findings -- always "malware".
+func (s *IsolatedUnpackerScanner) Bucket() string { return "malware" }
+
 func (s *IsolatedUnpackerScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding, error) {
 	name, err := randomJobName()
 	if err != nil {

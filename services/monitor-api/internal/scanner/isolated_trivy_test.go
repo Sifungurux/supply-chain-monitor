@@ -195,3 +195,13 @@ func TestIsolatedTrivyScanner_Scan_MountsCacheVolumeReadOnly(t *testing.T) {
 		t.Fatal("expected a persistentVolumeClaim-backed volume")
 	}
 }
+
+// TestIsolatedTrivyScanner_Bucket confirms IsolatedTrivyScanner
+// declares BucketAffinity as "cve", same as TrivyScanner/SBOMScanner --
+// it just runs their code inside a Job instead of in-process.
+func TestIsolatedTrivyScanner_Bucket(t *testing.T) {
+	s := newTrivyScanner(t, &fakeJobClient{namespace: "test-ns"})
+	if got := s.Bucket(); got != "cve" {
+		t.Errorf("Bucket() = %q, want %q", got, "cve")
+	}
+}

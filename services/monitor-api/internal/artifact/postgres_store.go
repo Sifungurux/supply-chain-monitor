@@ -60,6 +60,18 @@ var schemaStatements = []string{
 		created_at    TIMESTAMPTZ NOT NULL,
 		updated_at    TIMESTAMPTZ NOT NULL
 	)`,
+	// List() and FindByFindingID both `ORDER BY created_at DESC` over
+	// the whole artifacts table -- without an index, that's a full
+	// table scan plus an explicit sort on every single call, and both
+	// are hit on every dashboard load. Deliberately NOT indexing
+	// status or updated_at here even though they're an obvious-looking
+	// next target: neither column is actually filtered or sorted on
+	// anywhere in this codebase today (checked -- every WHERE clause on
+	// this table is `WHERE id = $1`), so an index on either would be
+	// pure write-path overhead (every INSERT/UPDATE has to maintain it)
+	// for zero current benefit. Add one if/when a real query needs it,
+	// e.g. a "show only failed artifacts" filter.
+	`CREATE INDEX IF NOT EXISTS artifacts_created_at_idx ON artifacts (created_at DESC)`,
 	`CREATE TABLE IF NOT EXISTS stage_history (
 		id          BIGSERIAL PRIMARY KEY,
 		artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,

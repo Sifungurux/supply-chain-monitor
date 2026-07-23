@@ -6,6 +6,53 @@ import (
 	"testing"
 )
 
+func TestLimitedBuffer_Write(t *testing.T) {
+	t.Run("writes under the limit accumulate normally", func(t *testing.T) {
+		b := &limitedBuffer{limit: 10}
+		if _, err := b.Write([]byte("hello")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if _, err := b.Write([]byte("world")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if b.String() != "helloworld" {
+			t.Fatalf("String() = %q, want %q", b.String(), "helloworld")
+		}
+	})
+
+	t.Run("a write that would exceed the limit is rejected", func(t *testing.T) {
+		b := &limitedBuffer{limit: 5}
+		if _, err := b.Write([]byte("hello")); err != nil {
+			t.Fatalf("Write up to the limit exactly: %v", err)
+		}
+		if _, err := b.Write([]byte("x")); err == nil {
+			t.Fatal("expected an error writing past the limit")
+		}
+		// The rejected write must not have partially landed.
+		if b.String() != "hello" {
+			t.Fatalf("String() = %q, want %q (rejected write should not partially append)", b.String(), "hello")
+		}
+	})
+}
+
+// TestExternalScanner_Scan_OutputExceedingLimitIsAnError proves the
+// 10MiB cap is actually wired into Scan, not just the limitedBuffer
+// type in isolation -- `yes | head -c 11000000` cheaply produces just
+// over the limit without the test itself needing to build/hold an
+// 11MB string.
+func TestExternalScanner_Scan_OutputExceedingLimitIsAnError(t *testing.T) {
+	e := NewExternalScanner(ExternalScannerConfig{
+		Name:    "firehose-scanner",
+		Command: "sh",
+		Args:    []string{"-c", "yes | head -c 11000000"},
+	})
+
+	_, err := e.Scan(context.Background(), "alpine:3.19")
+	if err == nil {
+		t.Fatal("expected an error for output exceeding the configured limit")
+	}
+}
+
 func TestExternalScanner_BuildArgs(t *testing.T) {
 	e := NewExternalScanner(ExternalScannerConfig{
 		Args: []string{"scan", "{{ref}}", "--tag={{ref}}", "--format", "json"},

@@ -139,3 +139,18 @@ func (f *FetchingScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 	}
 	return f.inner.Scan(ctx, path)
 }
+
+// Bucket forwards to the wrapped scanner's own BucketAffinity, so
+// wrapping a scanner here (for file/sbom/sarif registry-fetch support)
+// doesn't lose the per-bucket fix-detection precision the inner
+// scanner already declared. Returns "" (meaning "unknown, could be any
+// bucket" -- see BucketAffinity's own doc comment) when inner doesn't
+// implement BucketAffinity at all, which is exactly what
+// FetchingScanner wraps SARIFScanner as today: no false claim either
+// way, just an honest "don't know."
+func (f *FetchingScanner) Bucket() string {
+	if ba, ok := f.inner.(BucketAffinity); ok {
+		return ba.Bucket()
+	}
+	return ""
+}

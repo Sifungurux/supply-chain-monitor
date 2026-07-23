@@ -41,6 +41,14 @@ clamav:
     repository: clamav/clamav
     tag: 1.5-debian13-slim
     pullPolicy: IfNotPresent
+  # Each replica independently freshclams its own virus DB (no shared
+  # storage between pods -- see deployment.yaml's comment), so this is
+  # safe to raise under concurrent scan load without any other change:
+  # scm-clamav's Service already load-balances clamd connections across
+  # however many pods are running. Raise this if malware scans start
+  # queuing up behind clamd (each scan holds one clamd connection for
+  # its duration) faster than a single instance can keep up.
+  replicas: 1
   resources:
     requests:
       cpu: 250m
@@ -122,6 +130,21 @@ monitorApi:
     user: "monitor_api"
     db: "monitor_api"
     sslmode: "disable"
+    # pgxpool connection pool sizing (see main.go's buildPostgresDSN and
+    # docs/architecture.md's Postgres pool tuning fix). Left unset (0,
+    # meaning "don't override") by default when running the binary
+    # outside this chart -- but the chart itself sets deliberate values
+    # here rather than leaving pgxpool's own CPU-derived default
+    # (max(4, NumCPU*4)) in place, since that number has no relationship
+    # to Postgres's own max_connections or to how many other things
+    # (other monitor-api replicas, if this ever scales beyond one) share
+    # it. 10/2 is comfortable headroom for a single monitor-api replica
+    # against Percona's default max_connections without leaving the
+    # connection count to chance -- raise maxConns if this chart is ever
+    # scaled to more than one monitor-api replica.
+    pool:
+      maxConns: 10
+      minConns: 2
   # Dev-only API key for monitor-api's shared-key auth (see
   # internal/api/router.go's withAuth). Generate a real random value
   # (e.g. `openssl rand -hex 32`) and override it via this HelmRelease's
@@ -186,6 +209,18 @@ monitorApi:
   #     category: cve
   #     timeoutSeconds: 300
   externalScanners: []
+  # Per-API-key request throttling (see internal/api/ratelimit.go and
+  # router.go's withRateLimit) -- protects the scan pipeline/database
+  # from one caller (buggy client, compromised key, runaway retry loop)
+  # overwhelming them with requests. requestsPerSecond <= 0 disables
+  # rate limiting entirely -- the default, since not every deployment
+  # needs it (e.g. a small cluster with one trusted CI caller). burst
+  # is how many requests can land back-to-back before the sustained
+  # rate kicks in; it should comfortably cover a normal dashboard
+  # refresh or a small CI batch, not just a single request.
+  rateLimit:
+    requestsPerSecond: 0
+    burst: 20
   # The shared PersistentVolumeClaim IsolatedTrivyScanner mounts
   # read-only into every trivy scan-worker Job, kept warm by
   # trivy-db-cache-primer-job.yaml (install/upgrade time) and

@@ -136,3 +136,14 @@ func TestParseTrivyVulnerabilities(t *testing.T) {
 		}
 	})
 }
+
+// TestTrivyScanner_Bucket confirms TrivyScanner declares BucketAffinity
+// as "cve" -- see its Bucket() comment for why that's a safe, static
+// claim to make (every finding comes from parseTrivyVulnerabilities,
+// which always sets Source: "trivy").
+func TestTrivyScanner_Bucket(t *testing.T) {
+	s := NewTrivyScanner("scm-registry:5000", TrivyDBConfig{})
+	if got := s.Bucket(); got != "cve" {
+		t.Errorf("Bucket() = %q, want %q", got, "cve")
+	}
+}

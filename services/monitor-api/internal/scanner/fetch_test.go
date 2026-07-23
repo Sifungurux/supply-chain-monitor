@@ -112,11 +112,42 @@ type spyScanner struct {
 	gotRef   string
 	findings []artifact.Finding
 	err      error
+	// bucket, if set, makes spyScanner implement BucketAffinity (see
+	// TestFetchingScanner_Bucket) -- unset by every other test using
+	// this double, which correctly reports "" (unknown) then.
+	bucket string
 }
 
 func (s *spyScanner) Scan(_ context.Context, ref string) ([]artifact.Finding, error) {
 	s.gotRef = ref
 	return s.findings, s.err
+}
+
+func (s *spyScanner) Bucket() string { return s.bucket }
+
+// plainScanner implements Scanner and nothing else -- used to prove
+// FetchingScanner.Bucket() degrades gracefully (returns "", not a
+// panic or a wrong guess) when the inner scanner doesn't implement
+// BucketAffinity at all, which is exactly SARIFScanner's real situation
+// today.
+type plainScanner struct{}
+
+func (plainScanner) Scan(context.Context, string) ([]artifact.Finding, error) { return nil, nil }
+
+func TestFetchingScanner_Bucket(t *testing.T) {
+	t.Run("forwards the inner scanner's declared bucket", func(t *testing.T) {
+		fs := NewFetchingScanner(&fakeFetcher{}, &spyScanner{bucket: "cve"})
+		if got := fs.Bucket(); got != "cve" {
+			t.Errorf("Bucket() = %q, want %q", got, "cve")
+		}
+	})
+
+	t.Run("returns empty (unknown) when the inner scanner has no declared bucket", func(t *testing.T) {
+		fs := NewFetchingScanner(&fakeFetcher{}, plainScanner{})
+		if got := fs.Bucket(); got != "" {
+			t.Errorf("Bucket() = %q, want \"\" (unknown)", got)
+		}
+	})
 }
 
 func TestFetchingScanner_Scan(t *testing.T) {

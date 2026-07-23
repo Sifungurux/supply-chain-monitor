@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -140,17 +142,63 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	// Every scanner registered for this artifact type runs; findings are
-	// sorted into one of five buckets by classifyBucket below.
+	// Every scanner registered for this artifact type runs concurrently,
+	// not one after another: they're independent (each gets the same ref
+	// and ctx, none depends on another's output), and a single shared
+	// 5-minute budget above means a slow scanner used to eat directly
+	// into every scanner after it in the list -- with trivy, unpacker,
+	// and now an arbitrary number of operator-configured external
+	// scanners (see internal/scanner/external.go) all potentially
+	// registered for one type, that's no longer a two-scanner corner
+	// case. Findings are sorted into one of five buckets by
+	// classifyBucket below, exactly as before -- only *when* each
+	// scanner runs changed, not what happens to what it returns.
+	//
+	// results is indexed by scanner position and only ever written to
+	// by the one goroutine that owns that index, so no shared-state
+	// synchronization (mutex/channel) is needed for the writes
+	// themselves -- distinct slice elements are independent memory, and
+	// wg.Wait() below is the one synchronization point that has to
+	// happen before anything reads results.
+	type scanResult struct {
+		findings []artifact.Finding
+		err      error
+	}
+	results := make([]scanResult, len(scanners))
+	var wg sync.WaitGroup
+	for i, s := range scanners {
+		wg.Add(1)
+		go func(i int, s scanner.Scanner) {
+			defer wg.Done()
+			// A panic from a Scanner implementation (in-process code, or
+			// a bug surfaced by an operator's own ExternalScanner
+			// command) must not take down the whole monitor-api
+			// process just because it now runs on its own goroutine
+			// rather than inline in this request's handler goroutine --
+			// net/http's per-connection panic recovery only covers the
+			// handler goroutine itself, not goroutines a handler spawns.
+			// Recovered as an ordinary scan error instead: exactly as
+			// safe as a scanner returning an error, just no longer
+			// fatal to every other in-flight request.
+			defer func() {
+				if r := recover(); r != nil {
+					results[i] = scanResult{err: fmt.Errorf("scanner panicked: %v", r)}
+				}
+			}()
+			findings, scanErr := s.Scan(ctx, a.Ref)
+			results[i] = scanResult{findings: findings, err: scanErr}
+		}(i, s)
+	}
+	wg.Wait()
+
 	var cveFindings, malwareFindings, misconfigFindings, secretFindings, otherFindings []artifact.Finding
 	var scanErrors []string
 
-	for _, s := range scanners {
-		findings, scanErr := s.Scan(ctx, a.Ref)
-		if scanErr != nil {
-			scanErrors = append(scanErrors, scanErr.Error())
+	for _, res := range results {
+		if res.err != nil {
+			scanErrors = append(scanErrors, res.err.Error())
 		}
-		for _, f := range findings {
+		for _, f := range res.findings {
 			switch classifyBucket(f) {
 			case "malware":
 				malwareFindings = append(malwareFindings, f)
@@ -171,26 +219,51 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 		status = artifact.StatusFailed
 	}
 
-	// detectFixed gates whether MergeFindings is allowed to mark
-	// anything as fixed this round: if any registered scanner errored,
-	// this round's report can't be trusted as a complete picture of
-	// every bucket (e.g. Trivy erroring while ClamAV succeeds would
-	// otherwise make every previously-open CVE look "fixed" just
-	// because Trivy didn't run, not because any of them got patched).
-	// A fully clean run (no scanErrors at all) is the only time a
-	// missing finding safely means "actually fixed." See merge.go's own
-	// doc comment for the full reasoning, including the corresponding
-	// per-bucket-not-per-scanner precision this simplification gives
-	// up (documented as a roadmap item, not silently ignored).
+	// blockedBuckets gates, per bucket, whether MergeFindings is allowed
+	// to mark anything as fixed this round -- a bucket in this set had
+	// at least one scanner fail that could have contributed to it, so a
+	// missing finding there can't be trusted as "actually fixed" rather
+	// than "the scanner that would have reported it just didn't run."
+	//
+	// A scanner that implements scanner.BucketAffinity (TrivyScanner,
+	// SBOMScanner, ClamAVScanner, UnpackerScanner, and their isolated
+	// equivalents -- see each one's own Bucket() comment) only blocks
+	// the one bucket it declared on failure: a ClamAV error no longer
+	// blocks CVE fix-detection just because it happened in the same
+	// round. A scanner that *doesn't* implement it (SARIFScanner, an
+	// operator's ExternalScanner) blocks every bucket on failure,
+	// exactly like every scanner used to before this existed -- neither
+	// can honestly promise which bucket(s) it would have affected
+	// (SARIF mixes categories in one document; an ExternalScanner's own
+	// wire contract lets each finding set its own category independent
+	// of any configured default), so guessing would risk a real false
+	// "fixed" instead of just being coarse. See merge.go's own doc
+	// comment for what "fixed" means once a bucket isn't blocked.
+	blockedBuckets := make(map[string]bool)
+	for i, res := range results {
+		if res.err == nil {
+			continue
+		}
+		if ba, ok := scanners[i].(scanner.BucketAffinity); ok {
+			if b := ba.Bucket(); validFindingsBucket(b) {
+				blockedBuckets[b] = true
+				continue
+			}
+		}
+		for _, b := range []string{"cve", "malware", "misconfiguration", "secret", "other"} {
+			blockedBuckets[b] = true
+		}
+	}
+	detectFixedFor := func(bucket string) bool { return !blockedBuckets[bucket] }
+
 	now := time.Now().UTC()
-	detectFixed := len(scanErrors) == 0
 	updated, updErr := h.store.Update(id, func(art *artifact.Artifact) {
 		art.Status = status
-		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, cveFindings, now, detectFixed)
-		art.MalwareFindings = artifact.MergeFindings(art.MalwareFindings, malwareFindings, now, detectFixed)
-		art.MisconfigFindings = artifact.MergeFindings(art.MisconfigFindings, misconfigFindings, now, detectFixed)
-		art.SecretFindings = artifact.MergeFindings(art.SecretFindings, secretFindings, now, detectFixed)
-		art.OtherFindings = artifact.MergeFindings(art.OtherFindings, otherFindings, now, detectFixed)
+		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, cveFindings, now, detectFixedFor("cve"))
+		art.MalwareFindings = artifact.MergeFindings(art.MalwareFindings, malwareFindings, now, detectFixedFor("malware"))
+		art.MisconfigFindings = artifact.MergeFindings(art.MisconfigFindings, misconfigFindings, now, detectFixedFor("misconfiguration"))
+		art.SecretFindings = artifact.MergeFindings(art.SecretFindings, secretFindings, now, detectFixedFor("secret"))
+		art.OtherFindings = artifact.MergeFindings(art.OtherFindings, otherFindings, now, detectFixedFor("other"))
 		art.LastScanErrors = scanErrors
 	})
 	if updErr != nil {

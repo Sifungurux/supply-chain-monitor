@@ -72,6 +72,40 @@ type ExternalScannerConfig struct {
 
 const defaultExternalScannerTimeout = 5 * time.Minute
 
+// maxExternalScannerOutputBytes caps how much stdout/stderr a single
+// Scan call will accumulate from the external command, so a
+// misbehaving or compromised command flooding either stream can't grow
+// this process's memory without bound. 10MiB is generous headroom even
+// for a large findings list (a JSON finding record is on the order of
+// a couple hundred bytes, so this comfortably covers tens of thousands
+// of findings) while still being a hard, enforced ceiling -- a
+// well-behaved external scanner emitting the documented
+// JSON-array-of-findings contract has no legitimate reason to get
+// anywhere close to it.
+const maxExternalScannerOutputBytes = 10 * 1024 * 1024 // 10MiB
+
+// limitedBuffer is a bytes.Buffer that refuses writes once it's
+// accumulated more than limit bytes, returning an error instead of
+// growing further. Used as cmd.Stdout/cmd.Stderr below so os/exec's
+// own internal copy from the child process's pipes treats exceeding
+// the cap as a normal copy error (surfaced back through cmd.Run()),
+// rather than this process silently growing its own memory to match
+// however much the external command decides to write.
+type limitedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if b.buf.Len()+len(p) > b.limit {
+		return 0, fmt.Errorf("output exceeded the %d byte limit", b.limit)
+	}
+	return b.buf.Write(p)
+}
+
+func (b *limitedBuffer) Bytes() []byte  { return b.buf.Bytes() }
+func (b *limitedBuffer) String() string { return b.buf.String() }
+
 // externalFinding is the wire format an external scanner's command is
 // expected to print as a single JSON array on stdout. It deliberately
 // mirrors artifact.Finding's exported fields, plus "category" --
@@ -130,9 +164,10 @@ func (e *ExternalScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 
 	cmd := exec.CommandContext(ctx, e.cfg.Command, e.buildArgs(ref)...)
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := &limitedBuffer{limit: maxExternalScannerOutputBytes}
+	stderr := &limitedBuffer{limit: maxExternalScannerOutputBytes}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("external scanner %q (%s) failed for %q: %w (%s)", e.cfg.Name, e.cfg.Command, ref, err, stderr.String())

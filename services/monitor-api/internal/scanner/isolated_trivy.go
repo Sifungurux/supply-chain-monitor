@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -29,6 +30,15 @@ type IsolatedTrivyConfig struct {
 	// (SBOMScanner, for `sbom`-type artifacts). Forwarded to the
 	// worker as SCM_TRIVY_MODE -- see main.go's runScanWorker.
 	SubCommand string
+
+	// FetchPlainHTTP only matters when SubCommand is "sbom": ref for an
+	// sbom-type artifact may be an OCI registry reference (scm-registry
+	// by default) rather than a path already inside this Job's pod --
+	// unlike "image" mode, where trivy itself resolves the ref, the
+	// worker has to fetch the SBOM document first (see main.go's
+	// runScanWorker), exactly like FetchingScanner does for the
+	// in-process path. Forwarded to the worker as FETCH_PLAIN_HTTP.
+	FetchPlainHTTP bool
 
 	// CacheClaimName is the shared, centrally-refreshed PersistentVolumeClaim
 	// holding the pre-downloaded trivy vulnerability DB (see
@@ -134,6 +144,11 @@ func NewIsolatedTrivyScanner(client jobClient, cfg IsolatedTrivyConfig) *Isolate
 	return &IsolatedTrivyScanner{client: client, cfg: cfg.withDefaults()}
 }
 
+// Bucket implements BucketAffinity: both SubCommand modes ("image" and
+// "sbom") run TrivyScanner/SBOMScanner's own code inside the Job (see
+// runScanWorker in main.go), which only ever produces "cve" findings.
+func (s *IsolatedTrivyScanner) Bucket() string { return "cve" }
+
 func (s *IsolatedTrivyScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding, error) {
 	name, err := randomJobName()
 	if err != nil {
@@ -150,9 +165,12 @@ func (s *IsolatedTrivyScanner) Scan(ctx context.Context, ref string) ([]artifact
 		Command:               []string{"/usr/local/bin/monitor-api", "scan-worker"},
 		ActiveDeadlineSeconds: s.cfg.ActiveDeadlineSeconds,
 		Env: map[string]string{
-			"SCM_SCAN_REF":    ref,
-			"SCM_TRIVY_MODE":  s.cfg.SubCommand,
-			"TRIVY_CACHE_DIR": s.cfg.CacheMountPath,
+			"SCM_SCAN_REF":     ref,
+			"SCM_TRIVY_MODE":   s.cfg.SubCommand,
+			"TRIVY_CACHE_DIR":  s.cfg.CacheMountPath,
+			// Only actually consulted by the worker in "sbom" mode (see
+			// FetchPlainHTTP's own comment) -- harmless to always set.
+			"FETCH_PLAIN_HTTP": strconv.FormatBool(s.cfg.FetchPlainHTTP),
 		},
 		ExtraVolumes: []k8sjob.Volume{
 			{

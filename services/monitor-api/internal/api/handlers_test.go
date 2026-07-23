@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/api"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -26,6 +27,32 @@ func (f *fakeScanner) Scan(_ context.Context, _ string) ([]artifact.Finding, err
 	return f.findings, f.err
 }
 
+// sleepingScanner blocks for a fixed duration before returning --
+// used to prove scanArtifact's scanners actually run concurrently
+// (TestScanArtifact_ScannersRunConcurrently), not one after another.
+type sleepingScanner struct {
+	delay    time.Duration
+	findings []artifact.Finding
+}
+
+func (s *sleepingScanner) Scan(ctx context.Context, _ string) ([]artifact.Finding, error) {
+	select {
+	case <-time.After(s.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return s.findings, nil
+}
+
+// panickingScanner always panics -- used to prove a single Scanner's
+// bug can't take down the whole server now that scanners run on their
+// own goroutines (TestScanArtifact_ScannerPanicIsRecovered).
+type panickingScanner struct{}
+
+func (panickingScanner) Scan(context.Context, string) ([]artifact.Finding, error) {
+	panic("boom: this scanner has a bug")
+}
+
 // testAPIKey is the shared key every test router is constructed with.
 // doJSON below attaches it to every request automatically, so the ~10
 // existing tests that only care about handler behavior (not auth
@@ -36,7 +63,10 @@ const testAPIKey = "test-api-key"
 func newTestRouter(scanners scanner.Registry) (http.Handler, *artifact.MemStore) {
 	store := artifact.NewMemStore()
 	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
-	return api.NewRouter(store, tracker, scanners, testAPIKey), store
+	// Rate limiting disabled (0) for the ~10 existing tests that only
+	// care about handler behavior -- see TestRateLimit* for the rate
+	// limiter's own behavior, which builds its router directly instead.
+	return api.NewRouter(store, tracker, scanners, testAPIKey, 0, 0), store
 }
 
 // mustCreate is a test helper wrapping store.Create's now-error-returning
@@ -342,6 +372,76 @@ func TestScanArtifact_PartialFailureStillReportsSuccessfulFindings(t *testing.T)
 	}
 }
 
+// TestScanArtifact_ScannersRunConcurrently is the regression test for
+// the fix itself: scanArtifact used to run every registered scanner
+// for a type one after another, so N scanners each taking `delay`
+// added up to N*delay of total wall-clock time. Three scanners each
+// sleeping 150ms would take ~450ms sequentially but should take barely
+// more than 150ms running concurrently -- generous enough headroom
+// (400ms) to not be flaky on a loaded CI machine while still clearly
+// distinguishing "ran in parallel" from "ran one after another".
+func TestScanArtifact_ScannersRunConcurrently(t *testing.T) {
+	delay := 150 * time.Millisecond
+	s1 := &sleepingScanner{delay: delay, findings: []artifact.Finding{{ID: "CVE-1", Source: "trivy"}}}
+	s2 := &sleepingScanner{delay: delay, findings: []artifact.Finding{{ID: "eicar", Source: "clamav"}}}
+	s3 := &sleepingScanner{delay: delay}
+
+	h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {s1, s2, s3}})
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	start := time.Now()
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
+	elapsed := time.Since(start)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if elapsed > 400*time.Millisecond {
+		t.Fatalf("scan took %v, want well under %v (three %v scanners should overlap, not run one after another)", elapsed, 400*time.Millisecond, delay)
+	}
+
+	got := decodeArtifact(t, rec)
+	if len(got.CVEFindings) != 1 || len(got.MalwareFindings) != 1 {
+		t.Fatalf("expected both scanners' findings to still land in the right buckets, got cve=%+v malware=%+v", got.CVEFindings, got.MalwareFindings)
+	}
+}
+
+// TestScanArtifact_ScannerPanicIsRecovered proves a bug in one
+// Scanner (in-process code, or an operator's own ExternalScanner
+// command misbehaving) can't crash the whole monitor-api process now
+// that scanners run on their own goroutines -- net/http's per-request
+// panic recovery covers this handler's own goroutine, not one it
+// spawns itself, so scanArtifact has to recover from a scanner panic
+// itself and turn it into an ordinary scan error instead.
+func TestScanArtifact_ScannerPanicIsRecovered(t *testing.T) {
+	ok := &fakeScanner{findings: []artifact.Finding{{ID: "CVE-2024-1", Source: "trivy"}}}
+
+	h, store := newTestRouter(scanner.Registry{
+		artifact.TypeImage: {ok, panickingScanner{}},
+	})
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (one of two scanners still succeeded), body=%s", rec.Code, rec.Body.String())
+	}
+	got := decodeArtifact(t, rec)
+	if len(got.CVEFindings) != 1 {
+		t.Fatalf("expected the non-panicking scanner's finding to survive, got %+v", got.CVEFindings)
+	}
+	if len(got.LastScanErrors) != 1 {
+		t.Fatalf("expected the panic to be recorded as a scan error, got %v", got.LastScanErrors)
+	}
+
+	// The test process itself reaching this line at all is most of what
+	// this test is proving -- an unrecovered panic in a spawned
+	// goroutine would have crashed the whole test binary, not just
+	// failed this one assertion.
+	if !bytes.Contains(rec.Body.Bytes(), []byte("panicked")) {
+		t.Fatalf("expected the recorded error to mention the panic, got body=%s", rec.Body.String())
+	}
+}
+
 func TestScanArtifact_AllScannersFail(t *testing.T) {
 	broken1 := &fakeScanner{err: errors.New("trivy: exec failed")}
 	broken2 := &fakeScanner{err: errors.New("unpacker: pull failed")}
@@ -373,6 +473,13 @@ type sequenceScanner struct {
 	calls   int
 	results [][]artifact.Finding
 	errs    []error
+	// bucket, if set, makes this double implement scanner.BucketAffinity
+	// (see TestScanArtifact_FailureOnlyBlocksItsOwnBucket) -- left unset
+	// ("") by every other test using this double, which Bucket()
+	// faithfully returns, so those tests keep exercising the "unknown
+	// affinity blocks every bucket" fallback path exactly as before this
+	// field existed.
+	bucket string
 }
 
 func (s *sequenceScanner) Scan(_ context.Context, _ string) ([]artifact.Finding, error) {
@@ -387,6 +494,8 @@ func (s *sequenceScanner) Scan(_ context.Context, _ string) ([]artifact.Finding,
 	}
 	return s.results[i], err
 }
+
+func (s *sequenceScanner) Bucket() string { return s.bucket }
 
 // TestScanArtifact_SecondScanMarksMissingFindingAsFixed is the core
 // behavior MergeFindings exists for: a CVE that stops being reported
@@ -473,6 +582,58 @@ func TestScanArtifact_PartialFailureDoesNotMarkFindingsFixed(t *testing.T) {
 	}
 	if len(got.LastScanErrors) != 1 {
 		t.Fatalf("expected the broken scanner's error recorded, got %v", got.LastScanErrors)
+	}
+}
+
+// TestScanArtifact_FailureOnlyBlocksItsOwnBucket is the fix-detection
+// precision improvement over TestScanArtifact_PartialFailureDoesNotMarkFindingsFixed
+// just above: that test's doubles don't declare a bucket, so a failure
+// conservatively blocks every bucket -- the correct, safe fallback for
+// a scanner that can't honestly say which bucket(s) it would have
+// affected. This test's doubles DO declare one (via sequenceScanner's
+// bucket field, mirroring scanner.BucketAffinity's real implementers --
+// TrivyScanner, ClamAVScanner, etc.), so a malware scanner erroring must
+// no longer block CVE fix-detection: the two are unrelated buckets, and
+// scanArtifact now knows that instead of assuming the worst everywhere.
+func TestScanArtifact_FailureOnlyBlocksItsOwnBucket(t *testing.T) {
+	trivy := &sequenceScanner{
+		bucket: "cve",
+		results: [][]artifact.Finding{
+			{{ID: "CVE-2024-1", Severity: "high", Source: "trivy"}},
+			{}, // second scan: CVE-2024-1 no longer present -- should be marked fixed
+		},
+	}
+	broken := &sequenceScanner{
+		bucket:  "malware",
+		results: [][]artifact.Finding{{}, {}},
+		errs:    []error{nil, errors.New("clamav: connection refused")},
+	}
+	h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {trivy, broken}})
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first scan status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Second scan: trivy (bucket "cve") succeeds and no longer reports
+	// CVE-2024-1; the malware-bucket scanner errors. Only the malware
+	// bucket should be blocked from fix-detection -- CVE-2024-1 should
+	// still be marked fixed, since the scanner that failed couldn't have
+	// produced a CVE finding anyway.
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second scan status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	got := decodeArtifact(t, rec)
+	if len(got.CVEFindings) != 1 {
+		t.Fatalf("expected CVE-2024-1 to still be present (fixed, not deleted), got %+v", got.CVEFindings)
+	}
+	if got.CVEFindings[0].Status != artifact.FindingStatusFixed {
+		t.Fatalf("CVE status = %q, want %q -- a malware scanner failing shouldn't block CVE fix-detection", got.CVEFindings[0].Status, artifact.FindingStatusFixed)
+	}
+	if got.CVEFindings[0].ResolvedAt == nil {
+		t.Fatal("resolved_at is nil, want it set now that the CVE bucket was free to detect the fix")
 	}
 }
 

@@ -68,6 +68,11 @@ func NewTrivyScanner(registryAddr string, db TrivyDBConfig) *TrivyScanner {
 	return &TrivyScanner{registryAddr: registryAddr, db: db}
 }
 
+// Bucket implements BucketAffinity: every finding comes from
+// parseTrivyVulnerabilities, which always sets Source: "trivy" --
+// classifyBucket's default case, "cve".
+func (t *TrivyScanner) Bucket() string { return "cve" }
+
 type trivyReport struct {
 	Results []struct {
 		Vulnerabilities []struct {
