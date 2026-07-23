@@ -67,6 +67,100 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, a)
 }
 
+type bulkCreateArtifactsRequest struct {
+	Artifacts []createArtifactRequest `json:"artifacts"`
+}
+
+type bulkCreateArtifactsResult struct {
+	Ref      string             `json:"ref"`
+	Type     string             `json:"type"`
+	Artifact *artifact.Artifact `json:"artifact,omitempty"`
+	Error    string             `json:"error,omitempty"`
+}
+
+type bulkCreateArtifactsResponse struct {
+	Created int                         `json:"created"`
+	Failed  int                         `json:"failed"`
+	Results []bulkCreateArtifactsResult `json:"results"`
+}
+
+// maxBulkArtifacts caps how many artifacts one bulkCreateArtifacts
+// request can register. Without a cap, a single oversized request body
+// could tie up the store/DB the same way withRateLimit exists to stop
+// one caller monopolizing the scan pipeline (see ratelimit.go) -- this
+// is the equivalent guard for the registration path.
+const maxBulkArtifacts = 500
+
+// bulkCreateArtifacts registers many artifacts from a single request --
+// see docs/architecture.md, "Bulk-registering artifacts", added
+// specifically so seeding/testing a batch of artifacts (e.g. a list of
+// 100 images to scan) doesn't require one HTTP round trip per artifact
+// via POST /api/v1/artifacts.
+//
+// This is deliberately best-effort, not all-or-nothing: one malformed
+// ref or invalid type in a batch of 100 shouldn't block the other 99
+// from registering, so each entry is validated and created
+// independently, and the response reports success/failure per entry
+// instead of failing the whole request on the first bad one -- the same
+// "one failure shouldn't block everything else" reasoning
+// scanArtifact's own per-scanner error handling already uses.
+func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
+	var req bulkCreateArtifactsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(req.Artifacts) == 0 {
+		writeError(w, http.StatusBadRequest, "artifacts must be a non-empty array")
+		return
+	}
+	if len(req.Artifacts) > maxBulkArtifacts {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("too many artifacts in one request (max %d)", maxBulkArtifacts))
+		return
+	}
+
+	results := make([]bulkCreateArtifactsResult, 0, len(req.Artifacts))
+	created, failed := 0, 0
+	for _, item := range req.Artifacts {
+		res := bulkCreateArtifactsResult{Ref: item.Ref, Type: item.Type}
+
+		if item.Ref == "" {
+			res.Error = "ref is required"
+			failed++
+			results = append(results, res)
+			continue
+		}
+		t := artifact.Type(item.Type)
+		if !t.Valid() {
+			res.Error = "type must be one of image, file, sbom, sarif"
+			failed++
+			results = append(results, res)
+			continue
+		}
+		a, err := h.store.Create(item.Ref, t)
+		if err != nil {
+			res.Error = err.Error()
+			failed++
+			results = append(results, res)
+			continue
+		}
+		res.Artifact = a
+		created++
+		results = append(results, res)
+	}
+
+	// 201 as long as at least one artifact registered -- a request
+	// that's entirely bad input (e.g. every entry missing a ref) is the
+	// one case that should read as a client error rather than "created,
+	// but check the per-entry results," since nothing was actually
+	// created.
+	status := http.StatusCreated
+	if created == 0 {
+		status = http.StatusBadRequest
+	}
+	writeJSON(w, status, bulkCreateArtifactsResponse{Created: created, Failed: failed, Results: results})
+}
+
 func (h *handler) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	list, err := h.store.List()
 	if err != nil {

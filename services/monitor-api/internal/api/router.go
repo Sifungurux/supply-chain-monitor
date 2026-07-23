@@ -32,6 +32,7 @@ func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /api/v1/pipeline/stages", h.listStages)
 	mux.HandleFunc("POST /api/v1/artifacts", h.createArtifact)
+	mux.HandleFunc("POST /api/v1/artifacts/bulk", h.bulkCreateArtifacts)
 	mux.HandleFunc("GET /api/v1/artifacts", h.listArtifacts)
 	mux.HandleFunc("GET /api/v1/artifacts/{id}", h.getArtifact)
 	mux.HandleFunc("DELETE /api/v1/artifacts/{id}", h.deleteArtifact)

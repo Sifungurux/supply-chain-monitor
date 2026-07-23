@@ -169,6 +169,126 @@ func TestCreateArtifact(t *testing.T) {
 	})
 }
 
+func TestBulkCreateArtifacts_Success(t *testing.T) {
+	h, _ := newTestRouter(scanner.Registry{})
+
+	body := map[string]any{
+		"artifacts": []map[string]string{
+			{"ref": "alpine:3.19", "type": "image"},
+			{"ref": "/tmp/report.sarif", "type": "sarif"},
+			{"ref": "ghcr.io/example/app:1.0", "type": "image"},
+		},
+	}
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Created int `json:"created"`
+		Failed  int `json:"failed"`
+		Results []struct {
+			Ref      string `json:"ref"`
+			Error    string `json:"error"`
+			Artifact struct {
+				ID string `json:"id"`
+			} `json:"artifact"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, rec.Body.String())
+	}
+	if resp.Created != 3 || resp.Failed != 0 {
+		t.Fatalf("created=%d failed=%d, want 3/0", resp.Created, resp.Failed)
+	}
+	if len(resp.Results) != 3 {
+		t.Fatalf("results len = %d, want 3", len(resp.Results))
+	}
+	for _, r := range resp.Results {
+		if r.Artifact.ID == "" {
+			t.Fatalf("expected an id for ref %q, got none (error=%q)", r.Ref, r.Error)
+		}
+	}
+
+	// Confirm they actually landed in the store, not just echoed back.
+	listRec := doJSON(t, h, http.MethodGet, "/api/v1/artifacts", nil)
+	var list []artifact.Artifact
+	if err := json.Unmarshal(listRec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(list) != 3 {
+		t.Fatalf("store has %d artifacts, want 3", len(list))
+	}
+}
+
+func TestBulkCreateArtifacts_PartialFailureStillCreatesTheGoodOnes(t *testing.T) {
+	h, _ := newTestRouter(scanner.Registry{})
+
+	body := map[string]any{
+		"artifacts": []map[string]string{
+			{"ref": "alpine:3.19", "type": "image"},
+			{"ref": "", "type": "image"},           // missing ref
+			{"ref": "x", "type": "not-a-real-type"}, // invalid type
+			{"ref": "busybox:latest", "type": "image"},
+		},
+	}
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", body)
+	// At least one entry succeeded, so this is still 201, not 400 -- a
+	// batch shouldn't read as an overall failure just because some
+	// entries were bad (see bulkCreateArtifacts's own comment on this).
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Created int `json:"created"`
+		Failed  int `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Created != 2 || resp.Failed != 2 {
+		t.Fatalf("created=%d failed=%d, want 2/2", resp.Created, resp.Failed)
+	}
+}
+
+func TestBulkCreateArtifacts_AllInvalidReturns400(t *testing.T) {
+	h, _ := newTestRouter(scanner.Registry{})
+
+	body := map[string]any{
+		"artifacts": []map[string]string{
+			{"ref": "", "type": "image"},
+			{"ref": "x", "type": "not-a-real-type"},
+		},
+	}
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (nothing was actually created), body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestBulkCreateArtifacts_EmptyArrayRejected(t *testing.T) {
+	h, _ := newTestRouter(scanner.Registry{})
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", map[string]any{"artifacts": []map[string]string{}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an empty artifacts array", rec.Code)
+	}
+}
+
+func TestBulkCreateArtifacts_TooManyRejected(t *testing.T) {
+	h, _ := newTestRouter(scanner.Registry{})
+
+	items := make([]map[string]string, 501)
+	for i := range items {
+		items[i] = map[string]string{"ref": "alpine:3.19", "type": "image"}
+	}
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", map[string]any{"artifacts": items})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a batch over the cap", rec.Code)
+	}
+}
+
 func TestListAndGetArtifact(t *testing.T) {
 	h, store := newTestRouter(scanner.Registry{})
 

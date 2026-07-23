@@ -211,6 +211,7 @@ limiting).
 | GET    | `/healthz`                        | liveness/readiness                         |
 | GET    | `/api/v1/pipeline/stages`         | list configured pipeline stages            |
 | POST   | `/api/v1/artifacts`                | register an artifact `{ref, type}`         |
+| POST   | `/api/v1/artifacts/bulk`           | register many artifacts in one request `{artifacts: [{ref, type}, ...]}`, max 500 |
 | GET    | `/api/v1/artifacts`                | list all tracked artifacts                 |
 | GET    | `/api/v1/artifacts/{id}`           | get one artifact (findings, current stage) |
 | DELETE | `/api/v1/artifacts/{id}`           | permanently delete an artifact and everything recorded against it (no undo) |
@@ -255,6 +256,25 @@ curl -s localhost:8080/api/v1/artifacts/<id> "${AUTH[@]}"
 # find every artifact still affected by a given finding (e.g. after a
 # fix ships, confirm nothing registered still carries this CVE)
 curl -s localhost:8080/api/v1/findings/CVE-2024-1234/artifacts "${AUTH[@]}"
+```
+
+### Registering many artifacts at once
+
+`POST /api/v1/artifacts/bulk` takes `{"artifacts": [{"ref":..., "type":...}, ...]}`
+and registers every entry in one request, instead of one round trip per
+artifact via plain `POST /api/v1/artifacts`. It's best-effort, not
+all-or-nothing: one bad entry (missing `ref`, invalid `type`) doesn't
+stop the rest of the batch from registering, and the response reports
+success/failure per entry. `testdata/bulk-test-images.json` is a ready-
+made batch of 100 real image refs spread across seven public registries
+(Docker Hub, ghcr.io, registry.k8s.io, quay.io, mcr.microsoft.com,
+gcr.io, public.ecr.aws) for exercising this in one call:
+
+```bash
+curl -s -X POST localhost:8080/api/v1/artifacts/bulk "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d @testdata/bulk-test-images.json
+# => {"created":100,"failed":0,"results":[{"ref":"alpine:3.19","type":"image","artifact":{...}}, ...]}
 ```
 
 ### Submitting findings from an external scanner

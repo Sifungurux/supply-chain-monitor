@@ -1577,6 +1577,55 @@ before calling the API, since this is the one destructive,
 irreversible action available from the UI -- everything else (scan,
 register, stage transitions) is either additive or safely re-runnable.
 
+**Bulk-registering artifacts.** Registering artifacts one at a time via
+`POST /api/v1/artifacts` is the right shape for a real pipeline --
+artifacts show up one at a time as a build produces them -- but it's
+painful for seeding or testing a whole batch (e.g. a list of 100 images
+pulled from various registries): that's 100 separate HTTP round trips
+just to get data into the system before anything interesting (scanning,
+findings) can happen. `POST /api/v1/artifacts/bulk`
+(`internal/api/handlers.go`'s `bulkCreateArtifacts`) takes
+`{"artifacts": [{ref, type}, ...]}` and registers the whole batch from a
+single request.
+
+This is deliberately best-effort per entry, not all-or-nothing for the
+whole request: each artifact in the array is validated and created
+independently, and one bad entry (empty `ref`, invalid `type`) doesn't
+block the rest of the batch from registering -- the same "one failure
+shouldn't take down everything else" reasoning `scanArtifact`'s
+per-scanner error handling already uses (see "Parallelizing
+scanArtifact's scanner loop"). The response reports `created`/`failed`
+counts plus a per-entry result (the created artifact, or an error
+string) so a caller can tell exactly which refs succeeded without
+re-fetching the whole list. The one case that *does* fail the whole
+request is every entry being bad -- if nothing was actually created,
+a 400 is the honest status, not a 201 with an all-error results array.
+
+A request is also capped at `maxBulkArtifacts` (500) entries -- an
+unbounded array in one request body could otherwise let a single caller
+monopolize the store/DB the same way `withRateLimit` exists to stop one
+caller monopolizing the scan pipeline (see `ratelimit.go`); this is the
+equivalent guard on the registration path. No new `Store` method was
+needed -- the handler just calls the existing `Store.Create` once per
+entry, since neither `MemStore` nor `PostgresStore`'s `Create` does
+anything that benefits from batching (each insert is already a single,
+independent statement).
+
+`testdata/bulk-test-images.json` is a ready-made 100-entry batch for
+exercising this endpoint (and the scan pipeline behind it) end-to-end:
+real, currently-valid image refs spread across seven public registries
+(Docker Hub, `ghcr.io`, `registry.k8s.io`, `quay.io`,
+`mcr.microsoft.com`, `gcr.io`, `public.ecr.aws`), all `type: "image"`,
+shaped exactly as `bulkCreateArtifacts` expects so it can be POSTed
+directly with `-d @testdata/bulk-test-images.json` (see the README's
+"Registering many artifacts at once"). Real registries and image
+publishers change over time, so treat this as a realistic sample for
+load/smoke-testing the register→scan pipeline across many artifacts and
+registries at once, not a permanently-pinned fixture -- some entries
+may eventually 404 or get retagged, which is itself a fine thing to
+exercise given `bulkCreateArtifacts`'s partial-failure behavior only
+covers registration, not the scan step that follows.
+
 ## All services on Flux + Helm
 
 Every service in this project -- `registry`, `clamav`, `postgres`,
