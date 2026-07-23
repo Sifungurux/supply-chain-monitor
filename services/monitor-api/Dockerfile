@@ -35,6 +35,18 @@ FROM alpine:3.21
 # upstream releases only ship an amd64 binary, the reason this project
 # ever started building anything from source in the first place.
 ARG TARGETARCH
+# trivy's own install.sh (contrib/install.sh, godownloader-generated)
+# takes a version tag as its trailing positional arg -- omitting it
+# (as this used to) makes it resolve whatever GitHub currently reports
+# as "latest" via `github_release`, at build time. That's an unpinned
+# dependency in a project that pins everything else it downloads
+# (ORAS_VERSION/UNPACKER_VERSION/UMOCI_VERSION below), and means two
+# `docker build`s a week apart can silently end up running different
+# trivy versions -- undesirable for a supply-chain-security tool whose
+# whole job depends on a specific scanner's specific behavior. Bump
+# TRIVY_VERSION deliberately (or pass --build-arg TRIVY_VERSION=...) to
+# update; nothing updates it on its own anymore.
+ARG TRIVY_VERSION=0.72.0
 # oras (github.com/oras-project/oras) fetches file/sbom/sarif artifacts
 # from an OCI registry so their `ref` can be a real registry reference
 # instead of assuming the artifact is already a path inside this pod --
@@ -54,7 +66,7 @@ ARG ORAS_VERSION=1.3.2
 # to update; no commit SHA to track anymore.
 ARG UNPACKER_VERSION=0.5.1
 RUN apk add --no-cache ca-certificates curl tar \
-    && curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin \
+    && curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin "v${TRIVY_VERSION}" \
     && ARCH="${TARGETARCH:-$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')}" \
     && curl -sSL -o /tmp/oras.tar.gz "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${ARCH}.tar.gz" \
     && tar -zxf /tmp/oras.tar.gz -C /usr/local/bin oras \

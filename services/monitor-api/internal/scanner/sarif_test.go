@@ -175,6 +175,160 @@ func TestSARIFScanner_Scan(t *testing.T) {
 	})
 }
 
+// TestSARIFScanner_Scan_Category covers the classifier end to end,
+// through Scan itself rather than calling classifySarifCategory
+// directly -- confirming rule.Name/rule.Properties.Tags are actually
+// wired up from the parsed JSON into each Finding.Category.
+func TestSARIFScanner_Scan_Category(t *testing.T) {
+	s := NewSARIFScanner()
+
+	t.Run("trivy's own rule names classify by exact match", func(t *testing.T) {
+		path := writeSARIFFile(t, `{
+			"runs": [{
+				"tool": {"driver": {"rules": [
+					{"id": "CVE-2023-1234", "name": "OsPackageVulnerability"},
+					{"id": "python-pkg", "name": "LanguageSpecificPackageVulnerability"},
+					{"id": "AVD-AWS-0001", "name": "Misconfiguration"},
+					{"id": "aws-secret", "name": "Secret"},
+					{"id": "gpl-3.0", "name": "License"}
+				]}},
+				"results": [
+					{"ruleId": "CVE-2023-1234", "level": "error", "message": {"text": "x"}},
+					{"ruleId": "python-pkg", "level": "error", "message": {"text": "x"}},
+					{"ruleId": "AVD-AWS-0001", "level": "error", "message": {"text": "x"}},
+					{"ruleId": "aws-secret", "level": "error", "message": {"text": "x"}},
+					{"ruleId": "gpl-3.0", "level": "note", "message": {"text": "x"}}
+				]
+			}]
+		}`)
+
+		findings, err := s.Scan(context.Background(), path)
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		want := map[string]string{
+			"CVE-2023-1234": "cve",
+			"python-pkg":     "cve",
+			"AVD-AWS-0001":   "misconfiguration",
+			"aws-secret":     "secret",
+			"gpl-3.0":        "other", // license findings stay in the generic catch-all
+		}
+		if len(findings) != len(want) {
+			t.Fatalf("expected %d findings, got %+v", len(want), findings)
+		}
+		for _, f := range findings {
+			if got, ok := want[f.ID]; !ok || got != f.Category {
+				t.Errorf("finding %q: Category = %q, want %q", f.ID, f.Category, want[f.ID])
+			}
+		}
+	})
+
+	t.Run("CVE-shaped rule id classifies as cve even without a matching rule name", func(t *testing.T) {
+		path := writeSARIFFile(t, `{
+			"runs": [{
+				"tool": {"driver": {"rules": []}},
+				"results": [{"ruleId": "go/CVE-2022-9999", "level": "error", "message": {"text": "x"}}]
+			}]
+		}`)
+		findings, err := s.Scan(context.Background(), path)
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if len(findings) != 1 || findings[0].Category != "cve" {
+			t.Fatalf("expected category cve from CVE-shaped rule id, got %+v", findings)
+		}
+	})
+
+	t.Run("tag keywords classify tool-agnostic findings without a Trivy-style rule name", func(t *testing.T) {
+		path := writeSARIFFile(t, `{
+			"runs": [{
+				"tool": {"driver": {"rules": [
+					{"id": "generic-leak", "properties": {"tags": ["secret", "credentials"]}},
+					{"id": "generic-iac", "properties": {"tags": ["OWASP-A05:2021-Security Misconfiguration"]}},
+					{"id": "generic-vuln", "properties": {"tags": ["vulnerability"]}},
+					{"id": "generic-sast", "properties": {"tags": ["correctness"]}}
+				]}},
+				"results": [
+					{"ruleId": "generic-leak", "level": "error", "message": {"text": "x"}},
+					{"ruleId": "generic-iac", "level": "error", "message": {"text": "x"}},
+					{"ruleId": "generic-vuln", "level": "error", "message": {"text": "x"}},
+					{"ruleId": "generic-sast", "level": "warning", "message": {"text": "x"}}
+				]
+			}]
+		}`)
+		findings, err := s.Scan(context.Background(), path)
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		want := map[string]string{
+			"generic-leak":  "secret",
+			"generic-iac":   "misconfiguration",
+			"generic-vuln":  "cve",
+			"generic-sast":  "other", // no tag keyword matches -> generic catch-all
+		}
+		if len(findings) != len(want) {
+			t.Fatalf("expected %d findings, got %+v", len(want), findings)
+		}
+		for _, f := range findings {
+			if got, ok := want[f.ID]; !ok || got != f.Category {
+				t.Errorf("finding %q: Category = %q, want %q", f.ID, f.Category, want[f.ID])
+			}
+		}
+	})
+
+	t.Run("no name, no CVE-shaped id, no matching tags falls back to other", func(t *testing.T) {
+		path := writeSARIFFile(t, `{
+			"runs": [{
+				"tool": {"driver": {"rules": [{"id": "some-lint-rule"}]}},
+				"results": [{"ruleId": "some-lint-rule", "level": "note", "message": {"text": "x"}}]
+			}]
+		}`)
+		findings, err := s.Scan(context.Background(), path)
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if len(findings) != 1 || findings[0].Category != "other" {
+			t.Fatalf("expected fallback category other, got %+v", findings)
+		}
+	})
+}
+
+func TestClassifySarifCategory(t *testing.T) {
+	cases := []struct {
+		name    string
+		ruleID  string
+		ruleName string
+		tags    []string
+		want    string
+	}{
+		{"os package vuln by name", "CVE-2023-1", "OsPackageVulnerability", nil, "cve"},
+		{"lang package vuln by name", "SOME-ID", "LanguageSpecificPackageVulnerability", nil, "cve"},
+		{"misconfiguration by name", "AVD-1", "Misconfiguration", nil, "misconfiguration"},
+		{"secret by name", "SECRET-1", "Secret", nil, "secret"},
+		{"license by name", "LIC-1", "License", nil, "other"},
+		{"cve-shaped id, no name", "CVE-2021-44228", "", nil, "cve"},
+		{"cve-shaped id, mixed case", "cve-2021-44228", "", nil, "cve"},
+		{"cve-shaped id with prefix", "go/CVE-2021-44228", "", nil, "cve"},
+		{"secret tag", "x", "", []string{"secret"}, "secret"},
+		{"credential tag", "x", "", []string{"leaked-credential"}, "secret"},
+		{"misconfig tag", "x", "", []string{"misconfiguration"}, "misconfiguration"},
+		{"iac tag", "x", "", []string{"iac-scan"}, "misconfiguration"},
+		{"compliance tag", "x", "", []string{"compliance"}, "misconfiguration"},
+		{"cve tag", "x", "", []string{"cve"}, "cve"},
+		{"vulnerability tag", "x", "", []string{"vulnerability"}, "cve"},
+		{"unrecognized tag falls back to other", "x", "", []string{"style"}, "other"},
+		{"nothing at all falls back to other", "x", "", nil, "other"},
+		{"rule name wins over a coincidentally CVE-shaped id", "CVE-2023-1", "Misconfiguration", nil, "misconfiguration"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifySarifCategory(tc.ruleID, tc.ruleName, tc.tags); got != tc.want {
+				t.Errorf("classifySarifCategory(%q, %q, %v) = %q, want %q", tc.ruleID, tc.ruleName, tc.tags, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSarifLevelToSeverity(t *testing.T) {
 	cases := map[string]string{
 		"error":      "high",

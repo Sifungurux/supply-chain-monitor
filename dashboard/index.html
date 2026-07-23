@@ -176,7 +176,7 @@
     <table>
       <thead>
         <tr>
-          <th>Ref</th><th>Type</th><th>Status</th><th>Stage</th><th>CVEs</th><th>Malware</th><th>Other</th><th>Updated</th><th></th>
+          <th>Ref</th><th>Type</th><th>Status</th><th>Stage</th><th>CVEs</th><th>Malware</th><th>Misconfig</th><th>Secrets</th><th>Other</th><th>Updated</th><th></th>
         </tr>
       </thead>
       <tbody id="artifact-rows"></tbody>
@@ -297,9 +297,10 @@
   }
 
   // renderFinding is the one place that decides how a single finding
-  // looks, for all three buckets (CVE/malware/other) -- so "new" and
-  // "fixed" render identically everywhere instead of each bucket's map()
-  // callback growing its own slightly-different copy.
+  // looks, for all five buckets (CVE/malware/misconfiguration/secret/
+  // other) -- so "new" and "fixed" render identically everywhere
+  // instead of each bucket's map() callback growing its own
+  // slightly-different copy.
   //   showId: CVE/SARIF findings lead with their ID (e.g. "CVE-2024-1234"),
   //     with the title (if any) appended -- malware findings lead with
   //     the title (a signature name) since their ID is just a constant
@@ -386,12 +387,19 @@
     var withCVEs = state.artifacts.filter(function (a) { return openFindings(a.cve_findings).length > 0; }).length;
     var withMalware = state.artifacts.filter(function (a) { return openFindings(a.malware_findings).length > 0; }).length;
     var withOther = state.artifacts.filter(function (a) { return openFindings(a.other_findings).length > 0; }).length;
+    // These two are appended after the original five rather than
+    // inserted among them, so the existing cards keep their positions
+    // (some tests index into this array by position).
+    var withMisconfig = state.artifacts.filter(function (a) { return openFindings(a.misconfiguration_findings).length > 0; }).length;
+    var withSecrets = state.artifacts.filter(function (a) { return openFindings(a.secret_findings).length > 0; }).length;
     var cards = [
       ['Artifacts', total],
       ['Scanning now', scanning],
       ['With CVEs', withCVEs],
       ['With malware', withMalware],
-      ['With other findings', withOther]
+      ['With other findings', withOther],
+      ['With misconfigurations', withMisconfig],
+      ['With secrets', withSecrets]
     ];
     els.cards.innerHTML = cards.map(function (c) {
       return '<div class="card"><div class="n">' + c[1] + '</div><div class="l">' + c[0] + '</div></div>';
@@ -418,7 +426,7 @@
 
   function renderRows() {
     if (!state.artifacts.length) {
-      els.rows.innerHTML = '<tr><td colspan="9" class="empty">No artifacts yet. Register one above to get started.</td></tr>';
+      els.rows.innerHTML = '<tr><td colspan="11" class="empty">No artifacts yet. Register one above to get started.</td></tr>';
       return;
     }
     var rows = [];
@@ -435,6 +443,8 @@
             '<td>' + (a.current_stage ? esc(a.current_stage) : '<span class="muted">—</span>') + '</td>' +
             '<td>' + countCell(openFindings(a.cve_findings).length) + '</td>' +
             '<td>' + countCell(openFindings(a.malware_findings).length) + '</td>' +
+            '<td>' + countCell(openFindings(a.misconfiguration_findings).length) + '</td>' +
+            '<td>' + countCell(openFindings(a.secret_findings).length) + '</td>' +
             '<td>' + countCell(openFindings(a.other_findings).length) + '</td>' +
             '<td class="muted">' + timeAgo(a.updated_at) + '</td>' +
             '<td class="actions">' +
@@ -456,6 +466,8 @@
     var stageHistory = (a.stage_history || []).slice().reverse();
     var cve = a.cve_findings || [];
     var mal = a.malware_findings || [];
+    var misconfig = a.misconfiguration_findings || [];
+    var secret = a.secret_findings || [];
     var other = a.other_findings || [];
     var errs = a.last_scan_errors || [];
 
@@ -475,6 +487,14 @@
       ? mal.map(function (f) { return renderFinding(f, a, false); }).join('')
       : '<span class="muted">No malware findings.</span>';
 
+    var misconfigHtml = misconfig.length
+      ? misconfig.map(function (f) { return renderFinding(f, a, true); }).join('')
+      : '<span class="muted">No misconfiguration findings.</span>';
+
+    var secretHtml = secret.length
+      ? secret.map(function (f) { return renderFinding(f, a, true); }).join('')
+      : '<span class="muted">No secret findings.</span>';
+
     var otherHtml = other.length
       ? other.map(function (f) { return renderFinding(f, a, true); }).join('')
       : '<span class="muted">No other findings.</span>';
@@ -484,11 +504,13 @@
       : '';
 
     return (
-      '<tr class="detail-row"><td colspan="9">' +
+      '<tr class="detail-row"><td colspan="11">' +
         '<div class="detail-grid">' +
           '<div class="detail-col"><h3>Pipeline history</h3>' + historyHtml + '</div>' +
           '<div class="detail-col"><h3>CVE findings</h3>' + cveHtml + '</div>' +
           '<div class="detail-col"><h3>Malware findings</h3>' + malHtml + '</div>' +
+          '<div class="detail-col"><h3>Misconfiguration findings</h3>' + misconfigHtml + '</div>' +
+          '<div class="detail-col"><h3>Secret findings</h3>' + secretHtml + '</div>' +
           '<div class="detail-col"><h3>Other findings (SARIF, etc.)</h3>' + otherHtml + '</div>' +
         '</div>' +
         errsHtml +

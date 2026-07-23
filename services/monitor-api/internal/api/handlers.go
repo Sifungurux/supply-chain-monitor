@@ -141,16 +141,8 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// Every scanner registered for this artifact type runs; findings are
-	// sorted into CVE/malware/other buckets by Finding.Source rather
-	// than by artifact type, since a single type (image) can produce
-	// more than one kind. "sarif" is its own bucket (OtherFindings)
-	// rather than folded into CVEFindings -- SARIF covers SAST issues,
-	// secrets, IaC misconfigurations, and more, not just CVEs, so
-	// calling it a CVE finding would mislabel it. Everything that isn't
-	// explicitly clamav or sarif defaults to the CVE bucket, which
-	// today just means "trivy" but keeps this open to future
-	// CVE-flavored scanners without another switch-case edit.
-	var cveFindings, malwareFindings, otherFindings []artifact.Finding
+	// sorted into one of five buckets by classifyBucket below.
+	var cveFindings, malwareFindings, misconfigFindings, secretFindings, otherFindings []artifact.Finding
 	var scanErrors []string
 
 	for _, s := range scanners {
@@ -159,12 +151,16 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 			scanErrors = append(scanErrors, scanErr.Error())
 		}
 		for _, f := range findings {
-			switch f.Source {
-			case "clamav":
+			switch classifyBucket(f) {
+			case "malware":
 				malwareFindings = append(malwareFindings, f)
-			case "sarif":
+			case "misconfiguration":
+				misconfigFindings = append(misconfigFindings, f)
+			case "secret":
+				secretFindings = append(secretFindings, f)
+			case "other":
 				otherFindings = append(otherFindings, f)
-			default:
+			default: // "cve"
 				cveFindings = append(cveFindings, f)
 			}
 		}
@@ -192,6 +188,8 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 		art.Status = status
 		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, cveFindings, now, detectFixed)
 		art.MalwareFindings = artifact.MergeFindings(art.MalwareFindings, malwareFindings, now, detectFixed)
+		art.MisconfigFindings = artifact.MergeFindings(art.MisconfigFindings, misconfigFindings, now, detectFixed)
+		art.SecretFindings = artifact.MergeFindings(art.SecretFindings, secretFindings, now, detectFixed)
 		art.OtherFindings = artifact.MergeFindings(art.OtherFindings, otherFindings, now, detectFixed)
 		art.LastScanErrors = scanErrors
 	})
@@ -206,6 +204,39 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, updated)
+}
+
+// classifyBucket decides which of the five finding buckets (cve,
+// malware, misconfiguration, secret, other) a scanner's finding
+// belongs in.
+//
+// A Scanner that already knows its own category -- currently just
+// SARIFScanner, since a single SARIF document can mix CVEs, IaC
+// misconfigurations, secrets, and generic SAST issues all in one file
+// -- sets Finding.Category directly (see internal/scanner/sarif.go's
+// classifySarifCategory), and that's authoritative here. Most
+// scanners (TrivyScanner, ClamAVScanner, ...) each only ever produce
+// one kind of result and don't bother setting it, so this falls back
+// to the original Source-based heuristic: "clamav" is malware, "sarif"
+// (with no Category set -- e.g. an older/adjacent SARIF-producing
+// Scanner that hasn't been taught to classify itself) defaults to
+// other rather than cve, since a SARIF result could be anything.
+// Everything else defaults to cve (today just means "trivy", but
+// stays open to future CVE-flavored scanners without another
+// switch-case edit here).
+func classifyBucket(f artifact.Finding) string {
+	switch f.Category {
+	case "cve", "malware", "misconfiguration", "secret", "other":
+		return f.Category
+	}
+	switch f.Source {
+	case "clamav":
+		return "malware"
+	case "sarif":
+		return "other"
+	default:
+		return "cve"
+	}
 }
 
 type updateStageRequest struct {
@@ -244,16 +275,16 @@ func (h *handler) updateStage(w http.ResponseWriter, r *http.Request) {
 }
 
 // validFindingsBucket checks the bucket name submitFindings was given.
-// These three literal strings are an API-contract detail of this
+// These five literal strings are an API-contract detail of this
 // package -- kept separate from internal/artifact/postgres_store.go's
-// own bucketCVE/bucketMalware/bucketOther constants, which exist for a
-// different reason (Postgres table rows) and MemStore doesn't use at
-// all. Matches the same "cve"/"malware"/"other" vocabulary scanArtifact
-// already sorts Finding.Source into above, just made explicit here
-// instead of inferred from a Source string.
+// own bucketCVE/bucketMalware/bucketMisconfiguration/bucketSecret/
+// bucketOther constants, which exist for a different reason (Postgres
+// table rows) and MemStore doesn't use at all. Matches the same
+// vocabulary classifyBucket above already sorts findings into, just
+// made explicit here instead of inferred from a Source/Category.
 func validFindingsBucket(bucket string) bool {
 	switch bucket {
-	case "cve", "malware", "other":
+	case "cve", "malware", "misconfiguration", "secret", "other":
 		return true
 	default:
 		return false
@@ -261,9 +292,10 @@ func validFindingsBucket(bucket string) bool {
 }
 
 type submitFindingsRequest struct {
-	// Bucket picks which of the artifact's three finding buckets this
-	// call writes into ("cve", "malware", or "other" -- see
-	// artifact.Artifact's CVEFindings/MalwareFindings/OtherFindings).
+	// Bucket picks which of the artifact's five finding buckets this
+	// call writes into ("cve", "malware", "misconfiguration", "secret",
+	// or "other" -- see artifact.Artifact's CVEFindings/
+	// MalwareFindings/MisconfigFindings/SecretFindings/OtherFindings).
 	Bucket   string             `json:"bucket"`
 	Findings []artifact.Finding `json:"findings"`
 }
@@ -275,23 +307,23 @@ type submitFindingsRequest struct {
 // of Ref involved at all.
 //
 // This exists because scanArtifact (the only other write path into
-// CVEFindings/MalwareFindings/OtherFindings) always calls a registered
-// Scanner's Scan(ctx, ref), which always does its own fetch+scan of ref
-// internally -- there was previously no path for "here are findings I
-// already computed, just store them." See docs/architecture.md
-// ("Submitting external findings directly") for the full reasoning,
-// including why this is a new endpoint rather than another Scanner
-// implementation (a Scanner's contract is "given a ref, go compute
-// findings" -- this handler's input already *is* the findings, so it
-// doesn't fit that shape).
+// CVEFindings/MalwareFindings/MisconfigFindings/SecretFindings/
+// OtherFindings) always calls a registered Scanner's Scan(ctx, ref),
+// which always does its own fetch+scan of ref internally -- there was
+// previously no path for "here are findings I already computed, just
+// store them." See docs/architecture.md ("Submitting external findings
+// directly") for the full reasoning, including why this is a new
+// endpoint rather than another Scanner implementation (a Scanner's
+// contract is "given a ref, go compute findings" -- this handler's
+// input already *is* the findings, so it doesn't fit that shape).
 //
 // Deliberately touches only the one bucket named in the request,
-// unlike scanArtifact (which merges into all three buckets every call,
+// unlike scanArtifact (which merges into all five buckets every call,
 // since it always re-runs every registered scanner for the type at
 // once). An external system submitting its own malware results has no
 // way to know what Trivy or a SARIF import already found for this same
-// artifact, so touching the other two buckets here would risk
-// corrupting real data.
+// artifact, so touching the other buckets here would risk corrupting
+// real data.
 //
 // The one bucket it does touch is merged, not replaced, via
 // MergeFindings -- exactly like scanArtifact, so a finding that stops
@@ -311,7 +343,7 @@ func (h *handler) submitFindings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validFindingsBucket(req.Bucket) {
-		writeError(w, http.StatusBadRequest, "bucket must be one of cve, malware, other")
+		writeError(w, http.StatusBadRequest, "bucket must be one of cve, malware, misconfiguration, secret, other")
 		return
 	}
 	if req.Findings == nil {
@@ -325,6 +357,10 @@ func (h *handler) submitFindings(w http.ResponseWriter, r *http.Request) {
 			art.CVEFindings = artifact.MergeFindings(art.CVEFindings, req.Findings, now, true)
 		case "malware":
 			art.MalwareFindings = artifact.MergeFindings(art.MalwareFindings, req.Findings, now, true)
+		case "misconfiguration":
+			art.MisconfigFindings = artifact.MergeFindings(art.MisconfigFindings, req.Findings, now, true)
+		case "secret":
+			art.SecretFindings = artifact.MergeFindings(art.SecretFindings, req.Findings, now, true)
 		case "other":
 			art.OtherFindings = artifact.MergeFindings(art.OtherFindings, req.Findings, now, true)
 		}

@@ -277,6 +277,101 @@ did, dropping an entire build stage. Bump `UNPACKER_VERSION` in the
 Dockerfile to pick up a newer release; there's no commit SHA to track
 anymore.
 
+**Fixed: trivy itself was the one dependency in this image with no
+version pin at all.** `oras`/`unpacker`/`umoci` are all pinned
+(`ORAS_VERSION`/`UNPACKER_VERSION`/`UMOCI_VERSION`), but trivy's own
+`contrib/install.sh` was being invoked with no version argument, which
+-- per that script's own logic (`tag_to_version`'s `github_release`
+call) -- resolves to whatever GitHub currently reports as the latest
+release, at build time. That meant two `docker build`s of this exact
+Dockerfile, a week apart, could silently end up running two different
+trivy versions, with no record of which one actually produced a given
+scan's findings -- a real gap for a supply-chain-security tool whose
+core job is "trust this scanner's output." Fixed by adding
+`ARG TRIVY_VERSION` (passed as `install.sh`'s trailing version-tag
+argument, which the script does support -- it just wasn't being used).
+Bump it deliberately in the Dockerfile, or override per-build with
+`docker build --build-arg TRIVY_VERSION=...`, the same as the other
+three; nothing updates it on its own now.
+
+**Classifying SARIF findings into their own buckets.** A single SARIF
+document can legitimately mix several kinds of result -- trivy's own
+`--format sarif` output alone can carry both CVEs and IaC
+misconfigurations in the same file, and a document produced by chaining
+several tools together (Checkov, Gitleaks, Semgrep, trivy) can mix in
+secrets and generic SAST findings too. Before this, every SARIF result
+landed in the same `Artifact.OtherFindings` bucket regardless of what
+it actually was ("Classifying SARIF findings" section just above) --
+correct as a catch-all, but it meant a hardcoded secret and a linter
+warning were indistinguishable in the dashboard/API, and an external
+consumer polling `/findings/{id}/artifacts` for CVE-affected artifacts
+had no way to separate a real CVE out of a mixed SARIF report's
+`other_findings`.
+Two things changed together to fix this:
+- `Artifact` gained two more buckets, `MisconfigFindings` and
+  `SecretFindings` (`internal/artifact/model.go`), splitting
+  IaC-misconfiguration and hardcoded-secret results out of
+  `OtherFindings` -- five buckets total now: cve, malware,
+  misconfiguration, secret, other. `internal/artifact/postgres_store.go`
+  needed no schema change for this -- `findings.bucket` was already a
+  plain `TEXT` column, not an enum/CHECK constraint, so two new bucket
+  string values (`bucketMisconfiguration`, `bucketSecret`) are purely
+  additive: new constants, two more `loadFindings` calls, two more
+  `case`s in the batch-load switch, two more entries in `Update`'s
+  delete+reinsert group list. `MemStore` and `MergeFindings` needed no
+  changes at all, since bucket-slicing logic lives entirely in
+  `internal/api/handlers.go`'s mutate callback, not in either of those.
+- `Finding` gained a `Category` field (`json:"-"`, never persisted or
+  round-tripped over the API -- once a finding lands in, say,
+  `Artifact.SecretFindings`, which slice it's in already records its
+  category, so keeping a second copy on the struct would just be a
+  potentially-stale duplicate) that a `Scanner` can set as a
+  bucket-routing hint on a finding it returns. `SARIFScanner`
+  (`internal/scanner/sarif.go`) is the only `Scanner` that sets it,
+  via `classifySarifCategory`, which checks progressively weaker
+  signals per result:
+  1. The rule's SARIF `name` field against trivy's own
+     `toSarifRuleName` convention (verified against trivy's real
+     `pkg/report/sarif.go` source): `OsPackageVulnerability`/
+     `LanguageSpecificPackageVulnerability` → cve, `Misconfiguration` →
+     misconfiguration, `Secret` → secret, `License` → other. Trusted
+     first since it's the producing tool stating its own result type
+     directly, rather than us inferring one.
+  2. A CVE-ID-shaped rule ID (`(?i)cve-\d{4}-\d+`, matched anywhere in
+     the string so a prefixed id like `go/CVE-2023-1234` still counts)
+     → cve -- a tool-agnostic fallback, since plenty of non-trivy
+     scanners use bare or prefixed CVE numbers as their rule ID.
+  3. Keyword substring matching against the rule's `properties.tags`
+     (`secret`/`credential` → secret, `misconfig`/`iac`/`compliance` →
+     misconfiguration, `cve`/`vulnerab` → cve). The SARIF 2.1.0 spec
+     itself says tags SHOULD NOT be used for classification (a
+     taxonomy should be used instead), but in practice almost no
+     producer follows that, and tags remain the most common signal
+     available across tools that don't share trivy's rule-name
+     convention -- this is deliberately the last, weakest-trusted
+     check, not the first.
+  4. Anything matching none of the above still falls back to `other`,
+     exactly where it would have landed before this classifier
+     existed -- this only ever adds precision to a SARIF result's
+     bucket, it never risks losing one.
+  `internal/api/handlers.go` gained a `classifyBucket(f)` helper that
+  every finding gets routed through in `scanArtifact`: it prefers
+  `f.Category` when a Scanner set one, otherwise falls back to the
+  original `Finding.Source` heuristic (`clamav` → malware, `sarif` (no
+  `Category` set) → other, everything else → cve) -- so a `Scanner`
+  that doesn't know about categories (`TrivyScanner`, `ClamAVScanner`,
+  or a hypothetical future SARIF-adjacent scanner that hasn't been
+  taught to classify itself) keeps working exactly as before.
+  `validFindingsBucket` and `submitFindings` (the external-findings
+  endpoint) were extended the same way, so an external Checkov or
+  Gitleaks run can submit straight into `misconfiguration`/`secret`
+  without going through the SARIF path at all.
+  The dashboard (`dashboard/index.html`) grew two more count
+  columns/cards/detail sections the same way it grew a third for
+  `OtherFindings` originally -- appended after the original five cards
+  rather than inserted among them, so an existing test asserting a
+  card's position by array index didn't need to change.
+
 **Why no trivy-server yet.** Trivy's client/server mode shares a
 vulnerability DB across scans, which matters once you're scanning a lot
 of images, but it talks a bespoke RPC protocol rather than plain REST.
@@ -466,6 +561,9 @@ existing scanners:
   `scanArtifact` now switches on `Finding.Source` (`clamav` → malware,
   `sarif` → other, everything else → CVE) instead of the old
   two-way `clamav`-or-not check.
+  (This single `other` bucket for every SARIF result was later split
+  further -- see "Classifying SARIF findings into their own buckets"
+  below.)
 - Both inherited the same v1 simplification `file`-type artifacts
   already had -- `ref` assumed to already be a filesystem path
   reachable inside the `monitor-api` pod -- until "Fetching

@@ -247,7 +247,8 @@ curl -s -X POST localhost:8080/api/v1/artifacts/<id>/stage "${AUTH[@]}" \
 curl -s -X POST localhost:8080/api/v1/artifacts/<id>/scan "${AUTH[@]}"
 
 # check results -- cve_findings from trivy, malware_findings from clamav,
-# other_findings from parsed SARIF (SAST/secrets/IaC, not CVE or malware)
+# misconfiguration_findings/secret_findings/other_findings from parsed
+# SARIF, classified per-result (see "SBOM and SARIF scanning" below)
 curl -s localhost:8080/api/v1/artifacts/<id> "${AUTH[@]}"
 
 # find every artifact still affected by a given finding (e.g. after a
@@ -275,15 +276,25 @@ curl -s -X POST localhost:8080/api/v1/artifacts/<id>/findings "${AUTH[@]}" \
   }'
 ```
 
-`bucket` is one of `cve`, `malware`, `other` -- matching
-`cve_findings`/`malware_findings`/`other_findings` on the artifact.
-This call only ever touches the one bucket named, unlike `/scan`
-(which re-runs every scanner for the type and touches all three), so
-submitting external malware results here won't disturb CVE findings a
-real Trivy scan already produced against the same artifact. An
-artifact still in `registered` status moves to `scanned` after its
+`bucket` is one of `cve`, `malware`, `misconfiguration`, `secret`,
+`other` -- matching `cve_findings`/`malware_findings`/
+`misconfiguration_findings`/`secret_findings`/`other_findings` on the
+artifact. This call only ever touches the one bucket named, unlike
+`/scan` (which re-runs every scanner for the type and touches all
+five), so submitting external malware results here won't disturb CVE
+findings a real Trivy scan already produced against the same artifact.
+An artifact still in `registered` status moves to `scanned` after its
 first `/findings` call; an artifact that's already
 `scanning`/`scanned`/`failed` keeps its existing status.
+
+An external SAST/IaC/secrets-scanning tool that already produces its
+own SARIF report doesn't need to pre-sort its results into these
+buckets by hand -- registering the report as a `sarif`-type artifact
+and calling `/scan` gets the same classification `/findings` requires
+manually, done automatically (see "SBOM and SARIF scanning" below).
+`/findings` exists for tools that report in some other format
+entirely, or that already know which single bucket their result
+belongs in.
 
 ### Finding lifecycle: open, new, and fixed
 
@@ -322,11 +333,34 @@ and `file`:
   image scans (and sharing the same air-gapped DB-mirror config, see
   above).
 - **`sarif`** — a SARIF file already **is** a set of findings (from
-  CodeQL, Semgrep, trivy's own `--format sarif` output, etc.), so
-  nothing gets re-scanned; the file is parsed directly and its results
-  land in a third bucket, `other_findings` — SARIF covers SAST issues,
-  secrets, and misconfigurations generally, not just CVEs, so folding
-  it into `cve_findings` would mislabel it.
+  CodeQL, Semgrep, Checkov, Gitleaks, trivy's own `--format sarif`
+  output, etc.), so nothing gets re-scanned; the file is parsed
+  directly. A single SARIF document can legitimately mix several kinds
+  of result at once — trivy's own SARIF output alone can carry both
+  CVEs and misconfigurations in the same file — so each result is
+  classified individually into `cve_findings`,
+  `misconfiguration_findings`, `secret_findings`, or `other_findings`
+  (the catch-all for SAST/code-quality/license findings and anything
+  else that doesn't fit the more specific buckets), rather than
+  lumping every SARIF result into one bucket regardless of what it
+  actually is. Classification checks, in order:
+  1. The rule's SARIF `name` field against trivy's own convention
+     (`OsPackageVulnerability`/`LanguageSpecificPackageVulnerability` →
+     cve, `Misconfiguration` → misconfiguration, `Secret` → secret,
+     `License` → other) — trusted first since it's the producing tool
+     telling us directly what a result is.
+  2. A CVE-ID-shaped rule ID (`CVE-YYYY-NNNN`, with or without a
+     prefix like `go/`) → cve — tool-agnostic, for scanners besides
+     trivy that use CVE numbers as rule IDs.
+  3. Keyword matching against the rule's `tags` (e.g. `secret`/
+     `credential` → secret, `misconfig`/`iac`/`compliance` →
+     misconfiguration, `cve`/`vulnerab` → cve) — SARIF's own spec says
+     tags shouldn't be used this way, but in practice most tools don't
+     follow that, and tags remain the most common cross-tool signal.
+  4. Anything matching none of the above lands in `other_findings`,
+     the same place every SARIF result used to land before this
+     classification existed — this only ever adds precision, it never
+     drops a finding.
 
 ### Registering `file`/`sbom`/`sarif` artifacts by registry reference
 

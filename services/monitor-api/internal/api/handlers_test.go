@@ -276,6 +276,47 @@ func TestScanArtifact_SARIFFindingsGoToOtherBucket(t *testing.T) {
 	}
 }
 
+// TestScanArtifact_CategoryRoutesToMisconfigAndSecretBuckets covers
+// the new classifier-driven routing: a Scanner (SARIFScanner in
+// practice) that sets Finding.Category explicitly should land in that
+// bucket regardless of Source, splitting misconfiguration and secret
+// findings out of the OtherFindings catch-all.
+func TestScanArtifact_CategoryRoutesToMisconfigAndSecretBuckets(t *testing.T) {
+	sarifLike := &fakeScanner{findings: []artifact.Finding{
+		{ID: "CVE-2023-1", Severity: "high", Source: "sarif", Category: "cve"},
+		{ID: "AVD-AWS-1", Severity: "medium", Source: "sarif", Category: "misconfiguration"},
+		{ID: "aws-secret", Severity: "critical", Source: "sarif", Category: "secret"},
+		{ID: "license-gpl", Severity: "low", Source: "sarif", Category: "other"},
+	}}
+
+	h, store := newTestRouter(scanner.Registry{
+		artifact.TypeSARIF: {sarifLike},
+	})
+	created := mustCreate(t, store, "/tmp/results.sarif", artifact.TypeSARIF)
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	got := decodeArtifact(t, rec)
+
+	if len(got.CVEFindings) != 1 || got.CVEFindings[0].ID != "CVE-2023-1" {
+		t.Fatalf("cve findings = %+v", got.CVEFindings)
+	}
+	if len(got.MisconfigFindings) != 1 || got.MisconfigFindings[0].ID != "AVD-AWS-1" {
+		t.Fatalf("misconfiguration findings = %+v", got.MisconfigFindings)
+	}
+	if len(got.SecretFindings) != 1 || got.SecretFindings[0].ID != "aws-secret" {
+		t.Fatalf("secret findings = %+v", got.SecretFindings)
+	}
+	if len(got.OtherFindings) != 1 || got.OtherFindings[0].ID != "license-gpl" {
+		t.Fatalf("other findings = %+v", got.OtherFindings)
+	}
+	if len(got.MalwareFindings) != 0 {
+		t.Fatalf("expected no malware findings, got %+v", got.MalwareFindings)
+	}
+}
+
 func TestScanArtifact_PartialFailureStillReportsSuccessfulFindings(t *testing.T) {
 	ok := &fakeScanner{findings: []artifact.Finding{{ID: "CVE-2024-2", Source: "trivy"}}}
 	broken := &fakeScanner{err: errors.New("unpacker: pull failed")}
@@ -611,6 +652,51 @@ func TestSubmitFindings_SecondCallMarksMissingFindingAsFixed(t *testing.T) {
 	}
 	if f.ResolvedAt == nil {
 		t.Fatal("resolved_at is nil, want it set once the second submission stopped reporting it")
+	}
+}
+
+// TestSubmitFindings_MisconfigurationAndSecretBuckets covers external
+// submission into the two buckets added alongside the SARIF category
+// classifier -- an external Checkov or Gitleaks run submitting its own
+// results the same way an external malware scanner already could.
+func TestSubmitFindings_MisconfigurationAndSecretBuckets(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/findings", map[string]any{
+		"bucket": "misconfiguration",
+		"findings": []map[string]string{
+			{"id": "AVD-AWS-0001", "severity": "medium", "title": "S3 bucket is public", "source": "checkov"},
+		},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("misconfiguration submission status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	got := decodeArtifact(t, rec)
+	if len(got.MisconfigFindings) != 1 || got.MisconfigFindings[0].ID != "AVD-AWS-0001" {
+		t.Fatalf("misconfiguration_findings = %+v", got.MisconfigFindings)
+	}
+
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/findings", map[string]any{
+		"bucket": "secret",
+		"findings": []map[string]string{
+			{"id": "aws-access-key", "severity": "critical", "title": "AWS access key committed", "source": "gitleaks"},
+		},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("secret submission status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	got = decodeArtifact(t, rec)
+	if len(got.SecretFindings) != 1 || got.SecretFindings[0].ID != "aws-access-key" {
+		t.Fatalf("secret_findings = %+v", got.SecretFindings)
+	}
+	// Neither submission should have disturbed the other, or the
+	// unrelated cve/malware/other buckets.
+	if len(got.MisconfigFindings) != 1 {
+		t.Fatalf("expected the earlier misconfiguration finding to survive, got %+v", got.MisconfigFindings)
+	}
+	if len(got.CVEFindings) != 0 || len(got.MalwareFindings) != 0 || len(got.OtherFindings) != 0 {
+		t.Fatalf("expected the unrelated buckets to stay untouched, got cve=%+v malware=%+v other=%+v", got.CVEFindings, got.MalwareFindings, got.OtherFindings)
 	}
 }
 

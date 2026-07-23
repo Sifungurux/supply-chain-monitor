@@ -106,7 +106,9 @@ test('renders artifact rows, summary cards, and stage pills from a live API resp
   const doc = dom.window.document;
 
   const cardNumbers = [...doc.querySelectorAll('#cards .n')].map((n) => n.textContent);
-  assert.deepEqual(cardNumbers, ['3', '1', '1', '1', '0']); // total, scanning, with CVEs, with malware, with other findings
+  // total, scanning, with CVEs, with malware, with other findings, with
+  // misconfigurations, with secrets
+  assert.deepEqual(cardNumbers, ['3', '1', '1', '1', '0', '0', '0']);
 
   const stageText = doc.getElementById('stages').textContent;
   for (const s of SAMPLE_STAGES.stages) assert.match(stageText, new RegExp(s));
@@ -243,6 +245,58 @@ test('renders SARIF/other findings in their own count column and detail section'
   const detailHtml = doc.querySelector('tr.detail-row').innerHTML;
   assert.match(detailHtml, /Hardcoded secret detected/);
   assert.match(detailHtml, /Other findings/);
+
+  dom.window.close();
+});
+
+test('renders misconfiguration and secret findings in their own count columns and detail sections', async () => {
+  const withMisconfigAndSecret = [{
+    id: 'a7',
+    ref: '/tmp/results.sarif',
+    type: 'sarif',
+    status: 'scanned',
+    current_stage: '',
+    stage_history: [],
+    cve_findings: [],
+    malware_findings: [],
+    misconfiguration_findings: [{ id: 'AVD-AWS-0001', severity: 'medium', title: 'S3 bucket is public', source: 'sarif' }],
+    secret_findings: [{ id: 'aws-access-key', severity: 'critical', title: 'AWS access key committed', source: 'sarif' }],
+    other_findings: [],
+    last_scan_errors: [],
+    created_at: '2026-07-19T09:00:00Z',
+    updated_at: '2026-07-19T09:00:00Z'
+  }];
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(withMisconfigAndSecret);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  // "With misconfigurations" and "With secrets" cards -- appended after
+  // the original five, at indices 5 and 6.
+  const cardNumbers = [...doc.querySelectorAll('#cards .n')].map((n) => n.textContent);
+  assert.equal(cardNumbers[5], '1', 'With misconfigurations');
+  assert.equal(cardNumbers[6], '1', 'With secrets');
+
+  const row = doc.querySelector('#artifact-rows tr[data-id="a7"]');
+  // Ref, Type, Status, Stage, CVEs, Malware, Misconfig, Secrets, Other
+  assert.equal(row.querySelector('td:nth-child(7)').textContent.trim(), '1', 'Misconfig count column');
+  assert.equal(row.querySelector('td:nth-child(8)').textContent.trim(), '1', 'Secrets count column');
+  assert.equal(row.querySelector('td:nth-child(9)').textContent.trim(), '0', 'Other count column');
+
+  doc.querySelector('button[data-action="toggle"][data-id="a7"]').click();
+  const detailHtml = doc.querySelector('tr.detail-row').innerHTML;
+  assert.match(detailHtml, /S3 bucket is public/);
+  assert.match(detailHtml, /Misconfiguration findings/);
+  assert.match(detailHtml, /AWS access key committed/);
+  assert.match(detailHtml, /Secret findings/);
 
   dom.window.close();
 });

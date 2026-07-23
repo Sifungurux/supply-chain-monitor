@@ -34,9 +34,11 @@ type PostgresStore struct {
 // constants rather than repeating the string literals so a typo in
 // one of them is a compile error, not a silently-wrong WHERE clause.
 const (
-	bucketCVE     = "cve"
-	bucketMalware = "malware"
-	bucketOther   = "other"
+	bucketCVE              = "cve"
+	bucketMalware          = "malware"
+	bucketMisconfiguration = "misconfiguration"
+	bucketSecret           = "secret"
+	bucketOther            = "other"
 )
 
 // schemaStatements is deliberately a slice of individual single-
@@ -69,7 +71,7 @@ var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS findings (
 		id          BIGSERIAL PRIMARY KEY,
 		artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
-		bucket      TEXT NOT NULL, -- 'cve' | 'malware' | 'other', see bucketCVE etc.
+		bucket      TEXT NOT NULL, -- 'cve' | 'malware' | 'misconfiguration' | 'secret' | 'other', see bucketCVE etc.
 		finding_id  TEXT NOT NULL, -- e.g. "CVE-2024-1234" or "clamav-signature-match"
 		severity    TEXT NOT NULL DEFAULT '',
 		title       TEXT NOT NULL DEFAULT '',
@@ -368,8 +370,8 @@ func scanArtifactRow(row rowScanner) (*Artifact, error) {
 	return &a, nil
 }
 
-// fillChildren loads stage history, all three finding buckets, and
-// scan errors for a single artifact and attaches them to it. Takes a
+// fillChildren loads stage history, all five finding buckets, and scan
+// errors for a single artifact and attaches them to it. Takes a
 // pgxIface rather than *pgxpool.Pool directly so Update can call this
 // against its in-flight transaction (to read the pre-mutation state
 // under the same FOR UPDATE lock) while Get calls it directly against
@@ -384,6 +386,12 @@ func (s *PostgresStore) fillChildren(ctx context.Context, q pgxIface, a *Artifac
 	}
 	if a.MalwareFindings, err = loadFindings(ctx, q, a.ID, bucketMalware); err != nil {
 		return fmt.Errorf("load malware findings: %w", err)
+	}
+	if a.MisconfigFindings, err = loadFindings(ctx, q, a.ID, bucketMisconfiguration); err != nil {
+		return fmt.Errorf("load misconfiguration findings: %w", err)
+	}
+	if a.SecretFindings, err = loadFindings(ctx, q, a.ID, bucketSecret); err != nil {
+		return fmt.Errorf("load secret findings: %w", err)
 	}
 	if a.OtherFindings, err = loadFindings(ctx, q, a.ID, bucketOther); err != nil {
 		return fmt.Errorf("load other findings: %w", err)
@@ -546,6 +554,10 @@ func (s *PostgresStore) fillChildrenBatch(ctx context.Context, ids []string, byI
 			a.CVEFindings = append(a.CVEFindings, f)
 		case bucketMalware:
 			a.MalwareFindings = append(a.MalwareFindings, f)
+		case bucketMisconfiguration:
+			a.MisconfigFindings = append(a.MisconfigFindings, f)
+		case bucketSecret:
+			a.SecretFindings = append(a.SecretFindings, f)
 		case bucketOther:
 			a.OtherFindings = append(a.OtherFindings, f)
 		}
@@ -648,6 +660,8 @@ func (s *PostgresStore) Update(id string, mutate func(*Artifact)) (*Artifact, er
 	}{
 		{bucketCVE, a.CVEFindings},
 		{bucketMalware, a.MalwareFindings},
+		{bucketMisconfiguration, a.MisconfigFindings},
+		{bucketSecret, a.SecretFindings},
 		{bucketOther, a.OtherFindings},
 	} {
 		for _, f := range group.findings {

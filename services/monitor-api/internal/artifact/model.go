@@ -75,6 +75,28 @@ type Finding struct {
 	// MergeFindings first observed this finding stop being reported
 	// while Status is "fixed".
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
+
+	// Category is a transient bucket-routing hint a Scanner may set on
+	// a finding it returns -- "cve", "malware", "misconfiguration",
+	// "secret", or "other" (see internal/api/handlers.go's
+	// classifyBucket). It exists because a single scan of a single
+	// artifact can legitimately produce findings that belong in more
+	// than one bucket (SARIFScanner is the reason this exists:
+	// CodeQL/Semgrep/Checkov/Gitleaks/trivy's own --format sarif output
+	// can all appear in one SARIF document, and a CVE result in there
+	// belongs in cve_findings, not lumped in with a hardcoded-secret
+	// result). Most Scanners (TrivyScanner, ClamAVScanner, ...) don't
+	// need to set this at all -- handlers.go falls back to its old
+	// Source-based heuristic when Category is empty, so existing
+	// scanners are unaffected.
+	//
+	// Never persisted and never round-tripped through the API: json:"-"
+	// is deliberate. Once a finding is placed into, say,
+	// Artifact.SecretFindings, which slice/DB column it lives in
+	// already records its category -- keeping Category on the exported
+	// struct too would just be a second, potentially-stale copy of the
+	// same fact for anything read back out of the store.
+	Category string `json:"-"`
 }
 
 // StageEvent records that an artifact was observed at a given pipeline
@@ -98,11 +120,22 @@ type Artifact struct {
 	StageHistory    []StageEvent `json:"stage_history,omitempty"`
 	CVEFindings     []Finding    `json:"cve_findings,omitempty"`
 	MalwareFindings []Finding    `json:"malware_findings,omitempty"`
-	// OtherFindings holds anything that's neither a CVE nor a malware
-	// match -- currently just parsed SARIF results (SAST issues,
-	// secrets, IaC misconfigurations, linting; see SARIFScanner). A
-	// generic bucket rather than a SARIF-specific one since other
-	// non-CVE/non-malware finding sources are plausible later.
+	// MisconfigFindings and SecretFindings split two categories out of
+	// what used to all land in OtherFindings -- IaC/configuration
+	// issues and hardcoded secrets/credentials respectively, both
+	// common, well-known-enough categories (and common enough in SARIF
+	// output specifically -- see SARIFScanner's classifySarifCategory)
+	// to deserve their own bucket rather than being folded into a
+	// single generic "everything else." See docs/architecture.md
+	// ("Classifying SARIF findings into their own buckets").
+	MisconfigFindings []Finding `json:"misconfiguration_findings,omitempty"`
+	SecretFindings    []Finding `json:"secret_findings,omitempty"`
+	// OtherFindings holds anything that's neither a CVE, a malware
+	// match, a misconfiguration, nor a secret -- SAST/code-quality
+	// issues (CodeQL, Semgrep), license findings, linting, and anything
+	// else a SARIF document might carry that doesn't fit the four more
+	// specific buckets. A generic catch-all bucket rather than trying
+	// to enumerate every possible category up front.
 	OtherFindings []Finding `json:"other_findings,omitempty"`
 	// LastScanErrors holds any per-scanner errors from the most recent
 	// /scan call (e.g. one of several scanners for a type failed while
