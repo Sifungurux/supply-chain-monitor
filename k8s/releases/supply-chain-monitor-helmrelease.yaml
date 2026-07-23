@@ -66,7 +66,7 @@ spec:
   # give wait a correspondingly generous timeout so a fresh install
   # doesn't get marked failed while it's still just downloading (same
   # reasoning the old, separate clamav-helmrelease.yaml had).
-  timeout: 5m
+  timeout: 15m
   # image.tag stays "dev" (the chart's default) for local iteration --
   # `make deploy` rebuilds monitor-api:dev and rollout-restarts the
   # Deployment directly, since Flux/Helm alone can't detect a same-tag
