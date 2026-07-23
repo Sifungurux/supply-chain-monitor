@@ -454,6 +454,9 @@
               '<button data-action="toggle" data-id="' + esc(a.id) + '">' +
                 (state.expanded === a.id ? 'Hide' : 'Details') +
               '</button>' +
+              '<button data-action="delete" data-id="' + esc(a.id) + '" data-ref="' + esc(a.ref) + '" ' + (busy ? 'disabled' : '') + '>' +
+                '<i class="ti ti-trash" aria-hidden="true"></i> Delete' +
+              '</button>' +
             '</td>' +
           '</tr>'
         );
@@ -531,6 +534,27 @@
     }
   }
 
+  // deleteArtifact is permanent -- there's no undo and no soft-delete
+  // (see docs/architecture.md, "Deleting an artifact"), so this is the
+  // one destructive action on the dashboard that gets a confirm()
+  // guard in front of it. window.confirm is a real, blocking browser
+  // dialog here (not stubbed out), so the dashboard's own JS tests
+  // stub window.confirm to drive both the accept and cancel paths.
+  async function deleteArtifact(id, ref) {
+    if (!window.confirm('Delete ' + (ref || id) + '? This cannot be undone.')) return;
+    state.busy[id] = true;
+    renderRows();
+    try {
+      await fetchJSON('/api/v1/artifacts/' + id, { method: 'DELETE' });
+    } catch (err) {
+      setStatus('Delete failed for ' + id + ' — ' + err.message, true);
+    } finally {
+      delete state.busy[id];
+      if (state.expanded === id) state.expanded = null;
+      await loadAll();
+    }
+  }
+
   els.rows.addEventListener('click', function (ev) {
     var btn = ev.target.closest('button[data-action]');
     if (!btn) return;
@@ -541,6 +565,7 @@
       state.expanded = state.expanded === id ? null : id;
       renderRows();
     }
+    if (action === 'delete') deleteArtifact(id, btn.getAttribute('data-ref'));
   });
 
   els.form.addEventListener('submit', async function (ev) {

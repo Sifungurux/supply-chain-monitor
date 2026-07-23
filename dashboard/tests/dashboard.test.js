@@ -577,3 +577,75 @@ test('register form POSTs the entered ref/type and reloads the list', async () =
 
   dom.window.close();
 });
+
+test('clicking Delete and confirming sends a DELETE request and reloads the list', async () => {
+  const calls = [];
+  let deleted = false;
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url, opts) {
+      const method = (opts && opts.method) || 'GET';
+      calls.push({ url, method });
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (method === 'DELETE' && /\/api\/v1\/artifacts\/a1$/.test(url)) {
+        deleted = true;
+        return jsonResponse({});
+      }
+      if (url.endsWith('/api/v1/artifacts')) {
+        return jsonResponse(deleted ? SAMPLE_ARTIFACTS.slice(1) : SAMPLE_ARTIFACTS);
+      }
+      return errorResponse(404, {});
+    },
+    beforeParseExtra(window) {
+      // confirm() is a real, blocking browser dialog -- stub it to
+      // drive the "user clicked OK" path deterministically.
+      window.confirm = () => true;
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  assert.equal(doc.querySelectorAll('#artifact-rows tr[data-id]').length, 3);
+
+  doc.querySelector('button[data-action="delete"][data-id="a1"]').click();
+  await tick(20);
+
+  const deleteCall = calls.find((c) => c.method === 'DELETE');
+  assert.ok(deleteCall, 'expected a DELETE request');
+  assert.match(deleteCall.url, /\/api\/v1\/artifacts\/a1$/);
+
+  const rows = doc.querySelectorAll('#artifact-rows tr[data-id]');
+  assert.equal(rows.length, 2, 'list should have reloaded without the deleted artifact');
+
+  dom.window.close();
+});
+
+test('clicking Delete and cancelling the confirm dialog makes no request', async () => {
+  const calls = [];
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url, opts) {
+      const method = (opts && opts.method) || 'GET';
+      calls.push({ url, method });
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(SAMPLE_ARTIFACTS);
+      return errorResponse(404, {});
+    },
+    beforeParseExtra(window) {
+      window.confirm = () => false;
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  doc.querySelector('button[data-action="delete"][data-id="a1"]').click();
+  await tick(20);
+
+  assert.ok(!calls.some((c) => c.method === 'DELETE'), 'no DELETE call should be made when the user cancels');
+  assert.equal(doc.querySelectorAll('#artifact-rows tr[data-id]').length, 3, 'list unchanged');
+
+  dom.window.close();
+});

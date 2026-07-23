@@ -213,6 +213,7 @@ limiting).
 | POST   | `/api/v1/artifacts`                | register an artifact `{ref, type}`         |
 | GET    | `/api/v1/artifacts`                | list all tracked artifacts                 |
 | GET    | `/api/v1/artifacts/{id}`           | get one artifact (findings, current stage) |
+| DELETE | `/api/v1/artifacts/{id}`           | permanently delete an artifact and everything recorded against it (no undo) |
 | POST   | `/api/v1/artifacts/{id}/scan`      | run the scanner appropriate for its type   |
 | POST   | `/api/v1/artifacts/{id}/findings`  | record findings an external system already computed `{bucket, findings}` |
 | POST   | `/api/v1/artifacts/{id}/stage`     | record a pipeline-stage transition         |

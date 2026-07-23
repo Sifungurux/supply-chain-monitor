@@ -1539,6 +1539,44 @@ pattern `image` already does, with no new chart values needed (it
 reuses `TRIVY_CACHE_CLAIM`/`TRIVY_CACHE_DIR`/`FETCH_PLAIN_HTTP`/
 `SCAN_WORKER_IMAGE`, all already wired for `image`'s isolation).
 
+**Deleting an artifact.** There was previously no way to remove an
+artifact once registered -- a mis-typed ref, a one-off test artifact,
+or something the user simply no longer wants tracked would sit in the
+list forever. `DELETE /api/v1/artifacts/{id}` (`internal/api/handlers.go`'s
+`deleteArtifact`) adds that, following the same "not found" convention
+`GET`/`Update` already use (404 if the ID doesn't exist), reported via
+`pgconn.CommandTag.RowsAffected()` so a single round trip can tell
+"deleted" apart from "didn't exist" without a separate SELECT first.
+
+This is a hard, permanent delete, not a soft-delete/archive: there is
+no undo, and no way to bring a deleted artifact's history back. That's
+a deliberate simplicity trade -- soft-delete would mean every other
+query (`List`, `FindByFindingID`, the summary cards) needs to start
+filtering out a new "deleted" state, and the dashboard would need a
+way to view/restore/purge archived artifacts, none of which this
+project's actual use case (a single team's own cluster) has asked for.
+If that changes, `Store.Delete`'s doc comment is the place future work
+should start.
+
+`PostgresStore.Delete` is a single `DELETE FROM artifacts WHERE id =
+$1` statement, nothing more -- `stage_history`, `findings`, and
+`scan_errors` all declare `ON DELETE CASCADE` foreign keys back to
+`artifacts(id)` already (see the schema in `postgres_store.go`), so
+Postgres itself removes every child row as part of the same statement.
+This is why `Delete` doesn't need `Update`'s transaction + `SELECT ...
+FOR UPDATE` row-lock pattern: `Update` loads a whole artifact into Go
+memory, mutates it, and writes it back, so it has a real read-then-write
+race to guard against; `Delete` is one atomic statement with nothing to
+read first. `TestPostgresStore_Delete` (build-tagged
+`postgres_integration`) confirms the cascade actually happens by
+counting rows in the child tables directly, not just checking that
+`Get`/`List` stop showing the artifact afterward.
+
+The dashboard's Delete button asks for confirmation (`window.confirm`)
+before calling the API, since this is the one destructive,
+irreversible action available from the UI -- everything else (scan,
+register, stage transitions) is either additive or safely re-runnable.
+
 ## All services on Flux + Helm
 
 Every service in this project -- `registry`, `clamav`, `postgres`,
