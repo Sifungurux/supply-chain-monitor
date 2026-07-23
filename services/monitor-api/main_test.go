@@ -106,3 +106,111 @@ func TestBuildImageScanners(t *testing.T) {
 		}
 	})
 }
+
+// fakeFetcher is a trivial scanner.Fetcher double for
+// TestRegisterExternalScanners -- it's never actually invoked (these
+// tests only check *which* Scanner ends up registered where, never
+// call Scan()), it just needs to satisfy the interface so
+// registerExternalScanners has something to wrap file/sbom/sarif
+// registrations in.
+type fakeFetcher struct{}
+
+func (fakeFetcher) Fetch(context.Context, string) (string, func(), error) {
+	return "", func() {}, nil
+}
+
+// TestRegisterExternalScanners covers the EXTERNAL_SCANNERS wiring
+// (see internal/scanner/external.go and docs/architecture.md,
+// "Pluggable external scanners"): registration is additive per
+// artifact type, image registrations are left unwrapped (an external
+// image/CVE scanner is expected to resolve an OCI ref itself, same as
+// trivy/unpacker), and file/sbom/sarif registrations get wrapped in
+// FetchingScanner exactly like the built-in scanners for those types.
+// Deliberately never calls Scan() on anything -- this only checks
+// registry shape, not scanner behavior (that's external_test.go's job).
+func TestRegisterExternalScanners(t *testing.T) {
+	t.Run("registers into every listed artifact type, wrapping non-image types in FetchingScanner", func(t *testing.T) {
+		reg := scanner.Registry{
+			artifact.TypeImage: {&namedScanner{"trivy"}}, // pre-existing scanner must survive
+		}
+		specs := []scanner.ExternalScannerConfig{
+			{
+				Name:          "grype",
+				Command:       "grype",
+				Args:          []string{"{{ref}}", "-o", "json"},
+				ArtifactTypes: []string{"image", "sbom"},
+				Category:      "cve",
+			},
+		}
+
+		if err := registerExternalScanners(reg, specs, fakeFetcher{}); err != nil {
+			t.Fatalf("registerExternalScanners: %v", err)
+		}
+
+		imageScanners, _ := reg.For(artifact.TypeImage)
+		if len(imageScanners) != 2 {
+			t.Fatalf("image scanners = %+v, want the pre-existing trivy scanner plus the new one", imageScanners)
+		}
+		if _, ok := imageScanners[0].(*namedScanner); !ok {
+			t.Errorf("pre-existing image scanner appears to have been replaced, not appended to: %+v", imageScanners[0])
+		}
+		if _, ok := imageScanners[1].(*scanner.ExternalScanner); !ok {
+			t.Errorf("image scanner[1] = %T, want a raw *scanner.ExternalScanner (unwrapped -- image scanners resolve their own ref)", imageScanners[1])
+		}
+
+		sbomScanners, _ := reg.For(artifact.TypeSBOM)
+		if len(sbomScanners) != 1 {
+			t.Fatalf("sbom scanners = %+v, want exactly 1", sbomScanners)
+		}
+		if _, ok := sbomScanners[0].(*scanner.FetchingScanner); !ok {
+			t.Errorf("sbom scanner = %T, want it wrapped in *scanner.FetchingScanner (sbom refs may be OCI registry references)", sbomScanners[0])
+		}
+	})
+
+	t.Run("empty EXTERNAL_SCANNERS is a no-op", func(t *testing.T) {
+		reg := scanner.Registry{artifact.TypeImage: {&namedScanner{"trivy"}}}
+		if err := registerExternalScanners(reg, nil, fakeFetcher{}); err != nil {
+			t.Fatalf("registerExternalScanners: %v", err)
+		}
+		got, _ := reg.For(artifact.TypeImage)
+		if len(got) != 1 {
+			t.Fatalf("expected the registry to be untouched, got %+v", got)
+		}
+	})
+
+	t.Run("rejects a spec missing name", func(t *testing.T) {
+		err := registerExternalScanners(scanner.Registry{}, []scanner.ExternalScannerConfig{
+			{Command: "grype", ArtifactTypes: []string{"image"}},
+		}, fakeFetcher{})
+		if err == nil {
+			t.Fatal("expected an error for a spec with no name")
+		}
+	})
+
+	t.Run("rejects a spec missing command", func(t *testing.T) {
+		err := registerExternalScanners(scanner.Registry{}, []scanner.ExternalScannerConfig{
+			{Name: "grype", ArtifactTypes: []string{"image"}},
+		}, fakeFetcher{})
+		if err == nil {
+			t.Fatal("expected an error for a spec with no command")
+		}
+	})
+
+	t.Run("rejects a spec with no artifactTypes", func(t *testing.T) {
+		err := registerExternalScanners(scanner.Registry{}, []scanner.ExternalScannerConfig{
+			{Name: "grype", Command: "grype"},
+		}, fakeFetcher{})
+		if err == nil {
+			t.Fatal("expected an error for a spec with no artifactTypes")
+		}
+	})
+
+	t.Run("rejects an unrecognized artifactType", func(t *testing.T) {
+		err := registerExternalScanners(scanner.Registry{}, []scanner.ExternalScannerConfig{
+			{Name: "grype", Command: "grype", ArtifactTypes: []string{"container"}},
+		}, fakeFetcher{})
+		if err == nil {
+			t.Fatal("expected an error for an unrecognized artifactType (\"container\" isn't image/file/sbom/sarif)")
+		}
+	})
+}

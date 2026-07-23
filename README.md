@@ -486,6 +486,93 @@ Postgres connection. Leave it unset
 docs/architecture.md ("Running monitor-api outside a Kubernetes pod")
 for the full reasoning.
 
+### Pluggable external scanners
+
+Trivy, ClamAV, and the built-in SBOM/SARIF scanners aren't the only
+option — `monitorApi.externalScanners` in
+`charts/supply-chain-monitor/values.yaml` lets you register an
+arbitrary command as an *additional* scanner for any artifact type,
+alongside (not instead of) the built-in ones:
+
+```yaml
+monitorApi:
+  externalScanners:
+    - name: grype
+      artifactTypes: ["image"]
+      command: grype-to-findings.sh
+      args: ["{{ref}}"]
+      category: cve
+      timeoutSeconds: 300
+```
+
+The command is run as `<command> <args...>`, with every arg containing
+the literal substring `{{ref}}` replaced by the actual artifact
+ref/local path being scanned. It must print a JSON array of findings
+on stdout:
+
+```json
+[
+  {"id": "CVE-2024-1234", "severity": "high", "title": "...", "source": "grype", "category": "cve"}
+]
+```
+
+`source` and `category` are both optional per finding — a finding that
+omits either falls back to that entry's own `name`/`category`. `source`
+becomes `Finding.Source`; `category` picks which bucket the finding
+lands in (`cve`, `misconfiguration`, `secret`, or `other` — never
+`malware`, since this isn't a signature scanner). This is deliberately
+the same low-level contract `POST /api/v1/artifacts/{id}/findings`
+findings already use, just delivered by running a command instead of
+an HTTP call.
+
+**monitor-api never needs to understand your scanner's own output
+format** — it understands exactly one JSON shape, and the `command`
+you point it at is responsible for producing that shape, however it
+gets there. In practice `command` is almost always a small wrapper
+script, not the third-party scanner binary directly, since tools like
+Grype/OSV-Scanner/Syft don't natively emit this exact schema. A
+minimal Grype example (`grype-to-findings.sh`, needs `jq`):
+
+```bash
+#!/bin/sh
+set -eu
+grype "$1" -o json | jq '[.matches[] | {
+  id: .vulnerability.id,
+  severity: (.vulnerability.severity | ascii_downcase),
+  title: .vulnerability.description,
+  source: "grype",
+  category: "cve"
+}]'
+```
+
+**The scanner binary itself has to actually be in the image.** This
+project's own `Dockerfile` can't bake in every possible third-party
+scanner on the chance someone configures one — build a derived image
+instead:
+
+```dockerfile
+FROM monitor-api:dev
+RUN apk add --no-cache curl jq && \
+    curl -sSL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+COPY grype-to-findings.sh /usr/local/bin/grype-to-findings.sh
+RUN chmod +x /usr/local/bin/grype-to-findings.sh
+```
+
+...then point `monitorApi.image.repository`/`tag` (and, if scanning
+runs isolated in scan-worker Jobs, the same image is used automatically
+since `SCAN_WORKER_IMAGE` defaults to it — see `monitorApi.scanWorkerImage`)
+at your derived image.
+
+Registration is additive per artifact type — adding an external
+scanner against `image` doesn't remove trivy or the malware scan, the
+same way `image` already runs both today. `file`/`sbom`/`sarif`
+registrations automatically get the same registry-fetch treatment
+(`ref` may be an OCI reference, not a local path) the built-in
+scanners for those types already get; `image` registrations receive
+the raw ref, since an image/CVE scanner is expected to resolve it
+itself, same as trivy. See docs/architecture.md ("Pluggable external
+scanners") for the full design.
+
 ## Database
 
 Artifacts, findings, and stage history are stored in Postgres

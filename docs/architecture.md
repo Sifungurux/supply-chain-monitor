@@ -1250,6 +1250,72 @@ Kubernetes API client, a real `trivy` binary, or a real `unpacker` --
 it never invokes either scanner it's choosing between, just picks
 which one ends up in the registry.
 
+**Pluggable external scanners.** Every scanner up to this point --
+trivy, ClamAV, SBOMScanner, SARIFScanner -- is a fixed Go type this
+project ships. That's fine until someone wants a *different* CVE
+scanner (Grype, OSV-Scanner) or a different SBOM tool than trivy's own,
+which used to mean either living without it or writing a new Go type
+and rebuilding this binary. `internal/scanner/external.go`'s
+`ExternalScanner` closes that gap generically instead of one tool at a
+time: it shells out to an arbitrary operator-configured command and
+interprets its stdout as a JSON array of findings --
+`[{"id":...,"severity":...,"title":...,"source":...,"category":...},
+...]` -- with no opinion at all about what produced that JSON. The
+command can be a real third-party scanner binary if it happens to emit
+this exact shape (rare), or, far more often in practice, a thin
+wrapper script that runs the real tool and reshapes its native output
+(Grype's own JSON, SPDX, whatever) into this contract. Either way,
+monitor-api itself never needs to understand any particular tool's
+native format -- it understands exactly one wire format, and pushes
+the job of speaking it onto whatever's on the other end of the command.
+Two design choices worth calling out:
+- `Args` entries containing the literal substring `"{{ref}}"` get that
+  replaced with the real artifact ref (an image reference, or a local
+  path once fetched) before the command runs -- checked against every
+  arg, not just one designated positional slot, so both `["{{ref}}"]`
+  and `["--input", "{{ref}}", "-o", "json"]`-style invocations work.
+  `buildArgs` is split out from `Scan` purely so this substitution is
+  unit-testable without running any command at all, the same reasoning
+  `TrivyScanner.args` already exists for.
+- The wire format's `"category"` field exists specifically because
+  `artifact.Finding.Category` (see "Classifying SARIF findings into
+  their own buckets" above) is tagged `json:"-"` everywhere else in
+  this app -- deliberately, since a persisted finding's bucket already
+  records its category, and letting it round-trip through the public
+  API would just be a second, potentially-stale copy of the same fact.
+  `ExternalScanner` is the one place that has to break that rule: an
+  external command is the one caller that genuinely needs to *tell*
+  monitor-api what category a finding belongs in, since nothing else
+  in this process computed it. `externalFinding`, a small
+  JSON-tagged wire struct distinct from `artifact.Finding`, exists
+  purely to carry that one field in from outside the process before
+  being converted into a real `artifact.Finding` (with `Category` set
+  programmatically, not via its own, deliberately absent, json tag).
+Registration (`registerExternalScanners` in `main.go`, driven by the
+`EXTERNAL_SCANNERS` env var -- a JSON array of
+`scanner.ExternalScannerConfig`, rendered from
+`charts/supply-chain-monitor/values.yaml`'s `monitorApi.externalScanners`
+via `toJson` in `configmap.yaml`) is additive per artifact type, not a
+replacement: adding an external Grype-backed scanner against `image`
+doesn't remove trivy, the same "a type can have more than one scanner"
+design `Registry` already supported for image CVE+malware scanning.
+`file`/`sbom`/`sarif` registrations get wrapped in `FetchingScanner`,
+exactly like the built-in ClamAV/SBOM/SARIF scanners, since `ref` for
+those types may be an OCI registry reference rather than a path already
+inside this pod; `image` registrations are left unwrapped, since an
+external image/CVE scanner is expected to resolve an OCI ref itself
+the same way trivy and unpacker already do -- handing it a single
+fetched blob path instead would be the wrong shape entirely.
+What this doesn't solve: getting the external tool's own binary *into*
+the image in the first place. This project's own `Dockerfile` can't
+reasonably bake in every possible third-party scanner on the chance
+someone configures it -- that's an operator concern, solved by
+building a derived image (`FROM` this project's own monitor-api image,
+plus whatever `COPY`/`RUN apk add` the chosen tool needs) and pointing
+`monitorApi.image.repository`/`tag` at it. See README's "Pluggable
+external scanners" for a worked example wiring Grype in this way,
+including the shim script's exact shape.
+
 ## All services on Flux + Helm
 
 Every service in this project -- `registry`, `clamav`, `postgres`,
