@@ -561,7 +561,15 @@ func runAPIServer() {
 	rateLimitRPS := getenvFloat("RATE_LIMIT_RPS", 0)
 	rateLimitBurst := getenvFloat("RATE_LIMIT_BURST", 0)
 
-	router := api.NewRouter(store, stageTracker, scanners, apiKey, rateLimitRPS, rateLimitBurst)
+	// Best-effort duplicate-registration detection (see
+	// internal/api/handlers.go's resolveDigest) -- oras is already baked
+	// into this image (Dockerfile), the same binary fetcher above uses.
+	// fetchPlainHTTP is the same flag already computed for fetcher, not
+	// a second config surface -- see NewRouter's own comment for why
+	// image refs never use it regardless of this setting.
+	digestResolver := scanner.NewOrasDigestResolver()
+
+	router := api.NewRouter(store, stageTracker, scanners, apiKey, rateLimitRPS, rateLimitBurst, digestResolver, fetchPlainHTTP)
 
 	srv := &http.Server{
 		Addr:         listenAddr,

@@ -92,6 +92,45 @@ func TestMemStore_FindByFindingID(t *testing.T) {
 	}
 }
 
+func TestMemStore_FindByDigest(t *testing.T) {
+	s := artifact.NewMemStore()
+
+	a, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := s.Create("debian:12", artifact.TypeImage); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Not found yet -- digest hasn't been set on anything.
+	none, err := s.FindByDigest("sha256:aaa")
+	if err != nil {
+		t.Fatalf("FindByDigest: %v", err)
+	}
+	if none != nil {
+		t.Fatalf("expected no match before any digest is set, got %+v", none)
+	}
+
+	if _, err := s.Update(a.ID, func(art *artifact.Artifact) { art.Digest = "sha256:aaa" }); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	match, err := s.FindByDigest("sha256:aaa")
+	if err != nil {
+		t.Fatalf("FindByDigest: %v", err)
+	}
+	if match == nil || match.ID != a.ID {
+		t.Fatalf("match = %+v, want %q", match, a.ID)
+	}
+
+	// Empty digest is never a valid search key -- it means "no digest
+	// resolved," not a wildcard, so it must never match.
+	if got, err := s.FindByDigest(""); err != nil || got != nil {
+		t.Fatalf("FindByDigest(\"\") = %+v, %v, want nil, nil", got, err)
+	}
+}
+
 func TestMemStore_Delete(t *testing.T) {
 	s := artifact.NewMemStore()
 

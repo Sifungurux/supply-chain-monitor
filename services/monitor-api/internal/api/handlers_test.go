@@ -67,7 +67,39 @@ func newTestRouter(scanners scanner.Registry) (http.Handler, *artifact.MemStore)
 	// Rate limiting disabled (0) for the ~10 existing tests that only
 	// care about handler behavior -- see TestRateLimit* for the rate
 	// limiter's own behavior, which builds its router directly instead.
-	return api.NewRouter(store, tracker, scanners, testAPIKey, 0, 0), store
+	// digestResolver nil: dedup disabled by default here too -- see
+	// TestCreateArtifact_Duplicate* for the tests that exercise it
+	// deliberately with a fake resolver instead.
+	return api.NewRouter(store, tracker, scanners, testAPIKey, 0, 0, nil, false), store
+}
+
+// newTestRouterWithDigestResolver is newTestRouter plus a digest
+// resolver, for the duplicate-registration tests specifically -- kept
+// separate so the other ~10 existing tests are unaffected by dedup
+// behavior they don't care about.
+func newTestRouterWithDigestResolver(resolver scanner.DigestResolver) (http.Handler, *artifact.MemStore) {
+	store := artifact.NewMemStore()
+	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
+	return api.NewRouter(store, tracker, scanner.Registry{}, testAPIKey, 0, 0, resolver, false), store
+}
+
+// fakeDigestResolver lets tests exercise duplicate-registration
+// detection without shelling out to a real `oras` binary against a real
+// registry. digests maps ref -> digest; a ref with no entry resolves to
+// "" (same as a local-path ref oras would never contact a registry
+// for), and errRef (if set) makes Resolve return an error for that one
+// ref, so resolution-failure-shouldn't-block-registration behavior is
+// testable too.
+type fakeDigestResolver struct {
+	digests map[string]string
+	errRef  string
+}
+
+func (f *fakeDigestResolver) Resolve(_ context.Context, ref string, _ bool) (string, error) {
+	if ref == f.errRef {
+		return "", errors.New("fake registry unreachable")
+	}
+	return f.digests[ref], nil
 }
 
 // mustCreate is a test helper wrapping store.Create's now-error-returning
@@ -286,6 +318,130 @@ func TestBulkCreateArtifacts_TooManyRejected(t *testing.T) {
 	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", map[string]any{"artifacts": items})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for a batch over the cap", rec.Code)
+	}
+}
+
+func TestCreateArtifact_DuplicateDigestReturns409(t *testing.T) {
+	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:aaa"}}
+	h, _ := newTestRouterWithDigestResolver(resolver)
+
+	first := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{"ref": "alpine:3.19", "type": "image"})
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first registration status = %d, want 201, body=%s", first.Code, first.Body.String())
+	}
+	firstArtifact := decodeArtifact(t, first)
+	if firstArtifact.Digest != "sha256:aaa" {
+		t.Fatalf("digest = %q, want sha256:aaa", firstArtifact.Digest)
+	}
+
+	// Same digest, different ref (e.g. a different tag of the same
+	// image) -- still a duplicate, since dedup is keyed on digest, not
+	// the literal ref string.
+	second := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{"ref": "alpine:latest", "type": "image"})
+	if second.Code != http.StatusConflict {
+		t.Fatalf("second registration status = %d, want 409, body=%s", second.Code, second.Body.String())
+	}
+	var body struct {
+		ExistingArtifactID string `json:"existing_artifact_id"`
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode 409 body: %v", err)
+	}
+	if body.ExistingArtifactID != firstArtifact.ID {
+		t.Fatalf("existing_artifact_id = %q, want %q", body.ExistingArtifactID, firstArtifact.ID)
+	}
+}
+
+func TestCreateArtifact_DigestResolutionFailureStillSucceeds(t *testing.T) {
+	// Best-effort: a registry that's unreachable/rate-limited/whatever
+	// must never block registration -- it just means no dedup for this
+	// one entry, the same as if digestResolver weren't configured.
+	resolver := &fakeDigestResolver{errRef: "unreachable-registry.example/app:1.0"}
+	h, _ := newTestRouterWithDigestResolver(resolver)
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{"ref": "unreachable-registry.example/app:1.0", "type": "image"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 even though digest resolution failed, body=%s", rec.Code, rec.Body.String())
+	}
+	a := decodeArtifact(t, rec)
+	if a.Digest != "" {
+		t.Fatalf("digest = %q, want empty (resolution failed)", a.Digest)
+	}
+}
+
+func TestBulkCreateArtifacts_DuplicatesAcrossRequestsMarkedNotFailed(t *testing.T) {
+	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:aaa", "busybox:latest": "sha256:bbb"}}
+	h, _ := newTestRouterWithDigestResolver(resolver)
+
+	body := map[string]any{
+		"artifacts": []map[string]string{
+			{"ref": "alpine:3.19", "type": "image"},
+			{"ref": "busybox:latest", "type": "image"},
+		},
+	}
+	first := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", body)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first bulk status = %d, want 201, body=%s", first.Code, first.Body.String())
+	}
+
+	// Re-submit the exact same batch, as cluster/load-test-clamav.sh
+	// does on every run -- this must NOT come back as 400/all-failed.
+	second := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", body)
+	if second.Code != http.StatusCreated {
+		t.Fatalf("second (duplicate) bulk status = %d, want 201, body=%s", second.Code, second.Body.String())
+	}
+	var resp struct {
+		Created    int `json:"created"`
+		Failed     int `json:"failed"`
+		Duplicates int `json:"duplicates"`
+		Results    []struct {
+			Duplicate bool `json:"duplicate"`
+			Artifact  struct {
+				ID string `json:"id"`
+			} `json:"artifact"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, second.Body.String())
+	}
+	if resp.Created != 0 || resp.Failed != 0 || resp.Duplicates != 2 {
+		t.Fatalf("created=%d failed=%d duplicates=%d, want 0/0/2", resp.Created, resp.Failed, resp.Duplicates)
+	}
+	for _, r := range resp.Results {
+		if !r.Duplicate {
+			t.Fatal("expected every result marked duplicate")
+		}
+		// Still get a usable id back -- a caller that only wants ids to
+		// scan against (the load-test script) keeps working unchanged.
+		if r.Artifact.ID == "" {
+			t.Fatal("expected the existing artifact's id even for a duplicate result")
+		}
+	}
+}
+
+func TestBulkCreateArtifacts_DuplicateWithinSameBatchMarkedNotFailed(t *testing.T) {
+	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:aaa", "alpine:latest": "sha256:aaa"}}
+	h, _ := newTestRouterWithDigestResolver(resolver)
+
+	body := map[string]any{
+		"artifacts": []map[string]string{
+			{"ref": "alpine:3.19", "type": "image"},
+			{"ref": "alpine:latest", "type": "image"}, // same digest, different tag, same request
+		},
+	}
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Created    int `json:"created"`
+		Duplicates int `json:"duplicates"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Created != 1 || resp.Duplicates != 1 {
+		t.Fatalf("created=%d duplicates=%d, want 1/1", resp.Created, resp.Duplicates)
 	}
 }
 

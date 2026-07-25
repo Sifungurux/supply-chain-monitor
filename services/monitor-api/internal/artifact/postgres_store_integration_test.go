@@ -297,6 +297,48 @@ func TestPostgresStore_FindByFindingID(t *testing.T) {
 	}
 }
 
+// TestPostgresStore_FindByDigest proves digest round-trips through
+// Update's SET clause and FindByDigest's WHERE against a real database
+// -- the one place that would catch a mistake like forgetting to add
+// `digest` to Update's UPDATE statement (see postgres_store.go's own
+// comment on that trap: MemStore's Update wouldn't show this bug at
+// all, since it mutates the stored struct directly).
+func TestPostgresStore_FindByDigest(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	a, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := s.Create("debian:12", artifact.TypeImage); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// A unique digest per test run avoids collisions with rows any
+	// other test in this file leaves behind in the same shared database.
+	digest := fmt.Sprintf("sha256:test-%d", time.Now().UnixNano())
+
+	if got, err := s.FindByDigest(digest); err != nil || got != nil {
+		t.Fatalf("FindByDigest before Update = %+v, %v, want nil, nil", got, err)
+	}
+
+	if _, err := s.Update(a.ID, func(art *artifact.Artifact) { art.Digest = digest }); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	match, err := s.FindByDigest(digest)
+	if err != nil {
+		t.Fatalf("FindByDigest: %v", err)
+	}
+	if match == nil || match.ID != a.ID {
+		t.Fatalf("match = %+v, want %q", match, a.ID)
+	}
+
+	if got, err := s.FindByDigest(""); err != nil || got != nil {
+		t.Fatalf("FindByDigest(\"\") = %+v, %v, want nil, nil", got, err)
+	}
+}
+
 // TestPostgresStore_FindingLifecycleRoundTrips proves MergeFindings'
 // Status/FirstSeenAt/ResolvedAt actually persist and reload correctly
 // through the findings table's new columns, not just in the pure-Go

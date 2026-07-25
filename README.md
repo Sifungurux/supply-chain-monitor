@@ -274,8 +274,40 @@ gcr.io, public.ecr.aws) for exercising this in one call:
 curl -s -X POST localhost:8080/api/v1/artifacts/bulk "${AUTH[@]}" \
   -H 'Content-Type: application/json' \
   -d @testdata/bulk-test-images.json
-# => {"created":100,"failed":0,"results":[{"ref":"alpine:3.19","type":"image","artifact":{...}}, ...]}
+# => {"created":100,"failed":0,"duplicates":0,"results":[{"ref":"alpine:3.19","type":"image","artifact":{...}}, ...]}
 ```
+
+### Duplicate registration is caught by content, not by ref string
+
+Both `POST /api/v1/artifacts` and the bulk endpoint above resolve each
+`image`/`sbom`/`sarif` ref's real OCI content digest (via `oras manifest
+fetch --descriptor`, best-effort -- an unreachable/rate-limited registry
+just means no dedup for that one entry, never a failed registration) and
+check it against every digest already on record. This catches the same
+underlying image registered twice even under two different tags
+(`alpine:3.19` and `alpine:latest` resolving to the same digest), not
+just an exact repeated ref string.
+
+`POST /api/v1/artifacts` returns `409 Conflict` for a genuine duplicate:
+
+```bash
+curl -s -X POST localhost:8080/api/v1/artifacts "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d '{"ref":"alpine:latest","type":"image"}'
+# => {"error":"an artifact with this digest is already registered", "digest":"sha256:...",
+#     "existing_artifact_id":"...", "existing_artifact_ref":"alpine:3.19"}
+```
+
+The bulk endpoint treats a duplicate as its own outcome, not a failure --
+`duplicates` is a separate counter from `failed`, and a duplicate
+entry's `artifact` field still points at the *existing* artifact rather
+than being empty, so re-submitting `testdata/bulk-test-images.json` a
+second time (e.g. re-running `make load-test-clamav`) still returns a
+usable artifact id per ref instead of erroring the whole batch. `file`-
+type artifacts still using the original "ref is a path already inside
+the pod" convention (see `looksLikeLocalPath`) never attempt digest
+resolution at all -- there's no registry to check a filesystem path
+against.
 
 ### Submitting findings from an external scanner
 

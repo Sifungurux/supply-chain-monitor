@@ -25,8 +25,14 @@ import (
 // as "off" than as a real limit, so callers that don't care about this
 // (like most existing tests) can just pass 0 and get today's
 // unthrottled behavior back.
-func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner.Registry, apiKey string, rateLimitRPS float64, rateLimitBurst float64) http.Handler {
-	h := &handler{store: store, tracker: tracker, scanners: scanners}
+// digestResolver enables best-effort duplicate-registration detection
+// (see handlers.go's resolveDigest) -- pass nil to disable it entirely
+// (every registration behaves exactly as it did before this existed).
+// fetchPlainHTTP mirrors the same flag RegistryFetcher is already
+// constructed with (FETCH_PLAIN_HTTP in main.go) -- see resolveDigest's
+// comment for why it only ever applies to non-image artifact types.
+func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner.Registry, apiKey string, rateLimitRPS float64, rateLimitBurst float64, digestResolver scanner.DigestResolver, fetchPlainHTTP bool) http.Handler {
+	h := &handler{store: store, tracker: tracker, scanners: scanners, digestResolver: digestResolver, fetchPlainHTTP: fetchPlainHTTP}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.healthz)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -17,6 +18,49 @@ type handler struct {
 	store    artifact.Store
 	tracker  *pipeline.Tracker
 	scanners scanner.Registry
+	// digestResolver and fetchPlainHTTP power best-effort duplicate-
+	// registration detection (see createArtifact/bulkCreateArtifacts
+	// and resolveDigest below) -- digestResolver is nil in tests that
+	// don't care about this (see newTestRouter), which resolveDigest
+	// treats as "dedup disabled," not an error.
+	digestResolver scanner.DigestResolver
+	fetchPlainHTTP bool
+}
+
+// digestResolveTimeout bounds how long a single registry manifest call
+// can take during registration. Registration used to be instant and
+// dependency-free (no network call at all -- see docs/architecture.md);
+// this is what keeps a slow or hanging registry from turning that into
+// a hung request instead of just skipping dedup for that one entry.
+const digestResolveTimeout = 8 * time.Second
+
+// resolveDigest is best-effort: it never returns an error. "" means "no
+// digest available" -- digestResolver not configured, ref is a local
+// path (not a registry reference), or resolution failed for any reason
+// (unreachable/rate-limited registry, retagged or missing ref). A real
+// failure is logged here and nowhere else -- callers should never treat
+// an empty result as a reason to fail the registration it's part of
+// (see Artifact.Digest's own comment).
+func (h *handler) resolveDigest(ctx context.Context, ref string, t artifact.Type) string {
+	if h.digestResolver == nil {
+		return ""
+	}
+	// Image refs point at real, HTTPS-by-default registries (Docker
+	// Hub, ghcr.io, ...). FETCH_PLAIN_HTTP only ever describes the one
+	// local, unauthenticated scm-registry that file/sbom/sarif
+	// registry refs point at (see RegistryFetcher's own comment) --
+	// applying it to image refs too would mean trying plain HTTP
+	// against a real registry and failing every single time.
+	plainHTTP := t != artifact.TypeImage && h.fetchPlainHTTP
+
+	rctx, cancel := context.WithTimeout(ctx, digestResolveTimeout)
+	defer cancel()
+	digest, err := h.digestResolver.Resolve(rctx, ref, plainHTTP)
+	if err != nil {
+		log.Printf("digest resolution failed for %q (continuing without dedup for this artifact): %v", ref, err)
+		return ""
+	}
+	return digest
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -59,10 +103,41 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Best-effort digest resolution + duplicate check, before Create --
+	// see resolveDigest's own comment for why an empty digest here just
+	// means "proceed without dedup," not a failure.
+	digest := h.resolveDigest(r.Context(), req.Ref, t)
+	if digest != "" {
+		existing, err := h.store.FindByDigest(digest)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if existing != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":                 "an artifact with this digest is already registered",
+				"digest":                digest,
+				"existing_artifact_id":  existing.ID,
+				"existing_artifact_ref": existing.Ref,
+			})
+			return
+		}
+	}
+
 	a, err := h.store.Create(req.Ref, t)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if digest != "" {
+		if updated, err := h.store.Update(a.ID, func(art *artifact.Artifact) { art.Digest = digest }); err != nil {
+			// The artifact itself was created successfully; only the
+			// digest metadata failed to persist. Log rather than fail a
+			// registration that otherwise succeeded.
+			log.Printf("failed to persist resolved digest for artifact %s: %v", a.ID, err)
+		} else {
+			a = updated
+		}
 	}
 	writeJSON(w, http.StatusCreated, a)
 }
@@ -76,13 +151,32 @@ type bulkCreateArtifactsResult struct {
 	Type     string             `json:"type"`
 	Artifact *artifact.Artifact `json:"artifact,omitempty"`
 	Error    string             `json:"error,omitempty"`
+	// Duplicate marks an entry whose resolved digest already matches an
+	// existing artifact -- either one registered in an earlier request,
+	// or another entry earlier in this same batch. Artifact is still
+	// populated (with the *existing* artifact, not a new one) so a
+	// caller that just wants an id per ref -- e.g.
+	// cluster/load-test-clamav.sh re-registering the same 100-image
+	// batch on every run -- keeps working unchanged; Error explains
+	// which one it duplicates. Not counted in Failed: the artifact
+	// genuinely exists, this isn't a validation problem.
+	Duplicate bool `json:"duplicate,omitempty"`
 }
 
+// Created + Failed + Duplicates always equals len(Results).
 type bulkCreateArtifactsResponse struct {
-	Created int                         `json:"created"`
-	Failed  int                         `json:"failed"`
-	Results []bulkCreateArtifactsResult `json:"results"`
+	Created    int                         `json:"created"`
+	Failed     int                         `json:"failed"`
+	Duplicates int                         `json:"duplicates"`
+	Results    []bulkCreateArtifactsResult `json:"results"`
 }
+
+// bulkDigestResolveConcurrency bounds how many `oras manifest fetch`
+// calls run at once during one bulk registration. Resolving digests one
+// at a time for e.g. testdata/bulk-test-images.json's 100 entries would
+// add tens of seconds to what was previously an instant, dependency-free
+// endpoint -- cluster/load-test-clamav.sh depends on this staying fast.
+const bulkDigestResolveConcurrency = 10
 
 // maxBulkArtifacts caps how many artifacts one bulkCreateArtifacts
 // request can register. Without a cap, a single oversized request body
@@ -119,9 +213,41 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Phase 1: resolve every entry's digest concurrently (bounded), so
+	// registering 100 artifacts doesn't mean 100 sequential registry
+	// round trips. Invalid entries (empty ref/bad type) are skipped here
+	// -- they're rejected in phase 2 below before their digest (still ""
+	// in that case) is ever looked at.
+	digests := make([]string, len(req.Artifacts))
+	{
+		sem := make(chan struct{}, bulkDigestResolveConcurrency)
+		var wg sync.WaitGroup
+		for i, item := range req.Artifacts {
+			t := artifact.Type(item.Type)
+			if item.Ref == "" || !t.Valid() {
+				continue
+			}
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(i int, ref string, t artifact.Type) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				digests[i] = h.resolveDigest(r.Context(), ref, t)
+			}(i, item.Ref, t)
+		}
+		wg.Wait()
+	}
+
+	// Phase 2: sequential Create/duplicate-check pass -- every digest is
+	// already resolved, so this is just store calls, no more network
+	// I/O. Sequential (not concurrent) deliberately: seenInBatch needs a
+	// fixed processing order to catch two entries in the *same* request
+	// sharing a digest (e.g. the same image listed under two tags), not
+	// just duplicates of something registered in an earlier request.
+	seenInBatch := make(map[string]*artifact.Artifact) // digest -> artifact created earlier in this batch
 	results := make([]bulkCreateArtifactsResult, 0, len(req.Artifacts))
-	created, failed := 0, 0
-	for _, item := range req.Artifacts {
+	created, failed, duplicates := 0, 0, 0
+	for i, item := range req.Artifacts {
 		res := bulkCreateArtifactsResult{Ref: item.Ref, Type: item.Type}
 
 		if item.Ref == "" {
@@ -137,6 +263,34 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 			results = append(results, res)
 			continue
 		}
+
+		digest := digests[i]
+		if digest != "" {
+			if dup, ok := seenInBatch[digest]; ok {
+				res.Artifact = dup
+				res.Error = fmt.Sprintf("duplicate of %q earlier in this same batch (artifact %s, same digest)", dup.Ref, dup.ID)
+				res.Duplicate = true
+				duplicates++
+				results = append(results, res)
+				continue
+			}
+			existing, err := h.store.FindByDigest(digest)
+			if err != nil {
+				res.Error = err.Error()
+				failed++
+				results = append(results, res)
+				continue
+			}
+			if existing != nil {
+				res.Artifact = existing
+				res.Error = fmt.Sprintf("duplicate of existing artifact %s (same digest)", existing.ID)
+				res.Duplicate = true
+				duplicates++
+				results = append(results, res)
+				continue
+			}
+		}
+
 		a, err := h.store.Create(item.Ref, t)
 		if err != nil {
 			res.Error = err.Error()
@@ -144,21 +298,33 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 			results = append(results, res)
 			continue
 		}
+		if digest != "" {
+			if updated, err := h.store.Update(a.ID, func(art *artifact.Artifact) { art.Digest = digest }); err != nil {
+				log.Printf("failed to persist resolved digest for artifact %s: %v", a.ID, err)
+			} else {
+				a = updated
+			}
+			seenInBatch[digest] = a
+		}
 		res.Artifact = a
 		created++
 		results = append(results, res)
 	}
 
-	// 201 as long as at least one artifact registered -- a request
-	// that's entirely bad input (e.g. every entry missing a ref) is the
-	// one case that should read as a client error rather than "created,
-	// but check the per-entry results," since nothing was actually
-	// created.
+	// 201 as long as at least one artifact registered or matched an
+	// existing one -- a request that's entirely bad input (e.g. every
+	// entry missing a ref) is the one case that should read as a client
+	// error rather than "created, but check the per-entry results,"
+	// since nothing in it was ever valid. Re-registering an already-seen
+	// batch (created == 0, duplicates == len(results)) is NOT that case
+	// -- see cluster/load-test-clamav.sh, which re-submits the same 100
+	// images on every run and expects a normal, successful response
+	// back with usable artifact ids, not a 400.
 	status := http.StatusCreated
-	if created == 0 {
+	if created == 0 && duplicates == 0 {
 		status = http.StatusBadRequest
 	}
-	writeJSON(w, status, bulkCreateArtifactsResponse{Created: created, Failed: failed, Results: results})
+	writeJSON(w, status, bulkCreateArtifactsResponse{Created: created, Failed: failed, Duplicates: duplicates, Results: results})
 }
 
 func (h *handler) listArtifacts(w http.ResponseWriter, r *http.Request) {

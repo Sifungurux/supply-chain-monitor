@@ -112,8 +112,20 @@ type StageEvent struct {
 // report, plus whatever CVE/malware findings and pipeline history have
 // accumulated against it.
 type Artifact struct {
-	ID              string       `json:"id"`
-	Ref             string       `json:"ref"` // OCI ref, file path/URI, or SBOM/SARIF location
+	ID  string `json:"id"`
+	Ref string `json:"ref"` // OCI ref, file path/URI, or SBOM/SARIF location
+	// Digest is the ref's resolved OCI content digest (e.g.
+	// "sha256:..."), best-effort resolved at registration time via a
+	// registry manifest call (see scanner.DigestResolver) -- empty if
+	// resolution failed (unreachable/rate-limited registry, retagged or
+	// missing ref) or wasn't attempted at all (ref is a local
+	// filesystem path, not a registry reference; see
+	// scanner.looksLikeLocalPath). Never required for an artifact to
+	// exist: this is metadata for dedup and future use, not a
+	// precondition for registration succeeding, the same "best-effort,
+	// don't block on it" spirit as bulkCreateArtifacts's own per-entry
+	// error handling.
+	Digest          string       `json:"digest,omitempty"`
 	Type            Type         `json:"type"`
 	Status          Status       `json:"status"`
 	CurrentStage    string       `json:"current_stage,omitempty"`

@@ -26,6 +26,15 @@ type Store interface {
 	// history into their own tables"). MemStore answers this with a
 	// linear scan; PostgresStore uses the findings.finding_id index.
 	FindByFindingID(findingID string) ([]*Artifact, error)
+	// FindByDigest returns the first-registered artifact matching
+	// digest, or (nil, nil) if none exists yet -- "not found" is the
+	// expected, common case (most registrations are the first time
+	// their content has been seen), not an error condition. Never
+	// matches an empty digest: callers should only ever call this with
+	// a digest they've actually resolved (see internal/api/handlers.go's
+	// duplicate-registration check), not as a way to enumerate
+	// not-yet-resolved artifacts.
+	FindByDigest(digest string) (*Artifact, error)
 	// Delete permanently removes an artifact and everything recorded
 	// against it (stage history, findings, scan errors) -- there is no
 	// undo and no soft-delete/archive semantics (see
@@ -142,4 +151,23 @@ func findingIDMatches(findings []Finding, findingID string) bool {
 		}
 	}
 	return false
+}
+
+func (s *MemStore) FindByDigest(digest string) (*Artifact, error) {
+	if digest == "" {
+		return nil, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var match *Artifact
+	for _, a := range s.data {
+		if a.Digest == "" || a.Digest != digest {
+			continue
+		}
+		if match == nil || a.CreatedAt.Before(match.CreatedAt) {
+			match = a
+		}
+	}
+	return match, nil
 }

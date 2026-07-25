@@ -72,6 +72,22 @@ var schemaStatements = []string{
 	// for zero current benefit. Add one if/when a real query needs it,
 	// e.g. a "show only failed artifacts" filter.
 	`CREATE INDEX IF NOT EXISTS artifacts_created_at_idx ON artifacts (created_at DESC)`,
+	// Added for digest-based duplicate-registration detection (see
+	// FindByDigest below and internal/api/handlers.go). Same
+	// ADD COLUMN IF NOT EXISTS idempotency as the findings.status et al.
+	// migration below -- safe to run unconditionally on every startup,
+	// including against a table created before this feature existed.
+	// DEFAULT '' (not NULL): FindByDigest and every digest comparison in
+	// this file treat "" as "no digest resolved," never a match, so
+	// there's no NULL-handling special case to get wrong in a WHERE
+	// clause -- see FindByDigest's own `AND digest != ''` guard.
+	`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS digest TEXT NOT NULL DEFAULT ''`,
+	// Partial index (only non-empty digests): every artifact starts
+	// with digest = '' until best-effort resolution succeeds (or never,
+	// for local-path file/sbom/sarif refs -- see Artifact.Digest's
+	// comment), so indexing '' values for every such row would be pure
+	// write-path overhead for a value FindByDigest never searches for.
+	`CREATE INDEX IF NOT EXISTS artifacts_digest_idx ON artifacts (digest) WHERE digest != ''`,
 	`CREATE TABLE IF NOT EXISTS stage_history (
 		id          BIGSERIAL PRIMARY KEY,
 		artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
@@ -121,7 +137,7 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS scan_errors_artifact_id_idx ON scan_errors (artifact_id)`,
 }
 
-const selectArtifactColumns = `SELECT id, ref, type, status, current_stage, created_at, updated_at FROM artifacts`
+const selectArtifactColumns = `SELECT id, ref, digest, type, status, current_stage, created_at, updated_at FROM artifacts`
 
 // pgxIface is satisfied by both *pgxpool.Pool and pgx.Tx, so the
 // read/write helpers below can run either directly against the pool
@@ -373,7 +389,7 @@ func scanArtifactRow(row rowScanner) (*Artifact, error) {
 	var a Artifact
 	var typ, status string
 
-	err := row.Scan(&a.ID, &a.Ref, &typ, &status, &a.CurrentStage, &a.CreatedAt, &a.UpdatedAt)
+	err := row.Scan(&a.ID, &a.Ref, &a.Digest, &typ, &status, &a.CurrentStage, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -648,8 +664,18 @@ func (s *PostgresStore) Update(id string, mutate func(*Artifact)) (*Artifact, er
 	mutate(a)
 	a.UpdatedAt = time.Now().UTC()
 
-	if _, err := tx.Exec(ctx, `UPDATE artifacts SET status = $1, current_stage = $2, updated_at = $3 WHERE id = $4`,
-		string(a.Status), a.CurrentStage, a.UpdatedAt, a.ID); err != nil {
+	// digest is included here (alongside status/current_stage) even
+	// though most Update callers never touch it -- it's set exactly
+	// once, shortly after Create, via internal/api/handlers.go's
+	// duplicate-registration check calling Update with a mutate func
+	// that only sets a.Digest. Without it in this SET clause, that
+	// mutation would apply to the in-memory Artifact returned to the
+	// caller but silently never persist -- the same trap MemStore
+	// doesn't have (its Update mutates the stored struct directly), so
+	// this needed calling out explicitly rather than discovering it via
+	// a test that only runs against Postgres.
+	if _, err := tx.Exec(ctx, `UPDATE artifacts SET status = $1, current_stage = $2, digest = $3, updated_at = $4 WHERE id = $5`,
+		string(a.Status), a.CurrentStage, a.Digest, a.UpdatedAt, a.ID); err != nil {
 		return nil, fmt.Errorf("update artifact: %w", err)
 	}
 
@@ -767,4 +793,35 @@ func (s *PostgresStore) FindByFindingID(findingID string) ([]*Artifact, error) {
 		return nil, fmt.Errorf("load findings/history for matched artifacts: %w", err)
 	}
 	return out, nil
+}
+
+// FindByDigest returns the first-registered artifact with this exact
+// content digest, or (nil, nil) if none exists -- see the Store
+// interface's own comment on why "not found" isn't an error here.
+// `ORDER BY created_at ASC LIMIT 1` picks the original registration
+// deterministically if more than one row somehow shares a digest (e.g.
+// a race between two concurrent registrations that both resolved their
+// digest before either committed -- rare but not impossible, since this
+// check and the later Create aren't wrapped in one transaction).
+func (s *PostgresStore) FindByDigest(digest string) (*Artifact, error) {
+	if digest == "" {
+		return nil, nil
+	}
+	ctx := context.Background()
+	row := s.pool.QueryRow(ctx, selectArtifactColumns+`
+		WHERE digest = $1 AND digest != ''
+		ORDER BY created_at ASC
+		LIMIT 1
+	`, digest)
+	a, err := scanArtifactRow(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find artifact by digest: %w", err)
+	}
+	if err := s.fillChildren(ctx, s.pool, a); err != nil {
+		return nil, fmt.Errorf("find artifact by digest: %w", err)
+	}
+	return a, nil
 }

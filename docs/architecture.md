@@ -1663,6 +1663,104 @@ back (`WorkerResult.Error`) unchanged -- so fixing the one shared
 function covers both the in-process and isolated paths with no
 duplicated logic.
 
+**Digest-based duplicate-registration detection.** Before this, `Store.Create`
+unconditionally minted a fresh ID and inserted a row for whatever
+`ref`/`type` it was given -- registering `alpine:3.19` as `image` twice
+(or 100 times) produced that many independent, unrelated artifacts, no
+questions asked. There was no uniqueness constraint on `artifacts` at
+all (only `id TEXT PRIMARY KEY`), and registration made zero network
+calls, so there was nothing in the registration path that could even
+have noticed.
+
+`Artifact.Digest` (`internal/artifact/model.go`) now records the ref's
+resolved OCI content digest, and both `createArtifact` and
+`bulkCreateArtifacts` (`internal/api/handlers.go`) resolve it before
+inserting, via a new `scanner.DigestResolver` interface --
+`OrasDigestResolver` (`internal/scanner/digest.go`) shells out to `oras
+manifest fetch --descriptor`, the lightest oras command that returns a
+digest without pulling any blob content (unlike `RegistryFetcher.Fetch`'s
+`oras pull`, which downloads the whole artifact). `oras` is already baked
+into the monitor-api image (`Dockerfile`) for `RegistryFetcher`'s own
+use, so this needed no new dependency.
+
+Deliberately keyed on the resolved *digest*, not the literal `ref`
+string: a ref+type unique constraint would be nearly free (no network
+call at all) but would only catch an exact repeated string, missing the
+much more common case of the same image registered under two different
+tags (`alpine:3.19` and `alpine:latest` resolving to the same content).
+Resolving a real digest needed a registry call somewhere, so the design
+question was really "does resolving it up front, at registration time,
+cost more than it's worth" -- see the Roadmap entry below for the
+tradeoff this accepts.
+
+Resolution is best-effort in the same spirit as `bulkCreateArtifacts`'s
+own per-entry error handling: `resolveDigest` never returns an error,
+only `""` (digest resolver not configured, ref is a local filesystem
+path per `looksLikeLocalPath` -- `file`-type artifacts never go through
+this at all -- or resolution genuinely failed against a real registry).
+A registry that's unreachable, rate-limited, or serving a retagged/
+missing ref just means no dedup for that one entry, never a failed
+registration; the failure is logged and nothing else. Each resolve call
+is wrapped in its own 8-second timeout (`digestResolveTimeout`) so a
+hanging registry can't turn what used to be an instant, dependency-free
+request into a stuck one.
+
+`plainHTTP` is decided per call, not fixed on the resolver: image refs
+point at real, HTTPS-by-default registries (Docker Hub, ghcr.io, ...),
+while `FETCH_PLAIN_HTTP` only ever describes the one local,
+unauthenticated `scm-registry` that `file`/`sbom`/`sarif` registry refs
+point at (the same assumption `RegistryFetcher` already makes). Applying
+`FETCH_PLAIN_HTTP` to image refs too would mean trying plain HTTP
+against a real registry and failing every single time, so
+`resolveDigest` only applies it when `t != artifact.TypeImage`.
+
+`POST /api/v1/artifacts` returns `409 Conflict` (with the existing
+artifact's id/ref in the body) for a genuine duplicate, checked *before*
+`Store.Create` is ever called, so no orphaned row is created and then
+discarded. `bulkCreateArtifacts` resolves every entry's digest
+concurrently first (`bulkDigestResolveConcurrency`, bounded at 10 --
+resolving 100 entries serially would add tens of seconds to what
+`cluster/load-test-clamav.sh` depends on staying fast), then does a
+single sequential pass to Create/duplicate-check, using a local
+`seenInBatch` map to catch two entries *within the same request* sharing
+a digest, not just duplicates of something registered in an earlier
+request. A duplicate is its own outcome (`Duplicates`, a separate
+response counter from `Failed` -- the artifact genuinely exists, this
+isn't a validation problem), and its `Artifact` field still points at
+the *existing* artifact rather than being left empty, so a caller that
+only wants an id per ref -- `cluster/load-test-clamav.sh` re-registering
+the same 100-image batch on every run being the concrete case this
+project already had -- keeps working unchanged instead of getting back
+an all-failed response on the second run.
+
+`Store.Create`'s signature deliberately didn't change (still just
+`ref`/`type`) to avoid touching every existing call site across both
+`MemStore` and `PostgresStore`'s own tests -- digest is set via a
+follow-up `Store.Update(id, func(a *Artifact) { a.Digest = digest })`
+call instead, reusing machinery that already existed. This is why
+`PostgresStore.Update`'s `UPDATE artifacts SET ...` statement now
+includes `digest` alongside `status`/`current_stage`: without it, that
+mutation would apply to the in-memory `Artifact` handed back to the
+caller but silently never persist -- a trap `MemStore.Update` doesn't
+have, since it mutates the stored struct directly rather than
+reconstructing an `UPDATE` statement's column list by hand. Caught by
+`TestPostgresStore_FindByDigest` (build-tagged `postgres_integration`),
+not by the pure-Go `MemStore` tests, since only the Postgres path could
+have this specific bug.
+
+`Store.FindByDigest(digest string) (*Artifact, error)` follows
+`FindByFindingID`'s existing precedent (a secondary lookup by a
+non-`id` field) but returns a single artifact, not a list, and treats
+"not found" as `(nil, nil)`, not an error -- the expected, common case
+(most registrations are the first time their content has been seen).
+Never matches an empty digest (`PostgresStore`'s partial index is
+`WHERE digest != ''`; `MemStore`'s linear scan explicitly skips
+`a.Digest == ""` rows) -- an empty digest means "not resolved," never a
+wildcard.
+
+See the Roadmap below ("Digest resolution costs a real registry call at
+registration time") for the tradeoff this accepts.
+
 **Verbose scan-worker logging.** Before this, a scan-worker Job's pod
 logs (`kubectl logs`) showed almost nothing: `TrivyScanner.Scan` and
 `UnpackerScanner.Scan` both captured trivy's/unpacker's own
@@ -2196,6 +2294,21 @@ for real.
   to how rarely it runs), but it's an assumption, not a guarantee --
   worth a closer look before leaning on this for anything
   latency/correctness-sensitive.
+- **Digest resolution costs a real registry call at registration
+  time**: a genuine, deliberate tradeoff, not an oversight -- see
+  "Digest-based duplicate-registration detection" above for the full
+  design. Before this, registering an artifact was instant and had zero
+  external dependencies (no network call at all). Now every
+  `image`/`sbom`/`sarif` registration makes one registry call, gated by
+  an 8-second timeout and degrading gracefully to "no dedup for this
+  one" on any failure -- but a consistently unreachable or slow registry
+  will consistently mean no dedup, silently, for whatever's behind it.
+  An operator who wants registration to stay instant and
+  dependency-free again can pass a `nil` `DigestResolver` to `NewRouter`
+  (no config flag for this exists yet -- would be a natural follow-up,
+  e.g. `DISABLE_DIGEST_RESOLUTION`, matching `DISABLE_SCAN_ISOLATION`'s
+  existing shape for a similar "trade a production safeguard for
+  local-dev/degraded-environment speed" choice).
 - **Pinned dependencies**: `go.sum` still isn't committed (couldn't be
   generated correctly in the sandbox this project was built in -- no
   real Go toolchain, no network access to the module proxy -- see the
