@@ -322,7 +322,10 @@ func TestBulkCreateArtifacts_TooManyRejected(t *testing.T) {
 }
 
 func TestCreateArtifact_DuplicateDigestReturns409(t *testing.T) {
-	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:aaa"}}
+	// Both refs resolve to the same digest -- simulating two tags of the
+	// same underlying image -- since dedup has to be keyed on digest, not
+	// on the literal ref string being repeated.
+	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:aaa", "alpine:latest": "sha256:aaa"}}
 	h, _ := newTestRouterWithDigestResolver(resolver)
 
 	first := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{"ref": "alpine:3.19", "type": "image"})

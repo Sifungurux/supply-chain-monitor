@@ -56,7 +56,15 @@ func TestRateLimiter_DoesNotExceedBurstAfterLongIdle(t *testing.T) {
 		t.Fatal("expected the first request to be allowed")
 	}
 
-	time.Sleep(50 * time.Millisecond) // far more than enough to overfill past burst if capping were broken
+	// At 1000 tokens/sec, 50ms is enough elapsed time to add 50 tokens if
+	// capping were broken -- far more than enough to fully refill the 1
+	// token spent above back up to a full bucket of 2. That's the correct,
+	// intended behavior of a token bucket: unlike a fixed quota, a long
+	// enough idle period always earns back up to the full burst, no
+	// matter how much was spent before it, and the cap below exists only
+	// to stop it going *past* burst (i.e. accumulating all 50 potential
+	// tokens), not to keep it perpetually reduced by past spend.
+	time.Sleep(50 * time.Millisecond)
 
 	allowed := 0
 	for i := 0; i < 10; i++ {
@@ -64,7 +72,7 @@ func TestRateLimiter_DoesNotExceedBurstAfterLongIdle(t *testing.T) {
 			allowed++
 		}
 	}
-	if allowed != 1 {
-		t.Fatalf("expected exactly 1 more allowed request (burst of 2, one already spent), got %d", allowed)
+	if allowed != 2 {
+		t.Fatalf("expected exactly 2 more allowed requests (bucket fully refilled to burst after the idle, then capped there), got %d", allowed)
 	}
 }
