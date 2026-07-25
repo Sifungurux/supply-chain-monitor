@@ -51,6 +51,28 @@ for bin in curl jq xargs; do
   fi
 done
 
+# Portable millisecond timestamp. `date +%s%3N` is a GNU-date-ism -- on
+# macOS's stock BSD date, %N isn't recognized and prints a literal "N"
+# (e.g. "1784996920N"), which then blows up as soon as it hits arithmetic
+# ("value too great for base"). Prefer gdate (brew's coreutils) if
+# present, else use GNU date's %N only after confirming it actually
+# produced digits, else fall back to whole-second precision -- coarser,
+# but always a valid integer everywhere.
+now_ms() {
+  if command -v gdate >/dev/null 2>&1; then
+    gdate +%s%3N
+    return
+  fi
+  local candidate
+  candidate="$(date +%s%3N 2>/dev/null)"
+  if [[ "${candidate}" =~ ^[0-9]+$ ]]; then
+    echo "${candidate}"
+  else
+    echo "$(( $(date +%s) * 1000 ))"
+  fi
+}
+export -f now_ms
+
 if [[ ! -f "${BATCH_FILE}" ]]; then
   echo "Batch file not found: ${BATCH_FILE}" >&2
   exit 1
@@ -87,11 +109,11 @@ export API_BASE SCM_API_KEY results_file
 scan_one() {
   local id="$1"
   local t0 t1 elapsed_ms status
-  t0="$(date +%s%3N)"
+  t0="$(now_ms)"
   status="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
     "${API_BASE}/api/v1/artifacts/${id}/scan" \
     -H "Authorization: Bearer ${SCM_API_KEY}")"
-  t1="$(date +%s%3N)"
+  t1="$(now_ms)"
   elapsed_ms=$((t1 - t0))
   echo "${status} ${elapsed_ms} ${id}" >> "${results_file}"
 }

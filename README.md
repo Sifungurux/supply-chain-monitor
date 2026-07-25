@@ -224,7 +224,7 @@ limiting).
 
 Example flow:
 
-```bash
+```bashff
 # a bash array, not a plain string -- keeps "Authorization: Bearer <key>"
 # as one argument through expansion instead of being word-split on the
 # space (a plain `AUTH='-H Authorization:Bearer\ <key>'` string looks

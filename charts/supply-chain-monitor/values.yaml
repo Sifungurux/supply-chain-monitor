@@ -48,7 +48,7 @@ clamav:
   # however many pods are running. Raise this if malware scans start
   # queuing up behind clamd (each scan holds one clamd connection for
   # its duration) faster than a single instance can keep up.
-  replicas: 1
+  replicas: 3
   resources:
     requests:
       cpu: 250m
@@ -184,7 +184,7 @@ monitorApi:
   # README, "Running monitor-api outside a Kubernetes pod". Never set
   # this true here without also accepting image malware scanning moving
   # back in-process for real.
-  disableScanIsolation: "false"
+  disableScanIsolation: true
   # oras pull settings for file/sbom/sarif artifacts registered by OCI
   # reference. true matches unpacker.insecure/unpacker.public's same
   # plain-HTTP assumption.
