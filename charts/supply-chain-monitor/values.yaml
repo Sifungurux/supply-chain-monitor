@@ -184,7 +184,7 @@ monitorApi:
   # README, "Running monitor-api outside a Kubernetes pod". Never set
   # this true here without also accepting image malware scanning moving
   # back in-process for real.
-  disableScanIsolation: true
+  disableScanIsolation: false
   # oras pull settings for file/sbom/sarif artifacts registered by OCI
   # reference. true matches unpacker.insecure/unpacker.public's same
   # plain-HTTP assumption.
