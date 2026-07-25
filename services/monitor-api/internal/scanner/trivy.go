@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -108,11 +110,24 @@ func dbArgs(db TrivyDBConfig) []string {
 	return args
 }
 
+// verbosityArgs returns trivy's own progress/log-output flag: "--quiet"
+// normally, or "--debug" when VerboseScanLogs is set. Shared between
+// TrivyScanner.args (here) and SBOMScanner.args (sbom.go) so `trivy
+// image` and `trivy sbom` can never drift out of sync on this.
+func verbosityArgs() []string {
+	if VerboseScanLogs {
+		return []string{"--debug"}
+	}
+	return []string{"--quiet"}
+}
+
 // args builds the trivy CLI invocation. Split out from Scan so the
 // DB-mirror flag wiring can be unit-tested (internal/scanner/trivy_test.go)
 // without actually running trivy.
 func (t *TrivyScanner) args(ref string) []string {
-	args := []string{"image", "--quiet", "--format", "json"}
+	args := []string{"image"}
+	args = append(args, verbosityArgs()...)
+	args = append(args, "--format", "json")
 	args = append(args, dbArgs(t.db)...)
 	args = append(args, ref)
 	return args
@@ -174,11 +189,25 @@ func (t *TrivyScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding
 	cmd := exec.CommandContext(ctx, "trivy", t.args(ref)...)
 
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	if VerboseScanLogs {
+		// Tee everything trivy writes to this process's real stderr
+		// too, so `kubectl logs` on the scan-worker Job pod shows
+		// trivy's own progress as it happens -- see VerboseScanLogs's
+		// comment. Deliberately os.Stderr for both streams, never
+		// os.Stdout: os.Stdout is reserved for the one
+		// ResultMarker-prefixed line runScanWorker prints right before
+		// it exits (see workerresult.go), so this process's own stdout
+		// stays clean of anything else regardless of how noisy trivy
+		// itself gets.
+		cmd.Stdout = io.MultiWriter(&stdout, os.Stderr)
+		cmd.Stderr = io.MultiWriter(&stderr, os.Stderr)
+	} else {
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+	}
 
 	if err := cmd.Run(); err != nil {
-		return nil, wrapTrivyScanError(ref, err, stderr.String())
+		return nil, wrapTrivyScanError("trivy scan", ref, err, stderr.String())
 	}
 
 	return parseTrivyVulnerabilities(stdout.Bytes())
@@ -203,11 +232,16 @@ func (t *TrivyScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding
 // case in practice, not a hypothetical -- registries retag and remove
 // images over time (see docs/architecture.md, "Bulk-registering
 // artifacts" for a concrete example this project hit).
-func wrapTrivyScanError(ref string, err error, stderr string) error {
+//
+// label distinguishes TrivyScanner's "trivy scan" from SBOMScanner's
+// "trivy sbom scan" (sbom.go shares this same function) so the message
+// still says which of the two actually failed, without either caller
+// needing to double-wrap the other's message.
+func wrapTrivyScanError(label, ref string, err error, stderr string) error {
 	if strings.Contains(stderr, "MANIFEST_UNKNOWN") && strings.Contains(stderr, "Failed to fetch") {
-		return fmt.Errorf("trivy scan failed for %q: image tag or digest not found in the registry -- check that the ref is correct and the tag still exists (it may have been removed, retagged, or replaced upstream)", ref)
+		return fmt.Errorf("%s failed for %q: image tag or digest not found in the registry -- check that the ref is correct and the tag still exists (it may have been removed, retagged, or replaced upstream)", label, ref)
 	}
-	return fmt.Errorf("trivy scan failed for %q: %w (%s)", ref, err, stderr)
+	return fmt.Errorf("%s failed for %q: %w (%s)", label, ref, err, stderr)
 }
 
 // cleanScanCache purges trivy's local image/SBOM analysis cache (the

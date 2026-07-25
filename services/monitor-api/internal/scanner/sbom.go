@@ -3,7 +3,8 @@ package scanner
 import (
 	"bytes"
 	"context"
-	"fmt"
+	"io"
+	"os"
 	"os/exec"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -37,7 +38,9 @@ func (s *SBOMScanner) Bucket() string { return "cve" }
 // same reason TrivyScanner.args is: unit-testable without running
 // trivy (see sbom_test.go).
 func (s *SBOMScanner) args(ref string) []string {
-	args := []string{"sbom", "--quiet", "--format", "json"}
+	args := []string{"sbom"}
+	args = append(args, verbosityArgs()...)
+	args = append(args, "--format", "json")
 	args = append(args, dbArgs(s.db)...)
 	args = append(args, ref)
 	return args
@@ -61,11 +64,19 @@ func (s *SBOMScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding,
 	cmd := exec.CommandContext(ctx, "trivy", s.args(ref)...)
 
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	if VerboseScanLogs {
+		// See TrivyScanner.Scan's identical teeing -- same reasoning
+		// (os.Stderr only, os.Stdout stays reserved for the final
+		// ResultMarker line).
+		cmd.Stdout = io.MultiWriter(&stdout, os.Stderr)
+		cmd.Stderr = io.MultiWriter(&stderr, os.Stderr)
+	} else {
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+	}
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("trivy sbom scan failed for %q: %w (%s)", ref, err, stderr.String())
+		return nil, wrapTrivyScanError("trivy sbom scan", ref, err, stderr.String())
 	}
 
 	return parseTrivyVulnerabilities(stdout.Bytes())

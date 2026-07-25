@@ -1,8 +1,10 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -81,9 +83,29 @@ func (u *UnpackerScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 	args = append(args, ref)
 
 	cmd := exec.CommandContext(ctx, u.unpackerBin, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("unpacker failed for %q: %w (%s)", ref, err, string(output))
+
+	// Equivalent to cmd.CombinedOutput() (both streams captured into one
+	// buffer, since unpacker's own log lines -- "pulling ... with oras",
+	// the oras-failed-falling-back-to-crane message, etc. -- aren't
+	// meaningfully split between stdout/stderr and error messages below
+	// want them interleaved in the order they were written) -- written
+	// out longhand so VerboseScanLogs can additionally tee the same
+	// bytes to this process's real stderr as they're written, instead of
+	// only ever surfacing them after the fact if the scan happens to
+	// fail. See TrivyScanner.Scan's identical teeing in trivy.go for why
+	// os.Stderr specifically (os.Stdout stays reserved for the final
+	// ResultMarker line).
+	var output bytes.Buffer
+	if VerboseScanLogs {
+		cmd.Stdout = io.MultiWriter(&output, os.Stderr)
+		cmd.Stderr = io.MultiWriter(&output, os.Stderr)
+	} else {
+		cmd.Stdout = &output
+		cmd.Stderr = &output
+	}
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("unpacker failed for %q: %w (%s)", ref, err, output.String())
 	}
 
 	// Per unpacker's documented output layout: <output-dir>/image holds

@@ -1,12 +1,20 @@
 # Used only by the podman runtime path (cluster/runtimes/podman.sh).
 # The colima runtime (default) doesn't use k3d at all -- it runs k3s
-# natively via `colima start --kubernetes`.
+# natively via `colima start --kubernetes`, which is a single VM/single
+# node and can't be grown into a multi-node cluster. If you need a real
+# multi-node cluster (e.g. to test scm-clamav's replicas actually
+# spreading across nodes under load -- see README's "Scaling ClamAV"),
+# use this podman/k3d path with SCM_K3D_AGENTS set, e.g.:
+#   SCM_RUNTIME=podman SCM_K3D_AGENTS=3 ./cluster/create-cluster.sh
 apiVersion: k3d.io/v1alpha5
 kind: Simple
 metadata:
   name: supply-chain-monitor
 servers: 1
-agents: 1  # kept minimal on the podman path given the open macOS bugs noted in podman.sh
+# Default agent count kept minimal given the open macOS bugs noted in
+# podman.sh -- podman.sh passes SCM_K3D_AGENTS as a --agents override
+# (k3d CLI flags win over this file) when you want more nodes than this.
+agents: 1
 ports:
   # NodePort for Traefik (k8s/releases/traefik-helmrelease.yaml), so
   # http://localhost:30080 routes through the Gateway API (the
@@ -37,6 +45,19 @@ options:
       - arg: --disable=traefik
         nodeFilters:
           - server:*
+      # Rootless podman on macOS (the podman machine's "core" user) can't
+      # write to /proc/sys/kernel/panic, /proc/sys/vm/overcommit_memory,
+      # etc. -- kubelet fails its ContainerManager setup without this
+      # feature gate telling it to tolerate that instead of erroring.
+      # Needed on both server and agent nodes (both run a kubelet). See
+      # cluster/runtimes/podman.sh's cgroup-delegation step, which fixes
+      # the *other* half of this same rootless/macOS gap (the cpuset
+      # cgroup controller itself) -- both are required together, per
+      # k3d's own macOS/rootless-podman docs and k3d-io/k3d#1082.
+      - arg: --kubelet-arg=feature-gates=KubeletInUserNamespace=true
+        nodeFilters:
+          - server:*
+          - agent:*
   kubeconfig:
     updateDefaultKubeconfig: true
     switchCurrentContext: true

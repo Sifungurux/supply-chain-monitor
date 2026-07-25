@@ -47,3 +47,37 @@ func (r Registry) For(t artifact.Type) ([]Scanner, bool) {
 	s, ok := r[t]
 	return s, ok
 }
+
+// VerboseScanLogs, when true, makes every CLI-wrapping scanner in this
+// package (TrivyScanner, SBOMScanner, UnpackerScanner) additionally
+// stream the underlying tool's own stdout/stderr to this process's real
+// stderr as it runs, on top of whatever this package already captures
+// for parsing/error messages. Off by default: normally the only thing
+// worth seeing is the final result (findings or an error), and
+// trivy/unpacker's own step-by-step progress output is just noise once
+// a scan is working correctly.
+//
+// This exists for one real, recurring need: diagnosing a scan that's
+// slow, silently stuck, or failing in a way the final error alone
+// doesn't explain -- being able to `kubectl logs` a scan-worker Job
+// pod and see trivy's own scan steps, or unpacker's oras/crane pull
+// attempts, as they happen, instead of only the pass/fail result after
+// the fact.
+//
+// A package-level variable, not a per-scanner constructor argument,
+// deliberately: every CLI-wrapping Scanner in this package needs to
+// check it, and threading a bool through every constructor (several of
+// which are called from multiple places in main.go, and are also
+// exercised directly in tests with no interest in this setting) would
+// be a lot of plumbing for what's really one global "how noisy should
+// scan-worker Jobs be" knob. See main.go's runScanWorker (sets this
+// from the SCM_SCAN_VERBOSE env var each Job's own process reads at
+// startup) and runAPIServer (reads SCAN_WORKER_VERBOSE_LOGS once, sets
+// this directly for the in-process fallback path under
+// DISABLE_SCAN_ISOLATION, and forwards it into each isolated scanner's
+// config to become that Job's own SCM_SCAN_VERBOSE).
+//
+// Tests that care about args()'s exact output reset this to false
+// explicitly rather than relying on it already being false, since it's
+// shared, mutable package state -- see TestTrivyScanner_Args.
+var VerboseScanLogs bool

@@ -9,6 +9,11 @@ import (
 // (and its air-gapped DB-mirror flags, shared with `trivy image` via
 // dbArgs) is assembled correctly without needing the real trivy binary.
 func TestSBOMScanner_Args(t *testing.T) {
+	// See TestTrivyScanner_Args's identical reset -- VerboseScanLogs is
+	// shared package state.
+	VerboseScanLogs = false
+	defer func() { VerboseScanLogs = false }()
+
 	cases := []struct {
 		name string
 		db   TrivyDBConfig
@@ -66,6 +71,21 @@ func TestSBOMScanner_Args(t *testing.T) {
 				t.Fatalf("args = %#v, want %#v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSBOMScanner_Args_Verbose mirrors TestTrivyScanner_Args_Verbose --
+// `trivy sbom` shares verbosityArgs with `trivy image`, so this must
+// swap "--quiet" for "--debug" too.
+func TestSBOMScanner_Args_Verbose(t *testing.T) {
+	VerboseScanLogs = true
+	defer func() { VerboseScanLogs = false }()
+
+	s := NewSBOMScanner(TrivyDBConfig{})
+	got := s.args("/tmp/app.cdx.json")
+	want := []string{"sbom", "--debug", "--format", "json", "/tmp/app.cdx.json"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
 	}
 }
 

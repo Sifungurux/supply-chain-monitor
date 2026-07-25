@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -49,6 +48,13 @@ type IsolatedUnpackerConfig struct {
 	UnpackerInsecure  bool
 	UnpackerPublic    bool
 	UnpackerMaxFileMB int
+
+	// VerboseLogs, forwarded to the worker as SCM_SCAN_VERBOSE, makes
+	// this Job set scanner.VerboseScanLogs at startup (see main.go's
+	// runScanWorker) -- see VerboseScanLogs's own comment in scanner.go.
+	// Sourced from SCAN_WORKER_VERBOSE_LOGS in runAPIServer (values.yaml's
+	// monitorApi.scanWorker.verboseLogs), off by default.
+	VerboseLogs bool
 
 	// PollInterval controls how often Scan checks the Job's status.
 	// Defaults to 2s if zero.
@@ -149,12 +155,14 @@ func (s *IsolatedUnpackerScanner) Scan(ctx context.Context, ref string) ([]artif
 		Command:               []string{"/usr/local/bin/monitor-api", "scan-worker"},
 		ActiveDeadlineSeconds: s.cfg.ActiveDeadlineSeconds,
 		Env: map[string]string{
-			"SCM_SCAN_REF":          ref,
-			"CLAMAV_ADDR":           s.cfg.ClamAddr,
-			"UNPACKER_BIN":          s.cfg.UnpackerBin,
-			"UNPACKER_INSECURE":     strconv.FormatBool(s.cfg.UnpackerInsecure),
-			"UNPACKER_PUBLIC":       strconv.FormatBool(s.cfg.UnpackerPublic),
-			"UNPACKER_MAX_FILE_MB":  strconv.Itoa(s.cfg.UnpackerMaxFileMB),
+			"SCM_SCAN_REF":         ref,
+			"CLAMAV_ADDR":          s.cfg.ClamAddr,
+			"UNPACKER_BIN":         s.cfg.UnpackerBin,
+			"UNPACKER_INSECURE":    strconv.FormatBool(s.cfg.UnpackerInsecure),
+			"UNPACKER_PUBLIC":      strconv.FormatBool(s.cfg.UnpackerPublic),
+			"UNPACKER_MAX_FILE_MB": strconv.Itoa(s.cfg.UnpackerMaxFileMB),
+			// See VerboseLogs's own comment.
+			"SCM_SCAN_VERBOSE": strconv.FormatBool(s.cfg.VerboseLogs),
 		},
 		CPURequest:              s.cfg.CPURequest,
 		MemoryRequest:           s.cfg.MemoryRequest,
@@ -202,9 +210,9 @@ func (s *IsolatedUnpackerScanner) Scan(ctx context.Context, ref string) ([]artif
 		return nil, fmt.Errorf("read logs for scan job %q: %w", name, err)
 	}
 
-	var result WorkerResult
-	if err := json.Unmarshal([]byte(logs), &result); err != nil {
-		return nil, fmt.Errorf("scan job %q produced unparseable output: %w (output: %.200s)", name, err, logs)
+	result, err := ExtractWorkerResult(logs)
+	if err != nil {
+		return nil, fmt.Errorf("scan job %q %w", name, err)
 	}
 	if result.Error != "" {
 		return nil, fmt.Errorf("%s", result.Error)

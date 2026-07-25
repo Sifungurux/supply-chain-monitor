@@ -165,6 +165,19 @@ monitorApi:
   # monitorApi.image.repository:monitorApi.image.tag -- override only
   # if the scan-worker really needs to run a different image/tag.
   scanWorkerImage: ""
+  # Kept off by default: most of the time the only thing worth watching
+  # is a scan's pass/fail result, not trivy's or unpacker's own
+  # step-by-step progress. Set verboseLogs: true to make every
+  # scan-worker Job's pod logs (kubectl logs on the Job's pod, or
+  # `kubectl logs -l job-name=<name>`) also show trivy's own progress
+  # output (drops --quiet for --debug) and unpacker's own oras/crane
+  # pull messages as they happen, on top of the final findings/error --
+  # useful for diagnosing a scan that's slow, silently stuck, or failing
+  # in a way the final error alone doesn't explain. See
+  # docs/architecture.md ("Verbose scan-worker logging") and main.go's
+  # runScanWorker/scanner.VerboseScanLogs.
+  scanWorker:
+    verboseLogs: false
   # false here (the real in-cluster deployment, which has the
   # ServiceAccount token isolation needs). true is only ever meant for
   # running the monitor-api binary standalone outside Kubernetes -- see

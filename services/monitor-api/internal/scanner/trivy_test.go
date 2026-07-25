@@ -14,6 +14,13 @@ import (
 // --skip-db-update, --skip-java-db-update) without needing to execute
 // the real trivy binary.
 func TestTrivyScanner_Args(t *testing.T) {
+	// VerboseScanLogs is shared, mutable package state (see its own
+	// comment in scanner.go) -- reset explicitly rather than assuming
+	// it's already false, so this test's outcome doesn't depend on
+	// whatever ran before it in the same package test binary.
+	VerboseScanLogs = false
+	defer func() { VerboseScanLogs = false }()
+
 	cases := []struct {
 		name string
 		db   TrivyDBConfig
@@ -82,6 +89,22 @@ func TestTrivyScanner_Args(t *testing.T) {
 				t.Fatalf("args = %#v, want %#v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestTrivyScanner_Args_Verbose confirms VerboseScanLogs swaps trivy's
+// own "--quiet" for "--debug" -- the lever that actually makes trivy
+// produce more log output in the first place (see VerboseScanLogs's
+// comment in scanner.go and verbosityArgs).
+func TestTrivyScanner_Args_Verbose(t *testing.T) {
+	VerboseScanLogs = true
+	defer func() { VerboseScanLogs = false }()
+
+	s := NewTrivyScanner("", TrivyDBConfig{})
+	got := s.args("alpine:3.19")
+	want := []string{"image", "--debug", "--format", "json", "alpine:3.19"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
 	}
 }
 
@@ -164,7 +187,7 @@ func TestWrapTrivyScanError_ManifestUnknown(t *testing.T) {
 	* podman error: unable to initialize Podman client: no podman socket found: stat podman/podman.sock: no such file or directory
 	* remote error: GET https://gcr.io/v2/kubebuilder/kube-rbac-proxy/manifests/v0.13.1: MANIFEST_UNKNOWN: Failed to fetch "v0.13.1"
 `
-	err := wrapTrivyScanError("gcr.io/kubebuilder/kube-rbac-proxy:v0.13.1", errors.New("exit status 1"), rawStderr)
+	err := wrapTrivyScanError("trivy scan", "gcr.io/kubebuilder/kube-rbac-proxy:v0.13.1", errors.New("exit status 1"), rawStderr)
 	if err == nil {
 		t.Fatal("expected a non-nil error")
 	}
@@ -195,7 +218,7 @@ func TestWrapTrivyScanError_ManifestUnknown(t *testing.T) {
 // information nobody has decided yet is safe to discard.
 func TestWrapTrivyScanError_OtherFailuresKeepRawStderr(t *testing.T) {
 	rawStderr := "FATAL\tsome unrelated trivy failure that has nothing to do with a missing manifest\n"
-	err := wrapTrivyScanError("alpine:3.19", errors.New("exit status 1"), rawStderr)
+	err := wrapTrivyScanError("trivy scan", "alpine:3.19", errors.New("exit status 1"), rawStderr)
 	if err == nil {
 		t.Fatal("expected a non-nil error")
 	}
@@ -215,7 +238,7 @@ func TestWrapTrivyScanError_OtherFailuresKeepRawStderr(t *testing.T) {
 // thinking a retry with a corrected ref would help.
 func TestWrapTrivyScanError_UnsupportedArtifactTypeIsNotManifestUnknown(t *testing.T) {
 	rawStderr := `* remote error: unsupported artifact type "application/vnd.cncf.model.manifest.v1+json" for image "ai/gemma4:e4b"`
-	err := wrapTrivyScanError("ai/gemma4:e4b", errors.New("exit status 1"), rawStderr)
+	err := wrapTrivyScanError("trivy scan", "ai/gemma4:e4b", errors.New("exit status 1"), rawStderr)
 	if strings.Contains(err.Error(), "not found in the registry") {
 		t.Errorf("message %q should not be relabeled as a missing manifest -- this is an unsupported media type, a different problem", err.Error())
 	}

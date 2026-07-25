@@ -23,6 +23,22 @@ spec:
       labels:
         app: scm-clamav
     spec:
+      # `preferred` (not `required`): on a single-node cluster (colima,
+      # the default runtime -- see cluster/create-cluster.sh) this is a
+      # no-op and every replica still schedules fine on the one node. On
+      # a multi-node cluster (podman/k3d path with SCM_K3D_AGENTS set,
+      # see cluster/k3d-config.yaml) it spreads replicas across nodes
+      # instead of letting the scheduler stack them all on one, which
+      # would defeat the point of testing clamav.replicas under a
+      # multi-node cluster in the first place -- see README's "Scaling
+      # ClamAV".
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: scm-clamav
       containers:
         - name: clamav
           image: "{{ .Values.clamav.image.repository }}:{{ .Values.clamav.image.tag }}"

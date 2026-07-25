@@ -1663,6 +1663,66 @@ back (`WorkerResult.Error`) unchanged -- so fixing the one shared
 function covers both the in-process and isolated paths with no
 duplicated logic.
 
+**Verbose scan-worker logging.** Before this, a scan-worker Job's pod
+logs (`kubectl logs`) showed almost nothing: `TrivyScanner.Scan` and
+`UnpackerScanner.Scan` both captured trivy's/unpacker's own
+stdout/stderr into an in-memory buffer for parsing/error messages, but
+never wrote any of it to this process's *real* stdout/stderr -- so a
+scan that succeeded left no trace of what it actually did, and a scan
+that failed only showed the final error, not the steps leading up to
+it. Diagnosing a scan that's slow, silently stuck, or failing in a way
+the final error alone doesn't explain meant no real visibility short of
+reading the source.
+
+`scanner.VerboseScanLogs` (a package-level bool, `scanner.go`) fixes
+this: when true, every CLI-wrapping `Scanner` (`TrivyScanner`,
+`SBOMScanner`, `UnpackerScanner`) tees its captured output to this
+process's real `os.Stderr` via `io.MultiWriter` as the command runs,
+and `verbosityArgs` swaps trivy's own `--quiet` for `--debug` so there's
+actually more for trivy to say in the first place. A package-level
+variable rather than a constructor argument deliberately -- every
+CLI-wrapping scanner needs to check it, and threading a bool through
+every constructor (several called from multiple places in `main.go`,
+and exercised directly in tests with no interest in this setting) would
+be a lot of plumbing for one global "how noisy should scan-worker Jobs
+be" knob.
+
+This needed one real structural fix to ship safely, not just the
+teeing itself: **Kubernetes pod logs are a single combined
+stdout+stderr stream** (`PodLogs` hits the pod's one `/log` endpoint,
+which interleaves both). `IsolatedTrivyScanner`/`IsolatedUnpackerScanner`
+used to `json.Unmarshal` that *entire* stream as one WorkerResult
+document -- correct only as long as nothing else was ever written to
+either stream. Turning on verbose output would have broken that
+outright (this project had already been bitten by exactly this once
+before verbose logging existed at all: a stray `cleanScanCache`
+`log.Printf` on a cleanup failure landed on the same stream and made the
+whole parse fail -- see `trivy.go`'s `Scan` comment). Fixing this for
+real meant giving the actual result a fixed, greppable anchor:
+`runScanWorker` now prints the final `WorkerResult` prefixed with
+`scanner.ResultMarker`, and `scanner.ExtractWorkerResult` finds the
+*last* line carrying that prefix regardless of how much other output
+surrounds it (falling back to parsing the whole trimmed body only if no
+such line exists, so logs that are already just the bare JSON --
+every case before this existed, and every case today with verbose
+logging off -- keep parsing exactly as they always did).
+`workerresult_test.go` covers the marker-line extraction, the
+last-line-wins tiebreak, and the bare-JSON fallback directly;
+`TestIsolatedTrivyScanner_Scan_VerboseLogsDontBreakParsing` covers the
+same thing through `IsolatedTrivyScanner.Scan` end-to-end.
+
+Wired through as `monitorApi.scanWorker.verboseLogs` in `values.yaml` →
+`SCAN_WORKER_VERBOSE_LOGS` in the ConfigMap → read once in
+`runAPIServer`, which sets `scanner.VerboseScanLogs` directly for the
+in-process fallback path (`DISABLE_SCAN_ISOLATION=true`, same process)
+and forwards it into `IsolatedTrivyConfig.VerboseLogs`/
+`IsolatedUnpackerConfig.VerboseLogs`, which become each scan-worker
+Job's own `SCM_SCAN_VERBOSE` env var -- a Job is a separate process
+with a fresh environment, so `runScanWorker` has to read and re-apply
+this at its own startup rather than inheriting the API server's
+in-memory setting. Off by default: most of the time the only thing
+worth seeing is the final findings or error.
+
 ## All services on Flux + Helm
 
 Every service in this project -- `registry`, `clamav`, `postgres`,

@@ -633,7 +633,77 @@ throttled request volume per API key").
 Raise it if malware scans start queuing behind clamd connections faster
 than one instance keeps up — each pod freshclams its own DB
 independently (no shared storage), so this scales cleanly with no
-other change needed.
+other change needed. A `topologySpreadConstraint` on the Deployment
+(`preferred`, not `required`, so it's a no-op on a single-node cluster)
+spreads replicas across nodes rather than letting the scheduler stack
+them all on one, so raising `clamav.replicas` on a multi-node cluster
+actually buys you separate nodes' worth of CPU, not just separate pods
+competing for the same node.
+
+**Testing this for real, at scale**, needs two things the default local
+setup doesn't give you on its own:
+
+1. **A multi-node cluster.** The default runtime, Colima
+   (`cluster/create-cluster.sh`), runs k3s inside a single VM — one
+   node, no matter how you set `clamav.replicas`. For an actual
+   multi-node cluster, use the podman/k3d path with `SCM_K3D_AGENTS` set
+   (see `cluster/k3d-config.yaml`):
+   ```bash
+   SCM_RUNTIME=podman SCM_K3D_AGENTS=3 ./cluster/create-cluster.sh
+   ```
+2. **Real concurrent scan load.** `cluster/load-test-clamav.sh` (`make
+   load-test-clamav`) bulk-registers `testdata/bulk-test-images.json`
+   (100 artifacts) and fires `PARALLELISM` (default 10) concurrent
+   `POST /scan` requests, reporting success/failure counts and latency
+   (min/p50/p95/max). Run it once at `clamav.replicas: 1` and again
+   after scaling up (`helm upgrade ... --set clamav.replicas=4`) to see
+   whether latency actually drops rather than assuming it will:
+   ```bash
+   make port-forward   # separate terminal
+   make load-test-clamav
+   PARALLELISM=30 ./cluster/load-test-clamav.sh   # heavier concurrency
+   ```
+
+### Verbose scan-worker logging
+
+By default, `kubectl logs` on a scan-worker Job's pod (the short-lived
+Job each `image`/`sbom` scan runs in — see "Image scanning" above)
+shows almost nothing: trivy and unpacker's own progress output is
+captured for parsing/error messages but never printed to the pod's own
+log stream. That's fine once things are working, but not much help
+diagnosing a scan that's slow, silently stuck, or failing in a way the
+final error alone doesn't explain.
+
+`monitorApi.scanWorker.verboseLogs` in
+`charts/supply-chain-monitor/values.yaml` (default `false`) turns this
+on:
+
+```yaml
+monitorApi:
+  scanWorker:
+    verboseLogs: true
+```
+
+With it set, every scan-worker Job's pod logs also show trivy's own
+scan-step output (it runs with `--debug` instead of `--quiet`) and
+unpacker's own pull messages (the `pulling <ref> with oras`,
+oras-failed-falling-back-to-crane lines) as they happen, alongside the
+final findings/error every scan already reports. Applies to both the
+isolated (default) and in-process (`DISABLE_SCAN_ISOLATION=true`) scan
+paths.
+
+### Debugging a specific scan-worker Job
+
+Scan-worker Job pods are deleted right after each scan finishes (see
+`docs/architecture.md`, "Isolating the unpack+scan step"), so to
+actually watch one's logs while `verboseLogs` is on, trigger a scan and
+immediately tail Jobs in the namespace:
+
+```bash
+kubectl get jobs -n supply-chain-monitor -w
+# once a scm-scan-* Job appears:
+kubectl logs -n supply-chain-monitor -l job-name=<job-name> -f
+```
 
 ## Database
 

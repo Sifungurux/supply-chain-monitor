@@ -2,7 +2,6 @@ package scanner
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -39,6 +38,14 @@ type IsolatedTrivyConfig struct {
 	// runScanWorker), exactly like FetchingScanner does for the
 	// in-process path. Forwarded to the worker as FETCH_PLAIN_HTTP.
 	FetchPlainHTTP bool
+
+	// VerboseLogs, forwarded to the worker as SCM_SCAN_VERBOSE, makes
+	// this Job set scanner.VerboseScanLogs at startup (see main.go's
+	// runScanWorker) -- see VerboseScanLogs's own comment in scanner.go
+	// for what that actually changes. Sourced from
+	// SCAN_WORKER_VERBOSE_LOGS in runAPIServer (values.yaml's
+	// monitorApi.scanWorker.verboseLogs), off by default.
+	VerboseLogs bool
 
 	// CacheClaimName is the shared, centrally-refreshed PersistentVolumeClaim
 	// holding the pre-downloaded trivy vulnerability DB (see
@@ -165,12 +172,14 @@ func (s *IsolatedTrivyScanner) Scan(ctx context.Context, ref string) ([]artifact
 		Command:               []string{"/usr/local/bin/monitor-api", "scan-worker"},
 		ActiveDeadlineSeconds: s.cfg.ActiveDeadlineSeconds,
 		Env: map[string]string{
-			"SCM_SCAN_REF":     ref,
-			"SCM_TRIVY_MODE":   s.cfg.SubCommand,
-			"TRIVY_CACHE_DIR":  s.cfg.CacheMountPath,
+			"SCM_SCAN_REF":    ref,
+			"SCM_TRIVY_MODE":  s.cfg.SubCommand,
+			"TRIVY_CACHE_DIR": s.cfg.CacheMountPath,
 			// Only actually consulted by the worker in "sbom" mode (see
 			// FetchPlainHTTP's own comment) -- harmless to always set.
 			"FETCH_PLAIN_HTTP": strconv.FormatBool(s.cfg.FetchPlainHTTP),
+			// See VerboseLogs's own comment.
+			"SCM_SCAN_VERBOSE": strconv.FormatBool(s.cfg.VerboseLogs),
 		},
 		ExtraVolumes: []k8sjob.Volume{
 			{
@@ -222,9 +231,9 @@ func (s *IsolatedTrivyScanner) Scan(ctx context.Context, ref string) ([]artifact
 		return nil, fmt.Errorf("read logs for trivy scan job %q: %w", name, err)
 	}
 
-	var result WorkerResult
-	if err := json.Unmarshal([]byte(logs), &result); err != nil {
-		return nil, fmt.Errorf("trivy scan job %q produced unparseable output: %w (output: %.200s)", name, err, logs)
+	result, err := ExtractWorkerResult(logs)
+	if err != nil {
+		return nil, fmt.Errorf("trivy scan job %q %w", name, err)
 	}
 	if result.Error != "" {
 		return nil, fmt.Errorf("%s", result.Error)

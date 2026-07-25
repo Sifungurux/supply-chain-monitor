@@ -1,8 +1,14 @@
 # Runtime backend: colima (default) or podman. See cluster/create-cluster.sh.
-SCM_RUNTIME  ?= colima
-IMAGE        := monitor-api:dev
+# NOTE: this must match whatever SCM_RUNTIME you actually created the
+# cluster with (e.g. `make build SCM_RUNTIME=podman`, or `export
+# SCM_RUNTIME=podman` in your shell first) -- it isn't read back from the
+# running cluster, so a mismatch here silently skips the k3d image
+# import below rather than erroring.
+SCM_RUNTIME      ?= colima
+SCM_CLUSTER_NAME ?= supply-chain-monitor
+IMAGE            := monitor-api:dev
 
-.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test gateway-api-install build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard check-dashboard-configmap db-shell lock-deps db-backup db-restore db-backups-list
+.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test gateway-api-install build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard check-dashboard-configmap db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -55,9 +61,23 @@ gateway-api-install:
 # runtime) shares the same image store as `docker build`, so there's no
 # import step. On the podman runtime, export the DOCKER_HOST printed by
 # `make cluster-up SCM_RUNTIME=podman` first, so `docker build` here
-# actually talks to the podman machine.
+# actually talks to the podman machine -- but that alone isn't enough:
+# each k3d node is itself a container with its own embedded containerd,
+# entirely separate from podman's own image store, so a locally built
+# image is invisible to the cluster until explicitly imported. `k3d
+# image import` below does that, gated on SCM_RUNTIME=podman so the
+# (fast, no-op-if-mismatched) colima path isn't slowed down by a step it
+# doesn't need. Uses the fully-qualified docker.io/library/$(IMAGE) name,
+# not the short $(IMAGE) one -- podman's build backend tags images under
+# both, but k3d's image lookup only resolves the qualified one (the
+# short name fails with "not a file and couldn't be found in the
+# container runtime" even though the image exists).
 build:
 	docker build -t $(IMAGE) services/monitor-api
+ifeq ($(SCM_RUNTIME),podman)
+	@echo "SCM_RUNTIME=podman -- importing docker.io/library/$(IMAGE) into k3d cluster '$(SCM_CLUSTER_NAME)' (see comment above)..."
+	k3d image import docker.io/library/$(IMAGE) -c $(SCM_CLUSTER_NAME)
+endif
 
 # The whole application is a single Helm chart via Flux now (see
 # charts/supply-chain-monitor/, k8s/releases/supply-chain-monitor-helmrelease.yaml,
@@ -125,6 +145,14 @@ port-forward:
 
 logs:
 	kubectl -n supply-chain-monitor logs -l app=monitor-api -f
+
+# Load-tests the register->scan pipeline with 100 concurrent artifacts
+# (see cluster/load-test-clamav.sh) to check whether scm-clamav
+# (README's "Scaling ClamAV") is keeping up, rather than guessing from
+# clamav.replicas alone. Requires `make port-forward` running in another
+# terminal. Override PARALLELISM=N to change concurrency.
+load-test-clamav:
+	./cluster/load-test-clamav.sh
 
 # each image /scan spins up its own short-lived Job (see
 # internal/scanner/isolated_unpacker.go) that's normally gone within

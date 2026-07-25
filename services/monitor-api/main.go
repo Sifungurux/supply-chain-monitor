@@ -182,6 +182,13 @@ func runScanWorker() {
 		os.Exit(2)
 	}
 
+	// See scanner.VerboseScanLogs's own comment for what this actually
+	// changes. Set once, at the very top, before any scanner runs --
+	// every CLI-wrapping Scanner in the scanner package checks this
+	// package-level variable directly rather than taking it as a
+	// constructor argument.
+	scanner.VerboseScanLogs = getenvBool("SCM_SCAN_VERBOSE", false)
+
 	// Matches the scan timeout the API server itself used to apply
 	// in-process (see internal/api/handlers.go) -- the Job's own
 	// activeDeadlineSeconds (the Job template built in internal/k8sjob,
@@ -248,11 +255,23 @@ func runScanWorker() {
 		result.Error = scanErr.Error()
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	if err := enc.Encode(result); err != nil {
-		fmt.Fprintf(os.Stderr, "scan-worker: failed to write result: %v\n", err)
+	// Printed with scanner.ResultMarker as a prefix, not a bare
+	// json.Encoder.Encode, so IsolatedTrivyScanner/IsolatedUnpackerScanner
+	// (via scanner.ExtractWorkerResult) can find this exact line even
+	// when SCM_SCAN_VERBOSE also has trivy's or unpacker's own progress
+	// output mixed into the same pod log stream -- Kubernetes pod logs
+	// are a single combined stdout+stderr stream, so without this anchor
+	// any extra output written by a verbose scan (or even just
+	// cleanScanCache's own log.Printf on a cleanup failure, which
+	// already bit this project once before VerboseScanLogs existed --
+	// see trivy.go's Scan) could land ahead of or after the real result
+	// and break a naive whole-body JSON parse.
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scan-worker: failed to marshal result: %v\n", err)
 		os.Exit(1)
 	}
+	fmt.Printf("%s%s\n", scanner.ResultMarker, resultJSON)
 }
 
 // buildImageScanners picks both halves of the `image` artifact type's
@@ -403,6 +422,18 @@ func runAPIServer() {
 	fetchPlainHTTP := getenvBool("FETCH_PLAIN_HTTP", true)
 	fetcher := scanner.NewRegistryFetcher(fetchPlainHTTP)
 
+	// Governs how much of trivy's/unpacker's own progress output ends up
+	// visible in scan-worker Job pod logs -- see scanner.VerboseScanLogs's
+	// own comment. Off by default: most of the time the only thing worth
+	// seeing is the final findings/error. Set directly here for the
+	// in-process fallback path (disableScanIsolation below runs in this
+	// same process), and forwarded into each isolated scanner's config
+	// below to become that Job's own SCM_SCAN_VERBOSE -- a Job is a
+	// separate process with a fresh environment, so it has to be told
+	// again at its own startup (see runScanWorker).
+	verboseScanLogs := getenvBool("SCAN_WORKER_VERBOSE_LOGS", false)
+	scanner.VerboseScanLogs = verboseScanLogs
+
 	// Image malware scanning (unpack + ClamAV) and image CVE scanning
 	// (trivy) both normally run in their own short-lived Kubernetes Job
 	// per scan, not in this process -- see IsolatedUnpackerScanner,
@@ -449,6 +480,7 @@ func runAPIServer() {
 			UnpackerInsecure:  unpackerInsecure,
 			UnpackerPublic:    unpackerPublic,
 			UnpackerMaxFileMB: unpackerMaxFileMB,
+			VerboseLogs:       verboseScanLogs,
 		})
 		// Shares the same Kubernetes API client and worker image as
 		// isolatedUnpacker above -- both are just different scan-worker
@@ -460,6 +492,7 @@ func runAPIServer() {
 			SubCommand:     "image",
 			CacheClaimName: getenv("TRIVY_CACHE_CLAIM", "scm-trivy-db-cache"),
 			CacheMountPath: getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
+			VerboseLogs:    verboseScanLogs,
 		})
 		// Same again for sbom-type artifacts (see docs/architecture.md,
 		// "Isolating SBOM trivy scanning") -- FetchPlainHTTP is set here
@@ -473,6 +506,7 @@ func runAPIServer() {
 			CacheClaimName: getenv("TRIVY_CACHE_CLAIM", "scm-trivy-db-cache"),
 			CacheMountPath: getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
 			FetchPlainHTTP: fetchPlainHTTP,
+			VerboseLogs:    verboseScanLogs,
 		})
 	} else {
 		log.Printf("DISABLE_SCAN_ISOLATION=true: image malware scanning, trivy CVE scanning, and sbom trivy scanning will all run in-process, not in isolated Jobs -- see README, \"Running monitor-api outside a Kubernetes pod\"")

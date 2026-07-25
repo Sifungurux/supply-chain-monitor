@@ -107,6 +107,32 @@ func TestIsolatedTrivyScanner_Scan_WorkerReportedError(t *testing.T) {
 	}
 }
 
+// TestIsolatedTrivyScanner_Scan_VerboseLogsDontBreakParsing confirms the
+// real reason ExtractWorkerResult/ResultMarker exist: with
+// VerboseScanLogs on, a scan-worker Job's pod logs have trivy's own
+// progress output mixed in ahead of the final result, and Scan must
+// still find and use that result correctly rather than failing to
+// parse the whole noisy log body as one JSON document.
+func TestIsolatedTrivyScanner_Scan_VerboseLogsDontBreakParsing(t *testing.T) {
+	client := &fakeJobClient{
+		namespace:      "test-ns",
+		statusSequence: []jobStatusResult{{succeeded: true}},
+		podName:        "scm-scan-abc-xyz",
+		logs: "INFO\tVulnerability scanning is enabled\n" +
+			"INFO\tDetected OS: alpine\n" +
+			ResultMarker + `{"findings":[{"id":"CVE-2024-9","severity":"LOW","title":"z","source":"trivy"}]}`,
+	}
+	s := newTrivyScanner(t, client)
+
+	findings, err := s.Scan(context.Background(), "alpine:3.19")
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(findings) != 1 || findings[0].ID != "CVE-2024-9" {
+		t.Fatalf("findings = %+v", findings)
+	}
+}
+
 func TestIsolatedTrivyScanner_Scan_UnparseableLogs(t *testing.T) {
 	client := &fakeJobClient{
 		namespace:      "test-ns",

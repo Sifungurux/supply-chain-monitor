@@ -44,6 +44,13 @@ data:
   # monitor-api binary standalone outside Kubernetes -- see README,
   # "Running monitor-api outside a Kubernetes pod".
   DISABLE_SCAN_ISOLATION: {{ .Values.monitorApi.disableScanIsolation | quote }}
+  # Off by default -- see monitorApi.scanWorker.verboseLogs's own
+  # comment in values.yaml. Read here by runAPIServer, which both sets
+  # scanner.VerboseScanLogs directly for the in-process fallback path
+  # (DISABLE_SCAN_ISOLATION=true) and forwards it into every isolated
+  # scanner's Job as that Job's own SCM_SCAN_VERBOSE (see
+  # internal/scanner/isolated_trivy.go/isolated_unpacker.go).
+  SCAN_WORKER_VERBOSE_LOGS: {{ .Values.monitorApi.scanWorker.verboseLogs | quote }}
   # file/sbom/sarif artifacts can be registered with an OCI registry
   # reference instead of a path already inside this pod -- oras pull
   # fetches them from scm-registry first (see internal/scanner/fetch.go).
