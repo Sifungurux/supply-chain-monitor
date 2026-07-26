@@ -8,6 +8,25 @@ SCM_RUNTIME      ?= colima
 SCM_CLUSTER_NAME ?= supply-chain-monitor
 IMAGE            := monitor-api:dev
 
+# On the podman runtime, resolve DOCKER_HOST from podman's own current
+# connection list instead of requiring it exported by hand in every
+# shell. podman renegotiates the SSH-forwarded port in that URI on every
+# `podman machine start` (see cluster/runtimes/podman.sh's own handling
+# of this same problem for k3d's connection), so a value exported once
+# and left in a shell profile goes stale the next time the machine
+# restarts -- symptom: `docker build`/`docker run` failing with something
+# like `write |1: broken pipe` even though podman itself is fine.
+# Evaluated once, at parse time, in a subshell with its own stderr
+# redirect (podman/jq not installed or machine not started yet just
+# means an empty value here, silently -- same as DOCKER_HOST being unset
+# entirely, not a reason to fail every other target). `export` makes it
+# part of every recipe's environment for this invocation, including
+# test-api/test-postgres/test-dashboard's own `docker run` calls, not
+# just build/deploy.
+ifeq ($(SCM_RUNTIME),podman)
+export DOCKER_HOST := $(shell (podman system connection ls --format json | jq -r '.[] | select(.Default==true) | .URI') 2>/dev/null)
+endif
+
 .PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test gateway-api-install build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard check-dashboard-configmap db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
 
 cluster-up:
@@ -59,20 +78,27 @@ gateway-api-install:
 
 # On the colima runtime, this is all you need -- colima's k3s (docker
 # runtime) shares the same image store as `docker build`, so there's no
-# import step. On the podman runtime, export the DOCKER_HOST printed by
-# `make cluster-up SCM_RUNTIME=podman` first, so `docker build` here
-# actually talks to the podman machine -- but that alone isn't enough:
-# each k3d node is itself a container with its own embedded containerd,
-# entirely separate from podman's own image store, so a locally built
-# image is invisible to the cluster until explicitly imported. `k3d
-# image import` below does that, gated on SCM_RUNTIME=podman so the
-# (fast, no-op-if-mismatched) colima path isn't slowed down by a step it
+# import step. On the podman runtime, DOCKER_HOST is already resolved
+# and exported above so `docker build` here talks to the podman machine
+# with no manual export needed -- but that alone isn't enough: each k3d
+# node is itself a container with its own embedded containerd, entirely
+# separate from podman's own image store, so a locally built image is
+# invisible to the cluster until explicitly imported. `k3d image import`
+# below does that, gated on SCM_RUNTIME=podman so the (fast,
+# no-op-if-mismatched) colima path isn't slowed down by a step it
 # doesn't need. Uses the fully-qualified docker.io/library/$(IMAGE) name,
 # not the short $(IMAGE) one -- podman's build backend tags images under
 # both, but k3d's image lookup only resolves the qualified one (the
 # short name fails with "not a file and couldn't be found in the
 # container runtime" even though the image exists).
 build:
+ifeq ($(SCM_RUNTIME),podman)
+	@if [ -z "$(DOCKER_HOST)" ]; then \
+		echo "SCM_RUNTIME=podman but DOCKER_HOST could not be resolved -- is the podman machine started? Run 'make cluster-up SCM_RUNTIME=podman' or 'podman machine start' first." >&2; \
+		exit 1; \
+	fi
+	@echo "SCM_RUNTIME=podman -- DOCKER_HOST=$(DOCKER_HOST)"
+endif
 	docker build -t $(IMAGE) services/monitor-api
 ifeq ($(SCM_RUNTIME),podman)
 	@echo "SCM_RUNTIME=podman -- importing docker.io/library/$(IMAGE) into k3d cluster '$(SCM_CLUSTER_NAME)' (see comment above)..."
