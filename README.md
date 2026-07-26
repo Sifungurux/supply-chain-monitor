@@ -724,6 +724,42 @@ final findings/error every scan already reports. Applies to both the
 isolated (default) and in-process (`DISABLE_SCAN_ISOLATION=true`) scan
 paths.
 
+### Tuning scan timeouts for heavier images
+
+A scan can fail with something like:
+
+```
+scan job for "mysql:8.0": timed out waiting for trivy scan job to complete: context deadline exceeded
+```
+
+even though nothing is actually stuck -- it's a budget problem, not a
+hang. Two timeouts are involved: how long Kubernetes lets each
+scan-worker Job's pod run (`monitorApi.scanWorker.activeDeadlineSeconds`,
+default 600s), and how long the API handler itself waits for one to
+finish before giving up on the whole scan
+(`monitorApi.scanTimeoutSeconds`, default 660s, deliberately 60s above
+the first). Both are sized for alpine/busybox-sized images; a heavier
+one (more OS packages for trivy to walk/query -- `mysql`, `postgres`, and
+similar images are common examples) plus real scheduling delay and CPU
+contention from several scans running concurrently (see "Scaling
+ClamAV"/`make load-test-clamav` above) can push actual runtime past
+that. Raise both together, keeping `scanTimeoutSeconds` above
+`activeDeadlineSeconds`:
+
+```yaml
+monitorApi:
+  scanWorker:
+    activeDeadlineSeconds: 900
+  scanTimeoutSeconds: 960
+```
+
+`runAPIServer` refuses to start if `scanTimeoutSeconds` isn't strictly
+greater than `scanWorker.activeDeadlineSeconds` -- that ordering is what
+keeps this handler from ever giving up on a scan before Kubernetes' own
+deadline would have killed a genuinely stuck Job, so a config that gets
+it backwards is rejected at startup instead of surfacing later as
+confusing, intermittent timeouts under load.
+
 ### Debugging a specific scan-worker Job
 
 Scan-worker Job pods are deleted right after each scan finishes (see

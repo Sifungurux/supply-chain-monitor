@@ -464,6 +464,31 @@ func runAPIServer() {
 	inProcessUnpacker := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024)
 	inProcessTrivy := scanner.NewTrivyScanner(registryAddr, trivyDB)
 
+	// SCAN_WORKER_ACTIVE_DEADLINE_SECONDS bounds how long Kubernetes lets
+	// each scan-worker Job's pod run before killing it outright (both the
+	// unpacker and trivy Job shapes -- see IsolatedUnpackerConfig/
+	// IsolatedTrivyConfig's own ActiveDeadlineSeconds comment). Raise this
+	// for a cluster that's routinely scanning heavier images (more OS
+	// packages for trivy to walk/query -- e.g. mysql/postgres-sized
+	// images) and/or running many scans concurrently, where per-Job
+	// scheduling delay and CPU contention both push real runtime up.
+	// SCAN_TIMEOUT_SECONDS is the API handler's own overall per-scan
+	// budget (see internal/api/handlers.go's scanArtifact/scanTimeout) --
+	// it must stay comfortably above the value above, or this handler
+	// routinely reports "context deadline exceeded" before Kubernetes'
+	// own ActiveDeadlineSeconds would even have killed a genuinely stuck
+	// Job, which looks identical to a real hang but is actually just a
+	// legitimately slow scan running out of a budget that was never long
+	// enough for it. Validated (not silently clamped) so a misconfigured
+	// pair fails loudly at startup instead of surfacing as confusing,
+	// intermittent scan timeouts under load.
+	scanWorkerActiveDeadlineSeconds := getenvInt("SCAN_WORKER_ACTIVE_DEADLINE_SECONDS", 600)
+	scanTimeoutSeconds := getenvInt("SCAN_TIMEOUT_SECONDS", 660)
+	if scanTimeoutSeconds <= scanWorkerActiveDeadlineSeconds {
+		log.Fatalf("SCAN_TIMEOUT_SECONDS (%ds) must be greater than SCAN_WORKER_ACTIVE_DEADLINE_SECONDS (%ds) -- otherwise a scan gets reported as timed out before Kubernetes would even kill a genuinely stuck scan-worker Job", scanTimeoutSeconds, scanWorkerActiveDeadlineSeconds)
+	}
+	scanTimeout := time.Duration(scanTimeoutSeconds) * time.Second
+
 	var isolatedUnpacker scanner.Scanner
 	var isolatedTrivyImage scanner.Scanner
 	var isolatedTrivySBOM scanner.Scanner
@@ -474,13 +499,14 @@ func runAPIServer() {
 		}
 		workerImage := getenv("SCAN_WORKER_IMAGE", "monitor-api:dev")
 		isolatedUnpacker = scanner.NewIsolatedUnpackerScanner(k8sClient, scanner.IsolatedUnpackerConfig{
-			Image:             workerImage,
-			ClamAddr:          clamAddr,
-			UnpackerBin:       unpackerBin,
-			UnpackerInsecure:  unpackerInsecure,
-			UnpackerPublic:    unpackerPublic,
-			UnpackerMaxFileMB: unpackerMaxFileMB,
-			VerboseLogs:       verboseScanLogs,
+			Image:                 workerImage,
+			ClamAddr:              clamAddr,
+			UnpackerBin:           unpackerBin,
+			UnpackerInsecure:      unpackerInsecure,
+			UnpackerPublic:        unpackerPublic,
+			UnpackerMaxFileMB:     unpackerMaxFileMB,
+			VerboseLogs:           verboseScanLogs,
+			ActiveDeadlineSeconds: int64(scanWorkerActiveDeadlineSeconds),
 		})
 		// Shares the same Kubernetes API client and worker image as
 		// isolatedUnpacker above -- both are just different scan-worker
@@ -488,11 +514,12 @@ func runAPIServer() {
 		// IsolatedTrivyScanner's comment for why the DB cache is a
 		// separately-refreshed PVC rather than downloaded per scan.
 		isolatedTrivyImage = scanner.NewIsolatedTrivyScanner(k8sClient, scanner.IsolatedTrivyConfig{
-			Image:          workerImage,
-			SubCommand:     "image",
-			CacheClaimName: getenv("TRIVY_CACHE_CLAIM", "scm-trivy-db-cache"),
-			CacheMountPath: getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
-			VerboseLogs:    verboseScanLogs,
+			Image:                 workerImage,
+			SubCommand:            "image",
+			CacheClaimName:        getenv("TRIVY_CACHE_CLAIM", "scm-trivy-db-cache"),
+			CacheMountPath:        getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
+			VerboseLogs:           verboseScanLogs,
+			ActiveDeadlineSeconds: int64(scanWorkerActiveDeadlineSeconds),
 		})
 		// Same again for sbom-type artifacts (see docs/architecture.md,
 		// "Isolating SBOM trivy scanning") -- FetchPlainHTTP is set here
@@ -501,12 +528,13 @@ func runAPIServer() {
 		// IsolatedTrivyConfig.FetchPlainHTTP's own comment and
 		// runScanWorker's "sbom" case for where that actually happens.
 		isolatedTrivySBOM = scanner.NewIsolatedTrivyScanner(k8sClient, scanner.IsolatedTrivyConfig{
-			Image:          workerImage,
-			SubCommand:     "sbom",
-			CacheClaimName: getenv("TRIVY_CACHE_CLAIM", "scm-trivy-db-cache"),
-			CacheMountPath: getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
-			FetchPlainHTTP: fetchPlainHTTP,
-			VerboseLogs:    verboseScanLogs,
+			Image:                 workerImage,
+			SubCommand:            "sbom",
+			CacheClaimName:        getenv("TRIVY_CACHE_CLAIM", "scm-trivy-db-cache"),
+			CacheMountPath:        getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
+			FetchPlainHTTP:        fetchPlainHTTP,
+			VerboseLogs:           verboseScanLogs,
+			ActiveDeadlineSeconds: int64(scanWorkerActiveDeadlineSeconds),
 		})
 	} else {
 		log.Printf("DISABLE_SCAN_ISOLATION=true: image malware scanning, trivy CVE scanning, and sbom trivy scanning will all run in-process, not in isolated Jobs -- see README, \"Running monitor-api outside a Kubernetes pod\"")
@@ -569,7 +597,7 @@ func runAPIServer() {
 	// image refs never use it regardless of this setting.
 	digestResolver := scanner.NewOrasDigestResolver()
 
-	router := api.NewRouter(store, stageTracker, scanners, apiKey, rateLimitRPS, rateLimitBurst, digestResolver, fetchPlainHTTP)
+	router := api.NewRouter(store, stageTracker, scanners, apiKey, rateLimitRPS, rateLimitBurst, digestResolver, fetchPlainHTTP, scanTimeout)
 
 	srv := &http.Server{
 		Addr:         listenAddr,

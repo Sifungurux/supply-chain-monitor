@@ -79,20 +79,51 @@ if [[ ! -f "${BATCH_FILE}" ]]; then
 fi
 
 echo "Bulk-registering $(jq '.artifacts | length' "${BATCH_FILE}") artifacts from ${BATCH_FILE}..."
-bulk_response="$(curl -s -X POST "${API_BASE}/api/v1/artifacts/bulk" \
+# Captured with an explicit -w/http_code split and an explicit `||`
+# guard (rather than a bare `bulk_response="$(curl ...)"` that `set -e`
+# would kill with zero output on failure) so an unreachable API
+# (`make port-forward` not running -- the documented prerequisite) or an
+# auth/server error fails loud, with a message explaining why, instead of
+# the script just silently stopping.
+bulk_http="$(curl -s -w '\n%{http_code}' -X POST "${API_BASE}/api/v1/artifacts/bulk" \
   -H "Authorization: Bearer ${SCM_API_KEY}" \
   -H 'Content-Type: application/json' \
-  -d @"${BATCH_FILE}")"
+  -d @"${BATCH_FILE}")" || {
+  echo "Could not reach ${API_BASE} -- is 'make port-forward' running in another terminal (or API_BASE set correctly)?" >&2
+  exit 1
+}
+bulk_status="${bulk_http##*$'\n'}"
+bulk_response="${bulk_http%$'\n'*}"
+if [[ "${bulk_status}" != "200" && "${bulk_status}" != "201" ]]; then
+  echo "Bulk registration failed: HTTP ${bulk_status}" >&2
+  echo "${bulk_response}" >&2
+  exit 1
+fi
 
 created="$(echo "${bulk_response}" | jq -r '.created // 0')"
+# Duplicates (see docs/architecture.md, "Digest-based duplicate-
+# registration detection") are neither created nor failed -- an artifact
+# that already exists by digest is a perfectly normal, expected outcome
+# of rerunning this exact fixed batch file a second time, not a problem.
+# Reporting only created/failed here used to print "0 created, 0 failed"
+# on every rerun after the first, which reads exactly like the script
+# silently did nothing -- even though it goes on to scan all the
+# (pre-existing) ids just fine.
+duplicates="$(echo "${bulk_response}" | jq -r '.duplicates // 0')"
 failed="$(echo "${bulk_response}" | jq -r '.failed // 0')"
-echo "Registered: ${created} created, ${failed} failed to register."
+echo "Registered: ${created} created, ${duplicates} already registered (matched by digest), ${failed} failed to register."
 
 ids_file="$(mktemp)"
 results_file="$(mktemp)"
 trap 'rm -f "${ids_file}" "${results_file}"' EXIT
 
-echo "${bulk_response}" | jq -r '.results[].artifact.id | select(. != null)' > "${ids_file}"
+# `.results[]?` (not `.results[]`) so a response shape this script didn't
+# expect (e.g. an auth error body with no `.results` key at all) yields
+# no lines instead of a jq parse error -- which, combined with
+# pipefail+set -e above, used to kill the script silently right here too.
+# The id_count==0 check right below is what actually explains that case
+# to the user now, instead of the pipeline dying before ever reaching it.
+echo "${bulk_response}" | jq -r '.results[]?.artifact.id // empty' > "${ids_file}"
 
 id_count="$(wc -l < "${ids_file}" | tr -d ' ')"
 if [[ "${id_count}" -eq 0 ]]; then

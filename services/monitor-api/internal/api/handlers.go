@@ -25,7 +25,22 @@ type handler struct {
 	// treats as "dedup disabled," not an error.
 	digestResolver scanner.DigestResolver
 	fetchPlainHTTP bool
+	// scanTimeout bounds the shared budget scanArtifact gives every
+	// scanner registered for one artifact type (see that method's own
+	// comment on why it's deliberately not derived from r.Context()).
+	// Must be configured >= the isolated scan-worker Jobs' own
+	// ActiveDeadlineSeconds (main.go validates this at startup) --
+	// otherwise this handler routinely gives up and reports "context
+	// deadline exceeded" before Kubernetes' own ActiveDeadlineSeconds
+	// would even have killed a genuinely stuck Job, which is exactly
+	// what a heavier image (more OS packages for trivy to walk/query --
+	// e.g. mysql/postgres-sized images) under concurrent scan load looks
+	// like: still legitimately running, not actually stuck. Falls back
+	// to 5 minutes if zero (e.g. in tests that don't care about this).
+	scanTimeout time.Duration
 }
+
+const defaultScanTimeout = 5 * time.Minute
 
 // digestResolveTimeout bounds how long a single registry manifest call
 // can take during registration. Registration used to be instant and
@@ -417,7 +432,11 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 	// and updates the store regardless of what the original HTTP client
 	// does; the dashboard's own polling picks up the result afterward
 	// either way.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	scanTimeout := h.scanTimeout
+	if scanTimeout <= 0 {
+		scanTimeout = defaultScanTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), scanTimeout)
 	defer cancel()
 
 	// Every scanner registered for this artifact type runs concurrently,

@@ -70,7 +70,7 @@ func newTestRouter(scanners scanner.Registry) (http.Handler, *artifact.MemStore)
 	// digestResolver nil: dedup disabled by default here too -- see
 	// TestCreateArtifact_Duplicate* for the tests that exercise it
 	// deliberately with a fake resolver instead.
-	return api.NewRouter(store, tracker, scanners, testAPIKey, 0, 0, nil, false), store
+	return api.NewRouter(store, tracker, scanners, testAPIKey, 0, 0, nil, false, 0), store
 }
 
 // newTestRouterWithDigestResolver is newTestRouter plus a digest
@@ -80,7 +80,7 @@ func newTestRouter(scanners scanner.Registry) (http.Handler, *artifact.MemStore)
 func newTestRouterWithDigestResolver(resolver scanner.DigestResolver) (http.Handler, *artifact.MemStore) {
 	store := artifact.NewMemStore()
 	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
-	return api.NewRouter(store, tracker, scanner.Registry{}, testAPIKey, 0, 0, resolver, false), store
+	return api.NewRouter(store, tracker, scanner.Registry{}, testAPIKey, 0, 0, resolver, false, 0), store
 }
 
 // fakeDigestResolver lets tests exercise duplicate-registration

@@ -178,6 +178,29 @@ monitorApi:
   # runScanWorker/scanner.VerboseScanLogs.
   scanWorker:
     verboseLogs: false
+    # How long Kubernetes lets a scan-worker Job's pod run (both the
+    # unpacker and trivy Job shapes) before killing it outright. 600s
+    # (10m) is generous headroom for alpine/busybox-sized images but can
+    # be too tight for a heavier one (more OS packages for trivy to
+    # walk/query -- e.g. mysql/postgres-sized images) once real-world
+    # scheduling delay and CPU contention from concurrent scans are added
+    # on top of the scan itself -- symptom: "timed out waiting for
+    # [trivy/unpacker] scan job to complete: context deadline exceeded"
+    # for specific (usually larger) images under load, even though
+    # nothing is actually stuck. Raise this if that shows up in your own
+    # `make load-test-clamav` runs. Must stay below
+    # monitorApi.scanTimeoutSeconds below -- main.go's runAPIServer
+    # refuses to start otherwise (see that value's own comment).
+    activeDeadlineSeconds: 600
+  # The API handler's own overall per-scan budget (every scanner
+  # registered for one artifact type shares this -- see
+  # internal/api/handlers.go's scanArtifact) -- kept comfortably above
+  # scanWorker.activeDeadlineSeconds above (60s of margin by default) so
+  # this handler doesn't give up and report a scan as timed out before
+  # Kubernetes' own activeDeadlineSeconds would even have killed a
+  # genuinely stuck Job. Raise both together, keeping this one larger, if
+  # you raise scanWorker.activeDeadlineSeconds.
+  scanTimeoutSeconds: 660
   # false here (the real in-cluster deployment, which has the
   # ServiceAccount token isolation needs). true is only ever meant for
   # running the monitor-api binary standalone outside Kubernetes -- see

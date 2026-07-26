@@ -1761,6 +1761,40 @@ wildcard.
 See the Roadmap below ("Digest resolution costs a real registry call at
 registration time") for the tradeoff this accepts.
 
+**Fixed: scan timeouts weren't configurable, and had an inconsistent
+default relationship.** `IsolatedTrivyScanner`/`IsolatedUnpackerScanner`'s
+`ActiveDeadlineSeconds` (how long Kubernetes lets a scan-worker Job's pod
+run) always fell back to its 330-second default -- `main.go` never set it
+from anything -- while `scanArtifact`'s own shared per-scan budget (see
+"Isolating the unpack+scan step" above for why this is
+`context.Background()`-derived, not `r.Context()`-derived) was a hardcoded
+`5 * time.Minute` (300s). That's backwards: the API handler gave up 30
+seconds *before* Kubernetes' own deadline would even have killed a
+genuinely stuck Job, so a scan that was simply slow -- not stuck -- got
+reported as `context deadline exceeded` regardless. Heavier images (more
+OS packages for trivy to walk/query -- `mysql:8.0` is the concrete case
+that surfaced this) combined with the scheduling delay and CPU contention
+several concurrent scans put on a small cluster (see `make
+load-test-clamav`) were enough to routinely blow past 300s on images that
+would have finished fine given a few more seconds.
+
+Both are now configurable and validated against each other at startup:
+`SCAN_WORKER_ACTIVE_DEADLINE_SECONDS` (`monitorApi.scanWorker.activeDeadlineSeconds`,
+default 600) feeds `IsolatedUnpackerConfig`/`IsolatedTrivyConfig`'s
+`ActiveDeadlineSeconds` for every scan-worker Job shape (unpacker, trivy
+image mode, trivy sbom mode -- all three share the one setting, same as
+they already share `SCAN_WORKER_IMAGE`/`verboseLogs`); `SCAN_TIMEOUT_SECONDS`
+(`monitorApi.scanTimeoutSeconds`, default 660) is `scanArtifact`'s own
+budget, plumbed through as `handler.scanTimeout` (`NewRouter`'s new last
+parameter -- 0 falls back to the old 5-minute default, which is all the
+existing test call sites pass). `runAPIServer` calls `log.Fatalf` if
+`SCAN_TIMEOUT_SECONDS` isn't strictly greater than
+`SCAN_WORKER_ACTIVE_DEADLINE_SECONDS`, the same fail-closed-at-startup
+pattern `API_KEY` being required already uses -- a config that gets this
+relationship backwards fails loud immediately rather than surfacing later
+as confusing, intermittent scan timeouts under load. See README's "Tuning
+scan timeouts for heavier images".
+
 **Verbose scan-worker logging.** Before this, a scan-worker Job's pod
 logs (`kubectl logs`) showed almost nothing: `TrivyScanner.Scan` and
 `UnpackerScanner.Scan` both captured trivy's/unpacker's own

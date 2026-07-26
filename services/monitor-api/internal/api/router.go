@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/pipeline"
@@ -31,8 +32,12 @@ import (
 // fetchPlainHTTP mirrors the same flag RegistryFetcher is already
 // constructed with (FETCH_PLAIN_HTTP in main.go) -- see resolveDigest's
 // comment for why it only ever applies to non-image artifact types.
-func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner.Registry, apiKey string, rateLimitRPS float64, rateLimitBurst float64, digestResolver scanner.DigestResolver, fetchPlainHTTP bool) http.Handler {
-	h := &handler{store: store, tracker: tracker, scanners: scanners, digestResolver: digestResolver, fetchPlainHTTP: fetchPlainHTTP}
+// scanTimeout is the shared per-scan budget scanArtifact gives every
+// scanner registered for one artifact type (see handler.scanTimeout's
+// own comment) -- pass 0 to get the 5-minute default (what every caller
+// got before this was configurable).
+func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner.Registry, apiKey string, rateLimitRPS float64, rateLimitBurst float64, digestResolver scanner.DigestResolver, fetchPlainHTTP bool, scanTimeout time.Duration) http.Handler {
+	h := &handler{store: store, tracker: tracker, scanners: scanners, digestResolver: digestResolver, fetchPlainHTTP: fetchPlainHTTP, scanTimeout: scanTimeout}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.healthz)

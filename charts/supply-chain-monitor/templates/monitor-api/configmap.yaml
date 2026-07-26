@@ -51,6 +51,13 @@ data:
   # scanner's Job as that Job's own SCM_SCAN_VERBOSE (see
   # internal/scanner/isolated_trivy.go/isolated_unpacker.go).
   SCAN_WORKER_VERBOSE_LOGS: {{ .Values.monitorApi.scanWorker.verboseLogs | quote }}
+  # How long Kubernetes lets a scan-worker Job's pod run, and how long
+  # the API handler itself waits for one to finish -- see
+  # monitorApi.scanWorker.activeDeadlineSeconds/monitorApi.scanTimeoutSeconds's
+  # own comments in values.yaml for why the second must stay above the
+  # first. main.go's runAPIServer validates that relationship at startup.
+  SCAN_WORKER_ACTIVE_DEADLINE_SECONDS: {{ .Values.monitorApi.scanWorker.activeDeadlineSeconds | quote }}
+  SCAN_TIMEOUT_SECONDS: {{ .Values.monitorApi.scanTimeoutSeconds | quote }}
   # file/sbom/sarif artifacts can be registered with an OCI registry
   # reference instead of a path already inside this pod -- oras pull
   # fetches them from scm-registry first (see internal/scanner/fetch.go).
