@@ -72,8 +72,25 @@ function errorResponse(status, body) {
   });
 }
 
-function tick(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+// Waits for loadAll()'s mocked-fetch chain (fetchJSON -> fetchJSON ->
+// render, a handful of already-resolved promises, no real I/O) to
+// finish, then some. The 20ms every call site here originally passed
+// was tuned against a fast, idle dev machine -- it passed 18/18 locally
+// in exactly that kind of environment, then failed on its first real
+// GitHub Actions run with every early assertion seeing pre-render state
+// ('', [], wrong status class), the signature of the assertion running
+// before loadAll() finished rather than of anything actually wrong with
+// the dashboard's own logic. Shared CI runners plus jsdom/V8 startup
+// overhead inside a freshly started container can by themselves eat
+// into a 20ms budget before the mocked promise chain even gets to run.
+// Flushing the microtask queue a few times first (cheap, and directly
+// targets "loadAll's own await chain hasn't settled yet") plus a floor
+// under whatever ms a call site passes (some callers already asked for
+// more than 20ms further down this file) makes this robust across
+// environments instead of tuned to whichever machine last ran it.
+async function tick(ms) {
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, Math.max(ms, 150)));
 }
 
 function buildDom({ url, fetchImpl, beforeParseExtra }) {

@@ -50,6 +50,20 @@ point of that variable is a variable-length arg list) got a `# shellcheck
 disable=SC2086` with a comment explaining why quoting it would be wrong,
 not just a blind suppression.
 
+`test-dashboard` then failed for real (not the earlier invocation bug):
+3 of 18 tests failed on GitHub's runner but passed 18/18 locally --
+classic flaky-test debt (the category this audit's framework already
+names). Every test used a fixed `tick(20)` (20ms) wait before asserting
+on rendered DOM state; a shared CI runner's jsdom/V8 startup overhead
+inside a freshly-started container can by itself exceed 20ms before
+`loadAll()`'s mocked-fetch-then-render chain even runs, so the
+assertions were racing the render, not finding a real dashboard bug
+(confirmed by the failure signature: every early assertion saw
+pre-render state -- `''`, `[]`, wrong status class -- exactly what
+"asserted too early" looks like). Fixed in the one shared `tick()`
+helper (microtask-queue flush + a 150ms floor) rather than touching each
+of the 20+ individual call sites.
+
 Everything else in this document is still open.
 
 ## Findings
