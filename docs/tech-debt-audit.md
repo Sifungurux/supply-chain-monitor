@@ -76,6 +76,14 @@ already injected directly via `beforeParseExtra`, and the icon font is
 irrelevant to every assertion -- so `resources: 'usable'` was removed
 outright rather than worked around.
 
+All five jobs green after that. One warning remained, unrelated to any
+of the above: `actions/checkout@v4` targets Node.js 20, which GitHub
+Actions is deprecating (forced onto Node 24 in the meantime, removed
+entirely 2026-09-16). Bumped to `actions/checkout@v5` (built for Node
+24) across all five jobs -- this is about the action's own runtime, not
+this project's Node version (the test containers already pin
+`node:22-alpine` regardless).
+
 Everything else in this document is still open.
 
 ## Findings
