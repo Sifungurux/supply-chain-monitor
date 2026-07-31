@@ -97,7 +97,19 @@ function buildDom({ url, fetchImpl, beforeParseExtra }) {
   return new JSDOM(html, {
     url,
     runScripts: 'dangerously',
-    resources: 'usable',
+    // Deliberately NOT 'usable': that makes jsdom actually attempt real
+    // network fetches for index.html's external <link>/<script src>
+    // tags (the tabler-icons CDN stylesheet, env.js) in every one of
+    // these ~18 windows. Neither is needed for what's under test --
+    // window.SCM_CONFIG (what env.js sets in production) is injected
+    // directly via beforeParseExtra below wherever a test needs it, and
+    // the icon font is irrelevant to any assertion here. On a machine
+    // with real, unrestricted internet access (unlike a locked-down
+    // sandbox, where these just fail fast), 'usable' turned this into a
+    // real cause of the whole test run hanging indefinitely: real
+    // HTTPS/HTTP connections that can outlive dom.window.close() and
+    // keep Node's event loop from ever going idle, so the process never
+    // exits on its own.
     pretendToBeVisual: true,
     beforeParse(window) {
       // Injected before the inline <script> runs, so the very first

@@ -60,6 +60,22 @@ pre-render state -- `''`, `[]`, wrong status class -- exactly what
 helper (microtask-queue flush + a 150ms floor) rather than touching each
 of the 20+ individual call sites.
 
+`test-dashboard` then hung for 30+ minutes on GitHub Actions after the
+race-condition fix above made all 18 tests actually run to completion
+for the first time. Root cause: `buildDom()`'s JSDOM instances used
+`resources: 'usable'`, which makes jsdom actually attempt real network
+fetches for `index.html`'s external `<link>` (tabler-icons CDN CSS) and
+`<script src="env.js">` tags. A locked-down sandbox fails those fast
+("Could not load..."), masking the problem locally; a GitHub Actions
+runner has real, unrestricted internet access, where those same fetches
+across 18 separate windows can leave connections outliving
+`dom.window.close()`, keeping Node's event loop from ever going idle so
+the process never exits on its own. Neither resource is actually needed
+by any test -- `window.SCM_CONFIG` (what `env.js` sets in production) is
+already injected directly via `beforeParseExtra`, and the icon font is
+irrelevant to every assertion -- so `resources: 'usable'` was removed
+outright rather than worked around.
+
 Everything else in this document is still open.
 
 ## Findings
