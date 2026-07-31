@@ -150,7 +150,7 @@ scan_one() {
 }
 export -f scan_one
 
-cat "${ids_file}" | xargs -P "${PARALLELISM}" -I{} bash -c 'scan_one "$@"' _ {}
+xargs -P "${PARALLELISM}" -I{} bash -c 'scan_one "$@"' _ {} < "${ids_file}"
 
 end_ts="$(date +%s)"
 total_wall_s=$((end_ts - start_ts))

@@ -14,10 +14,12 @@ RUNTIME="${SCM_RUNTIME:-colima}"
 
 case "${RUNTIME}" in
   colima)
+    # shellcheck source=runtimes/colima.sh
     source "${SCRIPT_DIR}/runtimes/colima.sh"
     colima_down "${1:-}"
     ;;
   podman)
+    # shellcheck source=runtimes/podman.sh
     source "${SCRIPT_DIR}/runtimes/podman.sh"
     podman_down "${1:-}"
     ;;

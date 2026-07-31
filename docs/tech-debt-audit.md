@@ -37,6 +37,19 @@ locally). Fixed to `node --test` (no path argument). This test suite
 had apparently never actually been run to completion by anyone before
 CI did it for the first time.
 
+`shellcheck` also failed on its first real run, exactly as expected for
+code that had never been linted before -- four real findings, all
+fixed: `create-cluster.sh`/`destroy-cluster.sh`'s `source` of a
+runtime-computed path now has a `# shellcheck source=` directive so
+shellcheck actually follows and lints the sourced file instead of just
+flagging that it can't; `load-test-clamav.sh`'s `cat file | xargs`
+simplified to `xargs ... < file` (identical behavior, confirmed by
+diffing both forms' output); `modelscan-to-findings.sh`'s intentionally
+word-split `$ORAS_ARGS` (POSIX `/bin/sh` has no arrays, and the whole
+point of that variable is a variable-length arg list) got a `# shellcheck
+disable=SC2086` with a comment explaining why quoting it would be wrong,
+not just a blind suppression.
+
 Everything else in this document is still open.
 
 ## Findings

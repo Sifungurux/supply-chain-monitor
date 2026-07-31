@@ -51,6 +51,15 @@ ORAS_ARGS="pull --output $WORKDIR"
 if [ "${MODELSCAN_PLAIN_HTTP:-false}" = "true" ]; then
 	ORAS_ARGS="$ORAS_ARGS --plain-http"
 fi
+# ORAS_ARGS is intentionally an unquoted, word-split string, not a
+# quoted variable: this is #!/bin/sh (POSIX), which has no arrays, and
+# the whole point of building it above is a variable-length arg list
+# (plain "pull --output $WORKDIR", or that plus "--plain-http") --
+# quoting it as shellcheck's default suggestion would do turns it into
+# one single argument instead of several, breaking oras's own argv
+# parsing. Safe in practice since $WORKDIR comes from `mktemp -d`, never
+# user input.
+# shellcheck disable=SC2086
 oras $ORAS_ARGS "$REF" 1>&2
 
 RESULT_FILE="$WORKDIR/modelscan-result.json"
