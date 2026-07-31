@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -59,8 +60,19 @@ func scanFileWithClamd(ctx context.Context, addr, path string) (clamdResult, err
 				return clamdResult{}, fmt.Errorf("failed writing chunk: %w", werr)
 			}
 		}
-		if readErr != nil {
+		if readErr == io.EOF {
 			break
+		}
+		// A read error that isn't io.EOF (e.g. a real I/O failure
+		// partway through, or path pointing at a directory rather than
+		// a regular file) used to be treated exactly like a normal,
+		// successful end-of-file here -- silently sending the
+		// terminating zero-length chunk for whatever partial content
+		// had already been streamed and reporting back whatever clamd
+		// made of that truncated stream, typically "clean," rather than
+		// surfacing that the read itself failed.
+		if readErr != nil {
+			return clamdResult{}, fmt.Errorf("failed reading %q: %w", path, readErr)
 		}
 	}
 	// zero-length chunk signals end of stream

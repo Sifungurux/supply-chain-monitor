@@ -21,6 +21,30 @@ Scoring per item follows the brief: **Impact** (1–5, how much this slows the t
   `go.sum` explicitly) instead of `go mod tidy`; `make test-api`/`make
   test-postgres` do the same for consistency between local and CI runs.
 - **#8 (No shellcheck)**: addressed by the same CI workflow as #1 above.
+- **#4 (PostgresStore untested by default)**: resolved as a side effect
+  of #1 -- `test-postgres` is now its own CI job, so `postgres_store.go`
+  is exercised on every push/PR, not just when a developer remembers to
+  run `make test-postgres` by hand.
+- **#3 (In-process malware-scan fallback had zero unit tests)**: fixed.
+  Added `clamd_client_test.go` (a fake TCP listener speaking just enough
+  of clamd's INSTREAM protocol -- clean file, malware match, a
+  multi-chunk large file to confirm chunking reassembles correctly,
+  address/connection/context-cancellation error paths), `clamav_test.go`
+  (`ClamAVScanner.Scan`'s own finding-shape and error-propagation
+  behavior), and `unpacker_test.go` (`UnpackerScanner.Scan` against a
+  fake `unpacker` binary -- a small generated shell script, since this
+  is an external-process boundary, not a Go interface -- covering the
+  happy path, a failing unpacker process, a missing `image/` output
+  directory, the `maxFileSize` skip, every file failing to scan, and one
+  file failing without discarding findings from the rest).
+  Writing the first test for `scanFileWithClamd` surfaced a real bug in
+  the process: a non-`io.EOF` read error (e.g. the target path pointing
+  at a directory) was silently treated exactly like a normal end-of-file
+  and the partial content read so far got streamed to clamd and reported
+  as whatever clamd made of it -- typically "clean" -- rather than as
+  the read failure it actually was. Fixed alongside the test that caught
+  it (`TestScanFileWithClamd_NonEOFReadErrorIsNotSwallowed`), rather than
+  just documenting the gap and moving on.
 
 The first real CI run already justified #1 on its own: `test-dashboard`
 failed immediately with `Cannot find module '/src/tests'` --
