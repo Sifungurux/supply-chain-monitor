@@ -6,16 +6,12 @@ Scoring per item follows the brief: **Impact** (1–5, how much this slows the t
 
 ## Status
 
-- **#1 (No CI)**: `.github/workflows/ci.yml` added -- `test-api`,
-  `test-postgres`, `test-dashboard`, `check-dashboard-configmap`, and
-  `shellcheck` (folding in #8 below at the same time, since it was zero
-  extra cost once CI existed at all) on push/PR to `main`. Not yet
-  confirmed green against a real GitHub Actions run -- this sandbox has
-  no git push credentials or `gh`/Docker access, so pushing this and
-  reporting back the first run's results is the next step, iterating
-  from there the same way every other real-environment check in this
-  project's history has been debugged (real command output pasted back,
-  fixed, repeat).
+- **#1 (No CI)**: **Done and confirmed green.** `.github/workflows/ci.yml`
+  -- `test-api`, `test-postgres`, `test-dashboard`,
+  `check-dashboard-configmap`, and `shellcheck` (folding in #8 below at
+  the same time, zero extra cost once CI existed at all) on push/PR to
+  `main`. Every job failed at least once on its first real run and got
+  fixed for real reasons, not silenced -- see below for each one.
 - **#2 (Stale docs)**: fixed -- `go.mod`, `docs/architecture.md`'s two
   stale Roadmap entries, and the `test-api`/`test-postgres` Makefile
   comments all updated to reflect that `go.sum` is committed and the
