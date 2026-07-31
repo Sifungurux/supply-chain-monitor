@@ -48,14 +48,14 @@ clamav:
   # however many pods are running. Raise this if malware scans start
   # queuing up behind clamd (each scan holds one clamd connection for
   # its duration) faster than a single instance can keep up.
-  replicas: 3
+  replicas: 6
   resources:
     requests:
       cpu: 250m
       memory: 1Gi
     limits:
-      cpu: "1"
-      memory: 2Gi
+      cpu: "2"
+      memory: 4Gi
   # First boot downloads the virus DB (freshclam) and can take a few
   # minutes -- these generous probe settings are why.
   readiness:
