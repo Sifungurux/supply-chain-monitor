@@ -2343,13 +2343,12 @@ for real.
   e.g. `DISABLE_DIGEST_RESOLUTION`, matching `DISABLE_SCAN_ISOLATION`'s
   existing shape for a similar "trade a production safeguard for
   local-dev/degraded-environment speed" choice).
-- **Pinned dependencies**: `go.sum` still isn't committed (couldn't be
-  generated correctly in the sandbox this project was built in -- no
-  real Go toolchain, no network access to the module proxy -- see the
-  comment in `go.mod`). Run `make lock-deps` once, from a machine with
-  Docker (that's all it needs), and commit the resulting `go.sum` for
-  reproducible, verified builds instead of resolving fresh in every
-  Docker build.
+- ~~**Pinned dependencies**~~ **Fixed**: `go.sum` has been committed
+  since `f0b9c95` (`make lock-deps`, run from a machine with Docker).
+  One follow-up remains, not yet done: `Dockerfile`'s build stage still
+  runs `go mod tidy` on every build rather than verifying against the
+  now-committed `go.sum` -- see `docs/tech-debt-audit.md` ("Dockerfile
+  still re-resolves dependencies despite go.sum being committed").
 - **No point-in-time recovery**: `charts/supply-chain-monitor/templates/postgres/backup-cronjob.yaml`
   now takes daily `pg_dump` backups (see "Postgres backups"), closing
   the "no backup at all" gap, but a restore can still lose up to a
@@ -2441,16 +2440,14 @@ for real.
   newest-first, and registering a `file` artifact from the form doesn't
   warn you that its `ref` needs to already be a path inside the
   `monitor-api` pod (see the `file`-artifact fetching gap above).
-- **Never actually run/verified against a live cluster**: see "All
-  services on Flux + Helm" above -- every chart, `HelmRelease`, and
-  script here was written and statically validated (YAML parsing,
-  template-balance checks, a from-scratch re-derivation of the
-  dashboard ConfigMap render) but never executed against a real
-  Kubernetes API, since no sandbox this project has been built in has
-  had Docker, kubectl, Helm, or Colima available. Run `make cluster-up
-  && make deploy` on a real machine and treat the first pass as an
-  integration test of this migration, not just a routine deploy --
-  report back anything that fails so it can be fixed.
+- ~~**Never actually run/verified against a live cluster**~~ **Fixed**:
+  this has since been run for real, repeatedly -- multi-node podman/k3d
+  clusters, `make deploy`, and `make load-test-clamav` against a live
+  cluster, surfacing (and fixing) several real issues along the way
+  (SSH host-key/cgroup/path bugs in the podman runtime path, a
+  `disableScanIsolation`/ephemeral-storage misconfiguration, scan-worker
+  timeout tuning). See `docs/tech-debt-audit.md` for what's still open
+  as a result of that real usage.
 - **No TLS/HTTPS on the Gateway yet**: see "Ingress: Traefik + Gateway
   API" -- the `websecure` listener is disabled rather than half-wired.
   Adding it needs a certificate source (self-signed for local dev, or

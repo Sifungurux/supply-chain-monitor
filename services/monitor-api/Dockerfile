@@ -1,17 +1,18 @@
 # --- monitor-api build stage ---
 FROM golang:1.22-alpine AS build
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY . .
-# go.sum isn't committed (see go.mod's comment: it was written in a
-# sandbox with no Go toolchain, so real checksums couldn't be
-# generated there). `go mod tidy` resolves the dependency graph and
-# writes a correct go.sum here, at build time, against the real module
-# proxy/checksum database -- this build stage needs network access the
-# first time an image is built or a dependency changes. Once someone
-# runs `go mod tidy` locally and commits go.sum, this becomes a no-op
-# verification step instead of a resolution step.
-RUN go mod tidy
+# go.sum is committed (see go.mod's comment) -- `go mod download`
+# verifies the module graph against it and populates the local module
+# cache, rather than `go mod tidy`, which can silently rewrite go.sum
+# (re-resolving versions) instead of just checking it. `go mod verify`
+# then double-checks every downloaded module's content against go.sum's
+# checksums before anything is compiled against it -- exactly the
+# reproducible-build guarantee committing go.sum exists for. Network
+# access is only actually needed the first time an image is built on a
+# machine with an empty module cache, or after go.mod/go.sum change.
+RUN go mod download && go mod verify
 RUN CGO_ENABLED=0 go build -o /out/monitor-api .
 
 # --- umoci build stage ---

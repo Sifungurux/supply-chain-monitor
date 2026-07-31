@@ -1,0 +1,87 @@
+name: CI
+
+# Runs every test/check this repo already has a `make` target for, on
+# every push to main and every PR targeting it -- see
+# docs/tech-debt-audit.md ("No CI at all", priority 50, the highest-
+# scored item in that audit). Before this existed, every one of these
+# was a `make` target a human had to remember to run by hand; this
+# session alone shipped two regressions (a backwards rate-limiter test
+# assertion, a duplicate-registration test whose fake resolver didn't
+# exercise the case it claimed to) that would have merged clean on
+# `git push` alone without one.
+#
+# Every job below reuses the exact same Docker-based commands the
+# Makefile already runs locally (`make test-api`, `make test-postgres`,
+# etc.) rather than reimplementing them differently here -- so "passes
+# in CI" and "passes on a contributor's own machine" mean the same
+# thing, and a fix for one is a fix for both. ubuntu-latest runners come
+# with Docker preinstalled, which is all any of these need.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # go test ./... against MemStore -- no database needed. See `make
+  # test-api` in the Makefile.
+  test-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: make test-api
+        run: make test-api
+
+  # go test -tags=postgres_integration against a real, throwaway
+  # Postgres container -- exercises PostgresStore, the persistence path
+  # production actually uses, which test-api's MemStore-only run never
+  # touches (see docs/tech-debt-audit.md, "PostgresStore's real logic
+  # only runs under a build tag nobody automates"). Reuses `make
+  # test-postgres` verbatim rather than a GitHub Actions "services:"
+  # Postgres container, so this is the exact same command a contributor
+  # runs locally -- --network host works here the same way it does on
+  # Colima (a real Linux host), unlike Docker Desktop on macOS (see that
+  # target's own comment in the Makefile).
+  test-postgres:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: make test-postgres
+        run: make test-postgres
+
+  # Node+jsdom test suite for dashboard/index.html. See `make
+  # test-dashboard`.
+  test-dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: make test-dashboard
+        run: make test-dashboard
+
+  # Catches dashboard/index.html being edited without updating the copy
+  # the Helm chart actually serves (charts/supply-chain-monitor/files/index.html)
+  # -- see the Makefile target's own comment for the exact bug this
+  # exists to catch, which has shipped once already.
+  check-dashboard-configmap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: make check-dashboard-configmap
+        run: make check-dashboard-configmap
+
+  # Static analysis over cluster/*.sh (13 scripts, ~1,100 lines) -- see
+  # docs/tech-debt-audit.md, "No lint on cluster/*.sh". This exact class
+  # of script (podman.sh especially) has had several real bugs this
+  # project already hit by hand (a SCRIPT_DIR variable collision from
+  # `source`-ing rather than sub-processing, `set -e` silently
+  # swallowing a failed curl/jq call) that shellcheck's static checks
+  # are built to catch before they ship, not just this specific history
+  # of ones already found and fixed.
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck against cluster/*.sh
+        run: |
+          shopt -s globstar
+          shellcheck cluster/**/*.sh

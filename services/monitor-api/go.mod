@@ -4,15 +4,11 @@ go 1.22
 
 // pgx is the one non-stdlib dependency in this module, needed to talk
 // to Postgres (see internal/artifact/postgres_store.go and
-// docs/architecture.md). go.sum is intentionally NOT committed: it
-// couldn't be generated correctly in the sandbox this was written in
-// (no Go toolchain, no network access to the module proxy/checksum
-// database). The Dockerfile's build stage runs `go mod tidy` before
-// `go build`, which regenerates go.sum with real checksums fetched at
-// build time -- see the comment there. Run `make lock-deps` once (needs
-// only Docker, not a local Go install) and commit the resulting go.sum
-// for reproducible, pinned builds; until then, every build re-resolves
-// and re-verifies the dependency graph against sum.golang.org.
+// docs/architecture.md). go.sum IS committed (since f0b9c95, run via
+// `make lock-deps`) -- see docs/tech-debt-audit.md for the one place
+// this still isn't fully taken advantage of: the Dockerfile's build
+// stage still runs `go mod tidy` on every build rather than verifying
+// against the committed go.sum, which is a real, small, separate fix.
 require github.com/jackc/pgx/v5 v5.7.2
 
 require (

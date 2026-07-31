@@ -229,13 +229,14 @@ test: test-api test-dashboard check-dashboard-configmap
 
 # Runs services/monitor-api's Go test suite (handlers, store, pipeline)
 # via a containerized golang image -- no local Go install needed, just
-# Docker (which you already have via colima/podman). `go mod tidy`
-# first for the same reason the Dockerfile runs it: go.sum isn't
-# committed yet (see go.mod's comment), so it's resolved fresh here.
-# This only exercises MemStore -- it needs no running Postgres. For a
-# real database round-trip, see test-postgres below.
+# Docker (which you already have via colima/podman). go.sum is committed
+# (see go.mod's comment) -- `go mod download` here verifies the module
+# graph against it rather than re-resolving anything, so this only needs
+# network access if go.sum itself is out of date with go.mod. This only
+# exercises MemStore -- it needs no running Postgres. For a real
+# database round-trip, see test-postgres below.
 test-api:
-	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.22-alpine sh -c "go mod tidy && go test ./..."
+	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.22-alpine sh -c "go mod download && go test ./..."
 
 # Integration test against a real, throwaway Percona Postgres container
 # (internal/artifact/postgres_store_integration_test.go, gated behind
@@ -249,7 +250,7 @@ test-postgres:
 	docker run -d --rm --name scm-test-postgres -e POSTGRES_PASSWORD=test -p 55432:5432 percona/percona-distribution-postgresql:17.10 >/dev/null
 	docker run --rm --network host -v "$(CURDIR)/services/monitor-api":/src -w /src \
 		-e POSTGRES_TEST_DSN="postgres://postgres:test@localhost:55432/postgres?sslmode=disable" \
-		golang:1.22-alpine sh -c "go mod tidy && go test -tags=postgres_integration ./internal/artifact/..." ; \
+		golang:1.22-alpine sh -c "go mod download && go test -tags=postgres_integration ./internal/artifact/..." ; \
 	status=$$? ; docker stop scm-test-postgres >/dev/null 2>&1 ; exit $$status
 
 # Runs dashboard/index.html's Node+jsdom test suite via a containerized
