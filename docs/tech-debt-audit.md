@@ -26,6 +26,17 @@ Scoring per item follows the brief: **Impact** (1–5, how much this slows the t
   test-postgres` do the same for consistency between local and CI runs.
 - **#8 (No shellcheck)**: addressed by the same CI workflow as #1 above.
 
+The first real CI run already justified #1 on its own: `test-dashboard`
+failed immediately with `Cannot find module '/src/tests'` --
+`dashboard/package.json`'s test script (`node --test tests/`) passed a
+bare directory path, which this Node version's test runner resolves as
+a CommonJS `require()` target rather than recursing into it (explicit
+files, globs, or no path at all -- relying on Node's own default
+recursive discovery -- all work correctly; confirmed by reproducing
+locally). Fixed to `node --test` (no path argument). This test suite
+had apparently never actually been run to completion by anyone before
+CI did it for the first time.
+
 Everything else in this document is still open.
 
 ## Findings
