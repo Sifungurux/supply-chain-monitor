@@ -265,6 +265,28 @@ test('shows an empty-state row, not a blank table, when there are no artifacts',
   await tick(20);
   const doc = dom.window.document;
   assert.match(doc.getElementById('artifact-rows').textContent, /No artifacts yet/);
+  // The register link is hidden by default (no SCM_CONFIG) -- the
+  // empty state must not point at a link that isn't there.
+  assert.doesNotMatch(doc.getElementById('artifact-rows').textContent, /Register one above/);
+  dom.window.close();
+});
+
+test('the empty-state row points at "Register one above" only when the register link is enabled', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      return errorResponse(404, {});
+    },
+    beforeParseExtra(window) {
+      window.SCM_CONFIG = { apiBase: '', apiKey: '', allowManualRegistration: 'true' };
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  assert.match(doc.getElementById('artifact-rows').textContent, /Register one above/);
   dom.window.close();
 });
 
@@ -664,6 +686,108 @@ test('falls back to the old manual-entry behavior when window.SCM_CONFIG is abse
   const doc = dom.window.document;
   assert.equal(doc.getElementById('api-key').value, '');
   assert.equal(doc.getElementById('api-base').value, 'http://localhost:30300');
+  dom.window.close();
+});
+
+test('the "+ Register an artifact" link stays hidden unless allowManualRegistration is exactly "true"', async () => {
+  // No SCM_CONFIG at all (env.js absent) -- must fail closed, not show
+  // the link by default.
+  const domNoConfig = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      return errorResponse(404, {});
+    }
+  });
+  await tick(20);
+  assert.equal(domNoConfig.window.document.getElementById('register-link-section').hidden, true);
+  domNoConfig.window.close();
+
+  // Explicitly "false" -- also hidden.
+  const domFalse = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      return errorResponse(404, {});
+    },
+    beforeParseExtra(window) {
+      window.SCM_CONFIG = { apiBase: '', apiKey: '', allowManualRegistration: 'false' };
+    }
+  });
+  await tick(20);
+  assert.equal(domFalse.window.document.getElementById('register-link-section').hidden, true);
+  domFalse.window.close();
+
+  // Exactly "true" -- shown.
+  const domTrue = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      return errorResponse(404, {});
+    },
+    beforeParseExtra(window) {
+      window.SCM_CONFIG = { apiBase: '', apiKey: '', allowManualRegistration: 'true' };
+    }
+  });
+  await tick(20);
+  assert.equal(domTrue.window.document.getElementById('register-link-section').hidden, false);
+  domTrue.window.close();
+});
+
+test('clicking "+ Register an artifact" opens the register modal, closing on outside click/Escape/close button and after a successful submit', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url, opts) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts') && opts && opts.method === 'POST') {
+        return jsonResponse({ id: 'new1', ...JSON.parse(opts.body) });
+      }
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      return errorResponse(404, {});
+    },
+    beforeParseExtra(window) {
+      window.SCM_CONFIG = { apiBase: '', apiKey: '', allowManualRegistration: 'true' };
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  const overlay = doc.getElementById('register-modal-overlay');
+  assert.equal(overlay.hidden, true, 'starts hidden');
+
+  doc.getElementById('register-link').click();
+  assert.equal(overlay.hidden, false, 'opens on link click');
+
+  // Inside click doesn't close it.
+  doc.querySelector('#register-modal-overlay .modal-box').click();
+  assert.equal(overlay.hidden, false);
+
+  // Outside click does.
+  overlay.click();
+  assert.equal(overlay.hidden, true);
+
+  // Escape closes it too.
+  doc.getElementById('register-link').click();
+  assert.equal(overlay.hidden, false);
+  doc.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert.equal(overlay.hidden, true);
+
+  // Close button.
+  doc.getElementById('register-link').click();
+  assert.equal(overlay.hidden, false);
+  doc.getElementById('register-modal-close').click();
+  assert.equal(overlay.hidden, true);
+
+  // A successful submit closes the modal too.
+  doc.getElementById('register-link').click();
+  doc.getElementById('reg-ref').value = 'alpine:3.19';
+  doc.getElementById('register-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+  await tick(20);
+  assert.equal(overlay.hidden, true, 'a successful registration closes the modal');
+
   dom.window.close();
 });
 

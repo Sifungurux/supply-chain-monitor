@@ -50,7 +50,8 @@ spec:
               # hardened further.
               ESCAPED_KEY=$(printf '%s' "$API_KEY" | sed 's/\\/\\\\/g; s/"/\\"/g')
               ESCAPED_BASE=$(printf '%s' "$DASHBOARD_API_BASE" | sed 's/\\/\\\\/g; s/"/\\"/g')
-              printf 'window.SCM_CONFIG = { apiBase: "%s", apiKey: "%s" };\n' "$ESCAPED_BASE" "$ESCAPED_KEY" > /html/env.js
+              ESCAPED_ALLOW_MANUAL_REG=$(printf '%s' "$DASHBOARD_ALLOW_MANUAL_REGISTRATION" | sed 's/\\/\\\\/g; s/"/\\"/g')
+              printf 'window.SCM_CONFIG = { apiBase: "%s", apiKey: "%s", allowManualRegistration: "%s" };\n' "$ESCAPED_BASE" "$ESCAPED_KEY" "$ESCAPED_ALLOW_MANUAL_REG" > /html/env.js
           env:
             - name: API_KEY
               valueFrom:
@@ -66,6 +67,11 @@ spec:
                 configMapKeyRef:
                   name: scm-dashboard-config
                   key: DASHBOARD_API_BASE
+            - name: DASHBOARD_ALLOW_MANUAL_REGISTRATION
+              valueFrom:
+                configMapKeyRef:
+                  name: scm-dashboard-config
+                  key: DASHBOARD_ALLOW_MANUAL_REGISTRATION
           volumeMounts:
             - name: dashboard-html
               mountPath: /config-src
