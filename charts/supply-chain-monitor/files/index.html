@@ -102,8 +102,6 @@
   }
   .register-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .register-form input[type="text"], .register-form input[type="email"] { flex: 1 1 260px; }
-  .radio-label { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--scm-text-secondary); white-space: nowrap; }
-  .radio-label input[type="radio"] { border: 0; padding: 0; width: auto; }
   table { width: 100%; border-collapse: collapse; background: var(--scm-surface); border-radius: var(--scm-radius-lg); overflow: hidden; border: 0.5px solid var(--scm-border); }
   th, td { text-align: left; padding: 10px 12px; border-bottom: 0.5px solid var(--scm-border); font-size: 13px; vertical-align: middle; }
   th { color: var(--scm-text-secondary); font-weight: 500; font-size: 12px; }
@@ -199,9 +197,7 @@
         <option value="sbom">sbom</option>
         <option value="sarif">sarif</option>
       </select>
-      <label class="radio-label"><input type="radio" name="reg-mode" id="reg-mode-normal" value="normal" checked /> Register normally</label>
-      <label class="radio-label"><input type="radio" name="reg-mode" id="reg-mode-verify" value="verify" /> Verify digest before registering</label>
-      <input type="text" id="reg-expected-digest" placeholder="sha256:… (expected digest)" hidden />
+      <input type="text" id="reg-expected-digest" placeholder="sha256:… (optional, pins the digest)" />
       <input type="text" id="reg-maintainer-team" placeholder="Maintainer team (optional)" />
       <input type="email" id="reg-maintainer-email" placeholder="Maintainer contact email (optional)" />
       <button type="submit" class="primary"><i class="ti ti-plus" aria-hidden="true"></i> Register</button>
@@ -283,8 +279,6 @@
     form: document.getElementById('register-form'),
     ref: document.getElementById('reg-ref'),
     type: document.getElementById('reg-type'),
-    modeNormal: document.getElementById('reg-mode-normal'),
-    modeVerify: document.getElementById('reg-mode-verify'),
     expectedDigest: document.getElementById('reg-expected-digest'),
     maintainerTeam: document.getElementById('reg-maintainer-team'),
     maintainerEmail: document.getElementById('reg-maintainer-email'),
@@ -752,46 +746,14 @@
     if (ev.key === 'Escape' && !els.modalOverlay.hidden) closeDetailModal();
   });
 
-  // The expected-digest input only makes sense in "verify" mode --
-  // toggling either radio flips its visibility, and switching back to
-  // "normal" clears whatever was typed so a stale value can't leak into
-  // a later normal registration.
-  function updateRegMode() {
-    var verifying = els.modeVerify.checked;
-    els.expectedDigest.hidden = !verifying;
-    if (!verifying) els.expectedDigest.value = '';
-  }
-  els.modeNormal.addEventListener('change', updateRegMode);
-  els.modeVerify.addEventListener('change', updateRegMode);
-
-  // Seeds which radio starts checked from the chart's
-  // dashboard.defaultRegistrationMode value (see values.yaml and
-  // env.js's own comment above) -- e.g. a deployment that wants every
-  // visitor defaulting to "verify" instead of having to remember to
-  // switch it by hand each time. Anything other than exactly "verify"
-  // (including unset/empty, the injected.apiBase/apiKey pattern's own
-  // convention) falls back to "normal".
-  (function applyDefaultRegMode() {
-    var verify = injected.defaultRegMode === 'verify';
-    els.modeVerify.checked = verify;
-    els.modeNormal.checked = !verify;
-    updateRegMode();
-  })();
-
   els.form.addEventListener('submit', async function (ev) {
     ev.preventDefault();
     var ref = els.ref.value.trim();
     if (!ref) return;
 
     var body = { ref: ref, type: els.type.value };
-    if (els.modeVerify.checked) {
-      var expected = els.expectedDigest.value.trim();
-      if (!expected) {
-        setStatus('Enter the expected digest to verify against', true);
-        return;
-      }
-      body.expected_digest = expected;
-    }
+    var expected = els.expectedDigest.value.trim();
+    if (expected) body.expected_digest = expected;
 
     var team = els.maintainerTeam.value.trim();
     var email = els.maintainerEmail.value.trim();

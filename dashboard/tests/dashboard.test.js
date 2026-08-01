@@ -650,49 +650,6 @@ test('a value saved in localStorage still overrides window.SCM_CONFIG', async ()
   dom.window.close();
 });
 
-test('window.SCM_CONFIG.defaultRegMode "verify" pre-selects Verify mode and shows the expected-digest field', async () => {
-  const dom = buildDom({
-    url: 'http://localhost:30301/',
-    fetchImpl(url) {
-      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
-      return errorResponse(404, {});
-    },
-    beforeParseExtra(window) {
-      window.SCM_CONFIG = { apiBase: '', apiKey: '', defaultRegMode: 'verify' };
-    }
-  });
-
-  await tick(20);
-  const doc = dom.window.document;
-
-  assert.equal(doc.getElementById('reg-mode-verify').checked, true);
-  assert.equal(doc.getElementById('reg-mode-normal').checked, false);
-  assert.equal(doc.getElementById('reg-expected-digest').hidden, false);
-
-  dom.window.close();
-});
-
-test('an unset/unrecognized defaultRegMode falls back to "normal" with the expected-digest field hidden', async () => {
-  const dom = buildDom({
-    url: 'http://localhost:30301/',
-    fetchImpl(url) {
-      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
-      return errorResponse(404, {});
-    }
-  });
-
-  await tick(20);
-  const doc = dom.window.document;
-
-  assert.equal(doc.getElementById('reg-mode-normal').checked, true);
-  assert.equal(doc.getElementById('reg-mode-verify').checked, false);
-  assert.equal(doc.getElementById('reg-expected-digest').hidden, true);
-
-  dom.window.close();
-});
-
 test('falls back to the old manual-entry behavior when window.SCM_CONFIG is absent (e.g. env.js failed to load)', async () => {
   const dom = buildDom({
     url: 'http://localhost:30301/',
@@ -810,7 +767,7 @@ test('registering with only maintainer team (no email) is rejected client-side w
   dom.window.close();
 });
 
-test('"Verify digest" mode sends expected_digest and surfaces a mismatch error without clearing the form', async () => {
+test('filling in the expected-digest field sends expected_digest and surfaces a mismatch error without clearing the form', async () => {
   const calls = [];
 
   const dom = buildDom({
@@ -829,15 +786,8 @@ test('"Verify digest" mode sends expected_digest and surfaces a mismatch error w
   await tick(20);
   const doc = dom.window.document;
 
-  const expectedDigestInput = doc.getElementById('reg-expected-digest');
-  assert.equal(expectedDigestInput.hidden, true, 'hidden until Verify mode is chosen');
-
   doc.getElementById('reg-ref').value = 'alpine:3.19';
-  doc.getElementById('reg-mode-verify').checked = true;
-  doc.getElementById('reg-mode-verify').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
-  assert.equal(expectedDigestInput.hidden, false, 'shown once Verify mode is chosen');
-
-  expectedDigestInput.value = 'sha256:expected';
+  doc.getElementById('reg-expected-digest').value = 'sha256:expected';
   doc.getElementById('register-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
   await tick(20);
 
@@ -850,6 +800,35 @@ test('"Verify digest" mode sends expected_digest and surfaces a mismatch error w
   // The mismatch was rejected server-side -- the typed ref/digest stay
   // put so the user doesn't have to retype them to try again.
   assert.equal(doc.getElementById('reg-ref').value, 'alpine:3.19');
+
+  dom.window.close();
+});
+
+test('leaving the expected-digest field blank registers normally, with no expected_digest sent', async () => {
+  const calls = [];
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url, opts) {
+      calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts') && opts && opts.method === 'POST') {
+        return jsonResponse({ id: 'new1', ...JSON.parse(opts.body) });
+      }
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  doc.getElementById('reg-ref').value = 'alpine:3.19';
+  doc.getElementById('register-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+  await tick(20);
+
+  const postCall = calls.find((c) => c.method === 'POST');
+  assert.ok(postCall, 'expected a POST to /api/v1/artifacts');
+  const body = JSON.parse(postCall.body);
+  assert.equal('expected_digest' in body, false, 'no expected_digest key when the field is left blank');
 
   dom.window.close();
 });
