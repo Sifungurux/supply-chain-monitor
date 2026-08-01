@@ -101,7 +101,7 @@
     border-radius: 999px; padding: 1px 8px; font-size: 12px; font-weight: 500;
   }
   .register-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  .register-form input[type="text"] { flex: 1 1 260px; }
+  .register-form input[type="text"], .register-form input[type="email"] { flex: 1 1 260px; }
   .radio-label { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--scm-text-secondary); white-space: nowrap; }
   .radio-label input[type="radio"] { border: 0; padding: 0; width: auto; }
   table { width: 100%; border-collapse: collapse; background: var(--scm-surface); border-radius: var(--scm-radius-lg); overflow: hidden; border: 0.5px solid var(--scm-border); }
@@ -125,7 +125,10 @@
   .empty { color: var(--scm-text-secondary); padding: 24px; text-align: center; }
   .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; padding: 4px 4px 12px; }
   .detail-col h3 { font-size: 12px; text-transform: none; color: var(--scm-text-secondary); font-weight: 500; margin: 0 0 8px; }
-  .finding { border-radius: var(--scm-radius); padding: 6px 10px; margin-bottom: 6px; font-size: 12.5px; }
+  .finding { display: flex; align-items: center; gap: 6px; border-radius: var(--scm-radius); padding: 6px 10px; margin-bottom: 6px; font-size: 12.5px; }
+  .finding .badge { flex: 0 0 auto; }
+  .finding-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .finding-link { flex: 0 0 auto; white-space: nowrap; color: var(--scm-accent-text); font-size: 12px; }
   .finding-fixed { opacity: 0.65; }
   .timeline-item { font-size: 12.5px; padding: 4px 0; border-bottom: 0.5px solid var(--scm-border); }
   .timeline-item:last-child { border-bottom: none; }
@@ -153,6 +156,13 @@
     font-size: 12.5px; color: var(--scm-text-secondary);
   }
   .modal-meta strong { color: var(--scm-text); font-weight: 500; }
+  .link-btn {
+    background: none; border: none; padding: 0; margin: 0; color: var(--scm-accent-text);
+    text-decoration: underline; cursor: pointer; font: inherit;
+  }
+  .maintainer-edit { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: -4px 0 14px; }
+  .maintainer-edit[hidden] { display: none; }
+  .maintainer-edit input { flex: 1 1 160px; }
 </style>
 </head>
 <body>
@@ -192,6 +202,8 @@
       <label class="radio-label"><input type="radio" name="reg-mode" id="reg-mode-normal" value="normal" checked /> Register normally</label>
       <label class="radio-label"><input type="radio" name="reg-mode" id="reg-mode-verify" value="verify" /> Verify digest before registering</label>
       <input type="text" id="reg-expected-digest" placeholder="sha256:… (expected digest)" hidden />
+      <input type="text" id="reg-maintainer-team" placeholder="Maintainer team (optional)" />
+      <input type="email" id="reg-maintainer-email" placeholder="Maintainer contact email (optional)" />
       <button type="submit" class="primary"><i class="ti ti-plus" aria-hidden="true"></i> Register</button>
     </form>
   </section>
@@ -274,6 +286,8 @@
     modeNormal: document.getElementById('reg-mode-normal'),
     modeVerify: document.getElementById('reg-mode-verify'),
     expectedDigest: document.getElementById('reg-expected-digest'),
+    maintainerTeam: document.getElementById('reg-maintainer-team'),
+    maintainerEmail: document.getElementById('reg-maintainer-email'),
     modalOverlay: document.getElementById('modal-overlay'),
     modalBody: document.getElementById('modal-body'),
     modalClose: document.getElementById('modal-close')
@@ -333,6 +347,16 @@
     return diffMs < 5000;
   }
 
+  // CVE_ID_RE matches a bare CVE id (e.g. "CVE-2024-1234") -- used to
+  // decide whether a finding gets a "Read more" link to NVD below.
+  // Deliberately checks f.id itself rather than the bucket it's in:
+  // SARIF documents can mix a real CVE in among misconfiguration/secret/
+  // other findings (see classifyBucket), so bucket alone isn't a
+  // reliable signal -- an id that looks like a CVE gets the link
+  // regardless of which bucket it landed in, and a non-CVE id (an AVD
+  // rule, a ClamAV signature constant) never does.
+  var CVE_ID_RE = /^CVE-\d{4}-\d+$/i;
+
   // renderFinding is the one place that decides how a single finding
   // looks, for all five buckets (CVE/malware/misconfiguration/secret/
   // other) -- so "new" and "fixed" render identically everywhere
@@ -342,10 +366,16 @@
   //     with the title (if any) appended -- malware findings lead with
   //     the title (a signature name) since their ID is just a constant
   //     ("clamav-signature-match") with no information of its own.
+  // The id/title text is a single ellipsis-truncated line (a CVE
+  // description pulled through from a scanner can run to a paragraph)
+  // -- the full text is still available via the title attribute (a
+  // native browser tooltip, no extra JS) and, for real CVEs, via the
+  // "Read more" link out to NVD's own page for that id.
   function renderFinding(f, a, showId) {
-    var label = showId
-      ? esc(f.id) + (f.title ? ' — ' + esc(f.title) : '')
-      : esc(f.title || f.id);
+    var fullText = showId
+      ? f.id + (f.title ? ' — ' + f.title : '')
+      : (f.title || f.id);
+    var label = esc(fullText);
 
     var lifecycleBadge = '';
     if (f.status === 'fixed') {
@@ -354,8 +384,15 @@
       lifecycleBadge = ' <span class="badge badge-accent">New</span>';
     }
 
+    var readMore = CVE_ID_RE.test(f.id)
+      ? ' <a class="finding-link" href="https://nvd.nist.gov/vuln/detail/' + encodeURIComponent(f.id) +
+        '" target="_blank" rel="noopener noreferrer">Read more</a>'
+      : '';
+
     var rowCls = 'finding badge-neutral' + (f.status === 'fixed' ? ' finding-fixed' : '');
-    return '<div class="' + rowCls + '">' + severityBadge(f.severity) + ' ' + label + lifecycleBadge + '</div>';
+    return '<div class="' + rowCls + '">' + severityBadge(f.severity) +
+      '<span class="finding-label" title="' + esc(fullText) + '">' + label + '</span>' +
+      lifecycleBadge + readMore + '</div>';
   }
 
   function countCell(n) {
@@ -509,10 +546,22 @@
     return timeAgo(a.last_scan_at);
   }
 
+  // maintainerText is the modal's read-only view of who owns an
+  // artifact -- "Not set" (not an empty string) so a never-configured
+  // artifact reads as a deliberate state, not a rendering glitch.
+  function maintainerText(a) {
+    if (!a.maintainer_team && !a.maintainer_email) return '<span class="muted">Not set</span>';
+    return esc(a.maintainer_team) + ' — <a href="mailto:' + esc(a.maintainer_email) + '">' + esc(a.maintainer_email) + '</a>';
+  }
+
   // renderModalContent builds the Details modal shown for one artifact:
-  // a metadata header (last scan, digest, CVE/malware counts) per
-  // Phase 2, followed by the same full finding/history breakdown the
-  // old inline expand-row used to show.
+  // a metadata header (last scan, digest, maintainer, CVE/malware
+  // counts) per Phase 2, followed by the same full finding/history
+  // breakdown the old inline expand-row used to show. The maintainer
+  // edit form is rendered every time (not built on demand when Edit is
+  // clicked) and just kept hidden -- simpler than injecting markup
+  // later, and its inputs are pre-filled with the artifact's current
+  // values so Cancel needs no extra state to restore.
   function renderModalContent(a) {
     return (
       '<h2>' + esc(a.ref) + '</h2>' +
@@ -523,6 +572,14 @@
         '<span><strong>Digest:</strong> ' + (a.digest ? '<span class="ref">' + esc(a.digest) + '</span>' : '<span class="muted">not resolved</span>') + '</span>' +
         '<span><strong>CVEs:</strong> ' + countCell(openFindings(a.cve_findings).length) + '</span>' +
         '<span><strong>Malware:</strong> ' + countCell(openFindings(a.malware_findings).length) + '</span>' +
+        '<span><strong>Maintainer:</strong> ' + maintainerText(a) +
+          ' <button type="button" class="link-btn" data-action="edit-maintainer">Edit</button></span>' +
+      '</div>' +
+      '<div class="maintainer-edit" id="maintainer-edit" data-id="' + esc(a.id) + '" hidden>' +
+        '<input type="text" id="maintainer-edit-team" placeholder="Team" value="' + esc(a.maintainer_team || '') + '" />' +
+        '<input type="email" id="maintainer-edit-email" placeholder="Contact email" value="' + esc(a.maintainer_email || '') + '" />' +
+        '<button type="button" class="primary" data-action="save-maintainer">Save</button>' +
+        '<button type="button" data-action="cancel-edit-maintainer">Cancel</button>' +
       '</div>' +
       renderDetailSections(a)
     );
@@ -534,6 +591,50 @@
     els.modalBody.innerHTML = renderModalContent(a);
     els.modalOverlay.hidden = false;
   }
+
+  // Delegated (bound once to modalBody, not re-attached on every
+  // render the way a per-button onclick would need to be) since
+  // renderModalContent rebuilds the modal's innerHTML from scratch
+  // every time it opens.
+  els.modalBody.addEventListener('click', async function (ev) {
+    var btn = ev.target.closest('button[data-action]');
+    if (!btn) return;
+    var action = btn.getAttribute('data-action');
+    var editBox = document.getElementById('maintainer-edit');
+    if (!editBox) return;
+
+    if (action === 'edit-maintainer') {
+      editBox.hidden = false;
+      return;
+    }
+    if (action === 'cancel-edit-maintainer') {
+      editBox.hidden = true;
+      return;
+    }
+    if (action === 'save-maintainer') {
+      var id = editBox.getAttribute('data-id');
+      var team = document.getElementById('maintainer-edit-team').value.trim();
+      var email = document.getElementById('maintainer-edit-email').value.trim();
+      if (!team || !email) {
+        setStatus('Maintainer team and contact email are both required', true);
+        return;
+      }
+      try {
+        var updated = await fetchJSON('/api/v1/artifacts/' + id + '/maintainer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ team: team, email: email })
+        });
+        for (var i = 0; i < state.artifacts.length; i++) {
+          if (state.artifacts[i].id === id) { state.artifacts[i] = updated; break; }
+        }
+        openDetailModal(id);
+        setStatus('Maintainer updated', false);
+      } catch (err) {
+        setStatus('Could not update maintainer — ' + err.message, true);
+      }
+    }
+  });
 
   function closeDetailModal() {
     els.modalOverlay.hidden = true;
@@ -692,6 +793,17 @@
       body.expected_digest = expected;
     }
 
+    var team = els.maintainerTeam.value.trim();
+    var email = els.maintainerEmail.value.trim();
+    if (!!team !== !!email) {
+      setStatus('Maintainer team and contact email must both be filled in, or both left blank', true);
+      return;
+    }
+    if (team) {
+      body.maintainer_team = team;
+      body.maintainer_email = email;
+    }
+
     try {
       await fetchJSON('/api/v1/artifacts', {
         method: 'POST',
@@ -700,6 +812,8 @@
       });
       els.ref.value = '';
       els.expectedDigest.value = '';
+      els.maintainerTeam.value = '';
+      els.maintainerEmail.value = '';
       setStatus('Artifact registered', false);
       await loadAll();
     } catch (err) {

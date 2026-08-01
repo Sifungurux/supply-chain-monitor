@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -106,6 +107,25 @@ type createArtifactRequest struct {
 	// this if it's still the exact image I saw earlier" instead of
 	// trusting a mutable tag -- see checkExpectedDigest.
 	ExpectedDigest string `json:"expected_digest,omitempty"`
+	// MaintainerTeam/MaintainerEmail optionally set Artifact's fields of
+	// the same name at registration time -- see validateMaintainerPair
+	// for why they're rejected unless both are set or both are empty.
+	MaintainerTeam  string `json:"maintainer_team,omitempty"`
+	MaintainerEmail string `json:"maintainer_email,omitempty"`
+}
+
+// validateMaintainerPair enforces that maintainer team/email are
+// provided together or not at all: a team name with no way to reach
+// them, or a contact address with no team context, isn't meaningful
+// ownership info, so this rejects a half-filled pair up front instead
+// of silently persisting it. Shared by createArtifact,
+// bulkCreateArtifacts, and updateMaintainer so the three entry points
+// can't drift into enforcing this differently.
+func validateMaintainerPair(team, email string) error {
+	if (team == "") != (email == "") {
+		return errors.New("maintainer_team and maintainer_email must both be set, or both left empty")
+	}
+	return nil
 }
 
 // digestMatchesExpected is the shared pass/fail rule for digest pinning,
@@ -156,6 +176,10 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "type must be one of image, file, sbom, sarif")
 		return
 	}
+	if err := validateMaintainerPair(req.MaintainerTeam, req.MaintainerEmail); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Best-effort digest resolution + duplicate check, before Create --
 	// see resolveDigest's own comment for why an empty digest here just
@@ -192,6 +216,16 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 			// digest metadata failed to persist. Log rather than fail a
 			// registration that otherwise succeeded.
 			log.Printf("failed to persist resolved digest for artifact %s: %v", a.ID, err)
+		} else {
+			a = updated
+		}
+	}
+	if req.MaintainerTeam != "" || req.MaintainerEmail != "" {
+		if updated, err := h.store.Update(a.ID, func(art *artifact.Artifact) {
+			art.MaintainerTeam = req.MaintainerTeam
+			art.MaintainerEmail = req.MaintainerEmail
+		}); err != nil {
+			log.Printf("failed to persist maintainer info for artifact %s: %v", a.ID, err)
 		} else {
 			a = updated
 		}
@@ -320,6 +354,12 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 			results = append(results, res)
 			continue
 		}
+		if err := validateMaintainerPair(item.MaintainerTeam, item.MaintainerEmail); err != nil {
+			res.Error = err.Error()
+			failed++
+			results = append(results, res)
+			continue
+		}
 
 		digest := digests[i]
 		if !digestMatchesExpected(digest, item.ExpectedDigest) {
@@ -368,6 +408,19 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 				a = updated
 			}
 			seenInBatch[digest] = a
+		}
+		if item.MaintainerTeam != "" || item.MaintainerEmail != "" {
+			if updated, err := h.store.Update(a.ID, func(art *artifact.Artifact) {
+				art.MaintainerTeam = item.MaintainerTeam
+				art.MaintainerEmail = item.MaintainerEmail
+			}); err != nil {
+				log.Printf("failed to persist maintainer info for artifact %s: %v", a.ID, err)
+			} else {
+				a = updated
+				if digest != "" {
+					seenInBatch[digest] = a
+				}
+			}
 		}
 		res.Artifact = a
 		created++
@@ -684,6 +737,44 @@ func (h *handler) updateStage(w http.ResponseWriter, r *http.Request) {
 			Timestamp: time.Now().UTC(),
 			Note:      req.Note,
 		})
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, updated)
+}
+
+type updateMaintainerRequest struct {
+	Team  string `json:"team"`
+	Email string `json:"email"`
+}
+
+// updateMaintainer sets (or corrects) an artifact's maintainer info
+// after registration -- the Register form can't always know a team/
+// contact up front, and ownership changes over an artifact's lifetime
+// regardless. Unlike createArtifact/bulkCreateArtifacts, both fields
+// are required here: there's no "leave it as it was" partial-update
+// semantics for this endpoint, only "set it to this pair" -- clearing
+// it back to empty is the one case not supported today (not needed by
+// the dashboard, which only ever offers Save with both fields filled).
+func (h *handler) updateMaintainer(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var req updateMaintainerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Team == "" || req.Email == "" {
+		writeError(w, http.StatusBadRequest, "team and email are both required")
+		return
+	}
+
+	updated, err := h.store.Update(id, func(art *artifact.Artifact) {
+		art.MaintainerTeam = req.Team
+		art.MaintainerEmail = req.Email
 	})
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())

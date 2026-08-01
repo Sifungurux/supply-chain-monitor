@@ -464,6 +464,108 @@ func TestCreateArtifact_ExpectedDigestSetButUnresolvableRefusesRegistration(t *t
 	}
 }
 
+func TestCreateArtifact_MaintainerTeamAndEmailPersisted(t *testing.T) {
+	h, _ := newTestRouter(scanner.Registry{})
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{
+		"ref": "alpine:3.19", "type": "image",
+		"maintainer_team": "platform-security", "maintainer_email": "platform-security@example.com",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body=%s", rec.Code, rec.Body.String())
+	}
+	a := decodeArtifact(t, rec)
+	if a.MaintainerTeam != "platform-security" || a.MaintainerEmail != "platform-security@example.com" {
+		t.Fatalf("maintainer = %q/%q, want platform-security/platform-security@example.com", a.MaintainerTeam, a.MaintainerEmail)
+	}
+}
+
+func TestCreateArtifact_MaintainerOneFieldWithoutTheOtherRejected(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{
+		"ref": "alpine:3.19", "type": "image", "maintainer_team": "platform-security",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 when only maintainer_team is set, body=%s", rec.Code, rec.Body.String())
+	}
+	all, _ := store.List()
+	if len(all) != 0 {
+		t.Fatalf("store has %d artifacts, want 0", len(all))
+	}
+
+	rec2 := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{
+		"ref": "alpine:3.19", "type": "image", "maintainer_email": "platform-security@example.com",
+	})
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 when only maintainer_email is set, body=%s", rec2.Code, rec2.Body.String())
+	}
+}
+
+func TestUpdateMaintainer(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+a.ID+"/maintainer", map[string]string{
+		"team": "platform-security", "email": "platform-security@example.com",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	updated := decodeArtifact(t, rec)
+	if updated.MaintainerTeam != "platform-security" || updated.MaintainerEmail != "platform-security@example.com" {
+		t.Fatalf("maintainer = %q/%q, want platform-security/platform-security@example.com", updated.MaintainerTeam, updated.MaintainerEmail)
+	}
+
+	// A follow-up call with only one field must be rejected (not clear
+	// the other one out from under it).
+	rec2 := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+a.ID+"/maintainer", map[string]string{"team": "new-team"})
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 when email is missing, body=%s", rec2.Code, rec2.Body.String())
+	}
+
+	rec3 := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/does-not-exist/maintainer", map[string]string{
+		"team": "x", "email": "x@example.com",
+	})
+	if rec3.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for a nonexistent artifact, body=%s", rec3.Code, rec3.Body.String())
+	}
+}
+
+func TestBulkCreateArtifacts_MaintainerPersistedAndOneFieldRejected(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+
+	body := map[string]any{
+		"artifacts": []map[string]string{
+			{"ref": "alpine:3.19", "type": "image", "maintainer_team": "platform-security", "maintainer_email": "platform-security@example.com"},
+			{"ref": "busybox:latest", "type": "image", "maintainer_team": "orphaned-team"}, // email missing -- must be rejected
+		},
+	}
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (one entry still succeeded), body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Created int `json:"created"`
+		Failed  int `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Created != 1 || resp.Failed != 1 {
+		t.Fatalf("created=%d failed=%d, want 1/1", resp.Created, resp.Failed)
+	}
+
+	all, _ := store.List()
+	if len(all) != 1 {
+		t.Fatalf("store has %d artifacts, want 1", len(all))
+	}
+	if all[0].MaintainerTeam != "platform-security" || all[0].MaintainerEmail != "platform-security@example.com" {
+		t.Fatalf("maintainer = %q/%q, want platform-security/platform-security@example.com", all[0].MaintainerTeam, all[0].MaintainerEmail)
+	}
+}
+
 func TestBulkCreateArtifacts_DuplicatesAcrossRequestsMarkedNotFailed(t *testing.T) {
 	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:aaa", "busybox:latest": "sha256:bbb"}}
 	h, _ := newTestRouterWithDigestResolver(resolver)
