@@ -259,7 +259,7 @@ func TestBulkCreateArtifacts_PartialFailureStillCreatesTheGoodOnes(t *testing.T)
 	body := map[string]any{
 		"artifacts": []map[string]string{
 			{"ref": "alpine:3.19", "type": "image"},
-			{"ref": "", "type": "image"},           // missing ref
+			{"ref": "", "type": "image"},            // missing ref
 			{"ref": "x", "type": "not-a-real-type"}, // invalid type
 			{"ref": "busybox:latest", "type": "image"},
 		},
@@ -281,6 +281,44 @@ func TestBulkCreateArtifacts_PartialFailureStillCreatesTheGoodOnes(t *testing.T)
 	}
 	if resp.Created != 2 || resp.Failed != 2 {
 		t.Fatalf("created=%d failed=%d, want 2/2", resp.Created, resp.Failed)
+	}
+}
+
+func TestBulkCreateArtifacts_ExpectedDigestMismatchNotCreated(t *testing.T) {
+	resolver := &fakeDigestResolver{digests: map[string]string{
+		"alpine:3.19":    "sha256:aaa",
+		"busybox:latest": "sha256:bbb",
+	}}
+	h, store := newTestRouterWithDigestResolver(resolver)
+
+	body := map[string]any{
+		"artifacts": []map[string]string{
+			{"ref": "alpine:3.19", "type": "image", "expected_digest": "sha256:aaa"},      // matches -- should register
+			{"ref": "busybox:latest", "type": "image", "expected_digest": "sha256:wrong"}, // mismatch -- must not register
+		},
+	}
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (one entry still succeeded), body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Created int `json:"created"`
+		Failed  int `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Created != 1 || resp.Failed != 1 {
+		t.Fatalf("created=%d failed=%d, want 1/1", resp.Created, resp.Failed)
+	}
+
+	all, _ := store.List()
+	if len(all) != 1 {
+		t.Fatalf("store has %d artifacts, want 1 -- the mismatched entry must not have registered", len(all))
+	}
+	if all[0].Ref != "alpine:3.19" {
+		t.Fatalf("registered ref = %q, want alpine:3.19", all[0].Ref)
 	}
 }
 
@@ -369,6 +407,60 @@ func TestCreateArtifact_DigestResolutionFailureStillSucceeds(t *testing.T) {
 	a := decodeArtifact(t, rec)
 	if a.Digest != "" {
 		t.Fatalf("digest = %q, want empty (resolution failed)", a.Digest)
+	}
+}
+
+func TestCreateArtifact_ExpectedDigestMatchRegisters(t *testing.T) {
+	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:aaa"}}
+	h, store := newTestRouterWithDigestResolver(resolver)
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{
+		"ref": "alpine:3.19", "type": "image", "expected_digest": "sha256:aaa",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 when resolved digest matches expected, body=%s", rec.Code, rec.Body.String())
+	}
+	a := decodeArtifact(t, rec)
+	if a.Digest != "sha256:aaa" {
+		t.Fatalf("digest = %q, want sha256:aaa", a.Digest)
+	}
+	all, _ := store.List()
+	if len(all) != 1 {
+		t.Fatalf("store has %d artifacts, want 1", len(all))
+	}
+}
+
+func TestCreateArtifact_ExpectedDigestMismatchRefusesRegistration(t *testing.T) {
+	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:aaa"}}
+	h, store := newTestRouterWithDigestResolver(resolver)
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{
+		"ref": "alpine:3.19", "type": "image", "expected_digest": "sha256:different",
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 on digest mismatch, body=%s", rec.Code, rec.Body.String())
+	}
+	all, _ := store.List()
+	if len(all) != 0 {
+		t.Fatalf("store has %d artifacts, want 0 -- mismatched registration must not register anything", len(all))
+	}
+}
+
+func TestCreateArtifact_ExpectedDigestSetButUnresolvableRefusesRegistration(t *testing.T) {
+	// No digest available at all (resolution failed) with an expected
+	// digest pinned: fails closed rather than registering unverified.
+	resolver := &fakeDigestResolver{errRef: "unreachable-registry.example/app:1.0"}
+	h, store := newTestRouterWithDigestResolver(resolver)
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{
+		"ref": "unreachable-registry.example/app:1.0", "type": "image", "expected_digest": "sha256:aaa",
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 when digest can't be resolved to verify against, body=%s", rec.Code, rec.Body.String())
+	}
+	all, _ := store.List()
+	if len(all) != 0 {
+		t.Fatalf("store has %d artifacts, want 0", len(all))
 	}
 }
 

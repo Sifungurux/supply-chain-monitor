@@ -99,6 +99,45 @@ func (h *handler) listStages(w http.ResponseWriter, r *http.Request) {
 type createArtifactRequest struct {
 	Ref  string `json:"ref"`
 	Type string `json:"type"`
+	// ExpectedDigest, if set, gates registration on digest pinning: the
+	// ref's digest is resolved the same way the duplicate check below
+	// resolves it, and registration only proceeds if that resolved
+	// digest equals this one exactly. Lets a caller pin "only register
+	// this if it's still the exact image I saw earlier" instead of
+	// trusting a mutable tag -- see checkExpectedDigest.
+	ExpectedDigest string `json:"expected_digest,omitempty"`
+}
+
+// digestMatchesExpected is the shared pass/fail rule for digest pinning,
+// used by both createArtifact and bulkCreateArtifacts so the single-
+// artifact and bulk registration endpoints can't drift into enforcing
+// this differently. expectedDigest == "" means no pin was requested
+// (always passes). resolvedDigest == "" (couldn't resolve at all, e.g.
+// registry unreachable or ref is a local path) is treated the same as a
+// mismatch when a pin *was* requested: there's nothing to verify it
+// against, so this fails closed rather than silently registering
+// unverified.
+func digestMatchesExpected(resolvedDigest, expectedDigest string) bool {
+	if expectedDigest == "" {
+		return true
+	}
+	return resolvedDigest != "" && resolvedDigest == expectedDigest
+}
+
+// checkExpectedDigest is createArtifact's single-artifact wrapper around
+// digestMatchesExpected -- writes the 409 response and returns false
+// when the pin fails, so the caller can just return.
+func checkExpectedDigest(w http.ResponseWriter, ref, resolvedDigest, expectedDigest string) bool {
+	if digestMatchesExpected(resolvedDigest, expectedDigest) {
+		return true
+	}
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error":           "resolved digest does not match the expected digest -- registration refused",
+		"ref":             ref,
+		"expected_digest": expectedDigest,
+		"resolved_digest": resolvedDigest,
+	})
+	return false
 }
 
 func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
@@ -122,6 +161,9 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 	// see resolveDigest's own comment for why an empty digest here just
 	// means "proceed without dedup," not a failure.
 	digest := h.resolveDigest(r.Context(), req.Ref, t)
+	if !checkExpectedDigest(w, req.Ref, digest, req.ExpectedDigest) {
+		return
+	}
 	if digest != "" {
 		existing, err := h.store.FindByDigest(digest)
 		if err != nil {
@@ -280,6 +322,12 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 		}
 
 		digest := digests[i]
+		if !digestMatchesExpected(digest, item.ExpectedDigest) {
+			res.Error = fmt.Sprintf("resolved digest does not match expected digest %q -- registration refused", item.ExpectedDigest)
+			failed++
+			results = append(results, res)
+			continue
+		}
 		if digest != "" {
 			if dup, ok := seenInBatch[digest]; ok {
 				res.Artifact = dup
@@ -562,6 +610,7 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 		art.SecretFindings = artifact.MergeFindings(art.SecretFindings, secretFindings, now, detectFixedFor("secret"))
 		art.OtherFindings = artifact.MergeFindings(art.OtherFindings, otherFindings, now, detectFixedFor("other"))
 		art.LastScanErrors = scanErrors
+		art.LastScanAt = &now
 	})
 	if updErr != nil {
 		writeError(w, http.StatusInternalServerError, updErr.Error())
@@ -744,6 +793,7 @@ func (h *handler) submitFindings(w http.ResponseWriter, r *http.Request) {
 		if art.Status == artifact.StatusRegistered {
 			art.Status = artifact.StatusScanned
 		}
+		art.LastScanAt = &now
 	})
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())

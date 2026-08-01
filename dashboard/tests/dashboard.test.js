@@ -16,6 +16,7 @@ const SAMPLE_ARTIFACTS = [
     type: 'image',
     status: 'scanned',
     current_stage: 'scan',
+    digest: 'sha256:abc123',
     stage_history: [
       { stage: 'build', timestamp: '2026-07-19T10:00:00Z', note: 'CI job #1' },
       { stage: 'scan', timestamp: '2026-07-19T10:05:00Z' }
@@ -24,7 +25,8 @@ const SAMPLE_ARTIFACTS = [
     malware_findings: [],
     last_scan_errors: [],
     created_at: '2026-07-19T09:00:00Z',
-    updated_at: '2026-07-19T10:05:00Z'
+    updated_at: '2026-07-19T10:05:00Z',
+    last_scan_at: '2026-07-19T10:05:00Z'
   },
   {
     id: 'a2',
@@ -152,6 +154,47 @@ test('renders artifact rows, summary cards, and stage pills from a live API resp
   dom.window.close();
 });
 
+test('Details opens a modal with last-scan/digest/CVE/malware metadata, closing on an outside click but not an inside one', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(SAMPLE_ARTIFACTS);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  const overlay = doc.getElementById('modal-overlay');
+  assert.equal(overlay.hidden, true, 'modal starts hidden');
+
+  doc.querySelector('button[data-action="toggle"][data-id="a1"]').click();
+  assert.equal(overlay.hidden, false, 'Details opens the modal');
+
+  const body = doc.getElementById('modal-body').innerHTML;
+  assert.match(body, /Last scan/);
+  assert.match(body, /sha256:abc123/, 'a1 has a resolved digest');
+  assert.match(body, /openssl bug/);
+
+  // A click that lands inside the box must not close the modal.
+  doc.querySelector('.modal-box').click();
+  assert.equal(overlay.hidden, false, 'inside click leaves the modal open');
+
+  // A click on the backdrop itself closes it.
+  overlay.click();
+  assert.equal(overlay.hidden, true, 'outside click closes the modal');
+
+  // a3 has no digest and no last_scan_at (still "scanning") -- the
+  // unresolved/not-yet-scanned branch of the same modal.
+  doc.querySelector('button[data-action="toggle"][data-id="a3"]').click();
+  const a3Body = doc.getElementById('modal-body').innerHTML;
+  assert.match(a3Body, /not resolved/);
+  assert.match(a3Body, /Not yet scanned/);
+
+  dom.window.close();
+});
+
 test('shows an empty-state row, not a blank table, when there are no artifacts', async () => {
   const dom = buildDom({
     url: 'http://localhost:30301/',
@@ -271,7 +314,7 @@ test('renders SARIF/other findings in their own count column and detail section'
   // Expand the detail row and check the finding renders there, not
   // folded into the CVE column/section.
   doc.querySelector('button[data-action="toggle"][data-id="a4"]').click();
-  const detailHtml = doc.querySelector('tr.detail-row').innerHTML;
+  const detailHtml = doc.getElementById('modal-body').innerHTML;
   assert.match(detailHtml, /Hardcoded secret detected/);
   assert.match(detailHtml, /Other findings/);
 
@@ -321,7 +364,7 @@ test('renders misconfiguration and secret findings in their own count columns an
   assert.equal(row.querySelector('td:nth-child(9)').textContent.trim(), '0', 'Other count column');
 
   doc.querySelector('button[data-action="toggle"][data-id="a7"]').click();
-  const detailHtml = doc.querySelector('tr.detail-row').innerHTML;
+  const detailHtml = doc.getElementById('modal-body').innerHTML;
   assert.match(detailHtml, /S3 bucket is public/);
   assert.match(detailHtml, /Misconfiguration findings/);
   assert.match(detailHtml, /AWS access key committed/);
@@ -376,7 +419,7 @@ test('a fixed finding shows a Fixed badge, dims, and drops out of open-finding c
   assert.equal(cveCountCell.textContent.trim(), '0');
 
   doc.querySelector('button[data-action="toggle"][data-id="a5"]').click();
-  const detailHtml = doc.querySelector('tr.detail-row').innerHTML;
+  const detailHtml = doc.getElementById('modal-body').innerHTML;
   assert.match(detailHtml, /now patched/);
   assert.match(detailHtml, /Fixed/);
   assert.match(detailHtml, /finding-fixed/);
@@ -417,7 +460,7 @@ test('a finding first seen on the artifact\'s most recent update gets a New badg
   const doc = dom.window.document;
 
   doc.querySelector('button[data-action="toggle"][data-id="a6"]').click();
-  const detailHtml = doc.querySelector('tr.detail-row').innerHTML;
+  const detailHtml = doc.getElementById('modal-body').innerHTML;
 
   const newBadgeCount = (detailHtml.match(/>New</g) || []).length;
   assert.equal(newBadgeCount, 1, 'exactly the just-discovered finding should get a New badge');
@@ -603,6 +646,50 @@ test('register form POSTs the entered ref/type and reloads the list', async () =
 
   const rows = doc.querySelectorAll('#artifact-rows tr[data-id]');
   assert.equal(rows.length, 1, 'list should have reloaded after registering');
+
+  dom.window.close();
+});
+
+test('"Verify digest" mode sends expected_digest and surfaces a mismatch error without clearing the form', async () => {
+  const calls = [];
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url, opts) {
+      calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts') && opts && opts.method === 'POST') {
+        return errorResponse(409, { error: 'resolved digest does not match the expected digest -- registration refused' });
+      }
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  const expectedDigestInput = doc.getElementById('reg-expected-digest');
+  assert.equal(expectedDigestInput.hidden, true, 'hidden until Verify mode is chosen');
+
+  doc.getElementById('reg-ref').value = 'alpine:3.19';
+  doc.getElementById('reg-mode-verify').checked = true;
+  doc.getElementById('reg-mode-verify').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  assert.equal(expectedDigestInput.hidden, false, 'shown once Verify mode is chosen');
+
+  expectedDigestInput.value = 'sha256:expected';
+  doc.getElementById('register-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+  await tick(20);
+
+  const postCall = calls.find((c) => c.method === 'POST');
+  assert.ok(postCall, 'expected a POST to /api/v1/artifacts');
+  const body = JSON.parse(postCall.body);
+  assert.equal(body.expected_digest, 'sha256:expected');
+
+  assert.match(doc.getElementById('status').textContent, /does not match the expected digest/);
+  // The mismatch was rejected server-side -- the typed ref/digest stay
+  // put so the user doesn't have to retype them to try again.
+  assert.equal(doc.getElementById('reg-ref').value, 'alpine:3.19');
 
   dom.window.close();
 });
