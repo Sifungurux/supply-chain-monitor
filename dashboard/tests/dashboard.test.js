@@ -207,6 +207,165 @@ test('Details opens a modal with last-scan/digest/CVE/malware metadata, closing 
   dom.window.close();
 });
 
+test('search filters the artifact table by ref, digest, stage, and CVE/malware id or title, case-insensitively', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(SAMPLE_ARTIFACTS);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  const search = doc.getElementById('search-input');
+  const idsShown = () => [...doc.querySelectorAll('#artifact-rows tr[data-id]')].map((tr) => tr.dataset.id);
+
+  function type(value) {
+    search.value = value;
+    search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  }
+
+  type('ALPINE');
+  assert.deepEqual(idsShown(), ['a1'], 'ref match is case-insensitive');
+
+  type('sha256:abc123');
+  assert.deepEqual(idsShown(), ['a1'], 'digest matches');
+
+  type('openssl');
+  assert.deepEqual(idsShown(), ['a1'], 'CVE finding title matches');
+
+  type('CVE-2024-1234');
+  assert.deepEqual(idsShown(), ['a1'], 'CVE finding id matches');
+
+  type('eicar');
+  assert.deepEqual(idsShown(), ['a2'], 'malware finding title matches');
+
+  type('clamav-signature-match');
+  assert.deepEqual(idsShown(), ['a2'], 'malware finding id matches');
+
+  type('build');
+  assert.deepEqual(idsShown(), ['a3'], 'current_stage matches');
+
+  type('');
+  // Rows stay sorted newest-updated-first regardless of search state:
+  // a3 (11:00) > a1 (10:05) > a2 (09:30).
+  assert.deepEqual(idsShown(), ['a3', 'a1', 'a2'], 'clearing the search restores every row');
+
+  dom.window.close();
+});
+
+test('search matches maintainer team/email, and shows a distinct message when nothing matches', async () => {
+  const artifactsWithMaintainer = SAMPLE_ARTIFACTS.concat([{
+    id: 'a4',
+    ref: 'ghcr.io/example/other:latest',
+    type: 'image',
+    status: 'registered',
+    current_stage: '',
+    stage_history: [],
+    cve_findings: [],
+    malware_findings: [],
+    last_scan_errors: [],
+    maintainer_team: 'platform-team',
+    maintainer_email: 'platform@example.com',
+    created_at: '2026-07-19T12:00:00Z',
+    updated_at: '2026-07-19T12:00:00Z'
+  }]);
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(artifactsWithMaintainer);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  const search = doc.getElementById('search-input');
+
+  function type(value) {
+    search.value = value;
+    search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  }
+
+  type('platform-team');
+  assert.deepEqual(
+    [...doc.querySelectorAll('#artifact-rows tr[data-id]')].map((tr) => tr.dataset.id),
+    ['a4'],
+    'maintainer team matches'
+  );
+
+  type('platform@example.com');
+  assert.deepEqual(
+    [...doc.querySelectorAll('#artifact-rows tr[data-id]')].map((tr) => tr.dataset.id),
+    ['a4'],
+    'maintainer email matches'
+  );
+
+  type('no-such-artifact-zzz');
+  const emptyRow = doc.querySelector('#artifact-rows tr .empty');
+  assert.ok(emptyRow, 'a no-match row is shown');
+  assert.match(emptyRow.textContent, /No artifacts match "no-such-artifact-zzz"/);
+
+  dom.window.close();
+});
+
+test('search matches an artifact id, but not a finding that has since been fixed', async () => {
+  const withFixed = [{
+    id: 'a5',
+    ref: 'alpine:3.19',
+    type: 'image',
+    status: 'scanned',
+    current_stage: 'scan',
+    stage_history: [],
+    cve_findings: [
+      {
+        id: 'CVE-2024-5555',
+        severity: 'high',
+        title: 'now patched',
+        source: 'trivy',
+        status: 'fixed',
+        first_seen_at: '2026-07-01T00:00:00Z',
+        resolved_at: '2026-07-19T10:00:00Z'
+      }
+    ],
+    malware_findings: [],
+    last_scan_errors: [],
+    created_at: '2026-07-01T00:00:00Z',
+    updated_at: '2026-07-19T10:00:00Z'
+  }];
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(withFixed);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  const search = doc.getElementById('search-input');
+  const idsShown = () => [...doc.querySelectorAll('#artifact-rows tr[data-id]')].map((tr) => tr.dataset.id);
+
+  function type(value) {
+    search.value = value;
+    search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  }
+
+  type('a5');
+  assert.deepEqual(idsShown(), ['a5'], 'searching the artifact id matches it');
+
+  type('CVE-2024-5555');
+  assert.deepEqual(idsShown(), [], 'a fixed finding must not match search -- it no longer affects this image');
+
+  dom.window.close();
+});
+
 test('editing maintainer in the modal POSTs to the maintainer endpoint and updates the display', async () => {
   const calls = [];
   const dom = buildDom({
