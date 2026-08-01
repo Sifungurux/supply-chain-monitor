@@ -159,6 +159,41 @@ func parseTrivyVulnerabilities(output []byte) ([]artifact.Finding, error) {
 }
 
 func (t *TrivyScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding, error) {
+	output, err := t.ScanRaw(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	return parseTrivyVulnerabilities(output)
+}
+
+// ScanWithRaw is Scan plus the raw report ScanRaw returns, from a
+// single trivy invocation -- runScanWorker's image-mode branch
+// (main.go) needs both: the parsed findings every other caller gets
+// from Scan, and the raw report to derive SBOM/SARIF documents from via
+// GenerateImageDocuments. Every other caller keeps using Scan/ScanRaw
+// individually; this exists only so that one caller doesn't have to
+// scan twice to get both outputs.
+func (t *TrivyScanner) ScanWithRaw(ctx context.Context, ref string) ([]artifact.Finding, []byte, error) {
+	raw, err := t.ScanRaw(ctx, ref)
+	if err != nil {
+		return nil, nil, err
+	}
+	findings, err := parseTrivyVulnerabilities(raw)
+	if err != nil {
+		return nil, raw, err
+	}
+	return findings, raw, nil
+}
+
+// ScanRaw runs the same `trivy image --format json` invocation as Scan,
+// returning trivy's raw JSON report bytes before any parsing -- split
+// out so runScanWorker's image-mode branch (main.go) can also derive an
+// SBOM/SARIF document from the same report via `trivy convert` (see
+// GenerateImageDocuments in documents.go), without a second scan. Scan
+// above is unchanged in behavior: it still runs this exact invocation
+// and just discards the raw bytes after parsing, the same as before
+// this was split out.
+func (t *TrivyScanner) ScanRaw(ctx context.Context, ref string) ([]byte, error) {
 	// Confirmed on a real cluster: without this, trivy's local
 	// per-image analysis cache grows by roughly one entry per distinct
 	// image scanned, forever (trivy has no automatic eviction for it),
@@ -210,7 +245,7 @@ func (t *TrivyScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding
 		return nil, wrapTrivyScanError("trivy scan", ref, err, stderr.String())
 	}
 
-	return parseTrivyVulnerabilities(stdout.Bytes())
+	return stdout.Bytes(), nil
 }
 
 // wrapTrivyScanError turns a failed trivy invocation into the error

@@ -161,6 +161,9 @@ func TestPostgresStore_Delete(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
+	if err := s.SaveDocument(a.ID, artifact.DocumentKindSBOM, "application/vnd.cyclonedx+json", []byte(`{"bomFormat":"CycloneDX"}`)); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
 
 	countRows := func(table string) int {
 		t.Helper()
@@ -171,7 +174,7 @@ func TestPostgresStore_Delete(t *testing.T) {
 		return n
 	}
 
-	if countRows("findings") == 0 || countRows("stage_history") == 0 || countRows("scan_errors") == 0 {
+	if countRows("findings") == 0 || countRows("stage_history") == 0 || countRows("scan_errors") == 0 || countRows("artifact_documents") == 0 {
 		t.Fatal("expected child rows to exist before delete (test setup didn't work)")
 	}
 
@@ -193,7 +196,7 @@ func TestPostgresStore_Delete(t *testing.T) {
 		}
 	}
 
-	for _, table := range []string{"findings", "stage_history", "scan_errors"} {
+	for _, table := range []string{"findings", "stage_history", "scan_errors", "artifact_documents"} {
 		if n := countRows(table); n != 0 {
 			t.Fatalf("expected ON DELETE CASCADE to remove every %s row for the deleted artifact, found %d left behind", table, n)
 		}
@@ -336,6 +339,82 @@ func TestPostgresStore_FindByDigest(t *testing.T) {
 
 	if got, err := s.FindByDigest(""); err != nil || got != nil {
 		t.Fatalf("FindByDigest(\"\") = %+v, %v, want nil, nil", got, err)
+	}
+}
+
+// TestPostgresStore_SaveAndGetDocument is the one place that would
+// catch a real bug in artifact_documents' BYTEA round-trip (content
+// bytes surviving Postgres exactly, not mangled by an encoding
+// mismatch) or in loadDocumentFlags/fillChildrenBatch's HasSBOM/HasSARIF
+// wiring -- pure-Go tests against MemStore can't exercise either, since
+// MemStore just holds the same []byte in memory and Get/List return the
+// live pointer directly.
+func TestPostgresStore_SaveAndGetDocument(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	a, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if got, err := s.GetDocument(a.ID, artifact.DocumentKindSBOM); err != nil || got != nil {
+		t.Fatalf("GetDocument before any save = %+v, %v, want nil, nil", got, err)
+	}
+
+	sbomContent := []byte(`{"bomFormat":"CycloneDX","version":1}`)
+	if err := s.SaveDocument(a.ID, artifact.DocumentKindSBOM, "application/vnd.cyclonedx+json", sbomContent); err != nil {
+		t.Fatalf("SaveDocument(sbom): %v", err)
+	}
+	sarifContent := []byte(`{"version":"2.1.0"}`)
+	if err := s.SaveDocument(a.ID, artifact.DocumentKindSARIF, "application/sarif+json", sarifContent); err != nil {
+		t.Fatalf("SaveDocument(sarif): %v", err)
+	}
+
+	doc, err := s.GetDocument(a.ID, artifact.DocumentKindSBOM)
+	if err != nil {
+		t.Fatalf("GetDocument(sbom): %v", err)
+	}
+	if doc == nil || string(doc.Content) != string(sbomContent) || doc.ContentType != "application/vnd.cyclonedx+json" {
+		t.Fatalf("GetDocument(sbom) = %+v, content mismatch or wrong content type", doc)
+	}
+
+	// Get/List both report HasSBOM/HasSARIF without embedding content.
+	got, err := s.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.HasSBOM || !got.HasSARIF {
+		t.Fatalf("Get: HasSBOM=%v HasSARIF=%v, want both true", got.HasSBOM, got.HasSARIF)
+	}
+
+	list, err := s.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	found := false
+	for _, item := range list {
+		if item.ID == a.ID {
+			found = true
+			if !item.HasSBOM || !item.HasSARIF {
+				t.Fatalf("List: HasSBOM=%v HasSARIF=%v, want both true", item.HasSBOM, item.HasSARIF)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("List didn't include the artifact under test")
+	}
+
+	// Re-saving the same kind overwrites, doesn't duplicate the row.
+	updatedContent := []byte(`{"bomFormat":"CycloneDX","version":2}`)
+	if err := s.SaveDocument(a.ID, artifact.DocumentKindSBOM, "application/vnd.cyclonedx+json", updatedContent); err != nil {
+		t.Fatalf("SaveDocument(sbom) overwrite: %v", err)
+	}
+	doc2, err := s.GetDocument(a.ID, artifact.DocumentKindSBOM)
+	if err != nil {
+		t.Fatalf("GetDocument(sbom) after overwrite: %v", err)
+	}
+	if string(doc2.Content) != string(updatedContent) {
+		t.Fatalf("GetDocument(sbom) after overwrite = %q, want %q", string(doc2.Content), string(updatedContent))
 	}
 }
 

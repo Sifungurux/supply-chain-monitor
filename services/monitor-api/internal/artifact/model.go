@@ -170,6 +170,44 @@ type Artifact struct {
 	// can't tell a caller "was this actually scanned recently" without
 	// false positives from those other paths.
 	LastScanAt *time.Time `json:"last_scan_at,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	// HasSBOM/HasSARIF report whether a generated document of that kind
+	// exists for this artifact (see Document, Store.SaveDocument/
+	// GetDocument) -- booleans, not the document bytes themselves, so
+	// List() (which the dashboard polls every 10s) never carries
+	// megabytes of document content just to let the UI decide whether a
+	// download button should show. Best-effort like Digest: false just
+	// means no document has been captured yet, not an error.
+	HasSBOM   bool      `json:"has_sbom,omitempty"`
+	HasSARIF  bool      `json:"has_sarif,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Document kinds -- the only two Store.SaveDocument/GetDocument accept
+// today (see handlers.go's validateDocumentKind). Kept as constants so
+// a typo is a compile error rather than a silently-never-matching kind
+// string somewhere.
+const (
+	DocumentKindSBOM  = "sbom"
+	DocumentKindSARIF = "sarif"
+)
+
+// Document is a generated artifact document -- a CycloneDX SBOM or
+// SARIF report derived from an image scan (see
+// scanner.GenerateImageDocuments) -- stored separately from Artifact
+// itself. Deliberately its own type/table rather than fields on
+// Artifact: these can be multi-megabyte blobs (a real-world image's
+// CycloneDX SBOM or SARIF report commonly runs 10-20MB), and Artifact
+// is round-tripped whole on every List() call the dashboard polls every
+// 10 seconds, plus scanned end-to-end by the dashboard's client-side
+// search filter -- putting document bytes directly on the struct would
+// drag megabytes through both paths for every artifact on every poll,
+// whether or not anyone ever downloads one. See HasSBOM/HasSARIF above
+// for the lightweight signal Artifact does carry.
+type Document struct {
+	ArtifactID  string
+	Kind        string // DocumentKindSBOM or DocumentKindSARIF
+	ContentType string
+	Content     []byte
+	CreatedAt   time.Time
 }

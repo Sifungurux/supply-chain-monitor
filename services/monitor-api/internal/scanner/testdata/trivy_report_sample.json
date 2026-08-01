@@ -1,0 +1,92 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": "alpine:3.19",
+  "ArtifactType": "container_image",
+  "Results": [
+    {
+      "Target": "alpine:3.19 (alpine 3.19.9)",
+      "Class": "os-pkgs",
+      "Type": "alpine",
+      "Packages": [
+        {
+          "ID": "busybox@1.36.1-r20",
+          "Name": "busybox",
+          "Identifier": {
+            "PURL": "pkg:apk/alpine/busybox@1.36.1-r20?arch=x86_64&distro=3.19.9",
+            "UID": "c60e792b360ab614"
+          },
+          "Version": "1.36.1-r20",
+          "Arch": "x86_64",
+          "SrcName": "busybox",
+          "SrcVersion": "1.36.1-r20",
+          "Licenses": [
+            "GPL-2.0-only"
+          ],
+          "Maintainer": "S\u00f6ren Tempel <soeren+alpine@soeren-tempel.net>",
+          "DependsOn": [
+            "musl@1.2.4_git20230717-r5"
+          ],
+          "Layer": {
+            "Digest": "sha256:17a39c0ba978cc27001e9c56a480f98106e1ab74bd56eb302f9fd4cf758ea43f",
+            "DiffID": "sha256:0b44b2151d78267ab6f2c76208c3be18688f49b2b0afd6852a9533f2cce121c5"
+          },
+          "Digest": "sha1:448f4dc2cc8b12d1bc9996a6bb924b129eaa92e9",
+          "InstalledFiles": [
+            "bin/busybox",
+            "etc/securetty",
+            "etc/udhcpd.conf",
+            "etc/busybox-paths.d/busybox",
+            "etc/logrotate.d/acpid",
+            "etc/network/if-up.d/dad",
+            "etc/udhcpc/udhcpc.conf",
+            "usr/share/udhcpc/default.script"
+          ],
+          "AnalyzedBy": "apk"
+        }
+      ],
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2024-58251",
+          "PkgID": "busybox@1.36.1-r20",
+          "PkgName": "busybox",
+          "PkgIdentifier": {
+            "PURL": "pkg:apk/alpine/busybox@1.36.1-r20?arch=x86_64&distro=3.19.9",
+            "UID": "c60e792b360ab614"
+          },
+          "InstalledVersion": "1.36.1-r20",
+          "FixedVersion": "1.36.1-r21",
+          "Status": "fixed",
+          "Layer": {
+            "Digest": "sha256:17a39c0ba978cc27001e9c56a480f98106e1ab74bd56eb302f9fd4cf758ea43f",
+            "DiffID": "sha256:0b44b2151d78267ab6f2c76208c3be18688f49b2b0afd6852a9533f2cce121c5"
+          },
+          "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2024-58251",
+          "DataSource": {
+            "ID": "alpine",
+            "Name": "Alpine Secdb",
+            "URL": "https://secdb.alpinelinux.org/"
+          },
+          "Fingerprint": "sha256:44afb06427e5f33650916b748981d8ef1d6f05cc58a136224735df9724b33e55",
+          "Title": "In netstat in BusyBox through 1.37.0, local users can launch of networ ...",
+          "Description": "In netstat in BusyBox through 1.37.0, local users can launch of network application with an argv[0] containing an ANSI terminal escape sequence, leading to a denial of service (terminal locked up) when netstat is used by a victim.",
+          "Severity": "MEDIUM",
+          "CweIDs": [
+            "CWE-150"
+          ],
+          "VendorSeverity": {
+            "ubuntu": 2
+          },
+          "References": [
+            "http://www.openwall.com/lists/oss-security/2025/04/23/6",
+            "https://bugs.busybox.net/show_bug.cgi?id=15922",
+            "https://www.busybox.net",
+            "https://www.busybox.net/downloads/",
+            "https://www.cve.org/CVERecord?id=CVE-2024-58251"
+          ],
+          "PublishedDate": "2025-04-23T18:16:03.057Z",
+          "LastModifiedDate": "2026-06-17T08:14:42.853Z"
+        }
+      ]
+    }
+  ]
+}

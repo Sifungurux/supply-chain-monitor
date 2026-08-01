@@ -220,7 +220,11 @@ func runScanWorker() {
 			CacheDir:         getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
 		}
 		if trivyMode == "image" {
-			findings, scanErr = scanner.NewTrivyScanner("", trivyDB).Scan(ctx, ref)
+			var rawReport []byte
+			findings, rawReport, scanErr = scanner.NewTrivyScanner("", trivyDB).ScanWithRaw(ctx, ref)
+			if scanErr == nil {
+				captureImageDocuments(ctx, rawReport)
+			}
 		} else {
 			// sbom mode: ref may be an OCI registry reference (scm-registry
 			// by default), not a path already inside this pod -- unlike
@@ -272,6 +276,51 @@ func runScanWorker() {
 		os.Exit(1)
 	}
 	fmt.Printf("%s%s\n", scanner.ResultMarker, resultJSON)
+}
+
+// captureImageDocuments best-effort generates and uploads a CycloneDX
+// SBOM and a SARIF report derived from rawReport (an "image"-mode
+// scan's own raw trivy JSON, from TrivyScanner.ScanWithRaw -- see
+// GenerateImageDocuments' comment for why this is a conversion, not a
+// second scan). Called from runScanWorker's image branch only when the
+// scan itself succeeded.
+//
+// A no-op, not an error, when SCM_ARTIFACT_ID/SCM_API_BASE_URL/
+// SCM_API_KEY aren't all set -- IsolatedTrivyScanner.ScanForArtifact
+// only sets them when a caller actually asked for document capture
+// (artifactID non-empty and APIBaseURL configured -- see that method's
+// comment), so a plain Scan() call (any future caller of the base
+// Scanner interface) or a deployment that hasn't configured this simply
+// never attempts a capture.
+//
+// Every failure here is logged, never fatal to the worker -- see
+// GenerateImageDocuments' own "best-effort, mirroring Artifact.Digest"
+// comment for the same convention applied one level up: a document
+// capture problem must never affect the scan's own findings/success,
+// the same way an unresolvable digest never blocks registration. Safe
+// to log freely here (unlike a bare log.Printf elsewhere in this file
+// pre-VerboseScanLogs, see the historical note two comments above):
+// ExtractWorkerResult only ever looks at the *last* ResultMarker-
+// prefixed line in the combined pod log stream, so any amount of extra
+// log.Printf noise here is simply ignored, never mistaken for the real
+// result.
+func captureImageDocuments(ctx context.Context, rawReport []byte) {
+	artifactID := os.Getenv("SCM_ARTIFACT_ID")
+	apiBaseURL := os.Getenv("SCM_API_BASE_URL")
+	apiKey := os.Getenv("SCM_API_KEY")
+	if artifactID == "" || apiBaseURL == "" || apiKey == "" {
+		return
+	}
+
+	docs, genErrs := scanner.GenerateImageDocuments(ctx, rawReport, "/tmp")
+	for _, err := range genErrs {
+		log.Printf("scan-worker: document generation for artifact %s: %v (non-fatal, scan result unaffected)", artifactID, err)
+	}
+	for _, doc := range docs {
+		if err := scanner.UploadDocument(ctx, apiBaseURL, apiKey, artifactID, doc.Kind, doc.ContentType, doc.Content); err != nil {
+			log.Printf("scan-worker: upload %s document for artifact %s: %v (non-fatal, scan result unaffected)", doc.Kind, artifactID, err)
+		}
+	}
 }
 
 // buildImageScanners picks both halves of the `image` artifact type's
@@ -520,6 +569,16 @@ func runAPIServer() {
 			CacheMountPath:        getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
 			VerboseLogs:           verboseScanLogs,
 			ActiveDeadlineSeconds: int64(scanWorkerActiveDeadlineSeconds),
+			// Lets each "image" scan-worker Job upload a generated
+			// SBOM/SARIF document back to this Service once it's done
+			// scanning (see IsolatedTrivyConfig.APIBaseURL's comment) --
+			// "monitor-api" is this chart's own Service name/port (see
+			// charts/supply-chain-monitor/templates/monitor-api/service.yaml), reachable from
+			// any pod in the same namespace via cluster DNS. Empty
+			// disables document capture entirely, e.g. for a deployment
+			// where the scan-worker Job's network policy can't reach the
+			// API server pod.
+			APIBaseURL: getenv("SCAN_WORKER_API_BASE_URL", "http://monitor-api:8080"),
 		})
 		// Same again for sbom-type artifacts (see docs/architecture.md,
 		// "Isolating SBOM trivy scanning") -- FetchPlainHTTP is set here

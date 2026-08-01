@@ -42,6 +42,18 @@ type Store interface {
 	// if id doesn't exist, the same "not found" convention Get/Update
 	// already use.
 	Delete(id string) error
+	// SaveDocument stores (overwriting any existing document of the
+	// same kind) a generated SBOM/SARIF document against an artifact --
+	// see Document's own comment for why this is a separate call rather
+	// than a field Update's mutate callback can set. Returns an error
+	// if artifactID doesn't exist.
+	SaveDocument(artifactID, kind, contentType string, content []byte) error
+	// GetDocument returns (nil, nil) if no document of that kind has
+	// been captured yet -- e.g. before the first scan runs, or generation
+	// failed (best-effort, see Document's comment) -- the same "not
+	// found is the expected, common case" convention FindByDigest above
+	// already uses.
+	GetDocument(artifactID, kind string) (*Document, error)
 }
 
 // MemStore is a thread-safe, in-memory Store implementation.
@@ -52,10 +64,15 @@ type Store interface {
 type MemStore struct {
 	mu   sync.RWMutex
 	data map[string]*Artifact
+	// documents is keyed by artifact ID then kind (DocumentKindSBOM/
+	// DocumentKindSARIF) -- a plain nested map is enough here since
+	// MemStore only ever backs tests, never production (see the type's
+	// own comment).
+	documents map[string]map[string]*Document
 }
 
 func NewMemStore() *MemStore {
-	return &MemStore{data: make(map[string]*Artifact)}
+	return &MemStore{data: make(map[string]*Artifact), documents: make(map[string]map[string]*Document)}
 }
 
 // newID generates the random hex artifact ID used by every Store
@@ -126,7 +143,42 @@ func (s *MemStore) Delete(id string) error {
 		return fmt.Errorf("artifact %q not found", id)
 	}
 	delete(s.data, id)
+	delete(s.documents, id)
 	return nil
+}
+
+func (s *MemStore) SaveDocument(artifactID, kind, contentType string, content []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	a, ok := s.data[artifactID]
+	if !ok {
+		return fmt.Errorf("artifact %q not found", artifactID)
+	}
+	if s.documents[artifactID] == nil {
+		s.documents[artifactID] = make(map[string]*Document)
+	}
+	s.documents[artifactID][kind] = &Document{
+		ArtifactID:  artifactID,
+		Kind:        kind,
+		ContentType: contentType,
+		Content:     content,
+		CreatedAt:   time.Now().UTC(),
+	}
+	switch kind {
+	case DocumentKindSBOM:
+		a.HasSBOM = true
+	case DocumentKindSARIF:
+		a.HasSARIF = true
+	}
+	return nil
+}
+
+func (s *MemStore) GetDocument(artifactID, kind string) (*Document, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.documents[artifactID][kind], nil
 }
 
 func (s *MemStore) FindByFindingID(findingID string) ([]*Artifact, error) {

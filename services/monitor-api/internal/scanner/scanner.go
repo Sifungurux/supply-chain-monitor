@@ -36,6 +36,24 @@ type BucketAffinity interface {
 	Bucket() string
 }
 
+// ArtifactAwareScanner is an optional interface a Scanner can implement
+// to also receive the ID of the artifact being scanned, not just its
+// ref. Scan(ctx, ref) alone is enough for every scanner that only ever
+// needs to know *what* to scan -- but IsolatedTrivyScanner's
+// scan-worker Job also generates SBOM/SARIF documents (see
+// documents.go) that need to be uploaded back to monitor-api associated
+// with a specific artifact, and the Job has no other way to learn that
+// artifact's ID (it only ever receives ref -- see main.go's
+// runScanWorker). scanArtifact (internal/api/handlers.go) type-asserts
+// for this the same optional-capability way it already does for
+// BucketAffinity above, and calls ScanForArtifact instead of Scan when
+// available -- every other Scanner implementation is unaffected and
+// doesn't need to implement this.
+type ArtifactAwareScanner interface {
+	Scanner
+	ScanForArtifact(ctx context.Context, ref, artifactID string) ([]artifact.Finding, error)
+}
+
 // Registry maps an artifact type to the scanners that apply to it. An
 // artifact type can have more than one scanner registered against it --
 // e.g. a container image gets both a CVE scan (Trivy) and a malware

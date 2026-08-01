@@ -654,6 +654,49 @@
     return esc(a.maintainer_team) + ' — <a href="mailto:' + esc(a.maintainer_email) + '">' + esc(a.maintainer_email) + '</a>';
   }
 
+  // documentLinks renders a "Download SBOM"/"Download SARIF report"
+  // button for each document that's actually been captured (a.has_sbom/
+  // has_sarif, set by the API -- see Artifact.HasSBOM's comment; never
+  // both false-and-missing-button vs true-and-broken-download, since
+  // the flag and the document's existence are the same fact from the
+  // same source). Buttons, not plain <a href> links: every API route
+  // requires an Authorization: Bearer header (see router.go's withAuth),
+  // which a browser never attaches to a plain link navigation -- see
+  // downloadDocument below for the fetch-as-blob approach this requires.
+  function documentLinks(a) {
+    var links = [];
+    if (a.has_sbom) links.push('<button type="button" class="link-btn" data-action="download-sbom" data-id="' + esc(a.id) + '">Download SBOM</button>');
+    if (a.has_sarif) links.push('<button type="button" class="link-btn" data-action="download-sarif" data-id="' + esc(a.id) + '">Download SARIF report</button>');
+    if (!links.length) return '<span class="muted">Not yet generated</span>';
+    return links.join(' · ');
+  }
+
+  // downloadDocument fetches a document as an authenticated request
+  // (fetchJSON can't be reused as-is: it always calls res.json(), which
+  // would try to parse a multi-megabyte SBOM/SARIF document as a single
+  // JSON value just to throw it away), then triggers a save via a
+  // synthetic, temporary <a download> -- the standard way to save a
+  // fetched Blob to disk from JS, since the browser download UI itself
+  // only ever triggers off an <a> element, never directly off a fetch
+  // response.
+  async function downloadDocument(id, kind, filename) {
+    var headers = {};
+    if (state.apiKey) headers['Authorization'] = 'Bearer ' + state.apiKey;
+    var res = await fetch(state.apiBase + '/api/v1/artifacts/' + id + '/documents/' + kind, { headers: headers });
+    if (!res.ok) {
+      throw new Error(res.status === 401 ? 'Unauthorized — check the API key above' : (res.status + ' ' + res.statusText));
+    }
+    var blob = await res.blob();
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
   // renderModalContent builds the Details modal shown for one artifact:
   // a metadata header (last scan, digest, maintainer, CVE/malware
   // counts) per Phase 2, followed by the same full finding/history
@@ -674,6 +717,7 @@
         '<span><strong>Malware:</strong> ' + countCell(openFindings(a.malware_findings).length) + '</span>' +
         '<span><strong>Maintainer:</strong> ' + maintainerText(a) +
           ' <button type="button" class="link-btn" data-action="edit-maintainer">Edit</button></span>' +
+        '<span><strong>Documents:</strong> ' + documentLinks(a) + '</span>' +
       '</div>' +
       '<div class="maintainer-edit" id="maintainer-edit" data-id="' + esc(a.id) + '" hidden>' +
         '<input type="text" id="maintainer-edit-team" placeholder="Team" value="' + esc(a.maintainer_team || '') + '" />' +
@@ -700,6 +744,21 @@
     var btn = ev.target.closest('button[data-action]');
     if (!btn) return;
     var action = btn.getAttribute('data-action');
+
+    if (action === 'download-sbom' || action === 'download-sarif') {
+      var docID = btn.getAttribute('data-id');
+      var docArtifact = state.artifacts.filter(function (x) { return x.id === docID; })[0];
+      var kind = action === 'download-sbom' ? 'sbom' : 'sarif';
+      var ext = kind === 'sarif' ? '.sarif' : '.json';
+      var safeRef = docArtifact ? docArtifact.ref.replace(/[^a-zA-Z0-9._-]/g, '_') : docID;
+      try {
+        await downloadDocument(docID, kind, safeRef + '-' + kind + ext);
+      } catch (err) {
+        setStatus('Could not download ' + kind + ' — ' + err.message, true);
+      }
+      return;
+    }
+
     var editBox = document.getElementById('maintainer-edit');
     if (!editBox) return;
 
