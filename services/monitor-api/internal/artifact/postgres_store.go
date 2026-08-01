@@ -88,6 +88,12 @@ var schemaStatements = []string{
 	// comment), so indexing '' values for every such row would be pure
 	// write-path overhead for a value FindByDigest never searches for.
 	`CREATE INDEX IF NOT EXISTS artifacts_digest_idx ON artifacts (digest) WHERE digest != ''`,
+	// Added for the dashboard's Details modal (see Artifact.LastScanAt's
+	// comment) -- same idempotent ADD COLUMN IF NOT EXISTS as digest
+	// above. NULL (not a zero-value default) is deliberate: it's the
+	// natural "never scanned yet" state, matching the Go field being a
+	// *time.Time.
+	`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS last_scan_at TIMESTAMPTZ`,
 	`CREATE TABLE IF NOT EXISTS stage_history (
 		id          BIGSERIAL PRIMARY KEY,
 		artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
@@ -137,7 +143,7 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS scan_errors_artifact_id_idx ON scan_errors (artifact_id)`,
 }
 
-const selectArtifactColumns = `SELECT id, ref, digest, type, status, current_stage, created_at, updated_at FROM artifacts`
+const selectArtifactColumns = `SELECT id, ref, digest, type, status, current_stage, created_at, updated_at, last_scan_at FROM artifacts`
 
 // pgxIface is satisfied by both *pgxpool.Pool and pgx.Tx, so the
 // read/write helpers below can run either directly against the pool
@@ -389,7 +395,7 @@ func scanArtifactRow(row rowScanner) (*Artifact, error) {
 	var a Artifact
 	var typ, status string
 
-	err := row.Scan(&a.ID, &a.Ref, &a.Digest, &typ, &status, &a.CurrentStage, &a.CreatedAt, &a.UpdatedAt)
+	err := row.Scan(&a.ID, &a.Ref, &a.Digest, &typ, &status, &a.CurrentStage, &a.CreatedAt, &a.UpdatedAt, &a.LastScanAt)
 	if err != nil {
 		return nil, err
 	}
@@ -674,8 +680,8 @@ func (s *PostgresStore) Update(id string, mutate func(*Artifact)) (*Artifact, er
 	// doesn't have (its Update mutates the stored struct directly), so
 	// this needed calling out explicitly rather than discovering it via
 	// a test that only runs against Postgres.
-	if _, err := tx.Exec(ctx, `UPDATE artifacts SET status = $1, current_stage = $2, digest = $3, updated_at = $4 WHERE id = $5`,
-		string(a.Status), a.CurrentStage, a.Digest, a.UpdatedAt, a.ID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE artifacts SET status = $1, current_stage = $2, digest = $3, updated_at = $4, last_scan_at = $5 WHERE id = $6`,
+		string(a.Status), a.CurrentStage, a.Digest, a.UpdatedAt, a.LastScanAt, a.ID); err != nil {
 		return nil, fmt.Errorf("update artifact: %w", err)
 	}
 

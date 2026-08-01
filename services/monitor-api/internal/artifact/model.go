@@ -152,7 +152,14 @@ type Artifact struct {
 	// LastScanErrors holds any per-scanner errors from the most recent
 	// /scan call (e.g. one of several scanners for a type failed while
 	// others succeeded). Empty on a fully clean scan.
-	LastScanErrors []string  `json:"last_scan_errors,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	LastScanErrors []string `json:"last_scan_errors,omitempty"`
+	// LastScanAt is when the /scan endpoint last completed for this
+	// artifact -- nil until the first scan runs. Deliberately its own
+	// field rather than reusing UpdatedAt: UpdatedAt also moves on
+	// unrelated mutations (a /stage call, a digest backfill), so it
+	// can't tell a caller "was this actually scanned recently" without
+	// false positives from those other paths.
+	LastScanAt *time.Time `json:"last_scan_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
