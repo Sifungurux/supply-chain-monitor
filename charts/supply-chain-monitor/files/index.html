@@ -102,11 +102,12 @@
   }
   .register-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .register-form input[type="text"] { flex: 1 1 260px; }
+  .radio-label { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--scm-text-secondary); white-space: nowrap; }
+  .radio-label input[type="radio"] { border: 0; padding: 0; width: auto; }
   table { width: 100%; border-collapse: collapse; background: var(--scm-surface); border-radius: var(--scm-radius-lg); overflow: hidden; border: 0.5px solid var(--scm-border); }
   th, td { text-align: left; padding: 10px 12px; border-bottom: 0.5px solid var(--scm-border); font-size: 13px; vertical-align: middle; }
   th { color: var(--scm-text-secondary); font-weight: 500; font-size: 12px; }
   tr:last-child td { border-bottom: none; }
-  tr.detail-row td { background: var(--scm-bg); }
   .ref { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
   .badge {
     display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 500;
@@ -131,6 +132,27 @@
   .muted { color: var(--scm-text-muted); font-size: 12.5px; }
   .errs { color: var(--scm-danger-text); font-size: 12.5px; }
   i.ti { font-size: 16px; vertical-align: -2px; }
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px; z-index: 100;
+  }
+  .modal-overlay[hidden] { display: none; }
+  .modal-box {
+    position: relative; background: var(--scm-surface); border: 0.5px solid var(--scm-border);
+    border-radius: var(--scm-radius-lg); max-width: 640px; width: 100%;
+    max-height: 85vh; overflow-y: auto; padding: 20px;
+  }
+  .modal-box h2 { font-size: 16px; font-weight: 500; margin: 0 0 4px; padding-right: 24px; word-break: break-all; }
+  .modal-close {
+    position: absolute; top: 10px; right: 10px; border: none; background: transparent;
+    font-size: 20px; line-height: 1; padding: 4px 8px; color: var(--scm-text-secondary);
+  }
+  .modal-meta {
+    display: flex; flex-wrap: wrap; gap: 8px 20px; margin-bottom: 14px;
+    font-size: 12.5px; color: var(--scm-text-secondary);
+  }
+  .modal-meta strong { color: var(--scm-text); font-weight: 500; }
 </style>
 </head>
 <body>
@@ -167,6 +189,9 @@
         <option value="sbom">sbom</option>
         <option value="sarif">sarif</option>
       </select>
+      <label class="radio-label"><input type="radio" name="reg-mode" id="reg-mode-normal" value="normal" checked /> Register normally</label>
+      <label class="radio-label"><input type="radio" name="reg-mode" id="reg-mode-verify" value="verify" /> Verify digest before registering</label>
+      <input type="text" id="reg-expected-digest" placeholder="sha256:… (expected digest)" hidden />
       <button type="submit" class="primary"><i class="ti ti-plus" aria-hidden="true"></i> Register</button>
     </form>
   </section>
@@ -182,6 +207,13 @@
       <tbody id="artifact-rows"></tbody>
     </table>
   </section>
+</div>
+
+<div class="modal-overlay" id="modal-overlay" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true">
+    <button class="modal-close" id="modal-close" aria-label="Close" type="button">&times;</button>
+    <div id="modal-body"></div>
+  </div>
 </div>
 
 <!--
@@ -224,7 +256,6 @@
     apiKey: localStorage.getItem('scm-api-key') || injected.apiKey || '',
     stages: [],
     artifacts: [],
-    expanded: null,
     busy: {}
   };
 
@@ -239,7 +270,13 @@
     rows: document.getElementById('artifact-rows'),
     form: document.getElementById('register-form'),
     ref: document.getElementById('reg-ref'),
-    type: document.getElementById('reg-type')
+    type: document.getElementById('reg-type'),
+    modeNormal: document.getElementById('reg-mode-normal'),
+    modeVerify: document.getElementById('reg-mode-verify'),
+    expectedDigest: document.getElementById('reg-expected-digest'),
+    modalOverlay: document.getElementById('modal-overlay'),
+    modalBody: document.getElementById('modal-body'),
+    modalClose: document.getElementById('modal-close')
   };
   els.apiBase.value = state.apiBase;
   els.apiKey.value = state.apiKey;
@@ -451,21 +488,58 @@
               '<button data-action="scan" data-id="' + esc(a.id) + '" ' + (busy ? 'disabled' : '') + '>' +
                 (busy ? 'Scanning…' : '<i class="ti ti-player-play" aria-hidden="true"></i> Scan') +
               '</button>' +
-              '<button data-action="toggle" data-id="' + esc(a.id) + '">' +
-                (state.expanded === a.id ? 'Hide' : 'Details') +
-              '</button>' +
+              '<button data-action="toggle" data-id="' + esc(a.id) + '">Details</button>' +
               '<button data-action="delete" data-id="' + esc(a.id) + '" data-ref="' + esc(a.ref) + '" ' + (busy ? 'disabled' : '') + '>' +
                 '<i class="ti ti-trash" aria-hidden="true"></i> Delete' +
               '</button>' +
             '</td>' +
           '</tr>'
         );
-        if (state.expanded === a.id) rows.push(renderDetailRow(a));
       });
     els.rows.innerHTML = rows.join('');
   }
 
-  function renderDetailRow(a) {
+  // lastScanText reads Artifact.LastScanAt (set server-side only when
+  // /scan or /findings actually completes -- see
+  // internal/api/handlers.go) rather than updated_at, which also moves
+  // on unrelated mutations like a /stage call or the digest backfill
+  // and would otherwise misreport those as a fresh scan.
+  function lastScanText(a) {
+    if (!a.last_scan_at) return 'Not yet scanned';
+    return timeAgo(a.last_scan_at);
+  }
+
+  // renderModalContent builds the Details modal shown for one artifact:
+  // a metadata header (last scan, digest, CVE/malware counts) per
+  // Phase 2, followed by the same full finding/history breakdown the
+  // old inline expand-row used to show.
+  function renderModalContent(a) {
+    return (
+      '<h2>' + esc(a.ref) + '</h2>' +
+      '<div class="modal-meta">' +
+        '<span>' + esc(a.type) + '</span>' +
+        '<span>' + statusBadge(a.status) + '</span>' +
+        '<span><strong>Last scan:</strong> ' + esc(lastScanText(a)) + '</span>' +
+        '<span><strong>Digest:</strong> ' + (a.digest ? '<span class="ref">' + esc(a.digest) + '</span>' : '<span class="muted">not resolved</span>') + '</span>' +
+        '<span><strong>CVEs:</strong> ' + countCell(openFindings(a.cve_findings).length) + '</span>' +
+        '<span><strong>Malware:</strong> ' + countCell(openFindings(a.malware_findings).length) + '</span>' +
+      '</div>' +
+      renderDetailSections(a)
+    );
+  }
+
+  function openDetailModal(id) {
+    var a = state.artifacts.filter(function (x) { return x.id === id; })[0];
+    if (!a) return;
+    els.modalBody.innerHTML = renderModalContent(a);
+    els.modalOverlay.hidden = false;
+  }
+
+  function closeDetailModal() {
+    els.modalOverlay.hidden = true;
+  }
+
+  function renderDetailSections(a) {
     var stageHistory = (a.stage_history || []).slice().reverse();
     var cve = a.cve_findings || [];
     var mal = a.malware_findings || [];
@@ -507,17 +581,15 @@
       : '';
 
     return (
-      '<tr class="detail-row"><td colspan="11">' +
-        '<div class="detail-grid">' +
-          '<div class="detail-col"><h3>Pipeline history</h3>' + historyHtml + '</div>' +
-          '<div class="detail-col"><h3>CVE findings</h3>' + cveHtml + '</div>' +
-          '<div class="detail-col"><h3>Malware findings</h3>' + malHtml + '</div>' +
-          '<div class="detail-col"><h3>Misconfiguration findings</h3>' + misconfigHtml + '</div>' +
-          '<div class="detail-col"><h3>Secret findings</h3>' + secretHtml + '</div>' +
-          '<div class="detail-col"><h3>Other findings (SARIF, etc.)</h3>' + otherHtml + '</div>' +
-        '</div>' +
-        errsHtml +
-      '</td></tr>'
+      '<div class="detail-grid">' +
+        '<div class="detail-col"><h3>Pipeline history</h3>' + historyHtml + '</div>' +
+        '<div class="detail-col"><h3>CVE findings</h3>' + cveHtml + '</div>' +
+        '<div class="detail-col"><h3>Malware findings</h3>' + malHtml + '</div>' +
+        '<div class="detail-col"><h3>Misconfiguration findings</h3>' + misconfigHtml + '</div>' +
+        '<div class="detail-col"><h3>Secret findings</h3>' + secretHtml + '</div>' +
+        '<div class="detail-col"><h3>Other findings (SARIF, etc.)</h3>' + otherHtml + '</div>' +
+      '</div>' +
+      errsHtml
     );
   }
 
@@ -550,7 +622,6 @@
       setStatus('Delete failed for ' + id + ' — ' + err.message, true);
     } finally {
       delete state.busy[id];
-      if (state.expanded === id) state.expanded = null;
       await loadAll();
     }
   }
@@ -561,24 +632,60 @@
     var id = btn.getAttribute('data-id');
     var action = btn.getAttribute('data-action');
     if (action === 'scan') scanArtifact(id);
-    if (action === 'toggle') {
-      state.expanded = state.expanded === id ? null : id;
-      renderRows();
-    }
+    if (action === 'toggle') openDetailModal(id);
     if (action === 'delete') deleteArtifact(id, btn.getAttribute('data-ref'));
   });
+
+  els.modalClose.addEventListener('click', closeDetailModal);
+
+  // Closes on a click that lands on the overlay itself (the backdrop)
+  // but not one that lands on the modal box or anything inside it --
+  // ev.target is the actual clicked element, and the box is a separate
+  // child node, so a click inside the box never bubbles up as a click
+  // "on" the overlay element.
+  els.modalOverlay.addEventListener('click', function (ev) {
+    if (ev.target === els.modalOverlay) closeDetailModal();
+  });
+
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape' && !els.modalOverlay.hidden) closeDetailModal();
+  });
+
+  // The expected-digest input only makes sense in "verify" mode --
+  // toggling either radio flips its visibility, and switching back to
+  // "normal" clears whatever was typed so a stale value can't leak into
+  // a later normal registration.
+  function updateRegMode() {
+    var verifying = els.modeVerify.checked;
+    els.expectedDigest.hidden = !verifying;
+    if (!verifying) els.expectedDigest.value = '';
+  }
+  els.modeNormal.addEventListener('change', updateRegMode);
+  els.modeVerify.addEventListener('change', updateRegMode);
 
   els.form.addEventListener('submit', async function (ev) {
     ev.preventDefault();
     var ref = els.ref.value.trim();
     if (!ref) return;
+
+    var body = { ref: ref, type: els.type.value };
+    if (els.modeVerify.checked) {
+      var expected = els.expectedDigest.value.trim();
+      if (!expected) {
+        setStatus('Enter the expected digest to verify against', true);
+        return;
+      }
+      body.expected_digest = expected;
+    }
+
     try {
       await fetchJSON('/api/v1/artifacts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ref: ref, type: els.type.value })
+        body: JSON.stringify(body)
       });
       els.ref.value = '';
+      els.expectedDigest.value = '';
       setStatus('Artifact registered', false);
       await loadAll();
     } catch (err) {
