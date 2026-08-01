@@ -896,6 +896,89 @@ test('the "+ Register an artifact" link stays hidden unless allowManualRegistrat
   domTrue.window.close();
 });
 
+test('the connection settings (API/Key/Refresh/status) stay visible unless showConnectionSettings is exactly "false"', async () => {
+  // No SCM_CONFIG at all (env.js absent) -- opposite default from
+  // allowManualRegistration: this is a display preference, not a
+  // security gate, so it must stay visible, not hide by default.
+  const domNoConfig = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      return errorResponse(404, {});
+    }
+  });
+  await tick(20);
+  assert.equal(domNoConfig.window.document.getElementById('conn-settings').hidden, false);
+  domNoConfig.window.close();
+
+  // Explicitly "true" -- also visible.
+  const domTrue = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      return errorResponse(404, {});
+    },
+    beforeParseExtra(window) {
+      window.SCM_CONFIG = { apiBase: '', apiKey: '', showConnectionSettings: 'true' };
+    }
+  });
+  await tick(20);
+  assert.equal(domTrue.window.document.getElementById('conn-settings').hidden, false);
+  domTrue.window.close();
+
+  // Exactly "false" -- hidden.
+  const domFalse = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      return errorResponse(404, {});
+    },
+    beforeParseExtra(window) {
+      window.SCM_CONFIG = { apiBase: '', apiKey: '', showConnectionSettings: 'false' };
+    }
+  });
+  await tick(20);
+  assert.equal(domFalse.window.document.getElementById('conn-settings').hidden, true);
+  domFalse.window.close();
+});
+
+test('an error stays visible even with showConnectionSettings: "false" -- a broken API must not render as a quietly-empty table', async () => {
+  const domIdle = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      return errorResponse(404, {});
+    },
+    beforeParseExtra(window) {
+      window.SCM_CONFIG = { apiBase: '', apiKey: '', showConnectionSettings: 'false' };
+    }
+  });
+  await tick(20);
+  // Idle "Connected to…" text is hidden along with the rest of the
+  // connection settings when there's nothing wrong to report.
+  assert.equal(domIdle.window.document.getElementById('status').hidden, true);
+  domIdle.window.close();
+
+  const domError = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl() {
+      return Promise.reject(new Error('network down'));
+    },
+    beforeParseExtra(window) {
+      window.SCM_CONFIG = { apiBase: '', apiKey: '', showConnectionSettings: 'false' };
+    }
+  });
+  await tick(20);
+  const status = domError.window.document.getElementById('status');
+  assert.equal(status.hidden, false, 'an error must override the hidden setting');
+  assert.match(status.textContent, /Couldn't reach/);
+  domError.window.close();
+});
+
 test('clicking "+ Register an artifact" opens the register modal, closing on outside click/Escape/close button and after a successful submit', async () => {
   const dom = buildDom({
     url: 'http://localhost:30301/',

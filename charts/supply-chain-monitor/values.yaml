@@ -324,6 +324,16 @@ dashboard:
   # disables it, so there's no dead-end UI for a deployment that
   # never wants this.
   allowManualRegistration: false
+  # Shows the API base/key fields, the Refresh button, and the connection
+  # status text in the header -- true by default (a display preference,
+  # not a security gate like allowManualRegistration above, so it stays
+  # visible unless a deployment opts out). Hiding it doesn't disable
+  # anything: the dashboard still auto-refreshes every 10s and still
+  # picks up the API base/key from env.js, it just removes the manual
+  # override escape hatch (see docs/architecture.md, "Configuring the
+  # dashboard via ConfigMap/Secret instead of by hand") from the UI for
+  # deployments that never want a person changing it from the browser.
+  showConnectionSettings: true
   service:
     nodePort: 30301
   resources:

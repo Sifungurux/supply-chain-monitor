@@ -61,6 +61,11 @@
   }
   .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px 64px; }
   header { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+  /* display:contents keeps api-row/refresh/status as direct flex items of
+     header when visible, so wrapping them for a single hide toggle below
+     doesn't change header's existing flex layout at all. */
+  #conn-settings { display: contents; }
+  #conn-settings[hidden] { display: none; }
   h1 { font-size: 20px; font-weight: 500; margin: 0; flex: 1 1 auto; min-width: 200px; }
   h2 { font-size: 15px; font-weight: 500; margin: 0 0 10px; }
   .api-row { display: flex; align-items: center; gap: 8px; }
@@ -170,14 +175,16 @@
 <div class="wrap">
   <header>
     <h1><i class="ti ti-shield-check" aria-hidden="true"></i> Supply chain monitor</h1>
-    <div class="api-row">
-      <label for="api-base">API</label>
-      <input id="api-base" type="text" />
-      <label for="api-key">Key</label>
-      <input id="api-key" type="password" autocomplete="off" />
-      <button id="save-api"><i class="ti ti-check" aria-hidden="true"></i></button>
+    <div id="conn-settings">
+      <div class="api-row">
+        <label for="api-base">API</label>
+        <input id="api-base" type="text" />
+        <label for="api-key">Key</label>
+        <input id="api-key" type="password" autocomplete="off" />
+        <button id="save-api"><i class="ti ti-check" aria-hidden="true"></i></button>
+      </div>
+      <button id="refresh"><i class="ti ti-refresh" aria-hidden="true"></i> Refresh</button>
     </div>
-    <button id="refresh"><i class="ti ti-refresh" aria-hidden="true"></i> Refresh</button>
     <span id="status">Connecting…</span>
   </header>
 
@@ -244,7 +251,7 @@
   scm-dashboard-config ConfigMap (see docs/architecture.md,
   "Configuring the dashboard via ConfigMap/Secret instead of by
   hand"). It sets window.SCM_CONFIG = { apiBase, apiKey,
-  allowManualRegistration } before the script below runs. Opening this file directly (or in a test) without
+  allowManualRegistration, showConnectionSettings } before the script below runs. Opening this file directly (or in a test) without
   that initContainer just means the request 404s/fails and
   window.SCM_CONFIG stays undefined -- the script below already
   handles that by falling back to the old manual-entry behavior.
@@ -303,7 +310,8 @@
     registerLinkSection: document.getElementById('register-link-section'),
     registerLink: document.getElementById('register-link'),
     registerModalOverlay: document.getElementById('register-modal-overlay'),
-    registerModalClose: document.getElementById('register-modal-close')
+    registerModalClose: document.getElementById('register-modal-close'),
+    connSettings: document.getElementById('conn-settings')
   };
   els.apiBase.value = state.apiBase;
   els.apiKey.value = state.apiKey;
@@ -315,6 +323,19 @@
   // (or with the value unset/false) never exposes ad-hoc registration
   // a deployment didn't opt into.
   els.registerLinkSection.hidden = injected.allowManualRegistration !== 'true';
+
+  // Opposite default from allowManualRegistration above: this is a
+  // display preference, not a security gate, so it stays visible unless
+  // a deployment explicitly opts out -- a dashboard opened without env.js
+  // (or with the value unset/anything other than "false") keeps the API
+  // base/key fields and Refresh visible, the same as before this toggle
+  // existed. #status is deliberately NOT part of #conn-settings and not
+  // gated here: setStatus (below) hides its idle "Connecting…"/
+  // "Connected to…" text under the same preference, but always shows an
+  // error regardless -- a dashboard silently displaying stale data
+  // because its API died is worse than one extra line of chrome.
+  els.connSettings.hidden = injected.showConnectionSettings === 'false';
+  els.status.hidden = injected.showConnectionSettings === 'false';
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -499,6 +520,11 @@
   function setStatus(text, isError) {
     els.status.textContent = text;
     els.status.className = isError ? 'error' : '';
+    // See the comment where els.status.hidden is first set, above: an
+    // error always shows even with showConnectionSettings: "false", so
+    // a broken/unreachable API doesn't render as a quietly-empty table.
+    if (isError) els.status.hidden = false;
+    else if (injected.showConnectionSettings === 'false') els.status.hidden = true;
   }
 
   async function loadAll() {

@@ -80,3 +80,7 @@ spec:
       # link, so it's opted back in here rather than by flipping the
       # chart's own default.
       allowManualRegistration: true
+      # User asked to hide the API base/key fields and Refresh button
+      # from this cluster's dashboard -- chart default stays true so no
+      # other deployment silently loses them.
+      showConnectionSettings: false
