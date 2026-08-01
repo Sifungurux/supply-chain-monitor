@@ -88,8 +88,7 @@
   #status { font-size: 12px; color: var(--scm-text-secondary); }
   #status.error { color: var(--scm-danger-text); }
   section { margin-bottom: 28px; }
-  .section-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-  .section-header h2 { margin: 0; }
+  .search-row { display: flex; justify-content: center; margin: 0 0 14px; }
   #search-input { width: 320px; max-width: 100%; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
   .card {
@@ -202,8 +201,8 @@
   </section>
 
   <section>
-    <div class="section-header">
-      <h2>Artifacts</h2>
+    <h2>Artifacts</h2>
+    <div class="search-row">
       <input type="search" id="search-input" placeholder="Search ref, digest, maintainer, stage, CVE/malware id or title…" />
     </div>
     <table>
