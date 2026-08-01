@@ -83,6 +83,9 @@
   #status { font-size: 12px; color: var(--scm-text-secondary); }
   #status.error { color: var(--scm-danger-text); }
   section { margin-bottom: 28px; }
+  .section-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .section-header h2 { margin: 0; }
+  #search-input { width: 320px; max-width: 100%; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
   .card {
     background: var(--scm-surface); border: 0.5px solid var(--scm-border);
@@ -192,7 +195,10 @@
   </section>
 
   <section>
-    <h2>Artifacts</h2>
+    <div class="section-header">
+      <h2>Artifacts</h2>
+      <input type="search" id="search-input" placeholder="Search ref, digest, maintainer, stage, CVE/malware id or title…" />
+    </div>
     <table>
       <thead>
         <tr>
@@ -271,7 +277,8 @@
     apiKey: localStorage.getItem('scm-api-key') || injected.apiKey || '',
     stages: [],
     artifacts: [],
-    busy: {}
+    busy: {},
+    searchQuery: ''
   };
 
   var els = {
@@ -283,6 +290,7 @@
     cards: document.getElementById('cards'),
     stages: document.getElementById('stages'),
     rows: document.getElementById('artifact-rows'),
+    search: document.getElementById('search-input'),
     form: document.getElementById('register-form'),
     ref: document.getElementById('reg-ref'),
     type: document.getElementById('reg-type'),
@@ -424,6 +432,50 @@
     return (list || []).filter(function (f) { return f.status !== 'fixed'; });
   }
 
+  var FINDING_BUCKETS = [
+    'cve_findings', 'malware_findings', 'misconfiguration_findings',
+    'secret_findings', 'other_findings'
+  ];
+
+  // Matches a search query against every metadata field on an artifact
+  // (id, ref, digest, type, status, stage, maintainer) plus every open
+  // finding in every bucket (id, title, severity, source) -- so
+  // searching a CVE ID or malware signature name finds every image
+  // still affected by it, the same way searching a maintainer team
+  // finds everything they own. Findings already fixed are excluded via
+  // openFindings, the same filter every visible count on this page
+  // (the bucket columns, the "With CVEs" card, the modal) already
+  // applies -- otherwise a search for a resolved CVE would surface a
+  // row showing 0 in every finding column, which reads as a bug, not
+  // a match. Case-insensitive substring match, not a query language:
+  // this dataset is small enough (fetched whole into state.artifacts
+  // already) that a linear scan on every keystroke is plenty fast, so
+  // there's no need for a backend search endpoint or an index.
+  function matchesSearch(a, query) {
+    var q = query.trim().toLowerCase();
+    if (!q) return true;
+    var fields = [
+      a.id, a.ref, a.digest, a.type, a.status, a.current_stage,
+      a.maintainer_team, a.maintainer_email
+    ];
+    for (var i = 0; i < fields.length; i++) {
+      if (fields[i] && String(fields[i]).toLowerCase().indexOf(q) !== -1) return true;
+    }
+    for (var b = 0; b < FINDING_BUCKETS.length; b++) {
+      var findings = openFindings(a[FINDING_BUCKETS[b]]);
+      for (var f = 0; f < findings.length; f++) {
+        var finding = findings[f];
+        if (
+          (finding.id && finding.id.toLowerCase().indexOf(q) !== -1) ||
+          (finding.title && finding.title.toLowerCase().indexOf(q) !== -1) ||
+          (finding.severity && finding.severity.toLowerCase().indexOf(q) !== -1) ||
+          (finding.source && finding.source.toLowerCase().indexOf(q) !== -1)
+        ) return true;
+      }
+    }
+    return false;
+  }
+
   async function fetchJSON(path, opts) {
     opts = opts || {};
     var headers = Object.assign({}, opts.headers || {});
@@ -521,8 +573,13 @@
       els.rows.innerHTML = '<tr><td colspan="11" class="empty">' + emptyMsg + '</td></tr>';
       return;
     }
+    var matched = state.artifacts.filter(function (a) { return matchesSearch(a, state.searchQuery); });
+    if (!matched.length) {
+      els.rows.innerHTML = '<tr><td colspan="11" class="empty">No artifacts match &quot;' + esc(state.searchQuery.trim()) + '&quot;.</td></tr>';
+      return;
+    }
     var rows = [];
-    state.artifacts
+    matched
       .slice()
       .sort(function (a, b) { return new Date(b.updated_at) - new Date(a.updated_at); })
       .forEach(function (a) {
@@ -835,6 +892,11 @@
     loadAll();
   });
   els.refresh.addEventListener('click', loadAll);
+
+  els.search.addEventListener('input', function () {
+    state.searchQuery = els.search.value;
+    renderRows();
+  });
 
   loadAll();
   setInterval(loadAll, 10000);
