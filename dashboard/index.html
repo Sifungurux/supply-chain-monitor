@@ -187,21 +187,8 @@
     <div class="stages" id="stages"></div>
   </section>
 
-  <section>
-    <h2>Register an artifact</h2>
-    <form class="register-form" id="register-form">
-      <input type="text" id="reg-ref" placeholder="alpine:3.19, /path/to/file, ghcr.io/org/chart:1.0" required />
-      <select id="reg-type">
-        <option value="image">image</option>
-        <option value="file">file</option>
-        <option value="sbom">sbom</option>
-        <option value="sarif">sarif</option>
-      </select>
-      <input type="text" id="reg-expected-digest" placeholder="sha256:… (optional, pins the digest)" />
-      <input type="text" id="reg-maintainer-team" placeholder="Maintainer team (optional)" />
-      <input type="email" id="reg-maintainer-email" placeholder="Maintainer contact email (optional)" />
-      <button type="submit" class="primary"><i class="ti ti-plus" aria-hidden="true"></i> Register</button>
-    </form>
+  <section id="register-link-section" hidden>
+    <a href="#" id="register-link" class="link-btn">+ Register an artifact</a>
   </section>
 
   <section>
@@ -224,14 +211,34 @@
   </div>
 </div>
 
+<div class="modal-overlay" id="register-modal-overlay" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true">
+    <button class="modal-close" id="register-modal-close" aria-label="Close" type="button">&times;</button>
+    <h2>Register an artifact</h2>
+    <form class="register-form" id="register-form">
+      <input type="text" id="reg-ref" placeholder="alpine:3.19, /path/to/file, ghcr.io/org/chart:1.0" required />
+      <select id="reg-type">
+        <option value="image">image</option>
+        <option value="file">file</option>
+        <option value="sbom">sbom</option>
+        <option value="sarif">sarif</option>
+      </select>
+      <input type="text" id="reg-expected-digest" placeholder="sha256:… (optional, pins the digest)" />
+      <input type="text" id="reg-maintainer-team" placeholder="Maintainer team (optional)" />
+      <input type="email" id="reg-maintainer-email" placeholder="Maintainer contact email (optional)" />
+      <button type="submit" class="primary"><i class="ti ti-plus" aria-hidden="true"></i> Register</button>
+    </form>
+  </div>
+</div>
+
 <!--
   env.js is NOT part of this file -- it's generated at container
   startup by charts/supply-chain-monitor/templates/dashboard/deployment.yaml's render-config
   initContainer, from the scm-monitor-api-auth Secret and
   scm-dashboard-config ConfigMap (see docs/architecture.md,
   "Configuring the dashboard via ConfigMap/Secret instead of by
-  hand"). It sets window.SCM_CONFIG = { apiBase, apiKey } before the
-  script below runs. Opening this file directly (or in a test) without
+  hand"). It sets window.SCM_CONFIG = { apiBase, apiKey,
+  allowManualRegistration } before the script below runs. Opening this file directly (or in a test) without
   that initContainer just means the request 404s/fails and
   window.SCM_CONFIG stays undefined -- the script below already
   handles that by falling back to the old manual-entry behavior.
@@ -284,10 +291,22 @@
     maintainerEmail: document.getElementById('reg-maintainer-email'),
     modalOverlay: document.getElementById('modal-overlay'),
     modalBody: document.getElementById('modal-body'),
-    modalClose: document.getElementById('modal-close')
+    modalClose: document.getElementById('modal-close'),
+    registerLinkSection: document.getElementById('register-link-section'),
+    registerLink: document.getElementById('register-link'),
+    registerModalOverlay: document.getElementById('register-modal-overlay'),
+    registerModalClose: document.getElementById('register-modal-close')
   };
   els.apiBase.value = state.apiBase;
   els.apiKey.value = state.apiKey;
+
+  // The "+ Register an artifact" link is hidden unless the chart's
+  // dashboard.allowManualRegistration is explicitly "true" (see
+  // values.yaml) -- fail-closed like the injected apiBase/apiKey
+  // pattern's own convention, so a dashboard opened without env.js
+  // (or with the value unset/false) never exposes ad-hoc registration
+  // a deployment didn't opt into.
+  els.registerLinkSection.hidden = injected.allowManualRegistration !== 'true';
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -494,7 +513,12 @@
 
   function renderRows() {
     if (!state.artifacts.length) {
-      els.rows.innerHTML = '<tr><td colspan="11" class="empty">No artifacts yet. Register one above to get started.</td></tr>';
+      // "Register one above" only makes sense when that link actually
+      // exists -- see allowManualRegistration's gate above.
+      var emptyMsg = els.registerLinkSection.hidden
+        ? 'No artifacts yet.'
+        : 'No artifacts yet. Register one above to get started.';
+      els.rows.innerHTML = '<tr><td colspan="11" class="empty">' + emptyMsg + '</td></tr>';
       return;
     }
     var rows = [];
@@ -742,8 +766,27 @@
     if (ev.target === els.modalOverlay) closeDetailModal();
   });
 
+  function openRegisterModal() {
+    els.registerModalOverlay.hidden = false;
+  }
+
+  function closeRegisterModal() {
+    els.registerModalOverlay.hidden = true;
+  }
+
+  els.registerLink.addEventListener('click', function (ev) {
+    ev.preventDefault();
+    openRegisterModal();
+  });
+  els.registerModalClose.addEventListener('click', closeRegisterModal);
+  els.registerModalOverlay.addEventListener('click', function (ev) {
+    if (ev.target === els.registerModalOverlay) closeRegisterModal();
+  });
+
   document.addEventListener('keydown', function (ev) {
-    if (ev.key === 'Escape' && !els.modalOverlay.hidden) closeDetailModal();
+    if (ev.key !== 'Escape') return;
+    if (!els.modalOverlay.hidden) closeDetailModal();
+    if (!els.registerModalOverlay.hidden) closeRegisterModal();
   });
 
   els.form.addEventListener('submit', async function (ev) {
@@ -776,6 +819,7 @@
       els.expectedDigest.value = '';
       els.maintainerTeam.value = '';
       els.maintainerEmail.value = '';
+      closeRegisterModal();
       setStatus('Artifact registered', false);
       await loadAll();
     } catch (err) {

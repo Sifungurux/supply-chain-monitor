@@ -313,6 +313,17 @@ dashboard:
   # setup (e.g. a fixed ingress hostname that differs from the
   # dashboard's own).
   apiBase: ""
+  # Gates the dashboard's "+ Register an artifact" link -- false by
+  # default (fail-closed, the same posture digest pinning/maintainer
+  # validation already take elsewhere in this codebase): a real
+  # pipeline registers artifacts via the API directly as they're
+  # built, so ad-hoc manual registration through the dashboard is an
+  # extra, bypassable path a deployment may not want exposed at all.
+  # Set to true to show the link (opens a small modal with the
+  # existing register form) -- false hides it completely, not just
+  # disables it, so there's no dead-end UI for a deployment that
+  # never wants this.
+  allowManualRegistration: false
   service:
     nodePort: 30301
   resources:

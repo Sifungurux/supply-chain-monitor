@@ -73,4 +73,10 @@ spec:
   # image change. Real credentials/API keys go here too, if this ever
   # points at more than a throwaway local cluster (see values.yaml's own
   # comments on postgres.credentials.password and monitorApi.apiKey).
-  values: {}
+  values:
+    dashboard:
+      # Chart default is false (fail-closed) -- this local dev cluster
+      # is the one deployment that actually wants the manual-registration
+      # link, so it's opted back in here rather than by flipping the
+      # chart's own default.
+      allowManualRegistration: true
