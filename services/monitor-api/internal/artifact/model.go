@@ -125,7 +125,17 @@ type Artifact struct {
 	// precondition for registration succeeding, the same "best-effort,
 	// don't block on it" spirit as bulkCreateArtifacts's own per-entry
 	// error handling.
-	Digest          string       `json:"digest,omitempty"`
+	Digest string `json:"digest,omitempty"`
+	// MaintainerTeam and MaintainerEmail identify who's responsible for
+	// this artifact -- both empty until set, either at registration or
+	// via POST .../maintainer. Always set or cleared together: a team
+	// name with no way to reach them, or a contact address with no team
+	// context, isn't meaningful ownership info, so internal/api/handlers.go's
+	// validateMaintainerPair rejects one being set without the other.
+	// Free text, not validated beyond that pairing -- this records
+	// organizational ownership, not an auth identity.
+	MaintainerTeam  string       `json:"maintainer_team,omitempty"`
+	MaintainerEmail string       `json:"maintainer_email,omitempty"`
 	Type            Type         `json:"type"`
 	Status          Status       `json:"status"`
 	CurrentStage    string       `json:"current_stage,omitempty"`

@@ -94,6 +94,13 @@ var schemaStatements = []string{
 	// natural "never scanned yet" state, matching the Go field being a
 	// *time.Time.
 	`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS last_scan_at TIMESTAMPTZ`,
+	// Added for maintainer team/contact metadata (see Artifact.MaintainerTeam's
+	// comment) -- same idempotent ADD COLUMN IF NOT EXISTS pattern as
+	// digest/last_scan_at above. DEFAULT '' (not NULL), matching digest:
+	// every comparison/emptiness check in this codebase already treats
+	// "" as "not set," so there's no separate NULL case to handle.
+	`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS maintainer_team TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS maintainer_email TEXT NOT NULL DEFAULT ''`,
 	`CREATE TABLE IF NOT EXISTS stage_history (
 		id          BIGSERIAL PRIMARY KEY,
 		artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
@@ -143,7 +150,7 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS scan_errors_artifact_id_idx ON scan_errors (artifact_id)`,
 }
 
-const selectArtifactColumns = `SELECT id, ref, digest, type, status, current_stage, created_at, updated_at, last_scan_at FROM artifacts`
+const selectArtifactColumns = `SELECT id, ref, digest, type, status, current_stage, created_at, updated_at, last_scan_at, maintainer_team, maintainer_email FROM artifacts`
 
 // pgxIface is satisfied by both *pgxpool.Pool and pgx.Tx, so the
 // read/write helpers below can run either directly against the pool
@@ -262,7 +269,7 @@ func (s *PostgresStore) migrateLegacyJSONBColumns(ctx context.Context) error {
 	defer tx.Rollback(ctx) // no-op once Commit has succeeded
 
 	type legacyRow struct {
-		id                                                          string
+		id                                                         string
 		stageHistory, cveFindings, malwareFindings, lastScanErrors []byte
 	}
 	rows, err := tx.Query(ctx, `SELECT id, stage_history, cve_findings, malware_findings, last_scan_errors FROM artifacts`)
@@ -395,7 +402,7 @@ func scanArtifactRow(row rowScanner) (*Artifact, error) {
 	var a Artifact
 	var typ, status string
 
-	err := row.Scan(&a.ID, &a.Ref, &a.Digest, &typ, &status, &a.CurrentStage, &a.CreatedAt, &a.UpdatedAt, &a.LastScanAt)
+	err := row.Scan(&a.ID, &a.Ref, &a.Digest, &typ, &status, &a.CurrentStage, &a.CreatedAt, &a.UpdatedAt, &a.LastScanAt, &a.MaintainerTeam, &a.MaintainerEmail)
 	if err != nil {
 		return nil, err
 	}
@@ -680,8 +687,8 @@ func (s *PostgresStore) Update(id string, mutate func(*Artifact)) (*Artifact, er
 	// doesn't have (its Update mutates the stored struct directly), so
 	// this needed calling out explicitly rather than discovering it via
 	// a test that only runs against Postgres.
-	if _, err := tx.Exec(ctx, `UPDATE artifacts SET status = $1, current_stage = $2, digest = $3, updated_at = $4, last_scan_at = $5 WHERE id = $6`,
-		string(a.Status), a.CurrentStage, a.Digest, a.UpdatedAt, a.LastScanAt, a.ID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE artifacts SET status = $1, current_stage = $2, digest = $3, updated_at = $4, last_scan_at = $5, maintainer_team = $6, maintainer_email = $7 WHERE id = $8`,
+		string(a.Status), a.CurrentStage, a.Digest, a.UpdatedAt, a.LastScanAt, a.MaintainerTeam, a.MaintainerEmail, a.ID); err != nil {
 		return nil, fmt.Errorf("update artifact: %w", err)
 	}
 

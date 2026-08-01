@@ -176,6 +176,12 @@ test('Details opens a modal with last-scan/digest/CVE/malware metadata, closing 
   assert.match(body, /Last scan/);
   assert.match(body, /sha256:abc123/, 'a1 has a resolved digest');
   assert.match(body, /openssl bug/);
+  assert.match(body, /Not set/, 'a1 has no maintainer configured');
+  assert.match(
+    body,
+    /href="https:\/\/nvd\.nist\.gov\/vuln\/detail\/CVE-2024-1234"/,
+    'a real CVE id gets a Read more link to NVD'
+  );
 
   // A click that lands inside the box must not close the modal.
   doc.querySelector('.modal-box').click();
@@ -191,6 +197,57 @@ test('Details opens a modal with last-scan/digest/CVE/malware metadata, closing 
   const a3Body = doc.getElementById('modal-body').innerHTML;
   assert.match(a3Body, /not resolved/);
   assert.match(a3Body, /Not yet scanned/);
+
+  // a2's only finding is malware (id "clamav-signature-match", not a
+  // real CVE) -- it must not get an NVD link.
+  doc.querySelector('button[data-action="toggle"][data-id="a2"]').click();
+  const a2Body = doc.getElementById('modal-body').innerHTML;
+  assert.doesNotMatch(a2Body, /nvd\.nist\.gov/, 'a non-CVE finding id gets no Read more link');
+
+  dom.window.close();
+});
+
+test('editing maintainer in the modal POSTs to the maintainer endpoint and updates the display', async () => {
+  const calls = [];
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url, opts) {
+      calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(SAMPLE_ARTIFACTS);
+      if (url.endsWith('/a1/maintainer') && opts && opts.method === 'POST') {
+        const sent = JSON.parse(opts.body);
+        return jsonResponse({ ...SAMPLE_ARTIFACTS[0], maintainer_team: sent.team, maintainer_email: sent.email });
+      }
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  doc.querySelector('button[data-action="toggle"][data-id="a1"]').click();
+  assert.match(doc.getElementById('modal-body').innerHTML, /Not set/);
+
+  const editBox = doc.getElementById('maintainer-edit');
+  assert.equal(editBox.hidden, true, 'edit form starts hidden');
+  doc.querySelector('button[data-action="edit-maintainer"]').click();
+  assert.equal(editBox.hidden, false, 'Edit reveals the form');
+
+  doc.getElementById('maintainer-edit-team').value = 'platform-security';
+  doc.getElementById('maintainer-edit-email').value = 'platform-security@example.com';
+  doc.querySelector('button[data-action="save-maintainer"]').click();
+  await tick(20);
+
+  const postCall = calls.find((c) => c.method === 'POST' && c.url.endsWith('/a1/maintainer'));
+  assert.ok(postCall, 'expected a POST to the maintainer endpoint');
+  const sentBody = JSON.parse(postCall.body);
+  assert.equal(sentBody.team, 'platform-security');
+  assert.equal(sentBody.email, 'platform-security@example.com');
+
+  const bodyAfter = doc.getElementById('modal-body').innerHTML;
+  assert.match(bodyAfter, /platform-security/);
+  assert.match(bodyAfter, /platform-security@example\.com/);
 
   dom.window.close();
 });
@@ -689,6 +746,66 @@ test('register form POSTs the entered ref/type and reloads the list', async () =
 
   const rows = doc.querySelectorAll('#artifact-rows tr[data-id]');
   assert.equal(rows.length, 1, 'list should have reloaded after registering');
+
+  dom.window.close();
+});
+
+test('registering with maintainer team + email sends both fields and clears them on success', async () => {
+  const calls = [];
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url, opts) {
+      calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts') && opts && opts.method === 'POST') {
+        return jsonResponse({ id: 'new1', ...JSON.parse(opts.body) });
+      }
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  doc.getElementById('reg-ref').value = 'ghcr.io/example/app:1.0';
+  doc.getElementById('reg-maintainer-team').value = 'platform-security';
+  doc.getElementById('reg-maintainer-email').value = 'platform-security@example.com';
+  doc.getElementById('register-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+  await tick(20);
+
+  const postCall = calls.find((c) => c.method === 'POST');
+  assert.ok(postCall, 'expected a POST to /api/v1/artifacts');
+  const body = JSON.parse(postCall.body);
+  assert.equal(body.maintainer_team, 'platform-security');
+  assert.equal(body.maintainer_email, 'platform-security@example.com');
+
+  assert.equal(doc.getElementById('reg-maintainer-team').value, '', 'maintainer team cleared after success');
+  assert.equal(doc.getElementById('reg-maintainer-email').value, '', 'maintainer email cleared after success');
+
+  dom.window.close();
+});
+
+test('registering with only maintainer team (no email) is rejected client-side without a request', async () => {
+  const calls = [];
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url, opts) {
+      calls.push({ url, method: (opts && opts.method) || 'GET' });
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  doc.getElementById('reg-ref').value = 'ghcr.io/example/app:1.0';
+  doc.getElementById('reg-maintainer-team').value = 'platform-security';
+  doc.getElementById('register-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+  await tick(20);
+
+  assert.ok(!calls.some((c) => c.method === 'POST'), 'must not POST with only one maintainer field filled in');
+  assert.match(doc.getElementById('status').textContent, /must both be filled in/);
 
   dom.window.close();
 });
