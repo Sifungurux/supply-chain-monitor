@@ -1855,7 +1855,65 @@ this at its own startup rather than inheriting the API server's
 in-memory setting. Off by default: most of the time the only thing
 worth seeing is the final findings or error.
 
-## All services on Flux + Helm
+**Downloadable SBOM/SARIF documents for image artifacts.** `image`
+scans only ever fed `TrivyScanner.Scan`'s parsed findings into the
+existing pipeline -- no SBOM or SARIF document was ever generated or
+kept, even though trivy can produce both from the same scan. The
+existing return channel from an isolated scan-worker Job back to
+`monitor-api` (a single `SCM_SCAN_RESULT_JSON`-prefixed line in the
+pod's combined stdout+stderr logs, see `ExtractWorkerResult` above)
+is sized for one small JSON line, not the 10-20MB a real image's
+CycloneDX SBOM or SARIF report commonly runs to -- confirmed directly
+against `node:20` locally before choosing an approach. Rather than
+force documents through that channel, a scan-worker Job now POSTs
+them straight back to `monitor-api` over the in-cluster Service
+(`monitorApi.scanWorker.apiBaseURL`, defaulting to
+`http://monitor-api:8080`) once the scan itself has succeeded --
+findings are recorded either way, since document capture is
+best-effort (see below) and independent of whether it works.
+
+`TrivyScanner.ScanRaw` (and `ScanWithRaw`, used by `runScanWorker`'s
+`image` case) exposes trivy's raw `--format json` report instead of
+just the parsed findings, so `scanner.GenerateImageDocuments` can run
+`trivy convert --format cyclonedx --scanners vuln` and
+`trivy convert --format sarif` against it -- a reformat of a report
+trivy already produced, not a second/third scan of the image.
+`--scanners vuln` on the cyclonedx conversion matters: without it,
+`trivy convert` produces a bare component inventory and silently
+drops the vulnerability data already sitting in the source report.
+(A hand-written minimal fixture for this in `documents_test.go` first
+surfaced a related gotcha: trivy's CycloneDX vulnerability linkage
+needs a matching entry in the report's own `Packages[]` array, not
+just `PkgID` on the vulnerability -- missing either drops
+vulnerabilities from the conversion with no error. The fixture is now
+a trimmed *real* trivy report, not hand-rolled JSON.)
+
+A scan-worker Job authenticates this call-back with its own
+`SCM_API_KEY`, sourced via `EnvVar.ValueFrom.SecretKeyRef` (new on
+`internal/k8sjob`'s `EnvVar`, previously plain-string-only) rather than
+a plaintext env var, so the key never shows up verbatim in `kubectl
+get job -o yaml`. Generation and upload are both best-effort, the same
+convention `Artifact.Digest` already established elsewhere: failures
+are logged, never fail the scan or block findings from being
+recorded.
+
+Documents are stored in their own `artifact_documents` table
+(`artifact_id, kind` primary key, `BYTEA content`) rather than as
+columns on `artifacts` -- keeping multi-megabyte blobs out of the
+row/response that every `List()`/poll already pulls. `Artifact` itself
+only carries `HasSBOM`/`HasSARIF` booleans (populated via a
+kind-only, no-content `SELECT`) so the dashboard can decide whether to
+show a download link without ever pulling document bytes into a list
+view. `GET/POST /api/v1/artifacts/{id}/documents/{kind}` round out the
+API surface -- upload from the scan-worker Job, download from the
+dashboard (or any other client) once captured.
+
+The dashboard's download buttons can't be a plain `<a href>`: the API
+requires an `Authorization: Bearer` header, which a bare anchor
+navigation can't carry, and would just 401. Instead it does an
+authenticated `fetch`, converts the response to a `Blob`, and triggers
+the save via a synthetic temporary `<a download>` element pointed at
+`URL.createObjectURL(blob)`, revoked immediately after.
 
 Every service in this project -- `registry`, `clamav`, `postgres`,
 `monitor-api`, `dashboard` -- deploys as a Helm chart via Flux, not

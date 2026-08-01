@@ -192,6 +192,16 @@ monitorApi:
     # monitorApi.scanTimeoutSeconds below -- main.go's runAPIServer
     # refuses to start otherwise (see that value's own comment).
     activeDeadlineSeconds: 600
+    # Lets an "image"-mode trivy scan-worker Job upload a generated
+    # SBOM/SARIF document back to this Service once it's done scanning
+    # (see internal/scanner/isolated_trivy.go's IsolatedTrivyConfig.APIBaseURL
+    # and documents.go) -- "monitor-api" is this chart's own Service name/
+    # port (templates/monitor-api/service.yaml), reachable from any pod in
+    # the same namespace via cluster DNS. Empty disables document capture
+    # entirely (findings are unaffected either way) -- e.g. for a
+    # deployment where a NetworkPolicy blocks the scan-worker Job from
+    # reaching the API server pod.
+    apiBaseURL: "http://monitor-api:8080"
   # The API handler's own overall per-scan budget (every scanner
   # registered for one artifact type shares this -- see
   # internal/api/handlers.go's scanArtifact) -- kept comfortably above

@@ -148,6 +148,26 @@ var schemaStatements = []string{
 		error       TEXT NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS scan_errors_artifact_id_idx ON scan_errors (artifact_id)`,
+	// Holds generated SBOM/SARIF documents (see Document's comment) --
+	// deliberately its own table, never a column on artifacts: these can
+	// be multi-megabyte BYTEA blobs, and artifacts is read whole on
+	// every List() call the dashboard polls every 10s (see
+	// selectArtifactColumns) -- a column here would drag document bytes
+	// through that path for every artifact on every poll. PRIMARY KEY
+	// (artifact_id, kind) both enforces "at most one current document
+	// per kind" and gives SaveDocument's ON CONFLICT upsert something to
+	// target -- a re-scan simply overwrites the previous document rather
+	// than accumulating history, matching Digest's "current state, not
+	// an audit log" convention rather than StageHistory/findings'
+	// append-only one.
+	`CREATE TABLE IF NOT EXISTS artifact_documents (
+		artifact_id  TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+		kind         TEXT NOT NULL,
+		content_type TEXT NOT NULL,
+		content      BYTEA NOT NULL,
+		created_at   TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (artifact_id, kind)
+	)`,
 }
 
 const selectArtifactColumns = `SELECT id, ref, digest, type, status, current_stage, created_at, updated_at, last_scan_at, maintainer_team, maintainer_email FROM artifacts`
@@ -440,7 +460,36 @@ func (s *PostgresStore) fillChildren(ctx context.Context, q pgxIface, a *Artifac
 	if a.LastScanErrors, err = loadScanErrors(ctx, q, a.ID); err != nil {
 		return fmt.Errorf("load scan_errors: %w", err)
 	}
+	if err = loadDocumentFlags(ctx, q, a); err != nil {
+		return fmt.Errorf("load document flags: %w", err)
+	}
 	return nil
+}
+
+// loadDocumentFlags sets HasSBOM/HasSARIF from artifact_documents.kind
+// -- deliberately a `SELECT kind` (no content column touched), so
+// checking whether a document exists never pulls its potentially
+// multi-megabyte bytes along with it. See Document's comment.
+func loadDocumentFlags(ctx context.Context, q pgxIface, a *Artifact) error {
+	rows, err := q.Query(ctx, `SELECT kind FROM artifact_documents WHERE artifact_id = $1`, a.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var kind string
+		if err := rows.Scan(&kind); err != nil {
+			return err
+		}
+		switch kind {
+		case DocumentKindSBOM:
+			a.HasSBOM = true
+		case DocumentKindSARIF:
+			a.HasSARIF = true
+		}
+	}
+	return rows.Err()
 }
 
 func loadStageHistory(ctx context.Context, q pgxIface, artifactID string) ([]StageEvent, error) {
@@ -628,6 +677,33 @@ func (s *PostgresStore) fillChildrenBatch(ctx context.Context, ids []string, byI
 		return fmt.Errorf("batch load scan_errors: %w", err)
 	}
 	errRows.Close()
+
+	docRows, err := s.pool.Query(ctx, `SELECT artifact_id, kind FROM artifact_documents WHERE artifact_id = ANY($1)`, ids)
+	if err != nil {
+		return fmt.Errorf("batch load document flags: %w", err)
+	}
+	for docRows.Next() {
+		var artifactID, kind string
+		if err := docRows.Scan(&artifactID, &kind); err != nil {
+			docRows.Close()
+			return fmt.Errorf("scan artifact_documents row: %w", err)
+		}
+		a, ok := byID[artifactID]
+		if !ok {
+			continue
+		}
+		switch kind {
+		case DocumentKindSBOM:
+			a.HasSBOM = true
+		case DocumentKindSARIF:
+			a.HasSARIF = true
+		}
+	}
+	if err := docRows.Err(); err != nil {
+		docRows.Close()
+		return fmt.Errorf("batch load document flags: %w", err)
+	}
+	docRows.Close()
 
 	return nil
 }
@@ -837,4 +913,42 @@ func (s *PostgresStore) FindByDigest(digest string) (*Artifact, error) {
 		return nil, fmt.Errorf("find artifact by digest: %w", err)
 	}
 	return a, nil
+}
+
+// SaveDocument upserts a document, overwriting any existing one of the
+// same kind for this artifact -- see artifact_documents' schema comment
+// for why re-scanning replaces rather than accumulates. The artifacts
+// foreign key does the "artifactID must exist" check for free; a
+// missing artifact surfaces as a foreign-key-violation error here
+// rather than a separate existence query first.
+func (s *PostgresStore) SaveDocument(artifactID, kind, contentType string, content []byte) error {
+	ctx := context.Background()
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO artifact_documents (artifact_id, kind, content_type, content, created_at)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (artifact_id, kind) DO UPDATE SET content_type = $3, content = $4, created_at = $5
+	`, artifactID, kind, contentType, content, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("save %s document for %q: %w", kind, artifactID, err)
+	}
+	return nil
+}
+
+// GetDocument returns (nil, nil) if no document of that kind has been
+// captured yet -- see the Store interface's own comment on this
+// "not found is the expected, common case" convention.
+func (s *PostgresStore) GetDocument(artifactID, kind string) (*Document, error) {
+	ctx := context.Background()
+	var d Document
+	err := s.pool.QueryRow(ctx, `
+		SELECT artifact_id, kind, content_type, content, created_at
+		FROM artifact_documents WHERE artifact_id = $1 AND kind = $2
+	`, artifactID, kind).Scan(&d.ArtifactID, &d.Kind, &d.ContentType, &d.Content, &d.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get %s document for %q: %w", kind, artifactID, err)
+	}
+	return &d, nil
 }

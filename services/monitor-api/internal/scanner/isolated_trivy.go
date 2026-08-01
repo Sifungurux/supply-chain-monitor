@@ -70,6 +70,22 @@ type IsolatedTrivyConfig struct {
 
 	CPURequest, MemoryRequest, EphemeralStorageRequest string
 	CPULimit, MemoryLimit, EphemeralStorageLimit       string
+
+	// APIBaseURL, APIKeySecretName, and APIKeySecretKey are only
+	// consulted when SubCommand is "image" -- they let the scan-worker
+	// Job upload a generated SBOM/SARIF document (see documents.go's
+	// GenerateImageDocuments and main.go's runScanWorker) back to
+	// monitor-api's own in-cluster Service once it's done, the only
+	// return path available for a document this size (findings still
+	// return via the existing pod-logs/WorkerResult channel, unchanged
+	// -- see ArtifactAwareScanner's comment). APIBaseURL empty disables
+	// document capture entirely (ScanForArtifact never sets the
+	// SCM_ARTIFACT_ID/SCM_API_BASE_URL/SCM_API_KEY env vars), so a
+	// deployment that doesn't set this just gets findings, exactly as
+	// before this existed.
+	APIBaseURL       string
+	APIKeySecretName string
+	APIKeySecretKey  string
 }
 
 func (c IsolatedTrivyConfig) withDefaults() IsolatedTrivyConfig {
@@ -118,6 +134,15 @@ func (c IsolatedTrivyConfig) withDefaults() IsolatedTrivyConfig {
 		// nothing here that should ever grow.
 		c.EphemeralStorageLimit = "256Mi"
 	}
+	if c.APIKeySecretName == "" {
+		// Same Secret the dashboard's render-config initContainer and
+		// this pod's own API server already read the shared API key
+		// from -- see charts/supply-chain-monitor/templates/monitor-api/deployment.yaml.
+		c.APIKeySecretName = "scm-monitor-api-auth"
+	}
+	if c.APIKeySecretKey == "" {
+		c.APIKeySecretKey = "API_KEY"
+	}
 	return c
 }
 
@@ -156,13 +181,51 @@ func NewIsolatedTrivyScanner(client jobClient, cfg IsolatedTrivyConfig) *Isolate
 // runScanWorker in main.go), which only ever produces "cve" findings.
 func (s *IsolatedTrivyScanner) Bucket() string { return "cve" }
 
+// Scan implements the base Scanner interface -- equivalent to
+// ScanForArtifact with an empty artifactID, which never triggers
+// document capture (see ScanForArtifact's comment). Kept as a thin
+// wrapper so every existing caller (and test) that only knows about
+// Scanner, not ArtifactAwareScanner, is unaffected.
 func (s *IsolatedTrivyScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding, error) {
+	return s.ScanForArtifact(ctx, ref, "")
+}
+
+// ScanForArtifact implements ArtifactAwareScanner: identical to Scan,
+// except that when SubCommand is "image" and both artifactID and
+// s.cfg.APIBaseURL are set, the Job also gets SCM_ARTIFACT_ID/
+// SCM_API_BASE_URL/SCM_API_KEY env vars -- runScanWorker's image branch
+// (main.go) uses those to best-effort upload a generated SBOM/SARIF
+// document back to monitor-api once the scan itself is done. Findings
+// still return exactly as before, via the pod-logs/WorkerResult channel
+// -- the document upload is a separate, independent HTTP call the
+// worker makes from inside the Job, not part of that channel's
+// contract at all.
+func (s *IsolatedTrivyScanner) ScanForArtifact(ctx context.Context, ref, artifactID string) ([]artifact.Finding, error) {
 	name, err := randomJobName()
 	if err != nil {
 		return nil, fmt.Errorf("generate scan job name: %w", err)
 	}
 
 	const cacheVolumeName = "trivy-db-cache"
+
+	env := map[string]string{
+		"SCM_SCAN_REF":    ref,
+		"SCM_TRIVY_MODE":  s.cfg.SubCommand,
+		"TRIVY_CACHE_DIR": s.cfg.CacheMountPath,
+		// Only actually consulted by the worker in "sbom" mode (see
+		// FetchPlainHTTP's own comment) -- harmless to always set.
+		"FETCH_PLAIN_HTTP": strconv.FormatBool(s.cfg.FetchPlainHTTP),
+		// See VerboseLogs's own comment.
+		"SCM_SCAN_VERBOSE": strconv.FormatBool(s.cfg.VerboseLogs),
+	}
+	var secretEnv []k8sjob.SecretEnvVar
+	if s.cfg.SubCommand == "image" && artifactID != "" && s.cfg.APIBaseURL != "" {
+		env["SCM_ARTIFACT_ID"] = artifactID
+		env["SCM_API_BASE_URL"] = s.cfg.APIBaseURL
+		secretEnv = []k8sjob.SecretEnvVar{
+			{Name: "SCM_API_KEY", SecretName: s.cfg.APIKeySecretName, SecretKey: s.cfg.APIKeySecretKey},
+		}
+	}
 
 	job := k8sjob.NewScanJob(k8sjob.ScanJobConfig{
 		Name:                  name,
@@ -171,16 +234,8 @@ func (s *IsolatedTrivyScanner) Scan(ctx context.Context, ref string) ([]artifact
 		ServiceAccount:        s.cfg.ServiceAccount,
 		Command:               []string{"/usr/local/bin/monitor-api", "scan-worker"},
 		ActiveDeadlineSeconds: s.cfg.ActiveDeadlineSeconds,
-		Env: map[string]string{
-			"SCM_SCAN_REF":    ref,
-			"SCM_TRIVY_MODE":  s.cfg.SubCommand,
-			"TRIVY_CACHE_DIR": s.cfg.CacheMountPath,
-			// Only actually consulted by the worker in "sbom" mode (see
-			// FetchPlainHTTP's own comment) -- harmless to always set.
-			"FETCH_PLAIN_HTTP": strconv.FormatBool(s.cfg.FetchPlainHTTP),
-			// See VerboseLogs's own comment.
-			"SCM_SCAN_VERBOSE": strconv.FormatBool(s.cfg.VerboseLogs),
-		},
+		Env:                   env,
+		SecretEnvVars:         secretEnv,
 		ExtraVolumes: []k8sjob.Volume{
 			{
 				Name: cacheVolumeName,

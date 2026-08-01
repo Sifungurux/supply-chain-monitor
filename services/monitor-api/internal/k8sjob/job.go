@@ -80,14 +80,34 @@ type Container struct {
 	ImagePullPolicy string                    `json:"imagePullPolicy,omitempty"`
 	Command         []string                  `json:"command,omitempty"`
 	Env             []EnvVar                  `json:"env,omitempty"`
-	Resources       ResourceRequirements       `json:"resources,omitempty"`
-	SecurityContext *ContainerSecurityContext  `json:"securityContext,omitempty"`
-	VolumeMounts    []VolumeMount              `json:"volumeMounts,omitempty"`
+	Resources       ResourceRequirements      `json:"resources,omitempty"`
+	SecurityContext *ContainerSecurityContext `json:"securityContext,omitempty"`
+	VolumeMounts    []VolumeMount             `json:"volumeMounts,omitempty"`
 }
 
 type EnvVar struct {
 	Name  string `json:"name"`
-	Value string `json:"value"`
+	Value string `json:"value,omitempty"`
+	// ValueFrom, when set, sources this env var from a Secret instead
+	// of Value -- used for SCM_API_KEY (see ScanJobConfig.SecretEnvVars
+	// and IsolatedTrivyConfig.APIKeySecretName/Key), matching the same
+	// secretKeyRef pattern the dashboard's render-config initContainer
+	// already uses (charts/supply-chain-monitor/templates/dashboard/deployment.yaml)
+	// rather than putting a credential in a plain env value, which would
+	// be readable in plaintext via `kubectl get job -o yaml`. Populated
+	// by the kubelet directly from the Secret object at pod start --
+	// this needs no RBAC on the pod's own ServiceAccount (scm-scan-worker
+	// has none, deliberately, see PodSpec.ServiceAccountName's comment).
+	ValueFrom *EnvVarSource `json:"valueFrom,omitempty"`
+}
+
+type EnvVarSource struct {
+	SecretKeyRef *SecretKeySelector `json:"secretKeyRef,omitempty"`
+}
+
+type SecretKeySelector struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
 }
 
 type ResourceRequirements struct {
@@ -142,6 +162,13 @@ type VolumeMount struct {
 	ReadOnly  bool   `json:"readOnly,omitempty"`
 }
 
+// SecretEnvVar is one Secret-sourced env var for ScanJobConfig.SecretEnvVars.
+type SecretEnvVar struct {
+	Name       string // env var name inside the pod, e.g. "SCM_API_KEY"
+	SecretName string
+	SecretKey  string
+}
+
 func boolPtr(b bool) *bool    { return &b }
 func int64Ptr(i int64) *int64 { return &i }
 func int32Ptr(i int32) *int32 { return &i }
@@ -151,12 +178,20 @@ func int32Ptr(i int32) *int32 { return &i }
 // so the generated JSON -- and therefore job_test.go's assertions --
 // is deterministic.
 type ScanJobConfig struct {
-	Name                  string
-	Namespace             string
-	Image                 string
-	ServiceAccount        string
-	Command               []string
-	Env                   map[string]string
+	Name           string
+	Namespace      string
+	Image          string
+	ServiceAccount string
+	Command        []string
+	Env            map[string]string
+	// SecretEnvVars are appended after Env's sorted plain values --
+	// Secret-sourced env vars (see EnvVar.ValueFrom's comment), for
+	// values that shouldn't be readable in plaintext via `kubectl get
+	// job -o yaml` the way a plain Env value is. Small enough (one entry
+	// today: IsolatedTrivyScanner's SCM_API_KEY) that a slice with no
+	// particular ordering guarantee is fine -- unlike Env, nothing here
+	// depends on deterministic ordering for test assertions.
+	SecretEnvVars         []SecretEnvVar
 	ActiveDeadlineSeconds int64
 
 	CPURequest              string
@@ -188,9 +223,15 @@ func NewScanJob(cfg ScanJobConfig) *Job {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	env := make([]EnvVar, 0, len(keys))
+	env := make([]EnvVar, 0, len(keys)+len(cfg.SecretEnvVars))
 	for _, k := range keys {
 		env = append(env, EnvVar{Name: k, Value: cfg.Env[k]})
+	}
+	for _, sev := range cfg.SecretEnvVars {
+		env = append(env, EnvVar{
+			Name:      sev.Name,
+			ValueFrom: &EnvVarSource{SecretKeyRef: &SecretKeySelector{Name: sev.SecretName, Key: sev.SecretKey}},
+		})
 	}
 
 	labels := map[string]string{"app": "scm-scan-worker"}

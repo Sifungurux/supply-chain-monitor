@@ -71,6 +71,10 @@ data:
   # the isolated worker looks for the one already pulled).
   TRIVY_CACHE_CLAIM: {{ .Values.monitorApi.trivyCache.pvcName | quote }}
   TRIVY_CACHE_DIR: {{ .Values.monitorApi.trivyCache.mountPath | quote }}
+  # Lets an "image"-mode scan-worker Job upload a generated SBOM/SARIF
+  # document back to this Service -- see monitorApi.scanWorker.apiBaseURL's
+  # own comment in values.yaml.
+  SCAN_WORKER_API_BASE_URL: {{ .Values.monitorApi.scanWorker.apiBaseURL | quote }}
   {{- if .Values.monitorApi.trivyDB.enabled }}
   # air-gapped operation -- see cluster/seed-trivy-db.sh and README's
   # "Air-gapped operation".

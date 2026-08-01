@@ -207,6 +207,96 @@ test('Details opens a modal with last-scan/digest/CVE/malware metadata, closing 
   dom.window.close();
 });
 
+test('the Details modal shows a download button only for documents that have actually been captured', async () => {
+  const artifacts = [
+    { id: 'd1', ref: 'alpine:3.19', type: 'image', status: 'scanned', current_stage: 'scan',
+      cve_findings: [], malware_findings: [], created_at: '2026-07-19T09:00:00Z', updated_at: '2026-07-19T10:05:00Z',
+      has_sbom: true, has_sarif: true },
+    { id: 'd2', ref: 'busybox:latest', type: 'image', status: 'scanned', current_stage: 'scan',
+      cve_findings: [], malware_findings: [], created_at: '2026-07-19T09:00:00Z', updated_at: '2026-07-19T09:30:00Z' }
+  ];
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(artifacts);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  doc.querySelector('button[data-action="toggle"][data-id="d1"]').click();
+  const d1Body = doc.getElementById('modal-body').innerHTML;
+  assert.match(d1Body, /Download SBOM/);
+  assert.match(d1Body, /Download SARIF report/);
+
+  doc.querySelector('button[data-action="toggle"][data-id="d2"]').click();
+  const d2Body = doc.getElementById('modal-body').innerHTML;
+  assert.doesNotMatch(d2Body, /Download SBOM/);
+  assert.doesNotMatch(d2Body, /Download SARIF report/);
+  assert.match(d2Body, /Not yet generated/);
+
+  dom.window.close();
+});
+
+test('clicking a document download button fetches it with the API key and triggers a save, without a plain <a href> (which would 401)', async () => {
+  const artifacts = [
+    { id: 'd1', ref: 'alpine:3.19', type: 'image', status: 'scanned', current_stage: 'scan',
+      cve_findings: [], malware_findings: [], created_at: '2026-07-19T09:00:00Z', updated_at: '2026-07-19T10:05:00Z',
+      has_sbom: true }
+  ];
+  let capturedRequest = null;
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url, opts) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(artifacts);
+      if (url.endsWith('/api/v1/artifacts/d1/documents/sbom')) {
+        capturedRequest = { url, headers: (opts && opts.headers) || {} };
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          blob: () => Promise.resolve(new dom.window.Blob(['{"bomFormat":"CycloneDX"}'], { type: 'application/vnd.cyclonedx+json' }))
+        });
+      }
+      return errorResponse(404, {});
+    },
+    beforeParseExtra(window) {
+      window.SCM_CONFIG = { apiBase: '', apiKey: 'test-key-123' };
+      // jsdom has no createObjectURL/revokeObjectURL (confirmed against
+      // this project's pinned jsdom version) -- stubbed here the same
+      // way env.js/SCM_CONFIG is injected above, so the download path
+      // itself is exercised without needing a real browser for this
+      // part. The click-triggers-an-actual-file-save behavior this
+      // enables in a real browser still needs live verification (see
+      // this test's own title) -- jsdom can't observe an OS-level save
+      // dialog either way.
+      let created = 0, revoked = 0;
+      window.URL.createObjectURL = () => { created++; return 'blob:stub-url'; };
+      window.URL.revokeObjectURL = () => { revoked++; };
+      window.__objectUrlCounts = () => ({ created, revoked });
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  doc.querySelector('button[data-action="toggle"][data-id="d1"]').click();
+  doc.querySelector('button[data-action="download-sbom"][data-id="d1"]').click();
+  await tick(20);
+
+  if (!capturedRequest) throw new Error('expected the sbom document endpoint to be fetched');
+  assert.equal(capturedRequest.headers['Authorization'], 'Bearer test-key-123', 'download must send the API key -- a plain <a href> could not');
+
+  const counts = dom.window.__objectUrlCounts();
+  assert.equal(counts.created, 1, 'expected exactly one object URL created for the download');
+  assert.equal(counts.revoked, 1, 'expected the object URL to be revoked after triggering the save');
+
+  dom.window.close();
+});
+
 test('search filters the artifact table by ref, digest, stage, and CVE/malware id or title, case-insensitively', async () => {
   const dom = buildDom({
     url: 'http://localhost:30301/',
