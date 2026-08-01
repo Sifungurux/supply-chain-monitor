@@ -663,6 +663,20 @@
   els.modeNormal.addEventListener('change', updateRegMode);
   els.modeVerify.addEventListener('change', updateRegMode);
 
+  // Seeds which radio starts checked from the chart's
+  // dashboard.defaultRegistrationMode value (see values.yaml and
+  // env.js's own comment above) -- e.g. a deployment that wants every
+  // visitor defaulting to "verify" instead of having to remember to
+  // switch it by hand each time. Anything other than exactly "verify"
+  // (including unset/empty, the injected.apiBase/apiKey pattern's own
+  // convention) falls back to "normal".
+  (function applyDefaultRegMode() {
+    var verify = injected.defaultRegMode === 'verify';
+    els.modeVerify.checked = verify;
+    els.modeNormal.checked = !verify;
+    updateRegMode();
+  })();
+
   els.form.addEventListener('submit', async function (ev) {
     ev.preventDefault();
     var ref = els.ref.value.trim();

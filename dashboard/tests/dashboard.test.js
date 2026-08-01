@@ -593,6 +593,49 @@ test('a value saved in localStorage still overrides window.SCM_CONFIG', async ()
   dom.window.close();
 });
 
+test('window.SCM_CONFIG.defaultRegMode "verify" pre-selects Verify mode and shows the expected-digest field', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      return errorResponse(404, {});
+    },
+    beforeParseExtra(window) {
+      window.SCM_CONFIG = { apiBase: '', apiKey: '', defaultRegMode: 'verify' };
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  assert.equal(doc.getElementById('reg-mode-verify').checked, true);
+  assert.equal(doc.getElementById('reg-mode-normal').checked, false);
+  assert.equal(doc.getElementById('reg-expected-digest').hidden, false);
+
+  dom.window.close();
+});
+
+test('an unset/unrecognized defaultRegMode falls back to "normal" with the expected-digest field hidden', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  assert.equal(doc.getElementById('reg-mode-normal').checked, true);
+  assert.equal(doc.getElementById('reg-mode-verify').checked, false);
+  assert.equal(doc.getElementById('reg-expected-digest').hidden, true);
+
+  dom.window.close();
+});
+
 test('falls back to the old manual-entry behavior when window.SCM_CONFIG is absent (e.g. env.js failed to load)', async () => {
   const dom = buildDom({
     url: 'http://localhost:30301/',

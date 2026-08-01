@@ -25,3 +25,4 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   DASHBOARD_API_BASE: {{ .Values.dashboard.apiBase | quote }}
+  DASHBOARD_DEFAULT_REG_MODE: {{ .Values.dashboard.defaultRegistrationMode | quote }}
