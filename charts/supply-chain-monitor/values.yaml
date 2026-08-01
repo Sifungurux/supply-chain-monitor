@@ -313,15 +313,6 @@ dashboard:
   # setup (e.g. a fixed ingress hostname that differs from the
   # dashboard's own).
   apiBase: ""
-  # Default state of the Register form's mode radio buttons on first
-  # load: "normal" (Register normally) or "verify" (Verify digest
-  # before registering, showing the expected-digest field pre-selected).
-  # Anything else -- including empty -- falls back to "normal" (see
-  # index.html's applyDefaultRegMode). Per-browser localStorage doesn't
-  # come into play here the way it does for apiBase/apiKey: the mode is
-  # plain form state, not a saved credential, so it always starts from
-  # this default on every page load.
-  defaultRegistrationMode: normal
   service:
     nodePort: 30301
   resources:
