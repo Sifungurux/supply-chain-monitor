@@ -26,3 +26,4 @@ metadata:
 data:
   DASHBOARD_API_BASE: {{ .Values.dashboard.apiBase | quote }}
   DASHBOARD_ALLOW_MANUAL_REGISTRATION: {{ .Values.dashboard.allowManualRegistration | quote }}
+  DASHBOARD_SHOW_CONNECTION_SETTINGS: {{ .Values.dashboard.showConnectionSettings | quote }}

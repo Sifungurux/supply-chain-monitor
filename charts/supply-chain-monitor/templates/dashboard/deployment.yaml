@@ -51,7 +51,8 @@ spec:
               ESCAPED_KEY=$(printf '%s' "$API_KEY" | sed 's/\\/\\\\/g; s/"/\\"/g')
               ESCAPED_BASE=$(printf '%s' "$DASHBOARD_API_BASE" | sed 's/\\/\\\\/g; s/"/\\"/g')
               ESCAPED_ALLOW_MANUAL_REG=$(printf '%s' "$DASHBOARD_ALLOW_MANUAL_REGISTRATION" | sed 's/\\/\\\\/g; s/"/\\"/g')
-              printf 'window.SCM_CONFIG = { apiBase: "%s", apiKey: "%s", allowManualRegistration: "%s" };\n' "$ESCAPED_BASE" "$ESCAPED_KEY" "$ESCAPED_ALLOW_MANUAL_REG" > /html/env.js
+              ESCAPED_SHOW_CONN_SETTINGS=$(printf '%s' "$DASHBOARD_SHOW_CONNECTION_SETTINGS" | sed 's/\\/\\\\/g; s/"/\\"/g')
+              printf 'window.SCM_CONFIG = { apiBase: "%s", apiKey: "%s", allowManualRegistration: "%s", showConnectionSettings: "%s" };\n' "$ESCAPED_BASE" "$ESCAPED_KEY" "$ESCAPED_ALLOW_MANUAL_REG" "$ESCAPED_SHOW_CONN_SETTINGS" > /html/env.js
           env:
             - name: API_KEY
               valueFrom:
@@ -72,6 +73,11 @@ spec:
                 configMapKeyRef:
                   name: scm-dashboard-config
                   key: DASHBOARD_ALLOW_MANUAL_REGISTRATION
+            - name: DASHBOARD_SHOW_CONNECTION_SETTINGS
+              valueFrom:
+                configMapKeyRef:
+                  name: scm-dashboard-config
+                  key: DASHBOARD_SHOW_CONNECTION_SETTINGS
           volumeMounts:
             - name: dashboard-html
               mountPath: /config-src

@@ -1047,7 +1047,7 @@ below -- only set this if that self-detection is ever wrong for a
 given setup). The initContainer copies `index.html` from the
 ConfigMap-backed volume into a shared `emptyDir`, and writes a second
 file there, `env.js` -- a single `window.SCM_CONFIG = { apiBase,
-apiKey, allowManualRegistration }` assignment -- which `index.html` loads via a plain `<script
+apiKey, allowManualRegistration, showConnectionSettings }` assignment -- which `index.html` loads via a plain `<script
 src="env.js">` tag before its own inline script runs. The main nginx
 container serves that `emptyDir`, not the ConfigMap directly, so nginx
 itself never touches the Secret at all -- only the initContainer's
