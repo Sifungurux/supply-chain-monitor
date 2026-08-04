@@ -315,6 +315,19 @@ the pod" convention (see `looksLikeLocalPath`) never attempt digest
 resolution at all -- there's no registry to check a filesystem path
 against.
 
+A bare Docker Hub ref (`nginx:alpine`, `bitnami/redis:7.2.5` -- no
+explicit registry host) is qualified with `docker.io/` (and `library/`
+for a single-segment official-image name) before being handed to `oras`:
+unlike `docker pull`, `oras` never applies that default itself, so
+`oras manifest fetch nginx:alpine` parses `nginx` as the registry host
+and fails a DNS lookup for it -- every unqualified Docker Hub ref,
+deterministically, every time (confirmed live: `oras manifest fetch
+bitnami/redis:7.2.5` tried to resolve a registry literally named
+`bitnami`). `qualifyDockerHubRef` (`internal/scanner/digest.go`) is the
+fix, applied only to digest resolution -- image *scanning* (trivy, via
+go-containerregistry) already applies this same default on its own, so
+it was never affected.
+
 Registration-time resolution above is one-shot -- a registry that's
 rate-limited or briefly unreachable at that moment leaves the digest
 empty forever, with no automatic retry. `monitor-api sweep-registered`

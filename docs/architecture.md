@@ -1714,6 +1714,36 @@ point at (the same assumption `RegistryFetcher` already makes). Applying
 against a real registry and failing every single time, so
 `resolveDigest` only applies it when `t != artifact.TypeImage`.
 
+**Fixed: bare Docker Hub refs never resolved, at all, ever.** Not a
+rate-limiting or flakiness problem as first suspected from the load-test
+batch's failure pattern -- confirmed live against the real cluster:
+`oras`, unlike `docker pull`, never defaults an unqualified ref to
+`docker.io`. `oras manifest fetch nginx:alpine` parses `nginx` itself as
+the registry host and fails a DNS lookup for it; `oras manifest fetch
+bitnami/redis:7.2.5` does the same for a registry literally named
+`bitnami`. Every bare Docker Hub ref (no explicit registry host) failed
+this way 100% of the time, unconditionally -- not intermittently under
+load, which is what the original "Docker Hub rate limit" hypothesis
+would have predicted. Image *scanning* (trivy, via
+go-containerregistry) was never affected -- that library already applies
+Docker's own reference-normalization default itself, which is exactly
+why scanning e.g. `nginx:alpine` always worked while resolving its
+digest never did; the bug was isolated to this one oras call.
+
+`qualifyDockerHubRef` (`internal/scanner/digest.go`) applies the same
+normalization Docker itself uses before calling oras: a ref with no `/`
+is a single-segment official-image name (`nginx:alpine` ->
+`docker.io/library/nginx:alpine`); a ref with a `/` is already qualified
+if its first segment looks like a host (contains `.` or `:`, or is
+exactly `localhost` -- `ghcr.io/org/app:tag`, `localhost:5000/app:tag`,
+the in-cluster `scm-registry` FQDN) and is left untouched; otherwise the
+first segment is a Docker Hub user/org name (`bitnami/redis:7.2.5` ->
+`docker.io/bitnami/redis:7.2.5`, no `library/` needed since it already
+names an owner). Scoped to digest resolution only -- `RegistryFetcher`
+(file/sbom/sarif fetches) never needs it, since those refs are always
+already fully-qualified `scm-registry` references, never bare Docker Hub
+ones.
+
 `POST /api/v1/artifacts` returns `409 Conflict` (with the existing
 artifact's id/ref in the body) for a genuine duplicate, checked *before*
 `Store.Create` is ever called, so no orphaned row is created and then

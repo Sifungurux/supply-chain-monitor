@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 // DigestResolver resolves an OCI ref to its content digest via a
@@ -51,6 +52,39 @@ type orasDescriptor struct {
 	Digest string `json:"digest"`
 }
 
+// qualifyDockerHubRef prefixes ref with "docker.io/" (and "library/" for
+// a single-segment official-image name) when it has no explicit registry
+// host component -- the same reference-normalization Docker itself (and,
+// transitively, trivy's go-containerregistry-based image scanning, which
+// is why *scanning* e.g. "nginx:alpine" has always worked even though
+// *resolving its digest* here never did) applies before ever reaching a
+// registry. oras has no such default: `oras manifest fetch nginx:alpine`
+// parses "nginx" itself as the registry host and fails a DNS lookup for
+// it, deterministically, for every single unqualified Docker Hub ref --
+// confirmed live: `oras manifest fetch bitnami/redis:7.2.5` tried to
+// resolve a registry literally named "bitnami" and failed
+// ("lookup bitnami ...: no such host") before this existed.
+//
+// The rule (matching Docker's own reference-parsing convention): a ref
+// with no "/" at all is a single-segment official-image name
+// ("nginx:alpine" -> "docker.io/library/nginx:alpine"). A ref with a "/"
+// is already qualified if its first segment looks like a host (contains
+// "." or ":", or is exactly "localhost") -- e.g. "ghcr.io/org/app:tag",
+// "localhost:5000/app:tag" -- and is left untouched. Otherwise the first
+// segment is a Docker Hub user/org name ("bitnami/redis:7.2.5" ->
+// "docker.io/bitnami/redis:7.2.5") -- no "library/" needed, it already
+// names an owner.
+func qualifyDockerHubRef(ref string) string {
+	first, rest, hasSlash := strings.Cut(ref, "/")
+	if !hasSlash {
+		return "docker.io/library/" + ref
+	}
+	if strings.ContainsAny(first, ".:") || first == "localhost" {
+		return ref // already has an explicit registry host
+	}
+	return "docker.io/" + first + "/" + rest
+}
+
 func (r *OrasDigestResolver) Resolve(ctx context.Context, ref string, plainHTTP bool) (string, error) {
 	if looksLikeLocalPath(ref) {
 		return "", nil
@@ -60,7 +94,7 @@ func (r *OrasDigestResolver) Resolve(ctx context.Context, ref string, plainHTTP 
 	if plainHTTP {
 		args = append(args, "--plain-http")
 	}
-	args = append(args, ref)
+	args = append(args, qualifyDockerHubRef(ref))
 
 	cmd := exec.CommandContext(ctx, "oras", args...)
 	var stdout, stderr bytes.Buffer
