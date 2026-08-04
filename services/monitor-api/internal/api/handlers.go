@@ -40,6 +40,9 @@ type handler struct {
 	// like: still legitimately running, not actually stuck. Falls back
 	// to 5 minutes if zero (e.g. in tests that don't care about this).
 	scanTimeout time.Duration
+	// requireDigest is monitorApi.requireDigest / REQUIRE_DIGEST -- see
+	// NewRouter's own comment for the full behavior this gates.
+	requireDigest bool
 }
 
 const defaultScanTimeout = 5 * time.Minute
@@ -181,12 +184,27 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if h.requireDigest && req.ExpectedDigest == "" {
+		writeError(w, http.StatusBadRequest, "expected_digest is required (REQUIRE_DIGEST is enabled)")
+		return
+	}
 
 	// Best-effort digest resolution + duplicate check, before Create --
 	// see resolveDigest's own comment for why an empty digest here just
 	// means "proceed without dedup," not a failure.
 	digest := h.resolveDigest(r.Context(), req.Ref, t)
-	if !checkExpectedDigest(w, req.Ref, digest, req.ExpectedDigest) {
+
+	// unsafe (REQUIRE_DIGEST only) and the reject-on-mismatch path below
+	// (the pre-existing, opt-in-per-request behavior) are mutually
+	// exclusive: h.requireDigest already guaranteed ExpectedDigest is set
+	// above, so a mismatch here always marks the artifact rather than
+	// ever falling through to checkExpectedDigest's 409 -- see
+	// Artifact.Unsafe's own comment for why a deployment-wide policy
+	// registers-and-flags instead of rejecting outright.
+	var unsafe bool
+	if h.requireDigest {
+		unsafe = !digestMatchesExpected(digest, req.ExpectedDigest)
+	} else if !checkExpectedDigest(w, req.Ref, digest, req.ExpectedDigest) {
 		return
 	}
 	if digest != "" {
@@ -211,11 +229,14 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if digest != "" {
-		if updated, err := h.store.Update(a.ID, func(art *artifact.Artifact) { art.Digest = digest }); err != nil {
+	if digest != "" || unsafe {
+		if updated, err := h.store.Update(a.ID, func(art *artifact.Artifact) {
+			art.Digest = digest
+			art.Unsafe = unsafe
+		}); err != nil {
 			// The artifact itself was created successfully; only the
-			// digest metadata failed to persist. Log rather than fail a
-			// registration that otherwise succeeded.
+			// digest/unsafe metadata failed to persist. Log rather than
+			// fail a registration that otherwise succeeded.
 			log.Printf("failed to persist resolved digest for artifact %s: %v", a.ID, err)
 		} else {
 			a = updated
@@ -361,9 +382,21 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 			results = append(results, res)
 			continue
 		}
+		if h.requireDigest && item.ExpectedDigest == "" {
+			res.Error = "expected_digest is required (REQUIRE_DIGEST is enabled)"
+			failed++
+			results = append(results, res)
+			continue
+		}
 
 		digest := digests[i]
-		if !digestMatchesExpected(digest, item.ExpectedDigest) {
+		// unsafe mirrors createArtifact's own requireDigest handling --
+		// see that function's comment and Artifact.Unsafe's for why a
+		// deployment-wide policy marks rather than rejects.
+		var unsafe bool
+		if h.requireDigest {
+			unsafe = !digestMatchesExpected(digest, item.ExpectedDigest)
+		} else if !digestMatchesExpected(digest, item.ExpectedDigest) {
 			res.Error = fmt.Sprintf("resolved digest does not match expected digest %q -- registration refused", item.ExpectedDigest)
 			failed++
 			results = append(results, res)
@@ -402,12 +435,17 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 			results = append(results, res)
 			continue
 		}
-		if digest != "" {
-			if updated, err := h.store.Update(a.ID, func(art *artifact.Artifact) { art.Digest = digest }); err != nil {
+		if digest != "" || unsafe {
+			if updated, err := h.store.Update(a.ID, func(art *artifact.Artifact) {
+				art.Digest = digest
+				art.Unsafe = unsafe
+			}); err != nil {
 				log.Printf("failed to persist resolved digest for artifact %s: %v", a.ID, err)
 			} else {
 				a = updated
 			}
+		}
+		if digest != "" {
 			seenInBatch[digest] = a
 		}
 		if item.MaintainerTeam != "" || item.MaintainerEmail != "" {

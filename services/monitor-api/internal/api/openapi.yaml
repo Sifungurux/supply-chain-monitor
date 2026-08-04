@@ -386,8 +386,13 @@ components:
         expected_digest:
           type: string
           description: >-
-            If set, registration is refused unless the ref's resolved
+            Required if this deployment has REQUIRE_DIGEST enabled
+            (monitorApi.requireDigest); optional otherwise. Normally,
+            registration is refused (409) unless the ref's resolved
             digest matches this exactly (pins against a mutable tag).
+            Under REQUIRE_DIGEST, a mismatch (or an unresolvable ref)
+            does NOT refuse registration -- the artifact is still
+            created, with `unsafe: true` instead.
           example: "sha256:3f2a9c1b..."
         maintainer_team:
           type: string
@@ -453,6 +458,14 @@ components:
         digest:
           type: string
           description: Resolved OCI content digest, if available.
+        unsafe:
+          type: boolean
+          description: >-
+            Set at registration time when REQUIRE_DIGEST was enabled and
+            the provided expected_digest didn't match what actually
+            resolved (or nothing resolved at all). Never set any other
+            way -- a scan backfilling a missing digest never touches
+            this.
         maintainer_team: { type: string }
         maintainer_email: { type: string }
         type:

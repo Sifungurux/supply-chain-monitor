@@ -2448,6 +2448,49 @@ registry call on every routine re-scan).
 
 Set `monitorApi.sweep.enabled: false` to disable the CronJob entirely.
 
+### Requiring a verified digest at registration
+
+`monitorApi.requireDigest` (`REQUIRE_DIGEST`, `internal/api/handler.requireDigest`)
+is a deployment-wide policy layered on top of the existing, opt-in-per-
+request `expected_digest` pin (see "Detecting duplicate registrations by
+digest" above) -- but with deliberately different failure semantics, not
+just "the same pin, mandatory now."
+
+**Off (default):** exactly today's behavior. `expected_digest` is
+optional; if provided and it doesn't match the resolved digest (or
+nothing resolves), `checkExpectedDigest` refuses the whole registration
+with `409 Conflict` and nothing is created.
+
+**On:** `expected_digest` becomes a required field -- `createArtifact`
+and each entry of `bulkCreateArtifacts` reject a request/entry missing it
+with `400` before ever calling `resolveDigest`. But a mismatch (or an
+unresolvable ref) no longer refuses registration the way the opt-in pin
+does: the artifact is still created, with `Artifact.Unsafe = true`
+instead. `bulkCreateArtifacts` follows the same split -- an entry that
+would 409 under the opt-in pin instead counts toward `created`, not
+`failed`, under `REQUIRE_DIGEST`.
+
+This is a deliberate design choice, not a softened version of the
+existing pin: `expected_digest`'s per-request 409 is meant for a caller
+who already knows exactly what digest they expect and wants a hard stop
+if it's wrong. `REQUIRE_DIGEST` is a blanket operator policy applied to
+every caller, including ones that don't know about it yet -- refusing
+every unverifiable registration outright under that policy would turn on
+a real risk of breaking an existing pipeline's registrations the moment
+an operator flips this on, for a policy whose whole point is *visibility*
+into unverified artifacts, not blocking them. Marking `unsafe: true`
+gets that visibility (surfaced in both the API response and, via
+`unsafeBadge` in `dashboard/index.html`, a red badge next to the status
+badge in the artifact table and on the detail page) without that
+blast radius.
+
+`Artifact.Unsafe` is set exactly once, at registration time, by
+`createArtifact`/`bulkCreateArtifacts` only -- `scanArtifact`'s own
+digest backfill (see "Sweeping registered-but-unscanned artifacts" above)
+never touches it, since a scan backfilling a digest that was simply never
+attempted is a different situation from a registration whose claimed
+digest was checked and found wrong.
+
 ## Roadmap / open gaps
 
 - ~~**Fix-detection is per-type, not per-bucket**~~ **Fixed** for
