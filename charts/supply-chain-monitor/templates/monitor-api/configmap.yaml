@@ -62,6 +62,10 @@ data:
   # reference instead of a path already inside this pod -- oras pull
   # fetches them from scm-registry first (see internal/scanner/fetch.go).
   FETCH_PLAIN_HTTP: {{ .Values.monitorApi.fetchPlainHTTP | quote }}
+  # Makes expected_digest required on every registration and turns a
+  # mismatch into Artifact.Unsafe = true instead of a 409 refusal -- see
+  # this value's own comment above and NewRouter's in internal/api/router.go.
+  REQUIRE_DIGEST: {{ .Values.monitorApi.requireDigest | quote }}
   # The shared, centrally-refreshed vulnerability-DB cache
   # IsolatedTrivyScanner mounts read-only into each trivy scan-worker
   # Job -- see trivy-db-cache-pvc.yaml/trivy-db-cache-primer-job.yaml/

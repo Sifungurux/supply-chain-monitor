@@ -36,8 +36,16 @@ import (
 // scanner registered for one artifact type (see handler.scanTimeout's
 // own comment) -- pass 0 to get the 5-minute default (what every caller
 // got before this was configurable).
-func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner.Registry, apiKey string, rateLimitRPS float64, rateLimitBurst float64, digestResolver scanner.DigestResolver, fetchPlainHTTP bool, scanTimeout time.Duration) http.Handler {
-	h := &handler{store: store, tracker: tracker, scanners: scanners, digestResolver: digestResolver, fetchPlainHTTP: fetchPlainHTTP, scanTimeout: scanTimeout}
+// requireDigest is a deployment-wide policy (monitorApi.requireDigest /
+// REQUIRE_DIGEST): false preserves today's behavior exactly (a request's
+// own expected_digest is optional, checked only if provided, and
+// registration is refused outright on a mismatch). true makes
+// expected_digest a required field on every registration, and turns a
+// mismatch (or an unresolvable ref) into Artifact.Unsafe = true instead
+// of a rejection -- see createArtifact/bulkCreateArtifacts and
+// Artifact.Unsafe's own comment for why this is a mark, not a block.
+func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner.Registry, apiKey string, rateLimitRPS float64, rateLimitBurst float64, digestResolver scanner.DigestResolver, fetchPlainHTTP bool, scanTimeout time.Duration, requireDigest bool) http.Handler {
+	h := &handler{store: store, tracker: tracker, scanners: scanners, digestResolver: digestResolver, fetchPlainHTTP: fetchPlainHTTP, scanTimeout: scanTimeout, requireDigest: requireDigest}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.healthz)

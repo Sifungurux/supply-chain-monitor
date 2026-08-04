@@ -818,7 +818,14 @@ func runAPIServer() {
 	// image refs never use it regardless of this setting.
 	digestResolver := scanner.NewOrasDigestResolver()
 
-	router := api.NewRouter(store, stageTracker, scanners, apiKey, rateLimitRPS, rateLimitBurst, digestResolver, fetchPlainHTTP, scanTimeout)
+	// REQUIRE_DIGEST -- see NewRouter's own comment for the full
+	// behavior this gates. Off by default: turning it on is a real
+	// policy change (expected_digest becomes a required field on every
+	// registration), not something an existing deployment should pick up
+	// silently.
+	requireDigest := getenvBool("REQUIRE_DIGEST", false)
+
+	router := api.NewRouter(store, stageTracker, scanners, apiKey, rateLimitRPS, rateLimitBurst, digestResolver, fetchPlainHTTP, scanTimeout, requireDigest)
 
 	srv := &http.Server{
 		Addr:         listenAddr,

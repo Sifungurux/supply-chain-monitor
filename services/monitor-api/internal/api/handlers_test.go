@@ -70,7 +70,7 @@ func newTestRouter(scanners scanner.Registry) (http.Handler, *artifact.MemStore)
 	// digestResolver nil: dedup disabled by default here too -- see
 	// TestCreateArtifact_Duplicate* for the tests that exercise it
 	// deliberately with a fake resolver instead.
-	return api.NewRouter(store, tracker, scanners, testAPIKey, 0, 0, nil, false, 0), store
+	return api.NewRouter(store, tracker, scanners, testAPIKey, 0, 0, nil, false, 0, false), store
 }
 
 // newTestRouterWithDigestResolver is newTestRouter plus a digest
@@ -80,7 +80,17 @@ func newTestRouter(scanners scanner.Registry) (http.Handler, *artifact.MemStore)
 func newTestRouterWithDigestResolver(resolver scanner.DigestResolver) (http.Handler, *artifact.MemStore) {
 	store := artifact.NewMemStore()
 	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
-	return api.NewRouter(store, tracker, scanner.Registry{}, testAPIKey, 0, 0, resolver, false, 0), store
+	return api.NewRouter(store, tracker, scanner.Registry{}, testAPIKey, 0, 0, resolver, false, 0, false), store
+}
+
+// newTestRouterWithRequireDigest is newTestRouterWithDigestResolver plus
+// REQUIRE_DIGEST enabled, for the TestCreateArtifact_RequireDigest* /
+// TestBulkCreateArtifacts_RequireDigest* tests specifically -- kept
+// separate for the same reason newTestRouterWithDigestResolver itself is.
+func newTestRouterWithRequireDigest(resolver scanner.DigestResolver) (http.Handler, *artifact.MemStore) {
+	store := artifact.NewMemStore()
+	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
+	return api.NewRouter(store, tracker, scanner.Registry{}, testAPIKey, 0, 0, resolver, false, 0, true), store
 }
 
 // fakeDigestResolver lets tests exercise duplicate-registration
@@ -329,6 +339,98 @@ func TestBulkCreateArtifacts_ExpectedDigestMismatchNotCreated(t *testing.T) {
 	}
 }
 
+// TestBulkCreateArtifacts_RequireDigest_MismatchRegistersUnsafeInsteadOfFailing
+// is the bulk-endpoint counterpart to
+// TestCreateArtifact_RequireDigest_MismatchStillRegistersButMarkedUnsafe:
+// under REQUIRE_DIGEST, a per-entry mismatch is created (Unsafe=true),
+// not counted in Failed the way it is without the flag (compare
+// TestBulkCreateArtifacts_ExpectedDigestMismatchNotCreated above).
+func TestBulkCreateArtifacts_RequireDigest_MismatchRegistersUnsafeInsteadOfFailing(t *testing.T) {
+	resolver := &fakeDigestResolver{digests: map[string]string{
+		"alpine:3.19":    "sha256:aaa",
+		"busybox:latest": "sha256:actual",
+	}}
+	h, store := newTestRouterWithRequireDigest(resolver)
+
+	body := map[string]any{
+		"artifacts": []map[string]string{
+			{"ref": "alpine:3.19", "type": "image", "expected_digest": "sha256:aaa"},        // matches -- safe
+			{"ref": "busybox:latest", "type": "image", "expected_digest": "sha256:claimed"}, // mismatch -- unsafe, still created
+		},
+	}
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Created int `json:"created"`
+		Failed  int `json:"failed"`
+		Results []struct {
+			Ref      string `json:"ref"`
+			Artifact *struct {
+				Unsafe bool   `json:"unsafe"`
+				Digest string `json:"digest"`
+			} `json:"artifact"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Created != 2 || resp.Failed != 0 {
+		t.Fatalf("created=%d failed=%d, want 2/0 -- a mismatch under REQUIRE_DIGEST registers, it doesn't fail", resp.Created, resp.Failed)
+	}
+
+	all, _ := store.List()
+	if len(all) != 2 {
+		t.Fatalf("store has %d artifacts, want 2", len(all))
+	}
+	for _, r := range resp.Results {
+		if r.Artifact == nil {
+			t.Fatalf("entry %q: no artifact in result", r.Ref)
+		}
+		wantUnsafe := r.Ref == "busybox:latest"
+		if r.Artifact.Unsafe != wantUnsafe {
+			t.Fatalf("entry %q: Unsafe = %v, want %v", r.Ref, r.Artifact.Unsafe, wantUnsafe)
+		}
+	}
+}
+
+// TestBulkCreateArtifacts_RequireDigest_MissingExpectedDigestFailsThatEntryOnly
+// mirrors TestCreateArtifact_RequireDigest_MissingExpectedDigestRejected,
+// but per-entry: one bad entry (no expected_digest) must not block a
+// well-formed sibling entry in the same batch.
+func TestBulkCreateArtifacts_RequireDigest_MissingExpectedDigestFailsThatEntryOnly(t *testing.T) {
+	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:aaa"}}
+	h, store := newTestRouterWithRequireDigest(resolver)
+
+	body := map[string]any{
+		"artifacts": []map[string]string{
+			{"ref": "alpine:3.19", "type": "image", "expected_digest": "sha256:aaa"}, // has it -- should register
+			{"ref": "busybox:latest", "type": "image"},                               // missing it -- should fail
+		},
+	}
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (one entry still succeeded), body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Created int `json:"created"`
+		Failed  int `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Created != 1 || resp.Failed != 1 {
+		t.Fatalf("created=%d failed=%d, want 1/1", resp.Created, resp.Failed)
+	}
+	all, _ := store.List()
+	if len(all) != 1 {
+		t.Fatalf("store has %d artifacts, want 1", len(all))
+	}
+}
+
 func TestBulkCreateArtifacts_AllInvalidReturns400(t *testing.T) {
 	h, _ := newTestRouter(scanner.Registry{})
 
@@ -468,6 +570,99 @@ func TestCreateArtifact_ExpectedDigestSetButUnresolvableRefusesRegistration(t *t
 	all, _ := store.List()
 	if len(all) != 0 {
 		t.Fatalf("store has %d artifacts, want 0", len(all))
+	}
+}
+
+// TestCreateArtifact_RequireDigest_MissingExpectedDigestRejected: with
+// REQUIRE_DIGEST on, expected_digest stops being optional -- a request
+// that omits it is a 400, before any registry call is even attempted.
+func TestCreateArtifact_RequireDigest_MissingExpectedDigestRejected(t *testing.T) {
+	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:aaa"}}
+	h, store := newTestRouterWithRequireDigest(resolver)
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{
+		"ref": "alpine:3.19", "type": "image",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (expected_digest required when REQUIRE_DIGEST is on), body=%s", rec.Code, rec.Body.String())
+	}
+	all, _ := store.List()
+	if len(all) != 0 {
+		t.Fatalf("store has %d artifacts, want 0", len(all))
+	}
+}
+
+// TestCreateArtifact_RequireDigest_MatchRegistersSafely: the happy path
+// under REQUIRE_DIGEST -- a correct expected_digest registers exactly
+// like today, just with Unsafe left false.
+func TestCreateArtifact_RequireDigest_MatchRegistersSafely(t *testing.T) {
+	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:aaa"}}
+	h, _ := newTestRouterWithRequireDigest(resolver)
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{
+		"ref": "alpine:3.19", "type": "image", "expected_digest": "sha256:aaa",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body=%s", rec.Code, rec.Body.String())
+	}
+	got := decodeArtifact(t, rec)
+	if got.Unsafe {
+		t.Fatalf("Unsafe = true, want false -- the expected digest matched")
+	}
+	if got.Digest != "sha256:aaa" {
+		t.Fatalf("digest = %q, want %q", got.Digest, "sha256:aaa")
+	}
+}
+
+// TestCreateArtifact_RequireDigest_MismatchStillRegistersButMarkedUnsafe
+// is the core behavior this feature exists for: unlike the pre-existing,
+// opt-in expected_digest pin (409, nothing registered -- see
+// TestCreateArtifact_ExpectedDigestMismatchRefusesRegistration just
+// above), REQUIRE_DIGEST is a deployment-wide policy that still
+// registers the artifact on a mismatch, just marked Unsafe.
+func TestCreateArtifact_RequireDigest_MismatchStillRegistersButMarkedUnsafe(t *testing.T) {
+	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:actual"}}
+	h, store := newTestRouterWithRequireDigest(resolver)
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{
+		"ref": "alpine:3.19", "type": "image", "expected_digest": "sha256:claimed",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (registered, not refused), body=%s", rec.Code, rec.Body.String())
+	}
+	got := decodeArtifact(t, rec)
+	if !got.Unsafe {
+		t.Fatalf("Unsafe = false, want true -- resolved digest didn't match expected_digest")
+	}
+	if got.Digest != "sha256:actual" {
+		t.Fatalf("digest = %q, want the real resolved value %q (not the caller's mismatched claim)", got.Digest, "sha256:actual")
+	}
+	all, _ := store.List()
+	if len(all) != 1 {
+		t.Fatalf("store has %d artifacts, want 1 -- REQUIRE_DIGEST must not refuse a mismatched registration", len(all))
+	}
+}
+
+// TestCreateArtifact_RequireDigest_UnresolvableStillRegistersButMarkedUnsafe
+// covers the other unsafe path: no digest resolves at all (registry
+// unreachable), yet expected_digest was required and provided.
+func TestCreateArtifact_RequireDigest_UnresolvableStillRegistersButMarkedUnsafe(t *testing.T) {
+	resolver := &fakeDigestResolver{errRef: "unreachable-registry.example/app:1.0"}
+	h, store := newTestRouterWithRequireDigest(resolver)
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{
+		"ref": "unreachable-registry.example/app:1.0", "type": "image", "expected_digest": "sha256:aaa",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (registered, not refused), body=%s", rec.Code, rec.Body.String())
+	}
+	got := decodeArtifact(t, rec)
+	if !got.Unsafe {
+		t.Fatalf("Unsafe = false, want true -- nothing resolved to verify expected_digest against")
+	}
+	all, _ := store.List()
+	if len(all) != 1 {
+		t.Fatalf("store has %d artifacts, want 1", len(all))
 	}
 }
 
@@ -844,7 +1039,7 @@ func TestScanArtifact_BackfillsMissingDigest(t *testing.T) {
 	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:backfilled"}}
 	h := api.NewRouter(store, tracker, scanner.Registry{
 		artifact.TypeImage: {&fakeScanner{}},
-	}, testAPIKey, 0, 0, resolver, false, 0)
+	}, testAPIKey, 0, 0, resolver, false, 0, false)
 
 	// mustCreate goes straight through the store, bypassing
 	// createArtifact's own registration-time resolveDigest call --
@@ -875,7 +1070,7 @@ func TestScanArtifact_DoesNotReResolveAnAlreadySetDigest(t *testing.T) {
 	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:should-never-be-fetched"}}
 	h := api.NewRouter(store, tracker, scanner.Registry{
 		artifact.TypeImage: {&fakeScanner{}},
-	}, testAPIKey, 0, 0, resolver, false, 0)
+	}, testAPIKey, 0, 0, resolver, false, 0, false)
 
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 	if _, err := store.Update(created.ID, func(a *artifact.Artifact) { a.Digest = "sha256:already-set" }); err != nil {

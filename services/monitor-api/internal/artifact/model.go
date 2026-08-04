@@ -126,6 +126,24 @@ type Artifact struct {
 	// don't block on it" spirit as bulkCreateArtifacts's own per-entry
 	// error handling.
 	Digest string `json:"digest,omitempty"`
+	// Unsafe is set at registration time when REQUIRE_DIGEST is enabled
+	// (monitorApi.requireDigest) and the caller-provided expected_digest
+	// didn't match what actually resolved against the registry -- or
+	// nothing resolved at all. Unlike expected_digest's own per-request,
+	// opt-in pin (which refuses registration outright on a mismatch, see
+	// checkExpectedDigest), REQUIRE_DIGEST is a deployment-wide policy
+	// that still registers the artifact -- refusing every unverifiable
+	// registration outright would be too disruptive to turn on for an
+	// existing pipeline that doesn't yet know about it. Marking it
+	// unsafe instead keeps registration itself non-blocking while giving
+	// a real, visible signal (the dashboard/API caller decides what to
+	// do with it) instead of silently registering an unverified artifact
+	// the same as a verified one. Never set any other way -- a scan
+	// backfilling a missing digest (see scanArtifact) never touches this
+	// field, since that's a different concern (an artifact scanned after
+	// registration, not one whose registration-time claim didn't check
+	// out).
+	Unsafe bool `json:"unsafe,omitempty"`
 	// MaintainerTeam and MaintainerEmail identify who's responsible for
 	// this artifact -- both empty until set, either at registration or
 	// via POST .../maintainer. Always set or cleared together: a team

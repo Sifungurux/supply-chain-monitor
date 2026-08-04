@@ -340,6 +340,32 @@ turn it off. See docs/architecture.md ("Sweeping registered-but-
 unscanned artifacts, and backfilling missing digests") for the full
 reasoning.
 
+### Requiring a verified digest at registration
+
+`expected_digest` above is normally optional, and a mismatch refuses the
+whole registration (409). `monitorApi.requireDigest` (`REQUIRE_DIGEST`)
+is a deployment-wide policy that changes both of those: `expected_digest`
+becomes a **required** field on every `POST /api/v1/artifacts` (and every
+entry in a bulk request) -- missing it is a 400, before any registry call
+happens -- and a mismatch (or an unresolvable ref) no longer refuses
+registration. The artifact is still created, just with `"unsafe": true`:
+
+```bash
+curl -s -X POST localhost:8080/api/v1/artifacts "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d '{"ref":"alpine:3.19","type":"image","expected_digest":"sha256:claimed..."}'
+# resolved digest doesn't match "sha256:claimed..." ->
+# {"id":"...", "ref":"alpine:3.19", "digest":"sha256:actual...", "unsafe":true, ...}
+```
+
+This is deliberately a mark, not a block: refusing every unverifiable
+registration outright would be too disruptive to turn on for an existing
+pipeline that doesn't yet know about it. The dashboard shows a red
+"Unsafe" badge next to the status badge, both in the artifact table and
+on the detail page, for anything registered this way. Off by default --
+turning it on is a real policy change, not something a deployment should
+pick up silently.
+
 ### Submitting findings from an external scanner
 
 `/scan` always has monitor-api run one of its own registered scanners

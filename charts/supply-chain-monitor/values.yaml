@@ -222,6 +222,17 @@ monitorApi:
   # reference. true matches unpacker.insecure/unpacker.public's same
   # plain-HTTP assumption.
   fetchPlainHTTP: "true"
+  # A real policy change, not a quiet default: false preserves today's
+  # behavior exactly (expected_digest on POST /api/v1/artifacts is
+  # optional, checked only if provided, and a mismatch refuses the whole
+  # registration with 409). true makes expected_digest a required field
+  # on every registration -- and, unlike the 409 above, a mismatch (or an
+  # unresolvable ref) no longer refuses registration outright; it
+  # registers the artifact with unsafe: true instead, so a deployment can
+  # turn this on without an existing pipeline's registrations suddenly
+  # starting to fail outright. See docs/architecture.md ("Requiring a
+  # verified digest at registration").
+  requireDigest: false
   # Uncomment (and set enabled: true) for air-gapped operation -- see
   # cluster/seed-trivy-db.sh and README's "Air-gapped operation".
   trivyDB:

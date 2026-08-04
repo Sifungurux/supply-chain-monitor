@@ -783,6 +783,36 @@ test('a fixed finding shows a Fixed badge, dims, and drops out of open-finding c
   dom.window.close();
 });
 
+test('an artifact registered unsafe (REQUIRE_DIGEST mismatch) shows an Unsafe badge in the row and on the detail page', async () => {
+  const withUnsafe = [
+    { ...SAMPLE_ARTIFACTS[0], id: 'a8', ref: 'unsafe-image:1.0', unsafe: true },
+    { ...SAMPLE_ARTIFACTS[1], id: 'a9', ref: 'safe-image:1.0', unsafe: false }
+  ];
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(withUnsafe);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  const unsafeRow = doc.querySelector('#artifact-rows tr[data-id="a8"]');
+  assert.match(unsafeRow.innerHTML, /Unsafe/, 'the row for an unsafe artifact must show the Unsafe badge');
+
+  const safeRow = doc.querySelector('#artifact-rows tr[data-id="a9"]');
+  assert.doesNotMatch(safeRow.innerHTML, /Unsafe/, 'a safely-registered artifact must not show the Unsafe badge');
+
+  doc.querySelector('button[data-action="toggle"][data-id="a8"]').click();
+  assert.match(doc.getElementById('detail-body').innerHTML, /Unsafe/, 'the detail page must also show the Unsafe badge');
+
+  dom.window.close();
+});
+
 test('a finding first seen on the artifact\'s most recent update gets a New badge', async () => {
   const withNew = [{
     id: 'a6',
