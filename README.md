@@ -206,6 +206,12 @@ limiting).
 
 ## API
 
+Interactive docs (every route below, plus request/response schemas) are
+served by `monitor-api` itself at `/swagger` — no auth required to read
+them, same as `/healthz` (the spec is `/openapi.yaml`). This table stays
+as a quick-reference summary; `/swagger` is the source of truth for exact
+request/response shapes.
+
 | Method | Path                              | Purpose                                   |
 |--------|-----------------------------------|--------------------------------------------|
 | GET    | `/healthz`                        | liveness/readiness                         |

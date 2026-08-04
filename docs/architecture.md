@@ -2343,6 +2343,35 @@ for real.
    (`make test-artifact`, or the dashboard) actually working against
    them.
 
+### Swagger/OpenAPI docs for monitor-api
+
+`GET /swagger` serves a Swagger UI page, and `GET /openapi.yaml` serves
+the OpenAPI 3.0 spec it's built from -- every route the dashboard itself
+calls is documented there, so anything the dashboard displays can also be
+read or written directly through the API (registration, scanning, stage
+updates, maintainer info, findings, SBOM/SARIF documents).
+
+Both routes are exempt from the `Authorization: Bearer` requirement
+(`internal/api/router.go`'s `withAuth`), the same reasoning as
+`/healthz`: they describe the API's shape, not its data. Swagger UI's own
+"Authorize" button is still required before "Try it out" against a real
+endpoint works.
+
+The spec is a hand-written YAML file (`internal/api/openapi.yaml`),
+embedded into the binary via `go:embed`, not generated from struct/handler
+annotations -- a codegen library (e.g. `swaggo/swag`) would be a second
+non-stdlib dependency in a module whose `go.mod` deliberately keeps pgx as
+the only one. `internal/api/handlers_test.go`'s
+`TestOpenAPISpec_DescribesEveryRegisteredRoute` is a golden-endpoint-list
+check (every path `NewRouter` registers must appear in the spec) that
+catches an endpoint added to `router.go` without a matching spec entry --
+not a substitute for actually keeping the two in sync by hand.
+
+Swagger UI itself loads from jsDelivr, pinned to an exact version with a
+Subresource Integrity hash on every `<script>`/`<link>` tag (`internal/api/swagger.go`)
+rather than a floating version tag, which can't be hashed at all since the
+bytes it resolves to change out from under the hash on every release.
+
 ## Roadmap / open gaps
 
 - ~~**Fix-detection is per-type, not per-bucket**~~ **Fixed** for
