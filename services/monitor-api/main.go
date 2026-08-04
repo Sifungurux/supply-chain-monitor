@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -146,6 +148,18 @@ func main() {
 	// ("Isolating the unpack+scan step").
 	if len(os.Args) > 1 && os.Args[1] == "scan-worker" {
 		runScanWorker()
+		return
+	}
+	// `monitor-api sweep-registered` is a third mode this same binary
+	// runs as: a one-shot pass that scans a bounded batch of artifacts
+	// still sitting at status "registered" (never scanned since
+	// creation), then exits. Intended to run as a Kubernetes CronJob
+	// (see charts/supply-chain-monitor/templates/monitor-api/
+	// sweep-registered-cronjob.yaml) on a schedule, so artifacts
+	// registered without a follow-up manual/CI-triggered scan don't just
+	// sit unscanned forever. See runSweepRegistered's own comment.
+	if len(os.Args) > 1 && os.Args[1] == "sweep-registered" {
+		runSweepRegistered()
 		return
 	}
 	runAPIServer()
@@ -321,6 +335,154 @@ func captureImageDocuments(ctx context.Context, rawReport []byte) {
 			log.Printf("scan-worker: upload %s document for artifact %s: %v (non-fatal, scan result unaffected)", doc.Kind, artifactID, err)
 		}
 	}
+}
+
+// runSweepRegistered lists every artifact via monitor-api's own
+// GET /api/v1/artifacts, picks up to SWEEP_BATCH_SIZE that are still
+// sitting at status "registered" (oldest first), and scans each one via
+// POST .../scan -- the exact same endpoint a person clicking "Scan" in
+// the dashboard hits, which now also opportunistically backfills a
+// missing digest (see scanArtifact's own comment in internal/api/
+// handlers.go). Goes through the API rather than a direct Postgres
+// connection deliberately: this mirrors how scan-worker Jobs already
+// call back to monitor-api's own Service (see UploadDocument) instead of
+// touching the database directly, so this is the second caller of that
+// same established pattern, not a new one.
+//
+// A scan failure for one artifact (registry down, no scanner for its
+// type, etc.) is logged and skipped -- never fatal to the rest of the
+// batch, the same "one bad entry shouldn't block everything else"
+// reasoning bulkCreateArtifacts already uses.
+func runSweepRegistered() {
+	apiBase := getenv("SWEEP_API_BASE_URL", "http://monitor-api:8080")
+	apiKey := os.Getenv("SWEEP_API_KEY")
+	if apiKey == "" {
+		fmt.Fprintln(os.Stderr, "sweep-registered: SWEEP_API_KEY is required")
+		os.Exit(2)
+	}
+	batchSize := getenvInt("SWEEP_BATCH_SIZE", 5)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	all, err := listArtifactsFromAPI(ctx, apiBase, apiKey)
+	if err != nil {
+		log.Fatalf("sweep-registered: could not list artifacts: %v", err)
+	}
+
+	toScan := pickArtifactsToSweep(all, batchSize)
+	log.Printf("sweep-registered: %d artifact(s) registered-but-unscanned, scanning %d (SWEEP_BATCH_SIZE=%d)", countByStatus(all, artifact.StatusRegistered), len(toScan), batchSize)
+
+	missingDigest := 0
+	for _, a := range toScan {
+		updated, err := scanArtifactViaAPI(ctx, apiBase, apiKey, a.ID)
+		if err != nil {
+			log.Printf("sweep-registered: scan %s (%s) failed: %v", a.ID, a.Ref, err)
+			continue
+		}
+		if updated.Digest == "" {
+			missingDigest++
+			log.Printf("sweep-registered: %s (%s) scanned, digest still not resolved", a.ID, a.Ref)
+		} else {
+			log.Printf("sweep-registered: %s (%s) scanned, digest resolved", a.ID, a.Ref)
+		}
+	}
+	log.Printf("sweep-registered: done -- %d scanned, %d still missing a digest", len(toScan), missingDigest)
+}
+
+// pickArtifactsToSweep selects up to batchSize artifacts at status
+// "registered", oldest (by CreatedAt) first -- so a backlog bigger than
+// one batch works through fairly over successive CronJob runs instead of
+// the same few newest registrations winning every time. batchSize <= 0
+// means "nothing to do" (fails closed rather than defaulting to
+// unbounded), the same "cap rather than trust an unbounded number"
+// reasoning maxBulkArtifacts already uses in internal/api/handlers.go.
+// Pure and side-effect-free -- unit-tested in main_test.go without any
+// HTTP involved, the same pattern buildImageScanners/buildSBOMScanners
+// already establish for this file.
+func pickArtifactsToSweep(all []artifact.Artifact, batchSize int) []artifact.Artifact {
+	if batchSize <= 0 {
+		return nil
+	}
+	var registered []artifact.Artifact
+	for _, a := range all {
+		if a.Status == artifact.StatusRegistered {
+			registered = append(registered, a)
+		}
+	}
+	sort.Slice(registered, func(i, j int) bool {
+		return registered[i].CreatedAt.Before(registered[j].CreatedAt)
+	})
+	if len(registered) > batchSize {
+		registered = registered[:batchSize]
+	}
+	return registered
+}
+
+func countByStatus(all []artifact.Artifact, status artifact.Status) int {
+	n := 0
+	for _, a := range all {
+		if a.Status == status {
+			n++
+		}
+	}
+	return n
+}
+
+// listArtifactsFromAPI calls GET /api/v1/artifacts against monitor-api's
+// own Service -- see runSweepRegistered's own comment for why this goes
+// through the API rather than a direct Postgres connection.
+func listArtifactsFromAPI(ctx context.Context, apiBase, apiKey string) ([]artifact.Artifact, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(apiBase, "/")+"/api/v1/artifacts", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build list request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list artifacts: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("list artifacts: server returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var all []artifact.Artifact
+	if err := json.NewDecoder(resp.Body).Decode(&all); err != nil {
+		return nil, fmt.Errorf("decode artifact list: %w", err)
+	}
+	return all, nil
+}
+
+// scanArtifactViaAPI calls POST /api/v1/artifacts/{id}/scan -- the same
+// endpoint a person clicking "Scan" in the dashboard hits, so a swept
+// artifact is scanned exactly the way a manual one is, including the
+// opportunistic digest backfill scanArtifact now does.
+func scanArtifactViaAPI(ctx context.Context, apiBase, apiKey, id string) (*artifact.Artifact, error) {
+	url := strings.TrimRight(apiBase, "/") + "/api/v1/artifacts/" + id + "/scan"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build scan request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("scan: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("scan: server returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var a artifact.Artifact
+	if err := json.NewDecoder(resp.Body).Decode(&a); err != nil {
+		return nil, fmt.Errorf("decode scan response: %w", err)
+	}
+	return &a, nil
 }
 
 // buildImageScanners picks both halves of the `image` artifact type's

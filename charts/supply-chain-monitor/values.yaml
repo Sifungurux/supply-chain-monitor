@@ -294,6 +294,30 @@ monitorApi:
       limits:
         cpu: 500m
         memory: 768Mi
+  # Periodically scans artifacts still sitting at status "registered"
+  # (registered but never scanned) -- see templates/monitor-api/
+  # sweep-registered-cronjob.yaml and main.go's runSweepRegistered.
+  # batchSize is deliberately capped, not "scan everything registered":
+  # a burst of bulk-registered artifacts (see the bulk endpoint) could
+  # otherwise turn one CronJob run into hundreds of concurrent-ish scans
+  # competing with real usage -- oldest-registered-first, so a backlog
+  # bigger than one batch works through fairly across successive runs
+  # instead of the same few artifacts winning every time. Every swept
+  # scan also opportunistically backfills a missing digest (the same
+  # best-effort resolution registration itself attempts, retried here in
+  # case a rate-limited/unreachable registry blocked it the first time --
+  # see resolveDigest's own comment in internal/api/handlers.go).
+  sweep:
+    enabled: true
+    schedule: "*/15 * * * *" # every 15 minutes
+    batchSize: 5
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
   resources:
     # ephemeral-storage right-sized down: unpacking a container image no
     # longer happens in this pod -- it runs in its own per-scan

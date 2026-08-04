@@ -1,0 +1,67 @@
+# Runs `monitor-api sweep-registered` (main.go) on a schedule -- scans a
+# bounded batch of artifacts still sitting at status "registered" (never
+# scanned since creation), oldest first, and opportunistically backfills
+# a missing digest along the way (the same registry resolution
+# registration itself attempts, but registration-time resolution is
+# one-shot and never retried on its own -- see resolveDigest's own
+# comment in internal/api/handlers.go, and scanArtifact's for the
+# backfill). Mirrors trivy-db-refresh-cronjob.yaml's shape closely -- see
+# that file's own comment for the general pattern.
+#
+# Reuses monitor-api's own image: sweep-registered is the same binary as
+# the API server and scan-worker, just a third `os.Args[1]` mode -- no
+# separate build/image needed.
+#
+# Calls back into the running monitor-api Service over plain HTTP (GET
+# /api/v1/artifacts, POST .../scan), the same way isolated scan-worker
+# Jobs already call back to upload generated documents -- not a direct
+# Postgres connection, so this needs no Kubernetes API access and no
+# special ServiceAccount/RBAC at all.
+#
+# concurrencyPolicy: Forbid (same as the postgres backup and trivy DB
+# refresh CronJobs): two overlapping sweeps could pick and scan the same
+# artifacts twice, which is wasted work, not a correctness problem worth
+# allowing.
+{{- if .Values.monitorApi.sweep.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scm-sweep-registered
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: scm-sweep-registered
+spec:
+  schedule: {{ .Values.monitorApi.sweep.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: scm-sweep-registered
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app: scm-sweep-registered
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: sweep-registered
+              image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
+              args: ["sweep-registered"]
+              env:
+                - name: SWEEP_API_BASE_URL
+                  value: "http://monitor-api:8080"
+                - name: SWEEP_BATCH_SIZE
+                  value: {{ .Values.monitorApi.sweep.batchSize | quote }}
+                - name: SWEEP_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: scm-monitor-api-auth
+                      key: API_KEY
+              resources:
+                {{- toYaml .Values.monitorApi.sweep.resources | nindent 16 }}
+{{- end }}

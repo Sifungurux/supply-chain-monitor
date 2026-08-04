@@ -315,6 +315,18 @@ the pod" convention (see `looksLikeLocalPath`) never attempt digest
 resolution at all -- there's no registry to check a filesystem path
 against.
 
+Registration-time resolution above is one-shot -- a registry that's
+rate-limited or briefly unreachable at that moment leaves the digest
+empty forever, with no automatic retry. `monitor-api sweep-registered`
+(a `CronJob`, `monitorApi.sweep.schedule` -- every 15 minutes by
+default) periodically scans up to `monitorApi.sweep.batchSize` (default
+5) artifacts still sitting at status `registered`, oldest first; every
+scan it triggers also backfills a missing digest if the registry
+resolves cleanly this time. Set `monitorApi.sweep.enabled: false` to
+turn it off. See docs/architecture.md ("Sweeping registered-but-
+unscanned artifacts, and backfilling missing digests") for the full
+reasoning.
+
 ### Submitting findings from an external scanner
 
 `/scan` always has monitor-api run one of its own registered scanners

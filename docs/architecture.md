@@ -2372,6 +2372,52 @@ Subresource Integrity hash on every `<script>`/`<link>` tag (`internal/api/swagg
 rather than a floating version tag, which can't be hashed at all since the
 bytes it resolves to change out from under the hash on every release.
 
+### Sweeping registered-but-unscanned artifacts, and backfilling missing digests
+
+`monitor-api sweep-registered` (`main.go`) is a third mode this same
+binary runs as, alongside the API server itself and `scan-worker` --
+started as `charts/supply-chain-monitor/templates/monitor-api/
+sweep-registered-cronjob.yaml`, a `CronJob` on
+`monitorApi.sweep.schedule` (every 15 minutes by default). Each run:
+lists every artifact via `GET /api/v1/artifacts`, picks up to
+`monitorApi.sweep.batchSize` (default 5) still sitting at status
+`registered` -- oldest first, so a backlog bigger than one batch works
+through fairly across successive runs -- and scans each one via
+`POST .../scan`, the exact same endpoint a person clicking "Scan" in the
+dashboard hits.
+
+This exists because registration and scanning are two separate steps
+(`POST /api/v1/artifacts` never scans on its own -- see "Registering an
+artifact" above), and nothing before this swept up artifacts a caller
+registered and never got around to scanning. `batchSize` is a real cap,
+not a suggestion: a burst of bulk-registered artifacts (see "Bulk-
+registering artifacts") could otherwise turn one CronJob run into
+hundreds of concurrent-ish scans competing with real usage.
+
+Goes through the API rather than a direct Postgres connection
+deliberately -- the same established pattern isolated scan-worker Jobs
+already use to call back to monitor-api's own Service (`UploadDocument`
+in `internal/scanner/documents.go`), not a new one. That also means this
+CronJob needs no Kubernetes API access and no special ServiceAccount/RBAC
+at all, unlike `scan-worker`.
+
+**Digest backfill.** Every scan `scanArtifact` runs (manual or via this
+sweep) now also opportunistically resolves a missing digest, using the
+exact same best-effort `resolveDigest` helper `createArtifact` calls at
+registration time. This closes a real gap: registration-time digest
+resolution is one-shot and never retried on its own (see "Detecting
+duplicate registrations by digest" above) -- a registry that's rate-
+limited or briefly unreachable at registration time (Docker Hub's
+anonymous pull-rate limit is the one actually observed in practice, hit
+by `testdata/bulk-test-images.json`'s load-test batch, which registers
+~100 images including many bare `docker.io` refs with no registry host)
+left the artifact's digest empty forever, even though the exact same ref
+resolves fine minutes later. A routine scan is a natural second chance;
+an artifact that already has a digest is never re-resolved (no redundant
+registry call on every routine re-scan).
+
+Set `monitorApi.sweep.enabled: false` to disable the CronJob entirely.
+
 ## Roadmap / open gaps
 
 - ~~**Fix-detection is per-type, not per-bucket**~~ **Fixed** for
