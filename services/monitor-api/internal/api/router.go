@@ -41,6 +41,8 @@ func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.healthz)
+	mux.HandleFunc("GET /swagger", h.swaggerUI)
+	mux.HandleFunc("GET /openapi.yaml", h.openapiSpec)
 	mux.HandleFunc("GET /api/v1/pipeline/stages", h.listStages)
 	mux.HandleFunc("POST /api/v1/artifacts", h.createArtifact)
 	mux.HandleFunc("POST /api/v1/artifacts/bulk", h.bulkCreateArtifacts)
@@ -72,15 +74,25 @@ func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner
 }
 
 // withAuth requires `Authorization: Bearer <apiKey>` on every request
-// except /healthz. Uses crypto/subtle.ConstantTimeCompare rather than
-// == specifically to avoid a timing side-channel that could let an
-// attacker guess the key one byte at a time -- overkill for a
-// single-shared-key scheme against most threat models, but it's a
-// one-line difference from a plain string comparison, so there's no
-// real reason not to.
+// except /healthz, /swagger, and /openapi.yaml. Uses
+// crypto/subtle.ConstantTimeCompare rather than == specifically to avoid
+// a timing side-channel that could let an attacker guess the key one
+// byte at a time -- overkill for a single-shared-key scheme against most
+// threat models, but it's a one-line difference from a plain string
+// comparison, so there's no real reason not to.
+//
+// /swagger and /openapi.yaml are exempt for the same reason /healthz is:
+// they describe the API's shape, not any of its data -- unauthenticated
+// access to "here are the routes and request/response schemas" isn't a
+// real exposure, and requiring a key just to read the docs page (as
+// opposed to actually calling an endpoint through it) would be an
+// annoyance with no corresponding security benefit. Swagger UI's own
+// "Authorize" button is still where a real API key goes before "Try it
+// out" against any actual endpoint works.
 func withAuth(next http.Handler, apiKey string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
+		switch r.URL.Path {
+		case "/healthz", "/swagger", "/openapi.yaml":
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -143,12 +155,15 @@ func withCORS(next http.Handler) http.Handler {
 // keys.
 func withRateLimit(next http.Handler, limiter *rateLimiter) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// /healthz is normally unreachable here anyway (withAuth returns
-		// before calling this handler for that path), but it's cheap and
-		// clearer to also exempt it explicitly, so a liveness/readiness
-		// probe can never be the thing that trips this limiter even if
-		// the wiring above ever changes.
-		if r.URL.Path == "/healthz" {
+		// /healthz, /swagger, and /openapi.yaml all skip the auth check in
+		// withAuth (see its own comment) and still flow through to here --
+		// exempted explicitly for the same reasons: a liveness/readiness
+		// probe can never be the thing that trips this limiter, and every
+		// unauthenticated caller sharing one bucket keyed by an empty
+		// Authorization header (see limiter.allow below) shouldn't be able
+		// to lock other anonymous callers out of the API docs page.
+		switch r.URL.Path {
+		case "/healthz", "/swagger", "/openapi.yaml":
 			next.ServeHTTP(w, r)
 			return
 		}

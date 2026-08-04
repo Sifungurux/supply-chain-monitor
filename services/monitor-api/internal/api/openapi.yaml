@@ -1,0 +1,490 @@
+openapi: 3.0.3
+info:
+  title: Supply Chain Monitor API
+  description: >-
+    Tracks artifacts (container images, files, SBOMs, SARIF reports) as they
+    move through a software supply chain: registration, scanning, pipeline
+    stage history, and CVE/malware/misconfiguration/secret/other findings.
+    Everything the dashboard shows is available here -- this is the same API
+    it calls, so anything read on the dashboard can be read or written
+    directly through this spec.
+  version: "1.0"
+servers:
+  - url: /
+security:
+  - bearerAuth: []
+tags:
+  - name: artifacts
+    description: Register, list, inspect, scan, and delete artifacts.
+  - name: findings
+    description: Submit or query CVE/malware/misconfiguration/secret/other findings.
+  - name: documents
+    description: Upload/download generated SBOM and SARIF documents.
+  - name: pipeline
+    description: Pipeline stage configuration and per-artifact stage history.
+  - name: meta
+    description: Service health.
+
+paths:
+  /healthz:
+    get:
+      tags: [meta]
+      summary: Liveness/readiness probe
+      security: []
+      responses:
+        "200":
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+
+  /api/v1/pipeline/stages:
+    get:
+      tags: [pipeline]
+      summary: List the configured pipeline stage names, in order
+      responses:
+        "200":
+          description: Configured stages.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stages:
+                    type: array
+                    items: { type: string }
+                    example: [source, build, test, scan, sign, publish, deploy]
+
+  /api/v1/artifacts:
+    get:
+      tags: [artifacts]
+      summary: List every registered artifact
+      responses:
+        "200":
+          description: All artifacts.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Artifact" }
+    post:
+      tags: [artifacts]
+      summary: Register one artifact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateArtifactRequest" }
+      responses:
+        "201":
+          description: Registered.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409":
+          description: >-
+            expected_digest didn't match the resolved digest, or an artifact
+            with this digest is already registered.
+          content:
+            application/json:
+              schema: { type: object }
+
+  /api/v1/artifacts/bulk:
+    post:
+      tags: [artifacts]
+      summary: Register up to 500 artifacts in one request
+      description: >-
+        Best-effort, not all-or-nothing: one bad entry doesn't block the
+        rest. Each entry gets its own result (created, duplicate, or
+        failed) in the response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [artifacts]
+              properties:
+                artifacts:
+                  type: array
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/CreateArtifactRequest" }
+      responses:
+        "201":
+          description: At least one artifact was created or matched an existing one.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkCreateArtifactsResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/artifacts/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ArtifactID"
+    get:
+      tags: [artifacts]
+      summary: Get one artifact by id
+      responses:
+        "200":
+          description: The artifact.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [artifacts]
+      summary: Permanently delete an artifact
+      description: >-
+        Removes the artifact along with its stage history and findings.
+        There is no undo.
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: deleted }
+                  id: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/artifacts/{id}/scan:
+    parameters:
+      - $ref: "#/components/parameters/ArtifactID"
+    post:
+      tags: [artifacts]
+      summary: Run every registered scanner for this artifact's type
+      description: >-
+        Runs all scanners registered for the artifact's type concurrently,
+        merges results into the five finding buckets, and marks findings
+        that stopped being reported as fixed. Synchronous -- the response
+        carries the fully updated artifact once every scanner has finished
+        (or the shared per-scan timeout elapses).
+      responses:
+        "200":
+          description: Scan completed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501":
+          description: No scanner is registered for this artifact's type.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: Every registered scanner failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+
+  /api/v1/artifacts/{id}/stage:
+    parameters:
+      - $ref: "#/components/parameters/ArtifactID"
+    post:
+      tags: [pipeline]
+      summary: Record this artifact at a pipeline stage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stage]
+              properties:
+                stage: { type: string, example: build }
+                note: { type: string }
+      responses:
+        "200":
+          description: Updated artifact, with the new stage event appended to stage_history.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/artifacts/{id}/maintainer:
+    parameters:
+      - $ref: "#/components/parameters/ArtifactID"
+    post:
+      tags: [artifacts]
+      summary: Set (or replace) this artifact's maintainer team/email
+      description: Both fields are required -- there is no partial update.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [team, email]
+              properties:
+                team: { type: string, example: platform-security }
+                email: { type: string, format: email, example: platform-security@example.com }
+      responses:
+        "200":
+          description: Updated artifact.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/artifacts/{id}/findings:
+    parameters:
+      - $ref: "#/components/parameters/ArtifactID"
+    post:
+      tags: [findings]
+      summary: Submit findings computed elsewhere, for one bucket
+      description: >-
+        For results a system other than this API's own registered scanners
+        already computed (an external pipeline scanner, a SAST tool run in
+        CI). Only the named bucket is touched -- the other four are left
+        alone. Findings are merged, not replaced: a finding not present in
+        this call is marked fixed, exactly as scanArtifact does.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bucket, findings]
+              properties:
+                bucket:
+                  type: string
+                  enum: [cve, malware, misconfiguration, secret, other]
+                findings:
+                  type: array
+                  items: { $ref: "#/components/schemas/Finding" }
+      responses:
+        "200":
+          description: Updated artifact.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/findings/{findingID}/artifacts:
+    get:
+      tags: [findings]
+      summary: Find every artifact currently affected by one finding id
+      parameters:
+        - name: findingID
+          in: path
+          required: true
+          schema: { type: string }
+          example: CVE-2024-1234
+      responses:
+        "200":
+          description: Artifacts affected by this finding (empty array if none).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Artifact" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/artifacts/{id}/documents/{kind}:
+    parameters:
+      - $ref: "#/components/parameters/ArtifactID"
+      - $ref: "#/components/parameters/DocumentKind"
+    get:
+      tags: [documents]
+      summary: Download a generated SBOM or SARIF document
+      responses:
+        "200":
+          description: Raw document bytes.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404":
+          description: No document of this kind has been captured for this artifact yet.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    post:
+      tags: [documents]
+      summary: Upload a generated SBOM or SARIF document
+      description: >-
+        Internal write path used by scan workers to store a document too
+        large to return through the normal findings channel. Body is the
+        raw document bytes (max 64MiB).
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Saved.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: saved }
+                  id: { type: string }
+                  kind: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >-
+        Every endpoint except /healthz requires
+        `Authorization: Bearer <API key>`.
+
+  parameters:
+    ArtifactID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    DocumentKind:
+      name: kind
+      in: path
+      required: true
+      schema: { type: string, enum: [sbom, sarif] }
+
+  responses:
+    BadRequest:
+      description: Invalid request body or parameters.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No artifact with this id.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+    CreateArtifactRequest:
+      type: object
+      required: [ref, type]
+      properties:
+        ref:
+          type: string
+          description: OCI ref, file path/URI, or SBOM/SARIF location.
+          example: "ghcr.io/acme/checkout-service:2.4.1"
+        type:
+          type: string
+          enum: [image, file, sbom, sarif]
+        expected_digest:
+          type: string
+          description: >-
+            If set, registration is refused unless the ref's resolved
+            digest matches this exactly (pins against a mutable tag).
+          example: "sha256:3f2a9c1b..."
+        maintainer_team:
+          type: string
+        maintainer_email:
+          type: string
+          format: email
+
+    BulkCreateArtifactsResponse:
+      type: object
+      properties:
+        created: { type: integer }
+        failed: { type: integer }
+        duplicates: { type: integer }
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              ref: { type: string }
+              type: { type: string }
+              artifact: { $ref: "#/components/schemas/Artifact" }
+              error: { type: string }
+              duplicate: { type: boolean }
+
+    Finding:
+      type: object
+      properties:
+        id:
+          type: string
+          example: CVE-2024-1234
+        severity:
+          type: string
+          example: high
+        title: { type: string }
+        source:
+          type: string
+          example: trivy
+        status:
+          type: string
+          enum: [open, fixed]
+          readOnly: true
+        first_seen_at:
+          type: string
+          format: date-time
+          readOnly: true
+        resolved_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    StageEvent:
+      type: object
+      properties:
+        stage: { type: string }
+        timestamp: { type: string, format: date-time }
+        note: { type: string }
+
+    Artifact:
+      type: object
+      properties:
+        id: { type: string }
+        ref: { type: string }
+        digest:
+          type: string
+          description: Resolved OCI content digest, if available.
+        maintainer_team: { type: string }
+        maintainer_email: { type: string }
+        type:
+          type: string
+          enum: [image, file, sbom, sarif]
+        status:
+          type: string
+          enum: [registered, scanning, scanned, failed]
+        current_stage: { type: string }
+        stage_history:
+          type: array
+          items: { $ref: "#/components/schemas/StageEvent" }
+        cve_findings:
+          type: array
+          items: { $ref: "#/components/schemas/Finding" }
+        malware_findings:
+          type: array
+          items: { $ref: "#/components/schemas/Finding" }
+        misconfiguration_findings:
+          type: array
+          items: { $ref: "#/components/schemas/Finding" }
+        secret_findings:
+          type: array
+          items: { $ref: "#/components/schemas/Finding" }
+        other_findings:
+          type: array
+          items: { $ref: "#/components/schemas/Finding" }
+        last_scan_errors:
+          type: array
+          items: { type: string }
+        last_scan_at: { type: string, format: date-time }
+        has_sbom: { type: boolean }
+        has_sarif: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
