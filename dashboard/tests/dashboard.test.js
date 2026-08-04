@@ -154,7 +154,7 @@ test('renders artifact rows, summary cards, and stage pills from a live API resp
   dom.window.close();
 });
 
-test('Details opens a modal with last-scan/digest/CVE/malware metadata, closing on an outside click but not an inside one', async () => {
+test('Details navigates to the artifact detail page with last-scan/digest/CVE/malware metadata, and Back returns to the list', async () => {
   const dom = buildDom({
     url: 'http://localhost:30301/',
     fetchImpl(url) {
@@ -166,13 +166,14 @@ test('Details opens a modal with last-scan/digest/CVE/malware metadata, closing 
 
   await tick(20);
   const doc = dom.window.document;
-  const overlay = doc.getElementById('modal-overlay');
-  assert.equal(overlay.hidden, true, 'modal starts hidden');
+  assert.equal(doc.getElementById('detail-view').hidden, true, 'detail page starts hidden');
 
   doc.querySelector('button[data-action="toggle"][data-id="a1"]').click();
-  assert.equal(overlay.hidden, false, 'Details opens the modal');
+  assert.equal(doc.getElementById('detail-view').hidden, false, 'Details opens the detail page');
+  assert.equal(doc.getElementById('list-view').hidden, true, 'the list hides while on the detail page');
+  assert.equal(dom.window.location.hash, '#/artifacts/a1', 'the detail page is bookmarkable');
 
-  const body = doc.getElementById('modal-body').innerHTML;
+  const body = doc.getElementById('detail-body').innerHTML;
   assert.match(body, /Last scan/);
   assert.match(body, /sha256:abc123/, 'a1 has a resolved digest');
   assert.match(body, /openssl bug/);
@@ -183,31 +184,58 @@ test('Details opens a modal with last-scan/digest/CVE/malware metadata, closing 
     'a real CVE id gets a Read more link to NVD'
   );
 
-  // A click that lands inside the box must not close the modal.
-  doc.querySelector('.modal-box').click();
-  assert.equal(overlay.hidden, false, 'inside click leaves the modal open');
-
-  // A click on the backdrop itself closes it.
-  overlay.click();
-  assert.equal(overlay.hidden, true, 'outside click closes the modal');
+  doc.querySelector('button[data-action="back"]').click();
+  assert.equal(doc.getElementById('detail-view').hidden, true, 'Back closes the detail page');
+  assert.equal(doc.getElementById('list-view').hidden, false, 'Back shows the list again');
 
   // a3 has no digest and no last_scan_at (still "scanning") -- the
-  // unresolved/not-yet-scanned branch of the same modal.
+  // unresolved/not-yet-scanned branch of the same page.
   doc.querySelector('button[data-action="toggle"][data-id="a3"]').click();
-  const a3Body = doc.getElementById('modal-body').innerHTML;
+  const a3Body = doc.getElementById('detail-body').innerHTML;
   assert.match(a3Body, /not resolved/);
   assert.match(a3Body, /Not yet scanned/);
 
   // a2's only finding is malware (id "clamav-signature-match", not a
-  // real CVE) -- it must not get an NVD link.
+  // real CVE) -- it must not get an NVD link. Malware findings live
+  // under their own tab (a fresh artifact id resets the tab to CVE), so
+  // switch to it first.
   doc.querySelector('button[data-action="toggle"][data-id="a2"]').click();
-  const a2Body = doc.getElementById('modal-body').innerHTML;
+  doc.querySelector('button[data-action="tab"][data-bucket="malware_findings"]').click();
+  const a2Body = doc.getElementById('detail-body').innerHTML;
   assert.doesNotMatch(a2Body, /nvd\.nist\.gov/, 'a non-CVE finding id gets no Read more link');
 
   dom.window.close();
 });
 
-test('the Details modal shows a download button only for documents that have actually been captured', async () => {
+test('a bookmarked detail URL resolves once the artifact list loads, and an unknown id shows a not-found state', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/#/artifacts/a1',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(SAMPLE_ARTIFACTS);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  assert.equal(doc.getElementById('detail-view').hidden, false, 'a hash-based URL opens straight to the detail page');
+  assert.match(doc.getElementById('detail-body').innerHTML, /alpine:3\.19/);
+
+  // Simulates the user editing the URL (or a browser back/forward) to
+  // an id that isn't in state.artifacts -- must not render nothing.
+  dom.window.location.hash = '#/artifacts/does-not-exist';
+  await tick(20);
+  assert.match(
+    doc.getElementById('detail-body').innerHTML,
+    /Artifact not found/,
+    'a deleted or bad id gets a real empty state, not a blank page'
+  );
+
+  dom.window.close();
+});
+
+test('the detail page shows a download button only for documents that have actually been captured', async () => {
   const artifacts = [
     { id: 'd1', ref: 'alpine:3.19', type: 'image', status: 'scanned', current_stage: 'scan',
       cve_findings: [], malware_findings: [], created_at: '2026-07-19T09:00:00Z', updated_at: '2026-07-19T10:05:00Z',
@@ -228,12 +256,12 @@ test('the Details modal shows a download button only for documents that have act
   const doc = dom.window.document;
 
   doc.querySelector('button[data-action="toggle"][data-id="d1"]').click();
-  const d1Body = doc.getElementById('modal-body').innerHTML;
+  const d1Body = doc.getElementById('detail-body').innerHTML;
   assert.match(d1Body, /Download SBOM/);
   assert.match(d1Body, /Download SARIF report/);
 
   doc.querySelector('button[data-action="toggle"][data-id="d2"]').click();
-  const d2Body = doc.getElementById('modal-body').innerHTML;
+  const d2Body = doc.getElementById('detail-body').innerHTML;
   assert.doesNotMatch(d2Body, /Download SBOM/);
   assert.doesNotMatch(d2Body, /Download SARIF report/);
   assert.match(d2Body, /Not yet generated/);
@@ -456,7 +484,7 @@ test('search matches an artifact id, but not a finding that has since been fixed
   dom.window.close();
 });
 
-test('editing maintainer in the modal POSTs to the maintainer endpoint and updates the display', async () => {
+test('editing maintainer on the detail page POSTs to the maintainer endpoint and updates the display', async () => {
   const calls = [];
   const dom = buildDom({
     url: 'http://localhost:30301/',
@@ -476,7 +504,7 @@ test('editing maintainer in the modal POSTs to the maintainer endpoint and updat
   const doc = dom.window.document;
 
   doc.querySelector('button[data-action="toggle"][data-id="a1"]').click();
-  assert.match(doc.getElementById('modal-body').innerHTML, /Not set/);
+  assert.match(doc.getElementById('detail-body').innerHTML, /Not set/);
 
   const editBox = doc.getElementById('maintainer-edit');
   assert.equal(editBox.hidden, true, 'edit form starts hidden');
@@ -494,7 +522,7 @@ test('editing maintainer in the modal POSTs to the maintainer endpoint and updat
   assert.equal(sentBody.team, 'platform-security');
   assert.equal(sentBody.email, 'platform-security@example.com');
 
-  const bodyAfter = doc.getElementById('modal-body').innerHTML;
+  const bodyAfter = doc.getElementById('detail-body').innerHTML;
   assert.match(bodyAfter, /platform-security/);
   assert.match(bodyAfter, /platform-security@example\.com/);
 
@@ -639,12 +667,12 @@ test('renders SARIF/other findings in their own count column and detail section'
   const cardNumbers = [...doc.querySelectorAll('#cards .n')].map((n) => n.textContent);
   assert.equal(cardNumbers[4], '1');
 
-  // Expand the detail row and check the finding renders there, not
-  // folded into the CVE column/section.
+  // Open the detail page and check the finding renders under its own
+  // "Other" tab, not folded into the CVE tab.
   doc.querySelector('button[data-action="toggle"][data-id="a4"]').click();
-  const detailHtml = doc.getElementById('modal-body').innerHTML;
+  doc.querySelector('button[data-action="tab"][data-bucket="other_findings"]').click();
+  const detailHtml = doc.getElementById('detail-body').innerHTML;
   assert.match(detailHtml, /Hardcoded secret detected/);
-  assert.match(detailHtml, /Other findings/);
 
   dom.window.close();
 });
@@ -692,11 +720,11 @@ test('renders misconfiguration and secret findings in their own count columns an
   assert.equal(row.querySelector('td:nth-child(9)').textContent.trim(), '0', 'Other count column');
 
   doc.querySelector('button[data-action="toggle"][data-id="a7"]').click();
-  const detailHtml = doc.getElementById('modal-body').innerHTML;
-  assert.match(detailHtml, /S3 bucket is public/);
-  assert.match(detailHtml, /Misconfiguration findings/);
-  assert.match(detailHtml, /AWS access key committed/);
-  assert.match(detailHtml, /Secret findings/);
+  doc.querySelector('button[data-action="tab"][data-bucket="misconfiguration_findings"]').click();
+  assert.match(doc.getElementById('detail-body').innerHTML, /S3 bucket is public/);
+
+  doc.querySelector('button[data-action="tab"][data-bucket="secret_findings"]').click();
+  assert.match(doc.getElementById('detail-body').innerHTML, /AWS access key committed/);
 
   dom.window.close();
 });
@@ -747,7 +775,7 @@ test('a fixed finding shows a Fixed badge, dims, and drops out of open-finding c
   assert.equal(cveCountCell.textContent.trim(), '0');
 
   doc.querySelector('button[data-action="toggle"][data-id="a5"]').click();
-  const detailHtml = doc.getElementById('modal-body').innerHTML;
+  const detailHtml = doc.getElementById('detail-body').innerHTML;
   assert.match(detailHtml, /now patched/);
   assert.match(detailHtml, /Fixed/);
   assert.match(detailHtml, /finding-fixed/);
@@ -788,7 +816,7 @@ test('a finding first seen on the artifact\'s most recent update gets a New badg
   const doc = dom.window.document;
 
   doc.querySelector('button[data-action="toggle"][data-id="a6"]').click();
-  const detailHtml = doc.getElementById('modal-body').innerHTML;
+  const detailHtml = doc.getElementById('detail-body').innerHTML;
 
   const newBadgeCount = (detailHtml.match(/>New</g) || []).length;
   assert.equal(newBadgeCount, 1, 'exactly the just-discovered finding should get a New badge');
@@ -1328,6 +1356,49 @@ test('clicking Delete and confirming sends a DELETE request and reloads the list
 
   const rows = doc.querySelectorAll('#artifact-rows tr[data-id]');
   assert.equal(rows.length, 2, 'list should have reloaded without the deleted artifact');
+
+  dom.window.close();
+});
+
+test('clicking Delete from the detail page removes the artifact and navigates back to the list', async () => {
+  const calls = [];
+  let deleted = false;
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url, opts) {
+      const method = (opts && opts.method) || 'GET';
+      calls.push({ url, method });
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (method === 'DELETE' && /\/api\/v1\/artifacts\/a1$/.test(url)) {
+        deleted = true;
+        return jsonResponse({});
+      }
+      if (url.endsWith('/api/v1/artifacts')) {
+        return jsonResponse(deleted ? SAMPLE_ARTIFACTS.slice(1) : SAMPLE_ARTIFACTS);
+      }
+      return errorResponse(404, {});
+    },
+    beforeParseExtra(window) {
+      window.confirm = () => true;
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  doc.querySelector('button[data-action="toggle"][data-id="a1"]').click();
+  assert.equal(doc.getElementById('detail-view').hidden, false);
+
+  doc.querySelector('#detail-body button[data-action="delete"][data-id="a1"]').click();
+  await tick(20);
+
+  const deleteCall = calls.find((c) => c.method === 'DELETE');
+  assert.ok(deleteCall, 'expected a DELETE request');
+
+  assert.equal(dom.window.location.hash, '', 'deleting the artifact you are viewing returns to the list');
+  assert.equal(doc.getElementById('detail-view').hidden, true, 'the detail page closes');
+  assert.equal(doc.getElementById('list-view').hidden, false, 'the list is shown again');
 
   dom.window.close();
 });

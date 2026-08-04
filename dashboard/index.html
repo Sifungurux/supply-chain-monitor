@@ -168,6 +168,31 @@
   .maintainer-edit { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: -4px 0 14px; }
   .maintainer-edit[hidden] { display: none; }
   .maintainer-edit input { flex: 1 1 160px; }
+  #detail-view[hidden] { display: none; }
+  .detail-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+  .detail-actions { display: flex; gap: 6px; }
+  .detail-ref {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 26px; font-weight: 500;
+    margin: 0 0 4px; word-break: break-all;
+  }
+  .detail-digest {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+    color: var(--scm-text-secondary); margin-bottom: 14px; word-break: break-all;
+  }
+  .risk-spectrum, .risk-spectrum-empty { margin: 4px 0 26px; }
+  .risk-bar { display: flex; height: 10px; border-radius: 999px; overflow: hidden; background: var(--scm-border); }
+  .risk-seg { display: block; }
+  .risk-danger { background: var(--scm-danger-border); }
+  .risk-warning { background: var(--scm-warning-border); }
+  .risk-neutral { background: var(--scm-border-strong); }
+  .risk-label { margin-top: 6px; font-size: 12.5px; color: var(--scm-text-secondary); }
+  .detail-section-title { font-size: 12px; color: var(--scm-text-secondary); font-weight: 500; margin: 0 0 8px; }
+  .pipeline-track { display: flex; align-items: center; gap: 6px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 26px; }
+  .pipeline-arrow { color: var(--scm-text-muted); flex: 0 0 auto; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .tab { font-size: 12.5px; padding: 6px 12px; }
+  .tab-active { background: var(--scm-text); color: var(--scm-bg); border-color: var(--scm-text); }
+  .tab-panel { background: var(--scm-surface); border: 0.5px solid var(--scm-border); border-radius: var(--scm-radius-lg); padding: 12px; }
 </style>
 </head>
 <body>
@@ -187,39 +212,38 @@
     <span id="status">Connecting…</span>
   </header>
 
-  <section>
-    <div class="cards" id="cards"></div>
-  </section>
+  <div id="list-view">
+    <section>
+      <div class="cards" id="cards"></div>
+    </section>
 
-  <section>
-    <h2>Pipeline stages</h2>
-    <div class="stages" id="stages"></div>
-  </section>
+    <section>
+      <h2>Pipeline stages</h2>
+      <div class="stages" id="stages"></div>
+    </section>
 
-  <section id="register-link-section" hidden>
-    <a href="#" id="register-link" class="link-btn">+ Register an artifact</a>
-  </section>
+    <section id="register-link-section" hidden>
+      <a href="#" id="register-link" class="link-btn">+ Register an artifact</a>
+    </section>
 
-  <section>
-    <h2>Artifacts</h2>
-    <div class="search-row">
-      <input type="search" id="search-input" placeholder="Search ref, digest, maintainer, stage, CVE/malware id or title…" />
-    </div>
-    <table>
-      <thead>
-        <tr>
-          <th>Ref</th><th>Type</th><th>Status</th><th>Stage</th><th>CVEs</th><th>Malware</th><th>Misconfig</th><th>Secrets</th><th>Other</th><th>Updated</th><th></th>
-        </tr>
-      </thead>
-      <tbody id="artifact-rows"></tbody>
-    </table>
-  </section>
-</div>
+    <section>
+      <h2>Artifacts</h2>
+      <div class="search-row">
+        <input type="search" id="search-input" placeholder="Search ref, digest, maintainer, stage, CVE/malware id or title…" />
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Ref</th><th>Type</th><th>Status</th><th>Stage</th><th>CVEs</th><th>Malware</th><th>Misconfig</th><th>Secrets</th><th>Other</th><th>Updated</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="artifact-rows"></tbody>
+      </table>
+    </section>
+  </div>
 
-<div class="modal-overlay" id="modal-overlay" hidden>
-  <div class="modal-box" role="dialog" aria-modal="true">
-    <button class="modal-close" id="modal-close" aria-label="Close" type="button">&times;</button>
-    <div id="modal-body"></div>
+  <div id="detail-view" hidden>
+    <div id="detail-body"></div>
   </div>
 </div>
 
@@ -284,8 +308,30 @@
     stages: [],
     artifacts: [],
     busy: {},
-    searchQuery: ''
+    searchQuery: '',
+    detailTab: 'cve_findings'
   };
+  var lastDetailId = null;
+
+  // currentDetailID reads the artifact id straight out of location.hash
+  // (#/artifacts/<id>) rather than mirroring it into state -- location.hash
+  // is already the single source of truth for "which view is active" (it's
+  // what makes a detail page bookmarkable/shareable), so a second copy in
+  // state could drift from it after back/forward navigation.
+  function currentDetailID() {
+    var m = /^#\/artifacts\/(.+)$/.exec(location.hash);
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+
+  function goToDetail(id) {
+    location.hash = '#/artifacts/' + encodeURIComponent(id);
+    render();
+  }
+
+  function goToList() {
+    location.hash = '';
+    render();
+  }
 
   var els = {
     apiBase: document.getElementById('api-base'),
@@ -303,9 +349,9 @@
     expectedDigest: document.getElementById('reg-expected-digest'),
     maintainerTeam: document.getElementById('reg-maintainer-team'),
     maintainerEmail: document.getElementById('reg-maintainer-email'),
-    modalOverlay: document.getElementById('modal-overlay'),
-    modalBody: document.getElementById('modal-body'),
-    modalClose: document.getElementById('modal-close'),
+    listView: document.getElementById('list-view'),
+    detailView: document.getElementById('detail-view'),
+    detailBody: document.getElementById('detail-body'),
     registerLinkSection: document.getElementById('register-link-section'),
     registerLink: document.getElementById('register-link'),
     registerModalOverlay: document.getElementById('register-modal-overlay'),
@@ -540,9 +586,46 @@
   }
 
   function render() {
+    var detailID = currentDetailID();
+    if (detailID) {
+      renderDetailView(detailID);
+    } else {
+      renderListView();
+    }
+  }
+
+  function renderListView() {
+    els.listView.hidden = false;
+    els.detailView.hidden = true;
     renderCards();
     renderStages();
     renderRows();
+  }
+
+  function renderDetailView(id) {
+    els.listView.hidden = true;
+    els.detailView.hidden = false;
+    // A fresh id resets the findings tab to CVE -- otherwise leaving
+    // "Secrets" selected on one artifact would carry over to the next
+    // artifact you open, which reads as a bug (missing findings) rather
+    // than a leftover selection.
+    if (id !== lastDetailId) {
+      state.detailTab = 'cve_findings';
+      lastDetailId = id;
+    }
+    var a = state.artifacts.filter(function (x) { return x.id === id; })[0];
+    if (!a) {
+      // A genuinely missing artifact (bad link, or deleted in another
+      // tab) gets a real empty state instead of silently rendering
+      // nothing -- this also covers the moment right after loadAll()
+      // resolves on a hard reload of a detail URL, before the id is in
+      // state.artifacts yet.
+      els.detailBody.innerHTML =
+        '<p class="muted">Artifact not found. It may have been deleted.</p>' +
+        '<button type="button" class="link-btn" data-action="back">← Back to artifacts</button>';
+      return;
+    }
+    els.detailBody.innerHTML = renderDetailPage(a);
   }
 
   function renderCards() {
@@ -697,24 +780,122 @@
     URL.revokeObjectURL(url);
   }
 
-  // renderModalContent builds the Details modal shown for one artifact:
-  // a metadata header (last scan, digest, maintainer, CVE/malware
-  // counts) per Phase 2, followed by the same full finding/history
-  // breakdown the old inline expand-row used to show. The maintainer
-  // edit form is rendered every time (not built on demand when Edit is
-  // clicked) and just kept hidden -- simpler than injecting markup
-  // later, and its inputs are pre-filled with the artifact's current
-  // values so Cancel needs no extra state to restore.
-  function renderModalContent(a) {
+  var BUCKET_LABELS = {
+    cve_findings: 'CVE',
+    malware_findings: 'Malware',
+    misconfiguration_findings: 'Misconfig',
+    secret_findings: 'Secret',
+    other_findings: 'Other'
+  };
+
+  // riskSpectrum is the detail page's one signature visual: a single bar
+  // whose segment widths are proportional to open-finding severity, so
+  // an artifact's risk reads as a shape at a glance instead of six
+  // separate counts competing for attention. Colored in the same three
+  // buckets severityBadge already uses (critical+high share "danger" --
+  // there's no separate token for critical, and inventing one here would
+  // make this page speak a different severity language than every badge
+  // elsewhere), but the label text stays granular so "3 critical, 5
+  // high" isn't flattened into one number.
+  function riskSpectrum(a) {
+    var counts = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
+    var buckets = { danger: 0, warning: 0, neutral: 0 };
+    FINDING_BUCKETS.forEach(function (key) {
+      openFindings(a[key]).forEach(function (f) {
+        var s = (f.severity || '').toLowerCase();
+        if (s === 'critical') { counts.critical++; buckets.danger++; }
+        else if (s === 'high') { counts.high++; buckets.danger++; }
+        else if (s === 'medium') { counts.medium++; buckets.warning++; }
+        else if (s === 'low') { counts.low++; buckets.neutral++; }
+        else { counts.unknown++; buckets.neutral++; }
+      });
+    });
+    var total = buckets.danger + buckets.warning + buckets.neutral;
+    if (!total) return '<div class="risk-spectrum-empty muted">No open findings.</div>';
+    var label = ['critical', 'high', 'medium', 'low', 'unknown']
+      .filter(function (k) { return counts[k] > 0; })
+      .map(function (k) { return counts[k] + ' ' + k; })
+      .join(' · ');
+    var bar =
+      (buckets.danger ? '<span class="risk-seg risk-danger" style="flex:' + buckets.danger + '"></span>' : '') +
+      (buckets.warning ? '<span class="risk-seg risk-warning" style="flex:' + buckets.warning + '"></span>' : '') +
+      (buckets.neutral ? '<span class="risk-seg risk-neutral" style="flex:' + buckets.neutral + '"></span>' : '');
+    return '<div class="risk-spectrum"><div class="risk-bar">' + bar + '</div><div class="risk-label">' + esc(label) + '</div></div>';
+  }
+
+  // pipelineTracker reuses the .stage-pill look from the "Pipeline
+  // stages" summary above the table -- the same visual language for the
+  // same concept (a stage), just one artifact's history instead of the
+  // whole fleet's current distribution. a.stage_history already arrives
+  // chronological (oldest first, per the old modal's own .reverse() to
+  // show newest-first) which reads naturally left-to-right here. A
+  // note, if any, is a title-attribute tooltip rather than always-on
+  // text: notes can run long, and this is a single scannable line, not
+  // a timeline column with room to spare.
+  function pipelineTracker(a) {
+    var hist = a.stage_history || [];
+    if (!hist.length) return '<span class="muted">No stage events recorded yet.</span>';
+    return '<div class="pipeline-track">' + hist.map(function (e) {
+      var title = e.note ? esc(e.stage + ' — ' + e.note) : esc(e.stage);
+      return '<div class="stage-pill" title="' + title + '">' + esc(e.stage) +
+        '<span class="count">' + esc(new Date(e.timestamp).toLocaleDateString()) + '</span></div>';
+    }).join('<span class="pipeline-arrow">→</span>') + '</div>';
+  }
+
+  // renderFindingsTabs shows one finding bucket at a time (state.detailTab)
+  // instead of the old modal's six parallel columns -- a full page has
+  // room to let one category's findings breathe (full titles, full CVE
+  // ids) rather than every bucket truncating to fit six-way. Tab labels
+  // still show every bucket's open count via countCell, so switching
+  // categories is informed, not a guess. showId matches renderFinding's
+  // original per-bucket behavior exactly (malware ids are a constant
+  // signature name with no information of their own; every other bucket
+  // leads with its id).
+  function renderFindingsTabs(a) {
+    var activeKey = state.detailTab || 'cve_findings';
+    var tabsHtml = FINDING_BUCKETS.map(function (key) {
+      var active = key === activeKey;
+      return '<button type="button" class="tab' + (active ? ' tab-active' : '') + '" data-action="tab" data-bucket="' + key + '">' +
+        BUCKET_LABELS[key] + ' ' + countCell(openFindings(a[key]).length) + '</button>';
+    }).join('');
+
+    var list = a[activeKey] || [];
+    var showId = activeKey !== 'malware_findings';
+    var listHtml = list.length
+      ? list.map(function (f) { return renderFinding(f, a, showId); }).join('')
+      : '<span class="muted">No ' + BUCKET_LABELS[activeKey].toLowerCase() + ' findings.</span>';
+
+    return '<div class="tabs">' + tabsHtml + '</div><div class="tab-panel">' + listHtml + '</div>';
+  }
+
+  // renderDetailPage builds the full artifact detail page: identity
+  // (ref/digest set large and monospace -- the digest is the artifact's
+  // actual immutable identity, a tag is just a mutable label pointing at
+  // it), the risk spectrum signature, pipeline history, and tabbed
+  // findings. The maintainer edit form is rendered every time (not built
+  // on demand when Edit is clicked) and just kept hidden -- simpler than
+  // injecting markup later, and its inputs are pre-filled with the
+  // artifact's current values so Cancel needs no extra state to restore.
+  function renderDetailPage(a) {
+    var busy = !!state.busy[a.id];
     return (
-      '<h2>' + esc(a.ref) + '</h2>' +
+      '<div class="detail-header">' +
+        '<button type="button" class="link-btn" data-action="back">← Back</button>' +
+        '<div class="detail-actions">' +
+          '<button type="button" data-action="scan" data-id="' + esc(a.id) + '" ' + (busy ? 'disabled' : '') + '>' +
+            (busy ? 'Scanning…' : '<i class="ti ti-player-play" aria-hidden="true"></i> Scan') +
+          '</button>' +
+          '<button type="button" data-action="delete" data-id="' + esc(a.id) + '" data-ref="' + esc(a.ref) + '" ' + (busy ? 'disabled' : '') + '>' +
+            '<i class="ti ti-trash" aria-hidden="true"></i> Delete' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+      '<h2 class="detail-ref">' + esc(a.ref) + '</h2>' +
+      '<div class="detail-digest">' + (a.digest ? esc(a.digest) : '<span class="muted">digest not resolved</span>') + '</div>' +
       '<div class="modal-meta">' +
         '<span>' + esc(a.type) + '</span>' +
         '<span>' + statusBadge(a.status) + '</span>' +
         '<span><strong>Last scan:</strong> ' + esc(lastScanText(a)) + '</span>' +
-        '<span><strong>Digest:</strong> ' + (a.digest ? '<span class="ref">' + esc(a.digest) + '</span>' : '<span class="muted">not resolved</span>') + '</span>' +
-        '<span><strong>CVEs:</strong> ' + countCell(openFindings(a.cve_findings).length) + '</span>' +
-        '<span><strong>Malware:</strong> ' + countCell(openFindings(a.malware_findings).length) + '</span>' +
         '<span><strong>Maintainer:</strong> ' + maintainerText(a) +
           ' <button type="button" class="link-btn" data-action="edit-maintainer">Edit</button></span>' +
         '<span><strong>Documents:</strong> ' + documentLinks(a) + '</span>' +
@@ -725,25 +906,27 @@
         '<button type="button" class="primary" data-action="save-maintainer">Save</button>' +
         '<button type="button" data-action="cancel-edit-maintainer">Cancel</button>' +
       '</div>' +
-      renderDetailSections(a)
+      riskSpectrum(a) +
+      '<h3 class="detail-section-title">Pipeline</h3>' +
+      pipelineTracker(a) +
+      '<h3 class="detail-section-title">Findings</h3>' +
+      renderFindingsTabs(a) +
+      (a.last_scan_errors && a.last_scan_errors.length ? '<div class="errs">' + a.last_scan_errors.map(esc).join('<br>') + '</div>' : '')
     );
   }
 
-  function openDetailModal(id) {
-    var a = state.artifacts.filter(function (x) { return x.id === id; })[0];
-    if (!a) return;
-    els.modalBody.innerHTML = renderModalContent(a);
-    els.modalOverlay.hidden = false;
-  }
-
-  // Delegated (bound once to modalBody, not re-attached on every
-  // render the way a per-button onclick would need to be) since
-  // renderModalContent rebuilds the modal's innerHTML from scratch
-  // every time it opens.
-  els.modalBody.addEventListener('click', async function (ev) {
+  // Delegated (bound once to detailBody, not re-attached on every render
+  // the way a per-button onclick would need to be) since renderDetailPage
+  // rebuilds the container's innerHTML from scratch every time it draws.
+  els.detailBody.addEventListener('click', async function (ev) {
     var btn = ev.target.closest('button[data-action]');
     if (!btn) return;
     var action = btn.getAttribute('data-action');
+
+    if (action === 'back') { goToList(); return; }
+    if (action === 'tab') { state.detailTab = btn.getAttribute('data-bucket'); render(); return; }
+    if (action === 'scan') { scanArtifact(btn.getAttribute('data-id')); return; }
+    if (action === 'delete') { await deleteArtifact(btn.getAttribute('data-id'), btn.getAttribute('data-ref')); return; }
 
     if (action === 'download-sbom' || action === 'download-sarif') {
       var docID = btn.getAttribute('data-id');
@@ -787,7 +970,7 @@
         for (var i = 0; i < state.artifacts.length; i++) {
           if (state.artifacts[i].id === id) { state.artifacts[i] = updated; break; }
         }
-        openDetailModal(id);
+        render();
         setStatus('Maintainer updated', false);
       } catch (err) {
         setStatus('Could not update maintainer — ' + err.message, true);
@@ -795,67 +978,9 @@
     }
   });
 
-  function closeDetailModal() {
-    els.modalOverlay.hidden = true;
-  }
-
-  function renderDetailSections(a) {
-    var stageHistory = (a.stage_history || []).slice().reverse();
-    var cve = a.cve_findings || [];
-    var mal = a.malware_findings || [];
-    var misconfig = a.misconfiguration_findings || [];
-    var secret = a.secret_findings || [];
-    var other = a.other_findings || [];
-    var errs = a.last_scan_errors || [];
-
-    var historyHtml = stageHistory.length
-      ? stageHistory.map(function (e) {
-          return '<div class="timeline-item"><strong>' + esc(e.stage) + '</strong> — ' +
-            new Date(e.timestamp).toLocaleString() +
-            (e.note ? '<br><span class="muted">' + esc(e.note) + '</span>' : '') + '</div>';
-        }).join('')
-      : '<span class="muted">No stage events recorded yet.</span>';
-
-    var cveHtml = cve.length
-      ? cve.map(function (f) { return renderFinding(f, a, true); }).join('')
-      : '<span class="muted">No CVE findings.</span>';
-
-    var malHtml = mal.length
-      ? mal.map(function (f) { return renderFinding(f, a, false); }).join('')
-      : '<span class="muted">No malware findings.</span>';
-
-    var misconfigHtml = misconfig.length
-      ? misconfig.map(function (f) { return renderFinding(f, a, true); }).join('')
-      : '<span class="muted">No misconfiguration findings.</span>';
-
-    var secretHtml = secret.length
-      ? secret.map(function (f) { return renderFinding(f, a, true); }).join('')
-      : '<span class="muted">No secret findings.</span>';
-
-    var otherHtml = other.length
-      ? other.map(function (f) { return renderFinding(f, a, true); }).join('')
-      : '<span class="muted">No other findings.</span>';
-
-    var errsHtml = errs.length
-      ? '<div class="errs">' + errs.map(esc).join('<br>') + '</div>'
-      : '';
-
-    return (
-      '<div class="detail-grid">' +
-        '<div class="detail-col"><h3>Pipeline history</h3>' + historyHtml + '</div>' +
-        '<div class="detail-col"><h3>CVE findings</h3>' + cveHtml + '</div>' +
-        '<div class="detail-col"><h3>Malware findings</h3>' + malHtml + '</div>' +
-        '<div class="detail-col"><h3>Misconfiguration findings</h3>' + misconfigHtml + '</div>' +
-        '<div class="detail-col"><h3>Secret findings</h3>' + secretHtml + '</div>' +
-        '<div class="detail-col"><h3>Other findings (SARIF, etc.)</h3>' + otherHtml + '</div>' +
-      '</div>' +
-      errsHtml
-    );
-  }
-
   async function scanArtifact(id) {
     state.busy[id] = true;
-    renderRows();
+    render();
     try {
       await fetchJSON('/api/v1/artifacts/' + id + '/scan', { method: 'POST' });
     } catch (err) {
@@ -875,9 +1000,15 @@
   async function deleteArtifact(id, ref) {
     if (!window.confirm('Delete ' + (ref || id) + '? This cannot be undone.')) return;
     state.busy[id] = true;
-    renderRows();
+    render();
     try {
       await fetchJSON('/api/v1/artifacts/' + id, { method: 'DELETE' });
+      // Leaving the hash pointed at a now-deleted artifact would land on
+      // the detail view's "not found" state after loadAll() below --
+      // clearing it first sends a delete-from-the-detail-page back to
+      // the list instead, same as a delete-from-the-table-row already
+      // stays on the list.
+      if (currentDetailID() === id) location.hash = '';
     } catch (err) {
       setStatus('Delete failed for ' + id + ' — ' + err.message, true);
     } finally {
@@ -892,20 +1023,15 @@
     var id = btn.getAttribute('data-id');
     var action = btn.getAttribute('data-action');
     if (action === 'scan') scanArtifact(id);
-    if (action === 'toggle') openDetailModal(id);
+    if (action === 'toggle') goToDetail(id);
     if (action === 'delete') deleteArtifact(id, btn.getAttribute('data-ref'));
   });
 
-  els.modalClose.addEventListener('click', closeDetailModal);
-
-  // Closes on a click that lands on the overlay itself (the backdrop)
-  // but not one that lands on the modal box or anything inside it --
-  // ev.target is the actual clicked element, and the box is a separate
-  // child node, so a click inside the box never bubbles up as a click
-  // "on" the overlay element.
-  els.modalOverlay.addEventListener('click', function (ev) {
-    if (ev.target === els.modalOverlay) closeDetailModal();
-  });
+  // Covers back/forward navigation and any manual edit of the hash --
+  // clicks that set location.hash themselves (goToDetail/goToList) also
+  // call render() directly, since jsdom (and this app's own tests) don't
+  // dispatch 'hashchange' synchronously the way a real browser does.
+  window.addEventListener('hashchange', render);
 
   function openRegisterModal() {
     els.registerModalOverlay.hidden = false;
@@ -926,7 +1052,6 @@
 
   document.addEventListener('keydown', function (ev) {
     if (ev.key !== 'Escape') return;
-    if (!els.modalOverlay.hidden) closeDetailModal();
     if (!els.registerModalOverlay.hidden) closeRegisterModal();
   });
 
