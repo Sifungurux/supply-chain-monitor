@@ -49,6 +49,20 @@ jobs:
       - name: make test-postgres
         run: make test-postgres
 
+  # Starts a real, throwaway monitor-api and Postgres and curls
+  # /swagger, /openapi.yaml, and the README-documented API examples
+  # against them for real -- see cluster/test-swagger-docs.sh and `make
+  # test-swagger-docs`. Separate job from test-api for the same reason
+  # test-postgres is: needs --network host, which doesn't work on
+  # Docker Desktop for macOS (fine here -- ubuntu-latest is a real Linux
+  # host).
+  test-swagger-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: make test-swagger-docs
+        run: make test-swagger-docs
+
   # Node+jsdom test suite for dashboard/index.html. See `make
   # test-dashboard`.
   test-dashboard:
