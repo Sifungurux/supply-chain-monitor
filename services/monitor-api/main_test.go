@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
@@ -292,6 +293,75 @@ func TestRegisterExternalScanners(t *testing.T) {
 		}, fakeFetcher{})
 		if err == nil {
 			t.Fatal("expected an error for an unrecognized artifactType (\"container\" isn't image/file/sbom/sarif)")
+		}
+	})
+}
+
+// TestPickArtifactsToSweep covers the pure selection logic
+// runSweepRegistered relies on -- no HTTP involved, same as
+// TestBuildImageScanners/TestBuildSBOMScanners above.
+func TestPickArtifactsToSweep(t *testing.T) {
+	now := time.Now().UTC()
+	mk := func(id string, status artifact.Status, age time.Duration) artifact.Artifact {
+		return artifact.Artifact{ID: id, Status: status, CreatedAt: now.Add(-age)}
+	}
+
+	t.Run("only picks status=registered, ignores everything else", func(t *testing.T) {
+		all := []artifact.Artifact{
+			mk("a", artifact.StatusRegistered, time.Hour),
+			mk("b", artifact.StatusScanning, time.Hour),
+			mk("c", artifact.StatusScanned, time.Hour),
+			mk("d", artifact.StatusFailed, time.Hour),
+		}
+		got := pickArtifactsToSweep(all, 10)
+		if len(got) != 1 || got[0].ID != "a" {
+			t.Fatalf("got %+v, want only artifact \"a\" (the only status=registered one)", got)
+		}
+	})
+
+	t.Run("oldest first, so a backlog works through fairly across runs", func(t *testing.T) {
+		all := []artifact.Artifact{
+			mk("newest", artifact.StatusRegistered, time.Minute),
+			mk("oldest", artifact.StatusRegistered, 24*time.Hour),
+			mk("middle", artifact.StatusRegistered, time.Hour),
+		}
+		got := pickArtifactsToSweep(all, 10)
+		want := []string{"oldest", "middle", "newest"}
+		if len(got) != len(want) {
+			t.Fatalf("got %d artifacts, want %d", len(got), len(want))
+		}
+		for i, id := range want {
+			if got[i].ID != id {
+				t.Fatalf("position %d: got %q, want %q (order = %v)", i, got[i].ID, id, got)
+			}
+		}
+	})
+
+	t.Run("truncates to batchSize", func(t *testing.T) {
+		all := []artifact.Artifact{
+			mk("a", artifact.StatusRegistered, 3*time.Hour),
+			mk("b", artifact.StatusRegistered, 2*time.Hour),
+			mk("c", artifact.StatusRegistered, time.Hour),
+		}
+		got := pickArtifactsToSweep(all, 2)
+		if len(got) != 2 {
+			t.Fatalf("got %d artifacts, want exactly batchSize=2", len(got))
+		}
+	})
+
+	t.Run("batchSize <= 0 means nothing to do, not unbounded", func(t *testing.T) {
+		all := []artifact.Artifact{mk("a", artifact.StatusRegistered, time.Hour)}
+		for _, batchSize := range []int{0, -1} {
+			if got := pickArtifactsToSweep(all, batchSize); len(got) != 0 {
+				t.Fatalf("batchSize=%d: got %d artifacts, want 0 (fail closed, not unbounded)", batchSize, len(got))
+			}
+		}
+	})
+
+	t.Run("no registered artifacts at all", func(t *testing.T) {
+		all := []artifact.Artifact{mk("a", artifact.StatusScanned, time.Hour)}
+		if got := pickArtifactsToSweep(all, 10); len(got) != 0 {
+			t.Fatalf("got %d artifacts, want 0", len(got))
 		}
 	})
 }

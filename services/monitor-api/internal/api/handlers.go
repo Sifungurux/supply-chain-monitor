@@ -661,9 +661,27 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	detectFixedFor := func(bucket string) bool { return !blockedBuckets[bucket] }
 
+	// Backfill a missing digest opportunistically on every scan -- see
+	// resolveDigest's own comment for why registration-time resolution
+	// can fail (rate-limited/unreachable registry) and never retries on
+	// its own once that request returns. A routine scan of an already-
+	// registered artifact is a natural, low-cost second chance to fill
+	// it in later, using the exact same best-effort helper createArtifact
+	// uses. Resolved here (before store.Update below, not inside its
+	// closure) since this can take up to digestResolveTimeout (8s) of
+	// real network I/O, which shouldn't happen while holding whatever
+	// lock/transaction Update takes. A no-op when a.Digest is already
+	// set (digest just passes through unchanged) or resolution fails
+	// again (digest stays "", same as before this scan).
+	digest := a.Digest
+	if digest == "" {
+		digest = h.resolveDigest(r.Context(), a.Ref, a.Type)
+	}
+
 	now := time.Now().UTC()
 	updated, updErr := h.store.Update(id, func(art *artifact.Artifact) {
 		art.Status = status
+		art.Digest = digest
 		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, cveFindings, now, detectFixedFor("cve"))
 		art.MalwareFindings = artifact.MergeFindings(art.MalwareFindings, malwareFindings, now, detectFixedFor("malware"))
 		art.MisconfigFindings = artifact.MergeFindings(art.MisconfigFindings, misconfigFindings, now, detectFixedFor("misconfiguration"))

@@ -93,9 +93,16 @@ func newTestRouterWithDigestResolver(resolver scanner.DigestResolver) (http.Hand
 type fakeDigestResolver struct {
 	digests map[string]string
 	errRef  string
+	// calls counts every Resolve invocation -- used by
+	// TestScanArtifact_DoesNotReResolveAnAlreadySetDigest to prove an
+	// already-resolved digest never triggers a redundant registry call.
+	// Zero value is fine for every other test using this type; none of
+	// them read it.
+	calls int
 }
 
 func (f *fakeDigestResolver) Resolve(_ context.Context, ref string, _ bool) (string, error) {
+	f.calls++
 	if ref == f.errRef {
 		return "", errors.New("fake registry unreachable")
 	}
@@ -821,6 +828,70 @@ func TestScanArtifact_MergesFindingsBySource(t *testing.T) {
 	}
 	if len(got.LastScanErrors) != 0 {
 		t.Fatalf("expected no scan errors, got %v", got.LastScanErrors)
+	}
+}
+
+// TestScanArtifact_BackfillsMissingDigest covers the actual real-world
+// gap this exists to close: registration-time digest resolution is
+// best-effort and never retried on its own (see resolveDigest's own
+// comment) -- a registry that's rate-limited or briefly unreachable at
+// registration time leaves an artifact's digest empty forever, even
+// though the exact same ref resolves fine moments later. A routine scan
+// is a natural second chance to fill it in.
+func TestScanArtifact_BackfillsMissingDigest(t *testing.T) {
+	store := artifact.NewMemStore()
+	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
+	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:backfilled"}}
+	h := api.NewRouter(store, tracker, scanner.Registry{
+		artifact.TypeImage: {&fakeScanner{}},
+	}, testAPIKey, 0, 0, resolver, false, 0)
+
+	// mustCreate goes straight through the store, bypassing
+	// createArtifact's own registration-time resolveDigest call --
+	// simulating exactly the artifact this feature targets: registered
+	// with no digest, because resolution wasn't attempted or failed.
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	if created.Digest != "" {
+		t.Fatalf("test setup: expected no digest yet, got %q", created.Digest)
+	}
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	got := decodeArtifact(t, rec)
+	if got.Digest != "sha256:backfilled" {
+		t.Fatalf("digest = %q, want the resolver's value backfilled by the scan", got.Digest)
+	}
+}
+
+// TestScanArtifact_DoesNotReResolveAnAlreadySetDigest proves the backfill
+// is opportunistic, not a re-verification on every scan: an artifact that
+// already has a digest must never trigger a second registry round trip
+// just because it got scanned again.
+func TestScanArtifact_DoesNotReResolveAnAlreadySetDigest(t *testing.T) {
+	store := artifact.NewMemStore()
+	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
+	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:should-never-be-fetched"}}
+	h := api.NewRouter(store, tracker, scanner.Registry{
+		artifact.TypeImage: {&fakeScanner{}},
+	}, testAPIKey, 0, 0, resolver, false, 0)
+
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	if _, err := store.Update(created.ID, func(a *artifact.Artifact) { a.Digest = "sha256:already-set" }); err != nil {
+		t.Fatalf("store.Update: %v", err)
+	}
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	got := decodeArtifact(t, rec)
+	if got.Digest != "sha256:already-set" {
+		t.Fatalf("digest = %q, want the pre-existing digest left untouched", got.Digest)
+	}
+	if resolver.calls != 0 {
+		t.Fatalf("resolver.Resolve called %d times, want 0 -- an already-resolved digest must not trigger a redundant registry call", resolver.calls)
 	}
 }
 
