@@ -27,7 +27,7 @@ ifeq ($(SCM_RUNTIME),podman)
 export DOCKER_HOST := $(shell (podman system connection ls --format json | jq -r '.[] | select(.Default==true) | .URI') 2>/dev/null)
 endif
 
-.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test gateway-api-install build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard check-dashboard-configmap db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
+.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test gateway-api-install build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -257,6 +257,16 @@ test-postgres:
 # node image -- no local Node install needed.
 test-dashboard:
 	docker run --rm -v "$(CURDIR)/dashboard":/src -w /src node:22-alpine sh -c "npm install --no-save >/dev/null && npm test"
+
+# Starts a real, throwaway monitor-api (plus its own throwaway Postgres,
+# same as test-postgres above) and curls /swagger, /openapi.yaml, and the
+# README-documented API examples against it for real -- see
+# cluster/test-swagger-docs.sh's own header for what this catches that
+# internal/api's httptest-based Go tests can't (no real TCP listener, no
+# real HTTP round trip). Needs --network host (see test-postgres's own
+# comment) -- same Docker-Desktop-on-macOS caveat applies here too.
+test-swagger-docs:
+	./cluster/test-swagger-docs.sh
 
 # Generates and commits services/monitor-api/go.sum for real, pinned,
 # reproducible builds -- see go.mod's own comment on why it isn't
