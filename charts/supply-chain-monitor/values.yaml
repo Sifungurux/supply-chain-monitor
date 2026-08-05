@@ -304,6 +304,15 @@ monitorApi:
     javaRepository: ""
     skipUpdate: "true"
     skipJavaUpdate: "true"
+  # Selects which CVE scanner(s) actually run for `image`/`sbom`
+  # artifacts: "trivy" (default -- identical behavior to every
+  # deployment before this key existed), "grype", or "both" (findings
+  # from a CVE both tools agree on merge into one, with a joined
+  # Source -- see internal/artifact/merge.go's CoalesceSameIDSources).
+  # "grype"/"both" also turn on grype-db-cache-primer-job.yaml/
+  # grype-db-refresh-cronjob.yaml below, since grype then actually
+  # needs a warm DB to read.
+  cveScanner: "trivy"
   # Operator-configured external scanners -- plug in a different CVE
   # scanner (Grype, OSV-Scanner, ...) or SBOM tool alongside (never
   # instead of -- registration is additive) the built-in trivy/ClamAV
@@ -361,6 +370,31 @@ monitorApi:
     # contend for disk/CPU on a single-node dev cluster at the same
     # moment.
     refreshSchedule: "0 3 * * *" # daily at 03:00 UTC
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 768Mi
+  # The shared PersistentVolumeClaim IsolatedGrypeScanner mounts
+  # read-only into every grype scan-worker Job -- grype's own
+  # counterpart to trivyCache above, kept warm by
+  # grype-db-cache-primer-job.yaml/grype-db-refresh-cronjob.yaml, both
+  # of which are inert (never scheduled) unless cveScanner is "grype"
+  # or "both".
+  grypeCache:
+    pvcName: scm-grype-db-cache
+    mountPath: /grype-cache
+    persistence:
+      # grype's vulnerability DB alone (no separate Java DB the way
+      # trivy has) is typically a few hundred MB -- same 2Gi headroom
+      # as trivyCache for consistency.
+      size: 2Gi
+    # Offset from both postgres.backup.schedule (02:00) and
+    # trivyCache.refreshSchedule (03:00) so none of the three contend
+    # for disk/CPU on a single-node dev cluster at the same moment.
+    refreshSchedule: "0 4 * * *" # daily at 04:00 UTC
     resources:
       requests:
         cpu: 100m

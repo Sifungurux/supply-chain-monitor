@@ -1,0 +1,32 @@
+# The vulnerability DB every isolated grype scan-worker Job
+# (IsolatedGrypeScanner) reads -- pre-downloaded and kept warm by
+# grype-db-cache-primer-job.yaml (once, at install/upgrade time) and
+# grype-db-refresh-cronjob.yaml (on grypeCache.refreshSchedule
+# thereafter), rather than each scan-worker Job downloading its own
+# copy. Mirrors trivy-db-cache-pvc.yaml's shape and reasoning exactly
+# -- see that file's comment for the full "why" (WaitForFirstConsumer,
+# hook-weight ordering, hook-delete-policy) -- grype's DB, like trivy's,
+# is opened read-only internally, so many scan-worker Jobs can safely
+# share one copy concurrently.
+#
+# Unlike the primer Job/refresh CronJob below, this PVC is NOT gated on
+# monitorApi.cveScanner: even when cveScanner stays "trivy" (the
+# default), the PVC must still exist so Helm/Flux's readiness wait
+# doesn't fail trying to look up a resource that was never rendered --
+# it would simply never get a real consumer in that case, which is
+# harmless (no primer/refresh Job runs to fill it, no scan-worker Job
+# ever mounts it).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.monitorApi.grypeCache.pvcName }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": hook-failed
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.monitorApi.grypeCache.persistence.size }}
