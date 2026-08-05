@@ -177,10 +177,18 @@ type Artifact struct {
 	// specific buckets. A generic catch-all bucket rather than trying
 	// to enumerate every possible category up front.
 	OtherFindings []Finding `json:"other_findings,omitempty"`
-	// LastScanErrors holds any per-scanner errors from the most recent
-	// /scan call (e.g. one of several scanners for a type failed while
-	// others succeeded). Empty on a fully clean scan.
+	// LastScanErrors holds a friendly, classified message per failed
+	// scanner from the most recent /scan call (e.g. one of several
+	// scanners for a type failed while others succeeded) -- never the
+	// scanner's raw error text, see scanner.ClassifyScanError. Empty on
+	// a fully clean scan.
 	LastScanErrors []string `json:"last_scan_errors,omitempty"`
+	// LastScanFailureReason is a short, stable reason code (e.g.
+	// "not_found", "scan_timeout") set only when every scanner failed
+	// this round (Status == StatusFailed) -- see
+	// scanner.ClassifyScanError for the full set of codes. Cleared on
+	// the next scan that isn't a total failure.
+	LastScanFailureReason string `json:"last_scan_failure_reason,omitempty"`
 	// LastScanAt is when the /scan endpoint last completed for this
 	// artifact -- nil until the first scan runs. Deliberately its own
 	// field rather than reusing UpdatedAt: UpdatedAt also moves on

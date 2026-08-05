@@ -251,10 +251,9 @@ func (t *TrivyScanner) ScanRaw(ctx context.Context, ref string) ([]byte, error) 
 // wrapTrivyScanError turns a failed trivy invocation into the error
 // Scan returns. Most failures get trivy's raw stderr included verbatim
 // -- an unfamiliar failure is exactly when the extra detail is worth
-// keeping, even at the cost of some noise -- but "manifest unknown"
-// (trivy's registry client couldn't find the requested tag/digest at
-// all) is common enough, and unhelpful enough in its raw form, to
-// special-case.
+// keeping, even at the cost of some noise -- but two shapes are common
+// enough, and unhelpful enough in raw form, to special-case: the ref
+// simply doesn't exist, or the registry rejected the pull outright.
 //
 // The raw form is genuinely bad: trivy tries docker, containerd, podman,
 // and the remote registry in turn before giving up, so a single missing
@@ -268,15 +267,55 @@ func (t *TrivyScanner) ScanRaw(ctx context.Context, ref string) ([]byte, error) 
 // images over time (see docs/architecture.md, "Bulk-registering
 // artifacts" for a concrete example this project hit).
 //
+// The not-found check matches trivy's own "unable to find the
+// specified image ... in [docker containerd podman remote]" summary
+// line directly, rather than requiring the stricter (and narrower)
+// "MANIFEST_UNKNOWN"+"Failed to fetch" pair the remote leg happens to
+// use for one specific underlying registry error code. That pair is
+// kept as a second, OR'd condition rather than removed: it's the one
+// combination that can appear on its own outside this summary line (see
+// TestWrapTrivyScanError_ManifestUnknown), so dropping it would be a
+// silent regression for that shape even though every case it covers
+// today already implies the summary line too. A bare, unqualified ref
+// (e.g. "cosign:latest" instead of "docker.io/library/cosign:latest")
+// hits the broader summary-line match without ever producing a
+// MANIFEST_UNKNOWN error at all -- the remote leg fails to resolve the
+// ref to a registry in the first place, a different underlying error
+// this narrower pair was never going to catch.
+//
+// The auth check runs first, and deliberately does not get folded into
+// the not-found match even though both can appear alongside the same
+// summary line once Part C's registry auth lands: a pull rejected for
+// bad/missing credentials is a completely different fix (check the
+// configured registry credentials) from a pull that failed because the
+// ref genuinely doesn't exist (check the ref itself) and must not be
+// conflated into "not found" just because trivy's own wording happens
+// to overlap.
+//
 // label distinguishes TrivyScanner's "trivy scan" from SBOMScanner's
 // "trivy sbom scan" (sbom.go shares this same function) so the message
 // still says which of the two actually failed, without either caller
 // needing to double-wrap the other's message.
 func wrapTrivyScanError(label, ref string, err error, stderr string) error {
-	if strings.Contains(stderr, "MANIFEST_UNKNOWN") && strings.Contains(stderr, "Failed to fetch") {
+	switch {
+	case isRegistryAuthFailure(stderr):
+		return fmt.Errorf("%s failed for %q: registry authentication failed -- check the configured registry credentials", label, ref)
+	case strings.Contains(stderr, "unable to find the specified image") ||
+		(strings.Contains(stderr, "MANIFEST_UNKNOWN") && strings.Contains(stderr, "Failed to fetch")):
 		return fmt.Errorf("%s failed for %q: image tag or digest not found in the registry -- check that the ref is correct and the tag still exists (it may have been removed, retagged, or replaced upstream)", label, ref)
+	default:
+		return fmt.Errorf("%s failed for %q: %w (%s)", label, ref, err, stderr)
 	}
-	return fmt.Errorf("%s failed for %q: %w (%s)", label, ref, err, stderr)
+}
+
+// isRegistryAuthFailure recognizes the standard Docker Distribution
+// token-auth rejection wording ("UNAUTHORIZED: authentication
+// required", a bare "401 Unauthorized", etc.) inside a scan failure's
+// stderr. Case-insensitive since trivy, the registry, and any
+// intermediate proxy don't agree on capitalization.
+func isRegistryAuthFailure(stderr string) bool {
+	lower := strings.ToLower(stderr)
+	return strings.Contains(lower, "unauthorized") || strings.Contains(lower, "401 ")
 }
 
 // cleanScanCache purges trivy's local image/SBOM analysis cache (the

@@ -246,3 +246,52 @@ func TestWrapTrivyScanError_UnsupportedArtifactTypeIsNotManifestUnknown(t *testi
 		t.Errorf("message %q should keep the raw stderr for this unrecognized case", err.Error())
 	}
 }
+
+// TestWrapTrivyScanError_UnqualifiedRefNotFound is the exact bug report
+// this classification pass was written for: a bare, unqualified ref
+// (no registry/library prefix) fails to resolve on the remote leg
+// without ever producing a MANIFEST_UNKNOWN error -- the pre-existing
+// check required that exact code and missed this shape entirely, so the
+// full docker/containerd/podman/remote FATAL dump leaked to the user
+// verbatim. Fixture trimmed from the real failure reported for
+// "cosign:latest".
+func TestWrapTrivyScanError_UnqualifiedRefNotFound(t *testing.T) {
+	rawStderr := `2026-08-04T22:00:05Z	FATAL	Fatal error	run error: image scan error: scan error: unable to initialize a scan service: unable to initialize artifact: unable to initialize container image: unable to find the specified image "cosign:latest" in ["docker" "containerd" "podman" "remote"]: 4 errors occurred:
+	* docker error: unable to inspect the image (cosign:latest): failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory
+	* containerd error: containerd socket not found: /run/containerd/containerd.sock
+	* podman error: unable to initialize Podman client: no podman socket found: stat podman/podman.sock: no such file or directory
+	* remote error: GET https://index.docker.io/v2/library/cosign/manifests/latest: unexpected status code 404 Not Found: NAME_UNKNOWN: repository name not known to registry
+`
+	err := wrapTrivyScanError("trivy scan", "cosign:latest", errors.New("exit status 1"), rawStderr)
+	if err == nil {
+		t.Fatal("expected a non-nil error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "not found in the registry") {
+		t.Errorf("message %q should give the simplified explanation even without a MANIFEST_UNKNOWN error code", msg)
+	}
+	for _, noisy := range []string{"docker error", "containerd error", "podman error", "docker.sock", "4 errors occurred"} {
+		if strings.Contains(msg, noisy) {
+			t.Errorf("message %q still contains raw trivy noise %q, want it collapsed away", msg, noisy)
+		}
+	}
+}
+
+// TestWrapTrivyScanError_RegistryAuthFailure confirms a rejected pull
+// (relevant once Part C's registry auth lands) gets its own distinct
+// message instead of being misread as "not found" just because trivy's
+// summary line can wrap both cases identically.
+func TestWrapTrivyScanError_RegistryAuthFailure(t *testing.T) {
+	rawStderr := `* remote error: GET https://scm-registry/v2/private/app/manifests/latest: UNAUTHORIZED: authentication required`
+	err := wrapTrivyScanError("trivy scan", "scm-registry/private/app:latest", errors.New("exit status 1"), rawStderr)
+	if err == nil {
+		t.Fatal("expected a non-nil error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "authentication failed") {
+		t.Errorf("message %q should call out the authentication failure", msg)
+	}
+	if strings.Contains(msg, "not found in the registry") {
+		t.Errorf("message %q should not be relabeled as not-found -- a bad credential is a different problem than a missing ref", msg)
+	}
+}

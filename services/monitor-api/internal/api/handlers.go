@@ -662,6 +662,37 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 		status = artifact.StatusFailed
 	}
 
+	// Every scan error, from whichever layer it originated at (an
+	// in-process scanner, a scan-worker Job's own orchestration
+	// failure, a pre-scan fetch, a recovered panic -- see
+	// scanner.ClassifyScanError's own comment for why this is the one
+	// place all of those converge), gets classified here rather than
+	// stored raw: raw text is a multi-line trivy/k8s dump nobody but an
+	// operator reading server logs should ever see. The raw string is
+	// still logged server-side (kubectl logs / this pod's own stdout)
+	// so nothing is lost, just kept out of the API response and
+	// dashboard. failureReason picks the single most-specific reason
+	// across every failed scanner this round (classifyReasonRank),
+	// and is only meaningful -- so only persisted -- when every scanner
+	// failed (status == StatusFailed); a partial failure's LastScanErrors
+	// still gets the friendly per-scanner messages, but LastScanFailureReason
+	// stays cleared, matching "this scan overall still counts as
+	// scanned."
+	cleanErrors := make([]string, len(scanErrors))
+	var failureReason string
+	for i, raw := range scanErrors {
+		log.Printf("scan error for artifact %s: %s", a.ID, raw)
+		reason, message := scanner.ClassifyScanError(raw)
+		cleanErrors[i] = message
+		if failureReason == "" || scanner.ReasonRank(reason) < scanner.ReasonRank(failureReason) {
+			failureReason = reason
+		}
+	}
+	scanErrors = cleanErrors
+	if status != artifact.StatusFailed {
+		failureReason = ""
+	}
+
 	// blockedBuckets gates, per bucket, whether MergeFindings is allowed
 	// to mark anything as fixed this round -- a bucket in this set had
 	// at least one scanner fail that could have contributed to it, so a
@@ -726,6 +757,7 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 		art.SecretFindings = artifact.MergeFindings(art.SecretFindings, secretFindings, now, detectFixedFor("secret"))
 		art.OtherFindings = artifact.MergeFindings(art.OtherFindings, otherFindings, now, detectFixedFor("other"))
 		art.LastScanErrors = scanErrors
+		art.LastScanFailureReason = failureReason
 		art.LastScanAt = &now
 	})
 	if updErr != nil {

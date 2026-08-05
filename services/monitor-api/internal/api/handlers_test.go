@@ -1246,8 +1246,19 @@ func TestScanArtifact_ScannerPanicIsRecovered(t *testing.T) {
 	// this test is proving -- an unrecovered panic in a spawned
 	// goroutine would have crashed the whole test binary, not just
 	// failed this one assertion.
-	if !bytes.Contains(rec.Body.Bytes(), []byte("panicked")) {
-		t.Fatalf("expected the recorded error to mention the panic, got body=%s", rec.Body.String())
+	//
+	// The recorded error is the classified, friendly message (see
+	// scanner.ClassifyScanError) -- never the raw "boom: this scanner
+	// has a bug" panic text, which is logged server-side instead of
+	// returned to the caller.
+	if bytes.Contains(rec.Body.Bytes(), []byte("boom: this scanner has a bug")) {
+		t.Fatalf("expected the raw panic text to be classified away, got body=%s", rec.Body.String())
+	}
+	if got.LastScanErrors[0] != "Scanner encountered an internal error" {
+		t.Fatalf("expected the classified panic message, got %q", got.LastScanErrors[0])
+	}
+	if got.LastScanFailureReason != "" {
+		t.Fatalf("one of two scanners still succeeded, LastScanFailureReason should stay unset, got %q", got.LastScanFailureReason)
 	}
 }
 
@@ -1270,6 +1281,18 @@ func TestScanArtifact_AllScannersFail(t *testing.T) {
 	}
 	if len(got.LastScanErrors) != 2 {
 		t.Fatalf("expected both scanner errors recorded, got %v", got.LastScanErrors)
+	}
+	// Neither raw scanner error string should ever reach the API
+	// response -- only the classified, friendly message. Both fixtures
+	// here don't match any known pattern, so both should land on the
+	// "unknown" reason/message rather than leaking their raw text.
+	for _, raw := range []string{"trivy: exec failed", "unpacker: pull failed"} {
+		if bytes.Contains(rec.Body.Bytes(), []byte(raw)) {
+			t.Fatalf("raw scanner error %q leaked into the response, body=%s", raw, rec.Body.String())
+		}
+	}
+	if got.LastScanFailureReason != "unknown" {
+		t.Fatalf("LastScanFailureReason = %q, want %q (every scanner failed, neither error matched a known pattern)", got.LastScanFailureReason, "unknown")
 	}
 }
 
