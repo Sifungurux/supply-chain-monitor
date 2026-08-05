@@ -75,6 +75,18 @@ data:
   # the isolated worker looks for the one already pulled).
   TRIVY_CACHE_CLAIM: {{ .Values.monitorApi.trivyCache.pvcName | quote }}
   TRIVY_CACHE_DIR: {{ .Values.monitorApi.trivyCache.mountPath | quote }}
+  # grype's counterpart to the pair above -- see
+  # grype-db-cache-pvc.yaml/grype-db-cache-primer-job.yaml/
+  # grype-db-refresh-cronjob.yaml. Always set (not conditional on
+  # cveScanner) so switching cveScanner from "trivy" to "grype"/"both"
+  # on an existing deployment doesn't also require a chart change to
+  # pick these up.
+  GRYPE_CACHE_CLAIM: {{ .Values.monitorApi.grypeCache.pvcName | quote }}
+  GRYPE_CACHE_DIR: {{ .Values.monitorApi.grypeCache.mountPath | quote }}
+  # Selects which CVE scanner(s) run for image/sbom artifacts -- see
+  # values.yaml's monitorApi.cveScanner comment and main.go's
+  # runAPIServer.
+  CVE_SCANNER: {{ .Values.monitorApi.cveScanner | quote }}
   # Lets an "image"-mode scan-worker Job upload a generated SBOM/SARIF
   # document back to this Service -- see monitorApi.scanWorker.apiBaseURL's
   # own comment in values.yaml.

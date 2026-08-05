@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -87,30 +88,42 @@ func buildDockerConfigJSON(registryAddr, username, password string) []byte {
 	return b
 }
 
-// writeDockerConfig writes buildDockerConfigJSON's output to a fresh
-// temp file and returns its path -- unpacker's --config flag needs a
-// real file path, not inline JSON. Returns "" when username is empty
-// (the "no registry credentials configured" default every deployment
-// ran under before registry auth existed), which UnpackerScanner treats
-// as "don't pass --config at all." Called once at startup (both here in
+// writeDockerConfig writes buildDockerConfigJSON's output to a file
+// named "config.json" inside a fresh temp directory, and returns that
+// file's path -- unpacker's --config flag needs a real file path, not
+// inline JSON. Returns "" when username is empty (the "no registry
+// credentials configured" default every deployment ran under before
+// registry auth existed), which UnpackerScanner treats as "don't pass
+// --config at all." Called once at startup (both here in
 // runAPIServer's in-process fallback and in runScanWorker's isolated
-// path), not per-scan, so the temp file is deliberately never cleaned
-// up -- it lives for this process's lifetime either way (a long-running
-// pod that made this decision once at boot, or a scan-worker Job pod
-// that exits shortly after and takes its whole filesystem with it).
+// path), not per-scan, so the temp directory is deliberately never
+// cleaned up -- it lives for this process's lifetime either way (a
+// long-running pod that made this decision once at boot, or a
+// scan-worker Job pod that exits shortly after and takes its whole
+// filesystem with it).
+//
+// A directory containing a file literally named "config.json", not a
+// bare temp file with a random name, because grype needs that exact
+// shape: pointing the DOCKER_CONFIG env var at this file's parent
+// directory (see GrypeScanner.registryEnv's comment for why grype
+// needs this instead of a dedicated env var) is go-containerregistry's
+// default credential-helper keychain lookup, and that lookup expects
+// "config.json" specifically -- confirmed against the real grype
+// binary. unpacker's own --config flag is unaffected by this shape
+// change: it already took a full file path either way.
 func writeDockerConfig(registryAddr, username, password string) string {
 	if username == "" {
 		return ""
 	}
-	f, err := os.CreateTemp("", "scm-dockerconfig-*.json")
+	dir, err := os.MkdirTemp("", "scm-dockerconfig-*")
 	if err != nil {
-		log.Fatalf("create docker config temp file: %v", err)
+		log.Fatalf("create docker config temp dir: %v", err)
 	}
-	defer f.Close()
-	if _, err := f.Write(buildDockerConfigJSON(registryAddr, username, password)); err != nil {
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, buildDockerConfigJSON(registryAddr, username, password), 0o600); err != nil {
 		log.Fatalf("write docker config temp file: %v", err)
 	}
-	return f.Name()
+	return path
 }
 
 // buildPostgresDSN assembles a "postgres://..." connection string from
@@ -222,13 +235,19 @@ func main() {
 // IsolatedUnpackerScanner, and IsolatedTrivyScanner), not as a
 // long-running process.
 //
-// SCM_TRIVY_MODE selects which scan this invocation actually runs:
-// unset (the default) means the original unpack+ClamAV malware scan;
-// "image" or "sbom" means a trivy CVE scan instead (IsolatedTrivyScanner
-// sets this). Both trivy modes reuse TrivyScanner/SBOMScanner as-is --
-// the only thing that changes for the isolated path is TrivyDBConfig
-// pointing at the read-only shared cache mount instead of trivy's own
-// default location, and always skipping DB updates (see below).
+// SCM_SCAN_TOOL x SCM_SCAN_MODE select which scan this invocation
+// actually runs: SCM_SCAN_TOOL unset (the default) means the original
+// unpack+ClamAV malware scan, regardless of SCM_SCAN_MODE; "trivy" or
+// "grype" (with SCM_SCAN_MODE "image" or "sbom") means a CVE scan
+// using that tool instead. Renamed from the single SCM_TRIVY_MODE env
+// var (which only ever carried "image"/"sbom", trivy being the only
+// CVE scanner that existed) when grype was added as a second one -- a
+// clean rename, not additive, since the chart and this binary always
+// deploy together in one release. Every CVE-scan branch reuses
+// TrivyScanner/SBOMScanner/GrypeScanner/GrypeSBOMScanner as-is -- the
+// only thing that changes for the isolated path is each tool's DB
+// config pointing at its own read-only shared cache mount instead of
+// its default location, and always skipping DB updates (see below).
 //
 // A scan error (couldn't pull the image, clamd unreachable, etc.) is
 // reported *inside* the printed JSON (WorkerResult.Error), and the
@@ -265,8 +284,8 @@ func runScanWorker() {
 	var findings []artifact.Finding
 	var scanErr error
 
-	switch trivyMode := os.Getenv("SCM_TRIVY_MODE"); trivyMode {
-	case "image", "sbom":
+	switch tool, mode := os.Getenv("SCM_SCAN_TOOL"), os.Getenv("SCM_SCAN_MODE"); tool {
+	case "trivy":
 		// The shared trivy-db-cache PVC (see
 		// charts/supply-chain-monitor/templates/monitor-api/trivy-db-cache-pvc.yaml)
 		// is mounted read-only here -- freshness is entirely the primer
@@ -282,7 +301,7 @@ func runScanWorker() {
 			SkipJavaDBUpdate: true,
 			CacheDir:         getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
 		}
-		if trivyMode == "image" {
+		if mode == "image" {
 			var rawReport []byte
 			findings, rawReport, scanErr = scanner.NewTrivyScanner("", trivyDB).ScanWithRaw(ctx, ref)
 			if scanErr == nil {
@@ -304,6 +323,45 @@ func runScanWorker() {
 				scanErr = fmt.Errorf("fetch sbom artifact %q: %w", ref, fetchErr)
 			} else {
 				findings, scanErr = scanner.NewSBOMScanner(trivyDB).Scan(ctx, path)
+			}
+		}
+	case "grype":
+		// grype's own counterpart to trivy-db-cache above -- see
+		// charts/supply-chain-monitor/templates/monitor-api/grype-db-cache-pvc.yaml.
+		// Same "always skip, freshness is the primer/refresh Job's
+		// problem" reasoning.
+		grypeDB := scanner.GrypeDBConfig{
+			SkipDBUpdate:      true,
+			SkipAgeValidation: true,
+			CacheDir:          getenv("GRYPE_CACHE_DIR", "/grype-cache"),
+		}
+		plainHTTP := getenvBool("FETCH_PLAIN_HTTP", true)
+		// Same writeDockerConfig helper the default (unpacker) branch
+		// below already uses -- REGISTRY_ADDR/USERNAME/PASSWORD are the
+		// same trio IsolatedGrypeScanner forwards for exactly this
+		// purpose (see that type's comment). GrypeScanner/GrypeSBOMScanner
+		// don't take a bare env var the way trivy's
+		// TRIVY_USERNAME/PASSWORD do -- grype's registry-auth env vars
+		// turned out not to actually work (see grype.go's registryEnv
+		// comment), so this dockerconfig.json + DOCKER_CONFIG is the
+		// real mechanism.
+		dockerConfigPath := writeDockerConfig(getenv("REGISTRY_ADDR", ""), os.Getenv("REGISTRY_USERNAME"), os.Getenv("REGISTRY_PASSWORD"))
+		var dockerConfigDir string
+		if dockerConfigPath != "" {
+			dockerConfigDir = filepath.Dir(dockerConfigPath)
+		}
+		if mode == "image" {
+			findings, scanErr = scanner.NewGrypeScanner(grypeDB, plainHTTP, dockerConfigDir).Scan(ctx, ref)
+		} else {
+			// sbom mode: same fetch-then-scan shape as trivy's sbom
+			// branch above -- see that branch's comment.
+			fetcher := scanner.NewRegistryFetcher(plainHTTP, os.Getenv("REGISTRY_USERNAME"), os.Getenv("REGISTRY_PASSWORD"))
+			path, cleanup, fetchErr := fetcher.Fetch(ctx, ref)
+			defer cleanup()
+			if fetchErr != nil {
+				scanErr = fmt.Errorf("fetch sbom artifact %q: %w", ref, fetchErr)
+			} else {
+				findings, scanErr = scanner.NewGrypeSBOMScanner(grypeDB).Scan(ctx, path)
 			}
 		}
 	default:
@@ -535,36 +593,60 @@ func scanArtifactViaAPI(ctx context.Context, apiBase, apiKey, id string) (*artif
 	return &a, nil
 }
 
-// buildImageScanners picks both halves of the `image` artifact type's
-// scanner list -- the CVE scanner (trivy) and the malware scanner
-// (unpack + ClamAV) -- consistently: the isolated, Kubernetes-Job-per-
-// scan path for both by default, or the in-process fallback for both
-// when DISABLE_SCAN_ISOLATION is set. A single flag governing both
-// scanners keeps "isolation is on" vs. "isolation is off" one coherent
-// mental model instead of two independently-toggleable ones (see
-// DISABLE_SCAN_ISOLATION's own comment in runAPIServer). Split out from
-// runAPIServer specifically so this decision is unit-testable
-// (main_test.go) without needing a real Kubernetes API client or a
-// real trivy binary -- none of the four scanner arguments is ever
-// actually invoked by this function, just selected.
-func buildImageScanners(disableScanIsolation bool, trivyInProcess, trivyIsolated, inProcessUnpacker, isolatedUnpacker scanner.Scanner) []scanner.Scanner {
-	if disableScanIsolation {
-		return []scanner.Scanner{trivyInProcess, inProcessUnpacker}
+// cveScannersFor picks which CVE scanner(s) a given cveScanner setting
+// ("trivy", "grype", or "both") selects out of a trivy/grype pair --
+// shared by buildImageScanners and buildSBOMScanners so the
+// trivy/grype/both selection logic lives in exactly one place. Any
+// value other than "grype"/"both" (including "trivy" and, as a fail-
+// safe, anything unrecognized) falls back to trivy-only -- matching
+// this project's usual "unrecognized env value defaults to the
+// pre-existing safe behavior" convention, and, more importantly, this
+// is what makes cveScanner="trivy" behaviorally identical to every
+// deployment before this feature existed (see
+// TestBuildImageScanners_CVEScannerTrivyIsUnchanged).
+func cveScannersFor(cveScanner string, trivy, grype scanner.Scanner) []scanner.Scanner {
+	switch cveScanner {
+	case "grype":
+		return []scanner.Scanner{grype}
+	case "both":
+		return []scanner.Scanner{trivy, grype}
+	default:
+		return []scanner.Scanner{trivy}
 	}
-	return []scanner.Scanner{trivyIsolated, isolatedUnpacker}
 }
 
-// buildSBOMScanners picks the sbom artifact type's single scanner the
-// same way buildImageScanners picks image's two: the isolated,
-// Kubernetes-Job-per-scan path by default, or the in-process
-// FetchingScanner+SBOMScanner fallback under DISABLE_SCAN_ISOLATION.
-// Split out for the same reason buildImageScanners is: unit-testable
-// (main_test.go) without needing a real Kubernetes API client.
-func buildSBOMScanners(disableScanIsolation bool, inProcess, isolated scanner.Scanner) []scanner.Scanner {
+// buildImageScanners picks the `image` artifact type's full scanner
+// list -- cveScannersFor's pick of trivy/grype/both, plus the malware
+// scanner (unpack + ClamAV) -- consistently: the isolated, Kubernetes-
+// Job-per-scan path for every scanner by default, or the in-process
+// fallback for every scanner when DISABLE_SCAN_ISOLATION is set. A
+// single flag governing all of them keeps "isolation is on" vs.
+// "isolation is off" one coherent mental model instead of several
+// independently-toggleable ones (see DISABLE_SCAN_ISOLATION's own
+// comment in runAPIServer). Split out from runAPIServer specifically
+// so this decision is unit-testable (main_test.go) without needing a
+// real Kubernetes API client or real trivy/grype binaries -- none of
+// the scanner arguments is ever actually invoked by this function,
+// just selected.
+func buildImageScanners(disableScanIsolation bool, cveScanner string, trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcessUnpacker, isolatedUnpacker scanner.Scanner) []scanner.Scanner {
 	if disableScanIsolation {
-		return []scanner.Scanner{inProcess}
+		return append(cveScannersFor(cveScanner, trivyInProcess, grypeInProcess), inProcessUnpacker)
 	}
-	return []scanner.Scanner{isolated}
+	return append(cveScannersFor(cveScanner, trivyIsolated, grypeIsolated), isolatedUnpacker)
+}
+
+// buildSBOMScanners picks the sbom artifact type's CVE scanner(s) the
+// same way buildImageScanners picks image's: the isolated,
+// Kubernetes-Job-per-scan path by default, or the in-process
+// FetchingScanner+SBOMScanner/GrypeSBOMScanner fallback under
+// DISABLE_SCAN_ISOLATION. Split out for the same reason
+// buildImageScanners is: unit-testable (main_test.go) without needing
+// a real Kubernetes API client.
+func buildSBOMScanners(disableScanIsolation bool, cveScanner string, trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated scanner.Scanner) []scanner.Scanner {
+	if disableScanIsolation {
+		return cveScannersFor(cveScanner, trivyInProcess, grypeInProcess)
+	}
+	return cveScannersFor(cveScanner, trivyIsolated, grypeIsolated)
 }
 
 // registerExternalScanners adds each operator-configured external
@@ -667,6 +749,32 @@ func runAPIServer() {
 		SkipJavaDBUpdate: getenvBool("TRIVY_SKIP_JAVA_DB_UPDATE", false),
 	}
 
+	// grype's own counterpart to trivyDB above (no separate Java DB the
+	// way trivy has). CacheDir stays unset here -- that's only for the
+	// isolated path's shared read-only mount (see IsolatedGrypeConfig.
+	// CacheMountPath); in-process grype uses its own default cache
+	// location, the same relationship trivyDB/TrivyScanner("", trivyDB)
+	// above already has.
+	grypeDB := scanner.GrypeDBConfig{
+		SkipDBUpdate:      getenvBool("GRYPE_SKIP_DB_UPDATE", false),
+		SkipAgeValidation: getenvBool("GRYPE_SKIP_AGE_VALIDATION", false),
+	}
+
+	// Selects which CVE scanner(s) actually run for `image`/`sbom`
+	// artifacts -- see buildImageScanners/buildSBOMScanners and
+	// values.yaml's monitorApi.cveScanner comment. Validated (not
+	// silently clamped) so a typo'd value fails loudly at startup
+	// instead of silently falling back to trivy-only and leaving
+	// whoever configured "grype" wondering why grype never ran --
+	// same "fail closed, fail loud" convention scanTimeoutSeconds'
+	// validation below uses.
+	cveScanner := getenv("CVE_SCANNER", "trivy")
+	switch cveScanner {
+	case "trivy", "grype", "both":
+	default:
+		log.Fatalf(`CVE_SCANNER=%q is invalid -- must be "trivy", "grype", or "both"`, cveScanner)
+	}
+
 	stages := strings.Split(stagesEnv, ",")
 	for i := range stages {
 		stages[i] = strings.TrimSpace(stages[i])
@@ -744,8 +852,18 @@ func runAPIServer() {
 	// registry. See docs/architecture.md and README's "Running
 	// monitor-api outside a Kubernetes pod".
 	disableScanIsolation := getenvBool("DISABLE_SCAN_ISOLATION", false)
-	inProcessUnpacker := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024, writeDockerConfig(registryAddr, registryUsername, registryPassword))
+	// Computed once and reused for both unpacker's --config flag and
+	// grype's DOCKER_CONFIG below -- both authenticate against the same
+	// scm-registry account, no reason to write two separate temp
+	// dockerconfig.json files for it.
+	dockerConfigPath := writeDockerConfig(registryAddr, registryUsername, registryPassword)
+	inProcessUnpacker := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024, dockerConfigPath)
 	inProcessTrivy := scanner.NewTrivyScanner(registryAddr, trivyDB)
+	var grypeDockerConfigDir string
+	if dockerConfigPath != "" {
+		grypeDockerConfigDir = filepath.Dir(dockerConfigPath)
+	}
+	inProcessGrype := scanner.NewGrypeScanner(grypeDB, fetchPlainHTTP, grypeDockerConfigDir)
 
 	// SCAN_WORKER_ACTIVE_DEADLINE_SECONDS bounds how long Kubernetes lets
 	// each scan-worker Job's pod run before killing it outright (both the
@@ -775,6 +893,8 @@ func runAPIServer() {
 	var isolatedUnpacker scanner.Scanner
 	var isolatedTrivyImage scanner.Scanner
 	var isolatedTrivySBOM scanner.Scanner
+	var isolatedGrypeImage scanner.Scanner
+	var isolatedGrypeSBOM scanner.Scanner
 	if !disableScanIsolation {
 		k8sClient, err := k8sjob.NewInClusterClient()
 		if err != nil {
@@ -839,29 +959,64 @@ func runAPIServer() {
 			ActiveDeadlineSeconds:         int64(scanWorkerActiveDeadlineSeconds),
 			RegistryCredentialsSecretName: registryCredentialsSecretName,
 		})
+		// Only actually constructed when something will use them --
+		// cheap either way (no real API calls happen at construction
+		// time, just config storage), but there's no reason to build a
+		// grype Job shape nothing ever selects (see cveScannersFor).
+		if cveScanner != "trivy" {
+			isolatedGrypeImage = scanner.NewIsolatedGrypeScanner(k8sClient, scanner.IsolatedGrypeConfig{
+				Image:                         workerImage,
+				SubCommand:                    "image",
+				CacheClaimName:                getenv("GRYPE_CACHE_CLAIM", "scm-grype-db-cache"),
+				CacheMountPath:                getenv("GRYPE_CACHE_DIR", "/grype-cache"),
+				FetchPlainHTTP:                fetchPlainHTTP,
+				VerboseLogs:                   verboseScanLogs,
+				ActiveDeadlineSeconds:         int64(scanWorkerActiveDeadlineSeconds),
+				RegistryAddr:                  registryAddr,
+				RegistryCredentialsSecretName: registryCredentialsSecretName,
+			})
+			// Same shape as isolatedTrivySBOM above -- the worker fetches
+			// its own copy of the SBOM before scanning it (runScanWorker's
+			// "grype"+"sbom" case).
+			isolatedGrypeSBOM = scanner.NewIsolatedGrypeScanner(k8sClient, scanner.IsolatedGrypeConfig{
+				Image:                         workerImage,
+				SubCommand:                    "sbom",
+				CacheClaimName:                getenv("GRYPE_CACHE_CLAIM", "scm-grype-db-cache"),
+				CacheMountPath:                getenv("GRYPE_CACHE_DIR", "/grype-cache"),
+				FetchPlainHTTP:                fetchPlainHTTP,
+				VerboseLogs:                   verboseScanLogs,
+				ActiveDeadlineSeconds:         int64(scanWorkerActiveDeadlineSeconds),
+				RegistryAddr:                  registryAddr,
+				RegistryCredentialsSecretName: registryCredentialsSecretName,
+			})
+		}
 	} else {
 		log.Printf("DISABLE_SCAN_ISOLATION=true: image malware scanning, trivy CVE scanning, and sbom trivy scanning will all run in-process, not in isolated Jobs -- see README, \"Running monitor-api outside a Kubernetes pod\"")
 	}
 
 	scanners := scanner.Registry{
-		// image artifacts get both a CVE scan (trivy) and a malware scan
-		// (unpack + ClamAV) -- both isolated into their own scan-worker
-		// Job by default, both falling back in-process together under
-		// DISABLE_SCAN_ISOLATION. See buildImageScanners.
-		artifact.TypeImage: buildImageScanners(disableScanIsolation, inProcessTrivy, isolatedTrivyImage, inProcessUnpacker, isolatedUnpacker),
+		// image artifacts get a CVE scan (trivy/grype/both, per
+		// cveScanner) and a malware scan (unpack + ClamAV) -- all
+		// isolated into their own scan-worker Job by default, all
+		// falling back in-process together under DISABLE_SCAN_ISOLATION.
+		// See buildImageScanners/cveScannersFor.
+		artifact.TypeImage: buildImageScanners(disableScanIsolation, cveScanner, inProcessTrivy, isolatedTrivyImage, inProcessGrype, isolatedGrypeImage, inProcessUnpacker, isolatedUnpacker),
 		artifact.TypeFile: {
 			scanner.NewFetchingScanner(fetcher, scanner.NewClamAVScanner(clamAddr)),
 		},
-		// trivy sbom shares the same air-gapped DB-mirror config as the
-		// image scanner above -- see internal/scanner/sbom.go. Isolated
-		// into its own scan-worker Job by default now too (see
-		// docs/architecture.md, "Isolating SBOM trivy scanning"): that
-		// Job fetches its own copy of the SBOM (runScanWorker's "sbom"
-		// case) rather than relying on a local path only this pod could
-		// see, exactly mirroring how the in-process fallback below
-		// (FetchingScanner+SBOMScanner, used under
+		// trivy/grype sbom share the same air-gapped DB-mirror config as
+		// their image counterparts above -- see internal/scanner/sbom.go/
+		// grype_sbom.go. Isolated into its own scan-worker Job by default
+		// (see docs/architecture.md, "Isolating SBOM trivy scanning"):
+		// that Job fetches its own copy of the SBOM (runScanWorker's
+		// "sbom" mode) rather than relying on a local path only this pod
+		// could see, exactly mirroring how the in-process fallback below
+		// (FetchingScanner+SBOMScanner/GrypeSBOMScanner, used under
 		// DISABLE_SCAN_ISOLATION) already fetches it itself.
-		artifact.TypeSBOM: buildSBOMScanners(disableScanIsolation, scanner.NewFetchingScanner(fetcher, scanner.NewSBOMScanner(trivyDB)), isolatedTrivySBOM),
+		artifact.TypeSBOM: buildSBOMScanners(disableScanIsolation, cveScanner,
+			scanner.NewFetchingScanner(fetcher, scanner.NewSBOMScanner(trivyDB)), isolatedTrivySBOM,
+			scanner.NewFetchingScanner(fetcher, scanner.NewGrypeSBOMScanner(grypeDB)), isolatedGrypeSBOM,
+		),
 		// SARIF is parsed, not re-scanned -- see internal/scanner/sarif.go.
 		artifact.TypeSARIF: {
 			scanner.NewFetchingScanner(fetcher, scanner.NewSARIFScanner()),

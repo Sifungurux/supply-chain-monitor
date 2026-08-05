@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -129,29 +130,31 @@ func (n *namedScanner) Scan(context.Context, string) ([]artifact.Finding, error)
 	return nil, nil
 }
 
-// TestBuildImageScanners pins down the one behavioral difference
-// DISABLE_SCAN_ISOLATION is supposed to make: which CVE scanner and
-// which malware scanner back the `image` artifact type, chosen
-// consistently together. This is the only part of the
+// TestBuildImageScanners pins down the behavioral differences
+// DISABLE_SCAN_ISOLATION and cveScanner are supposed to make: which
+// CVE scanner(s) and which malware scanner back the `image` artifact
+// type, chosen consistently together. This is the only part of the
 // isolation-fallback logic (see runAPIServer's comment, "Running
 // monitor-api outside a Kubernetes pod") that's testable without a
-// real Kubernetes API client or a real trivy binary -- deliberately
-// split out of runAPIServer for exactly that reason.
+// real Kubernetes API client or real trivy/grype binaries --
+// deliberately split out of runAPIServer for exactly that reason.
 func TestBuildImageScanners(t *testing.T) {
 	trivyInProcess := &namedScanner{"trivy-in-process"}
 	trivyIsolated := &namedScanner{"trivy-isolated"}
+	grypeInProcess := &namedScanner{"grype-in-process"}
+	grypeIsolated := &namedScanner{"grype-isolated"}
 	inProcess := &namedScanner{"in-process-unpacker"}
 	isolated := &namedScanner{"isolated-unpacker"}
 
-	t.Run("isolation enabled (default): uses both isolated scanners", func(t *testing.T) {
-		got := buildImageScanners(false, trivyInProcess, trivyIsolated, inProcess, isolated)
+	t.Run("isolation enabled (default): uses the isolated CVE scanner(s)", func(t *testing.T) {
+		got := buildImageScanners(false, "trivy", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcess, isolated)
 		if len(got) != 2 || got[0] != scanner.Scanner(trivyIsolated) || got[1] != scanner.Scanner(isolated) {
 			t.Fatalf("scanners = %+v, want [trivy-isolated, isolated-unpacker]", got)
 		}
 	})
 
 	t.Run("DISABLE_SCAN_ISOLATION=true: uses both in-process scanners instead", func(t *testing.T) {
-		got := buildImageScanners(true, trivyInProcess, trivyIsolated, inProcess, isolated)
+		got := buildImageScanners(true, "trivy", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcess, isolated)
 		if len(got) != 2 || got[0] != scanner.Scanner(trivyInProcess) || got[1] != scanner.Scanner(inProcess) {
 			t.Fatalf("scanners = %+v, want [trivy-in-process, in-process-unpacker]", got)
 		}
@@ -164,27 +167,78 @@ func TestBuildImageScanners(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run(`cveScanner="grype": trivy is dropped entirely`, func(t *testing.T) {
+		got := buildImageScanners(false, "grype", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcess, isolated)
+		if len(got) != 2 || got[0] != scanner.Scanner(grypeIsolated) || got[1] != scanner.Scanner(isolated) {
+			t.Fatalf("scanners = %+v, want [grype-isolated, isolated-unpacker]", got)
+		}
+	})
+
+	t.Run(`cveScanner="both": both CVE scanners run alongside the malware scanner`, func(t *testing.T) {
+		got := buildImageScanners(false, "both", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcess, isolated)
+		if len(got) != 3 || got[0] != scanner.Scanner(trivyIsolated) || got[1] != scanner.Scanner(grypeIsolated) || got[2] != scanner.Scanner(isolated) {
+			t.Fatalf("scanners = %+v, want [trivy-isolated, grype-isolated, isolated-unpacker]", got)
+		}
+	})
+}
+
+// TestBuildImageScanners_CVEScannerTrivyIsUnchanged is the regression
+// test the plan for adding grype explicitly called for: cveScanner
+// unset/"trivy" must produce the exact same scanner list
+// buildImageScanners returned before grype existed at all (a bare
+// [trivy, unpacker] pair, isolated or in-process together) --
+// confirmed here by asserting the length and identity of every
+// element, not just that grype is merely "absent somewhere."
+func TestBuildImageScanners_CVEScannerTrivyIsUnchanged(t *testing.T) {
+	trivyInProcess := &namedScanner{"trivy-in-process"}
+	trivyIsolated := &namedScanner{"trivy-isolated"}
+	grypeInProcess := &namedScanner{"grype-in-process"}
+	grypeIsolated := &namedScanner{"grype-isolated"}
+	inProcess := &namedScanner{"in-process-unpacker"}
+	isolated := &namedScanner{"isolated-unpacker"}
+
+	for _, isolationDisabled := range []bool{false, true} {
+		got := buildImageScanners(isolationDisabled, "trivy", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcess, isolated)
+		want := []scanner.Scanner{trivyIsolated, isolated}
+		if isolationDisabled {
+			want = []scanner.Scanner{trivyInProcess, inProcess}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("disableScanIsolation=%v: scanners = %+v, want %+v", isolationDisabled, got, want)
+		}
+	}
 }
 
 // TestBuildSBOMScanners is buildImageScanners' own test, mirrored for
 // buildSBOMScanners (see docs/architecture.md, "Isolating SBOM trivy
-// scanning") -- the same DISABLE_SCAN_ISOLATION choice, just for the
-// single sbom-type scanner instead of image's two.
+// scanning") -- the same DISABLE_SCAN_ISOLATION/cveScanner choices,
+// just for the sbom-type scanner list (no malware scanner) instead of
+// image's.
 func TestBuildSBOMScanners(t *testing.T) {
-	inProcess := &namedScanner{"sbom-in-process"}
-	isolated := &namedScanner{"sbom-isolated"}
+	trivyInProcess := &namedScanner{"trivy-sbom-in-process"}
+	trivyIsolated := &namedScanner{"trivy-sbom-isolated"}
+	grypeInProcess := &namedScanner{"grype-sbom-in-process"}
+	grypeIsolated := &namedScanner{"grype-sbom-isolated"}
 
 	t.Run("isolation enabled (default): uses the isolated scanner", func(t *testing.T) {
-		got := buildSBOMScanners(false, inProcess, isolated)
-		if len(got) != 1 || got[0] != scanner.Scanner(isolated) {
-			t.Fatalf("scanners = %+v, want [sbom-isolated]", got)
+		got := buildSBOMScanners(false, "trivy", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated)
+		if len(got) != 1 || got[0] != scanner.Scanner(trivyIsolated) {
+			t.Fatalf("scanners = %+v, want [trivy-sbom-isolated]", got)
 		}
 	})
 
 	t.Run("DISABLE_SCAN_ISOLATION=true: uses the in-process scanner instead", func(t *testing.T) {
-		got := buildSBOMScanners(true, inProcess, isolated)
-		if len(got) != 1 || got[0] != scanner.Scanner(inProcess) {
-			t.Fatalf("scanners = %+v, want [sbom-in-process]", got)
+		got := buildSBOMScanners(true, "trivy", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated)
+		if len(got) != 1 || got[0] != scanner.Scanner(trivyInProcess) {
+			t.Fatalf("scanners = %+v, want [trivy-sbom-in-process]", got)
+		}
+	})
+
+	t.Run(`cveScanner="both": both scanners run`, func(t *testing.T) {
+		got := buildSBOMScanners(false, "both", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated)
+		if len(got) != 2 || got[0] != scanner.Scanner(trivyIsolated) || got[1] != scanner.Scanner(grypeIsolated) {
+			t.Fatalf("scanners = %+v, want [trivy-sbom-isolated, grype-sbom-isolated]", got)
 		}
 	})
 }

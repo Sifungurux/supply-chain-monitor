@@ -27,7 +27,8 @@ type IsolatedTrivyConfig struct {
 	// SubCommand selects which trivy invocation the worker runs:
 	// "image" (TrivyScanner, for `image`-type artifacts) or "sbom"
 	// (SBOMScanner, for `sbom`-type artifacts). Forwarded to the
-	// worker as SCM_TRIVY_MODE -- see main.go's runScanWorker.
+	// worker as SCM_SCAN_MODE (alongside SCM_SCAN_TOOL=trivy) -- see
+	// main.go's runScanWorker.
 	SubCommand string
 
 	// FetchPlainHTTP only matters when SubCommand is "sbom": ref for an
@@ -229,7 +230,8 @@ func (s *IsolatedTrivyScanner) ScanForArtifact(ctx context.Context, ref, artifac
 
 	env := map[string]string{
 		"SCM_SCAN_REF":    ref,
-		"SCM_TRIVY_MODE":  s.cfg.SubCommand,
+		"SCM_SCAN_TOOL":   "trivy",
+		"SCM_SCAN_MODE":   s.cfg.SubCommand,
 		"TRIVY_CACHE_DIR": s.cfg.CacheMountPath,
 		// Only actually consulted by the worker in "sbom" mode (see
 		// FetchPlainHTTP's own comment) -- harmless to always set.
