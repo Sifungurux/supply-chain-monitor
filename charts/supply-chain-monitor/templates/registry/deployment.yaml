@@ -21,21 +21,32 @@ spec:
           imagePullPolicy: {{ .Values.registry.image.pullPolicy }}
           ports:
             - containerPort: 5000
+            - name: debug
+              containerPort: 5001
           env:
             - name: REGISTRY_STORAGE_DELETE_ENABLED
               value: {{ .Values.registry.deleteEnabled | quote }}
+            # Distribution's separate debug listener, unauthenticated
+            # regardless of REGISTRY_AUTH_TOKEN_* -- switched to below
+            # ahead of registry-auth landing, since GET /v2/ on the main
+            # listener correctly starts 401ing unauthenticated requests
+            # once that's wired up (in fact that's the standard way to
+            # verify auth is actually working), which would otherwise
+            # take the readiness/liveness probes down with it.
+            - name: REGISTRY_HTTP_DEBUG_ADDR
+              value: ":5001"
           volumeMounts:
             - name: data
               mountPath: /var/lib/registry
           readinessProbe:
             httpGet:
-              path: /v2/
-              port: 5000
+              path: /debug/health
+              port: 5001
             initialDelaySeconds: 3
           livenessProbe:
             httpGet:
-              path: /v2/
-              port: 5000
+              path: /debug/health
+              port: 5001
             initialDelaySeconds: 5
           resources:
             {{- toYaml .Values.registry.resources | nindent 12 }}
