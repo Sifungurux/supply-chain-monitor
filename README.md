@@ -483,8 +483,11 @@ oras` if you don't already have it, same as for
 `cluster/seed-trivy-db.sh`):
 
 ```bash
-# push a SARIF file as a single-blob OCI artifact
-oras push --plain-http localhost:30500/scans/app-sarif:1 results.sarif
+# push a SARIF file as a single-blob OCI artifact -- scm-registry now
+# requires auth (see "Registry authentication" below); scm-writer can
+# push, scm-reader can only pull. Credentials are the plaintext
+# dev-placeholder values.yaml sets under dockerAuth.accounts.*.
+oras push --plain-http -u scm-writer -p changeme-writer localhost:30500/scans/app-sarif:1 results.sarif
 
 # register it -- ref is the registry reference, not a local path
 curl -s -X POST localhost:8080/api/v1/artifacts \
@@ -497,9 +500,40 @@ curl -s -X POST localhost:8080/api/v1/artifacts \
 `/tmp/results.sarif`) if you'd rather mount one directly — anything
 starting with `/`, `.`, or `~` is treated as a path already inside the
 pod and never fetched; anything else is treated as a registry
-reference. Only `scm-registry`'s unauthenticated, plain-HTTP setup is
-supported today (`FETCH_PLAIN_HTTP` in the ConfigMap) — see Known
-limitations.
+reference, fetched plain-HTTP (`FETCH_PLAIN_HTTP` in the ConfigMap) and
+authenticated with the credentials in `REGISTRY_USERNAME`/
+`REGISTRY_PASSWORD` — see "Registry authentication" below.
+
+### Registry authentication
+
+`scm-registry` requires a Bearer token from `scm-docker-auth`
+([cesanta/docker_auth](https://github.com/cesanta/docker_auth)) for
+every `/v2/` request — the registry used to be fully open (plain HTTP,
+no auth at all), so anyone with network access could push. Three static
+accounts, one flat role each (not scoped per-repository — this is a
+single shared registry):
+
+| account | role | can |
+|---|---|---|
+| `scm-reader` | read | pull only |
+| `scm-writer` | read-write | pull, push |
+| `scm-admin` | admin | pull, push, delete — no restrictions |
+
+Credentials are the plaintext dev placeholders `values.yaml`'s
+`dockerAuth.accounts.*.password` sets — change before this points at
+anything shared. `docker`/`oras` pick up a token automatically once
+you've logged in or passed `-u`/`-p`:
+
+```bash
+docker login localhost:30500 -u scm-writer -p changeme-writer
+# or, per-command, no login needed:
+oras push --plain-http -u scm-writer -p changeme-writer localhost:30500/myapp:1 ./myapp.tar
+```
+
+`monitor-api` itself only ever pulls (never pushes) — it authenticates
+as `scm-reader` via the `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` env vars
+(`registry-credentials-secret.yaml`), forwarded into every isolated
+scan-worker Job it creates the same way `SCM_API_KEY` already is.
 
 ### Image scanning: CVEs and malware, not just one or the other
 
@@ -522,7 +556,7 @@ not by artifact type. Relevant env vars (see
 `charts/supply-chain-monitor/values.yaml`'s `monitorApi.unpacker.*`
 keys, rendered into the ConfigMap by that chart):
 `UNPACKER_INSECURE`, `UNPACKER_PUBLIC` (defaults assume our local,
-unauthenticated `scm-registry`), `UNPACKER_MAX_FILE_MB` (skip huge files
+plain-HTTP `scm-registry`), `UNPACKER_MAX_FILE_MB` (skip huge files
 when walking the unpacked image, default 100MB).
 
 **The unpack+malware-scan step runs in its own Kubernetes Job, not

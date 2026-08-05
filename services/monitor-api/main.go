@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -62,6 +63,54 @@ func getenvFloat(key string, fallback float64) float64 {
 		return fallback
 	}
 	return f
+}
+
+// buildDockerConfigJSON returns the docker CLI config.json content (an
+// "auths" map, the same shape ~/.docker/config.json uses) unpacker's
+// own --config flag expects -- the file-based credential mechanism
+// unpacker takes, alongside oras's --username/--password flags
+// (fetch.go) and trivy's native TRIVY_USERNAME/TRIVY_PASSWORD env vars,
+// all three authenticating against the same scm-registry account. See
+// docs/architecture.md's registry-auth section.
+func buildDockerConfigJSON(registryAddr, username, password string) []byte {
+	auth := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+	cfg := map[string]any{
+		"auths": map[string]any{
+			registryAddr: map[string]string{
+				"username": username,
+				"password": password,
+				"auth":     auth,
+			},
+		},
+	}
+	b, _ := json.Marshal(cfg) // map[string]any of only strings/maps of strings never fails to marshal
+	return b
+}
+
+// writeDockerConfig writes buildDockerConfigJSON's output to a fresh
+// temp file and returns its path -- unpacker's --config flag needs a
+// real file path, not inline JSON. Returns "" when username is empty
+// (the "no registry credentials configured" default every deployment
+// ran under before registry auth existed), which UnpackerScanner treats
+// as "don't pass --config at all." Called once at startup (both here in
+// runAPIServer's in-process fallback and in runScanWorker's isolated
+// path), not per-scan, so the temp file is deliberately never cleaned
+// up -- it lives for this process's lifetime either way (a long-running
+// pod that made this decision once at boot, or a scan-worker Job pod
+// that exits shortly after and takes its whole filesystem with it).
+func writeDockerConfig(registryAddr, username, password string) string {
+	if username == "" {
+		return ""
+	}
+	f, err := os.CreateTemp("", "scm-dockerconfig-*.json")
+	if err != nil {
+		log.Fatalf("create docker config temp file: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.Write(buildDockerConfigJSON(registryAddr, username, password)); err != nil {
+		log.Fatalf("write docker config temp file: %v", err)
+	}
+	return f.Name()
 }
 
 // buildPostgresDSN assembles a "postgres://..." connection string from
@@ -248,7 +297,7 @@ func runScanWorker() {
 			// it fetches its own copy first via the same RegistryFetcher
 			// the in-process path uses (internal/scanner/fetch.go). See
 			// docs/architecture.md ("Isolating SBOM trivy scanning").
-			fetcher := scanner.NewRegistryFetcher(getenvBool("FETCH_PLAIN_HTTP", true))
+			fetcher := scanner.NewRegistryFetcher(getenvBool("FETCH_PLAIN_HTTP", true), os.Getenv("REGISTRY_USERNAME"), os.Getenv("REGISTRY_PASSWORD"))
 			path, cleanup, fetchErr := fetcher.Fetch(ctx, ref)
 			defer cleanup()
 			if fetchErr != nil {
@@ -263,8 +312,9 @@ func runScanWorker() {
 		unpackerInsecure := getenvBool("UNPACKER_INSECURE", true)
 		unpackerPublic := getenvBool("UNPACKER_PUBLIC", true)
 		unpackerMaxFileMB := getenvInt("UNPACKER_MAX_FILE_MB", 100)
+		dockerConfigPath := writeDockerConfig(getenv("REGISTRY_ADDR", ""), os.Getenv("REGISTRY_USERNAME"), os.Getenv("REGISTRY_PASSWORD"))
 
-		s := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024)
+		s := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024, dockerConfigPath)
 		findings, scanErr = s.Scan(ctx, ref)
 	}
 
@@ -575,10 +625,32 @@ func runAPIServer() {
 	registryAddr := getenv("REGISTRY_ADDR", "")
 	stagesEnv := getenv("PIPELINE_STAGES", "source,build,test,scan,sign,publish,deploy")
 
+	// REGISTRY_USERNAME/PASSWORD authenticate every registry-facing pull
+	// path (oras via RegistryFetcher, unpacker via a generated
+	// dockerconfig.json, trivy via its own native TRIVY_USERNAME/
+	// TRIVY_PASSWORD env vars set on isolated_trivy.go's scan-worker
+	// Jobs) against scm-registry's token-auth -- see
+	// docs/architecture.md's registry-auth section. Empty (the default
+	// before registry auth existed) means every one of those falls back
+	// to unauthenticated behavior unchanged.
+	registryUsername := os.Getenv("REGISTRY_USERNAME")
+	registryPassword := os.Getenv("REGISTRY_PASSWORD")
+	// trivy reads its own native TRIVY_USERNAME/TRIVY_PASSWORD env vars
+	// directly (os/exec inherits this process's environment automatically,
+	// no explicit flag/arg needed -- see trivy.go's ScanRaw). Only
+	// actually exercised when DISABLE_SCAN_ISOLATION runs TrivyScanner
+	// in-process below; harmless to set unconditionally otherwise, since
+	// the isolated path's own scan-worker Jobs get these set independently
+	// via isolated_trivy.go's SecretEnvVars.
+	if registryUsername != "" {
+		os.Setenv("TRIVY_USERNAME", registryUsername)
+		os.Setenv("TRIVY_PASSWORD", registryPassword)
+	}
+
 	// unpacker (github.com/Sifungurux/unpacker) config, passed through
 	// to each scan-worker Job's env -- see IsolatedUnpackerScanner.
-	// Defaults assume a local, unauthenticated, plain-HTTP dev registry
-	// (scm-registry); tighten these before pointing at anything else.
+	// Defaults assume a local, plain-HTTP dev registry (scm-registry);
+	// tighten these before pointing at anything else.
 	unpackerBin := getenv("UNPACKER_BIN", "unpacker")
 	unpackerInsecure := getenvBool("UNPACKER_INSECURE", true)
 	unpackerPublic := getenvBool("UNPACKER_PUBLIC", true)
@@ -631,7 +703,7 @@ func runAPIServer() {
 	// first. image artifacts don't need this: unpacker and trivy both
 	// already fetch the image themselves. See internal/scanner/fetch.go.
 	fetchPlainHTTP := getenvBool("FETCH_PLAIN_HTTP", true)
-	fetcher := scanner.NewRegistryFetcher(fetchPlainHTTP)
+	fetcher := scanner.NewRegistryFetcher(fetchPlainHTTP, registryUsername, registryPassword)
 
 	// Governs how much of trivy's/unpacker's own progress output ends up
 	// visible in scan-worker Job pod logs -- see scanner.VerboseScanLogs's
@@ -672,7 +744,7 @@ func runAPIServer() {
 	// registry. See docs/architecture.md and README's "Running
 	// monitor-api outside a Kubernetes pod".
 	disableScanIsolation := getenvBool("DISABLE_SCAN_ISOLATION", false)
-	inProcessUnpacker := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024)
+	inProcessUnpacker := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024, writeDockerConfig(registryAddr, registryUsername, registryPassword))
 	inProcessTrivy := scanner.NewTrivyScanner(registryAddr, trivyDB)
 
 	// SCAN_WORKER_ACTIVE_DEADLINE_SECONDS bounds how long Kubernetes lets
@@ -709,15 +781,23 @@ func runAPIServer() {
 			log.Fatalf("could not create kubernetes client for scan-worker jobs: %v (set DISABLE_SCAN_ISOLATION=true to run without one -- see README)", err)
 		}
 		workerImage := getenv("SCAN_WORKER_IMAGE", "monitor-api:dev")
+		// Empty (the pre-registry-auth default) when scm-registry has no
+		// auth configured -- every isolated Job's *CredentialsSecretName
+		// field below stays "" too, so none of them mount anything new.
+		// See docs/architecture.md's registry-auth section and
+		// charts/supply-chain-monitor/templates/registry-credentials-secret.yaml.
+		registryCredentialsSecretName := getenv("REGISTRY_CREDENTIALS_SECRET", "")
 		isolatedUnpacker = scanner.NewIsolatedUnpackerScanner(k8sClient, scanner.IsolatedUnpackerConfig{
-			Image:                 workerImage,
-			ClamAddr:              clamAddr,
-			UnpackerBin:           unpackerBin,
-			UnpackerInsecure:      unpackerInsecure,
-			UnpackerPublic:        unpackerPublic,
-			UnpackerMaxFileMB:     unpackerMaxFileMB,
-			VerboseLogs:           verboseScanLogs,
-			ActiveDeadlineSeconds: int64(scanWorkerActiveDeadlineSeconds),
+			Image:                         workerImage,
+			ClamAddr:                      clamAddr,
+			UnpackerBin:                   unpackerBin,
+			UnpackerInsecure:              unpackerInsecure,
+			UnpackerPublic:                unpackerPublic,
+			UnpackerMaxFileMB:             unpackerMaxFileMB,
+			VerboseLogs:                   verboseScanLogs,
+			ActiveDeadlineSeconds:         int64(scanWorkerActiveDeadlineSeconds),
+			RegistryAddr:                  registryAddr,
+			RegistryCredentialsSecretName: registryCredentialsSecretName,
 		})
 		// Shares the same Kubernetes API client and worker image as
 		// isolatedUnpacker above -- both are just different scan-worker
@@ -725,12 +805,13 @@ func runAPIServer() {
 		// IsolatedTrivyScanner's comment for why the DB cache is a
 		// separately-refreshed PVC rather than downloaded per scan.
 		isolatedTrivyImage = scanner.NewIsolatedTrivyScanner(k8sClient, scanner.IsolatedTrivyConfig{
-			Image:                 workerImage,
-			SubCommand:            "image",
-			CacheClaimName:        getenv("TRIVY_CACHE_CLAIM", "scm-trivy-db-cache"),
-			CacheMountPath:        getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
-			VerboseLogs:           verboseScanLogs,
-			ActiveDeadlineSeconds: int64(scanWorkerActiveDeadlineSeconds),
+			Image:                         workerImage,
+			SubCommand:                    "image",
+			CacheClaimName:                getenv("TRIVY_CACHE_CLAIM", "scm-trivy-db-cache"),
+			CacheMountPath:                getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
+			VerboseLogs:                   verboseScanLogs,
+			ActiveDeadlineSeconds:         int64(scanWorkerActiveDeadlineSeconds),
+			RegistryCredentialsSecretName: registryCredentialsSecretName,
 			// Lets each "image" scan-worker Job upload a generated
 			// SBOM/SARIF document back to this Service once it's done
 			// scanning (see IsolatedTrivyConfig.APIBaseURL's comment) --
@@ -749,13 +830,14 @@ func runAPIServer() {
 		// IsolatedTrivyConfig.FetchPlainHTTP's own comment and
 		// runScanWorker's "sbom" case for where that actually happens.
 		isolatedTrivySBOM = scanner.NewIsolatedTrivyScanner(k8sClient, scanner.IsolatedTrivyConfig{
-			Image:                 workerImage,
-			SubCommand:            "sbom",
-			CacheClaimName:        getenv("TRIVY_CACHE_CLAIM", "scm-trivy-db-cache"),
-			CacheMountPath:        getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
-			FetchPlainHTTP:        fetchPlainHTTP,
-			VerboseLogs:           verboseScanLogs,
-			ActiveDeadlineSeconds: int64(scanWorkerActiveDeadlineSeconds),
+			Image:                         workerImage,
+			SubCommand:                    "sbom",
+			CacheClaimName:                getenv("TRIVY_CACHE_CLAIM", "scm-trivy-db-cache"),
+			CacheMountPath:                getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
+			FetchPlainHTTP:                fetchPlainHTTP,
+			VerboseLogs:                   verboseScanLogs,
+			ActiveDeadlineSeconds:         int64(scanWorkerActiveDeadlineSeconds),
+			RegistryCredentialsSecretName: registryCredentialsSecretName,
 		})
 	} else {
 		log.Printf("DISABLE_SCAN_ISOLATION=true: image malware scanning, trivy CVE scanning, and sbom trivy scanning will all run in-process, not in isolated Jobs -- see README, \"Running monitor-api outside a Kubernetes pod\"")

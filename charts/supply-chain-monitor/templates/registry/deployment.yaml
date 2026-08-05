@@ -27,7 +27,7 @@ spec:
             - name: REGISTRY_STORAGE_DELETE_ENABLED
               value: {{ .Values.registry.deleteEnabled | quote }}
             # Distribution's separate debug listener, unauthenticated
-            # regardless of REGISTRY_AUTH_TOKEN_* -- switched to below
+            # regardless of REGISTRY_AUTH_TOKEN_* below -- switched to
             # ahead of registry-auth landing, since GET /v2/ on the main
             # listener correctly starts 401ing unauthenticated requests
             # once that's wired up (in fact that's the standard way to
@@ -35,9 +35,36 @@ spec:
             # take the readiness/liveness probes down with it.
             - name: REGISTRY_HTTP_DEBUG_ADDR
               value: ":5001"
+            # Enables Docker Registry Token Authentication -- once these
+            # four are set, every /v2/ request needs a valid Bearer token
+            # from scm-docker-auth (templates/docker-auth/), which issues
+            # read/read-write/admin-scoped tokens per account (see
+            # docs/architecture.md's registry-auth section). REALM points
+            # at docker_auth's own /auth endpoint over plain HTTP -- the
+            # token spec doesn't require this leg to be TLS, matching
+            # every other registry-facing tool in this project.
+            - name: REGISTRY_AUTH_TOKEN_REALM
+              value: {{ printf "http://scm-docker-auth.%s.svc.cluster.local:%v/auth" .Release.Namespace .Values.dockerAuth.service.port | quote }}
+            - name: REGISTRY_AUTH_TOKEN_SERVICE
+              value: "scm-registry"
+            # Must match dockerAuth.tokenIssuer exactly -- docker_auth
+            # rejects any token whose "iss" claim doesn't match its own
+            # token.issuer, and the registry rejects any token whose
+            # "iss" doesn't match this.
+            - name: REGISTRY_AUTH_TOKEN_ISSUER
+              value: {{ .Values.dockerAuth.tokenIssuer | quote }}
+            - name: REGISTRY_AUTH_TOKEN_ROOTCERTBUNDLE
+              value: "/auth-certs/tls.crt"
           volumeMounts:
             - name: data
               mountPath: /var/lib/registry
+            # Only the public cert (see the volume's `items:` below) --
+            # the registry only ever needs to verify token signatures,
+            # never sign anything itself, so it has no reason to see
+            # scm-docker-auth-signing's private key file at all.
+            - name: auth-certs
+              mountPath: /auth-certs
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /debug/health
@@ -54,3 +81,9 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: scm-registry-data
+        - name: auth-certs
+          secret:
+            secretName: scm-docker-auth-signing
+            items:
+              - key: tls.crt
+                path: tls.crt

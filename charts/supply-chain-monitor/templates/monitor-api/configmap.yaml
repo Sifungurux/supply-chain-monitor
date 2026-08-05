@@ -106,3 +106,10 @@ data:
   # ConfigMap key on the next upgrade.
   RATE_LIMIT_RPS: {{ .Values.monitorApi.rateLimit.requestsPerSecond | quote }}
   RATE_LIMIT_BURST: {{ .Values.monitorApi.rateLimit.burst | quote }}
+  # Names the Secret (registry-credentials-secret.yaml) main.go should
+  # forward REGISTRY_USERNAME/PASSWORD from into each isolated scan-worker
+  # Job it creates -- REGISTRY_USERNAME/PASSWORD themselves come via
+  # deployment.yaml's secretKeyRef below, not this plaintext ConfigMap,
+  # since main.go only needs the Secret's *name* here to pass along to
+  # isolated_trivy.go/isolated_unpacker.go's own SecretEnvVars wiring.
+  REGISTRY_CREDENTIALS_SECRET: "scm-registry-credentials"

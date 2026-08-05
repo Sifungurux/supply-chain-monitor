@@ -33,17 +33,20 @@ type Fetcher interface {
 // inside the pod, e.g. a shared volume) for anyone still relying on
 // it, rather than silently changing what ref means.
 type RegistryFetcher struct {
-	// PlainHTTP matches scm-registry's own setup: a local,
-	// unauthenticated, plain-HTTP registry -- the same assumption
-	// UnpackerScanner's --insecure/--public flags already make for
-	// image artifacts. Tighten before pointing this at a real,
-	// TLS-terminated, authenticated registry (see docs/architecture.md's
-	// Roadmap).
+	// PlainHTTP matches scm-registry's own setup: a local, plain-HTTP
+	// registry -- the same assumption UnpackerScanner's --insecure/
+	// --public flags already make for image artifacts. Tighten before
+	// pointing this at a real, TLS-terminated registry.
 	PlainHTTP bool
+	// Username/Password authenticate `oras pull` against scm-registry's
+	// token-auth (see docs/architecture.md's registry-auth section) --
+	// empty means no credentials, the original behavior from before
+	// registry auth existed.
+	Username, Password string
 }
 
-func NewRegistryFetcher(plainHTTP bool) *RegistryFetcher {
-	return &RegistryFetcher{PlainHTTP: plainHTTP}
+func NewRegistryFetcher(plainHTTP bool, username, password string) *RegistryFetcher {
+	return &RegistryFetcher{PlainHTTP: plainHTTP, Username: username, Password: password}
 }
 
 // looksLikeLocalPath distinguishes "ref is already a path inside the
@@ -71,6 +74,9 @@ func (f *RegistryFetcher) Fetch(ctx context.Context, ref string) (string, func()
 	args := []string{"pull", "--output", dir}
 	if f.PlainHTTP {
 		args = append(args, "--plain-http")
+	}
+	if f.Username != "" {
+		args = append(args, "--username", f.Username, "--password", f.Password)
 	}
 	args = append(args, ref)
 

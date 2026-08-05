@@ -86,6 +86,17 @@ type IsolatedTrivyConfig struct {
 	APIBaseURL       string
 	APIKeySecretName string
 	APIKeySecretKey  string
+
+	// RegistryCredentialsSecretName/UsernameKey/PasswordKey, when
+	// SecretName is set, forward scm-registry's read-only credentials
+	// into the Job as TRIVY_USERNAME/TRIVY_PASSWORD -- trivy's own
+	// native registry-auth env vars (os/exec inherits them
+	// automatically, see trivy.go's ScanRaw), needed once scm-registry
+	// requires auth (see docs/architecture.md's registry-auth section).
+	// Empty SecretName disables this, the pre-registry-auth default.
+	RegistryCredentialsSecretName string
+	RegistryUsernameKey           string
+	RegistryPasswordKey           string
 }
 
 func (c IsolatedTrivyConfig) withDefaults() IsolatedTrivyConfig {
@@ -142,6 +153,14 @@ func (c IsolatedTrivyConfig) withDefaults() IsolatedTrivyConfig {
 	}
 	if c.APIKeySecretKey == "" {
 		c.APIKeySecretKey = "API_KEY"
+	}
+	if c.RegistryCredentialsSecretName != "" {
+		if c.RegistryUsernameKey == "" {
+			c.RegistryUsernameKey = "REGISTRY_USERNAME"
+		}
+		if c.RegistryPasswordKey == "" {
+			c.RegistryPasswordKey = "REGISTRY_PASSWORD"
+		}
 	}
 	return c
 }
@@ -222,9 +241,23 @@ func (s *IsolatedTrivyScanner) ScanForArtifact(ctx context.Context, ref, artifac
 	if s.cfg.SubCommand == "image" && artifactID != "" && s.cfg.APIBaseURL != "" {
 		env["SCM_ARTIFACT_ID"] = artifactID
 		env["SCM_API_BASE_URL"] = s.cfg.APIBaseURL
-		secretEnv = []k8sjob.SecretEnvVar{
-			{Name: "SCM_API_KEY", SecretName: s.cfg.APIKeySecretName, SecretKey: s.cfg.APIKeySecretKey},
-		}
+		secretEnv = append(secretEnv, k8sjob.SecretEnvVar{Name: "SCM_API_KEY", SecretName: s.cfg.APIKeySecretName, SecretKey: s.cfg.APIKeySecretKey})
+	}
+	if s.cfg.RegistryCredentialsSecretName != "" {
+		secretEnv = append(secretEnv,
+			// TRIVY_USERNAME/PASSWORD: trivy's own native registry-auth
+			// env vars, for "image" mode's direct pull.
+			k8sjob.SecretEnvVar{Name: "TRIVY_USERNAME", SecretName: s.cfg.RegistryCredentialsSecretName, SecretKey: s.cfg.RegistryUsernameKey},
+			k8sjob.SecretEnvVar{Name: "TRIVY_PASSWORD", SecretName: s.cfg.RegistryCredentialsSecretName, SecretKey: s.cfg.RegistryPasswordKey},
+			// REGISTRY_USERNAME/PASSWORD: consulted by runScanWorker's
+			// "sbom" branch (main.go) for its own RegistryFetcher pull,
+			// which happens before trivy ever runs -- a completely
+			// separate credential consumer from the two above, just
+			// sourced from the same Secret. Harmless in "image" mode,
+			// where nothing reads these.
+			k8sjob.SecretEnvVar{Name: "REGISTRY_USERNAME", SecretName: s.cfg.RegistryCredentialsSecretName, SecretKey: s.cfg.RegistryUsernameKey},
+			k8sjob.SecretEnvVar{Name: "REGISTRY_PASSWORD", SecretName: s.cfg.RegistryCredentialsSecretName, SecretKey: s.cfg.RegistryPasswordKey},
+		)
 	}
 
 	job := k8sjob.NewScanJob(k8sjob.ScanJobConfig{

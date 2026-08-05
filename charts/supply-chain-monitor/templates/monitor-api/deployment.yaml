@@ -54,6 +54,23 @@ spec:
                 secretKeyRef:
                   name: scm-monitor-api-auth
                   key: API_KEY
+            # Authenticates this pod's own in-process pull paths
+            # (RegistryFetcher, UnpackerScanner's generated
+            # dockerconfig.json, trivy's native TRIVY_USERNAME/PASSWORD)
+            # against scm-registry's token-auth -- see main.go's
+            # runAPIServer and docs/architecture.md's registry-auth
+            # section. registry-credentials-secret.yaml is the read-only
+            # scm-reader account; monitor-api never pushes.
+            - name: REGISTRY_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: scm-registry-credentials
+                  key: REGISTRY_USERNAME
+            - name: REGISTRY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: scm-registry-credentials
+                  key: REGISTRY_PASSWORD
           readinessProbe:
             httpGet:
               path: /healthz

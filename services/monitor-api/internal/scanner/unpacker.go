@@ -43,9 +43,16 @@ type UnpackerScanner struct {
 	insecure    bool
 	public      bool
 	maxFileSize int64
+	// dockerConfigPath, when set, points unpacker's own --config flag
+	// at a docker CLI config.json (an "auths" map, same shape
+	// ~/.docker/config.json uses) authenticating pulls against
+	// scm-registry's token-auth (see docs/architecture.md's
+	// registry-auth section). Built by main.go's writeDockerConfig,
+	// empty in every deployment before registry auth existed.
+	dockerConfigPath string
 }
 
-func NewUnpackerScanner(clamAddr, unpackerBin string, insecure, public bool, maxFileSize int64) *UnpackerScanner {
+func NewUnpackerScanner(clamAddr, unpackerBin string, insecure, public bool, maxFileSize int64, dockerConfigPath string) *UnpackerScanner {
 	if unpackerBin == "" {
 		unpackerBin = "unpacker"
 	}
@@ -53,11 +60,12 @@ func NewUnpackerScanner(clamAddr, unpackerBin string, insecure, public bool, max
 		maxFileSize = 100 * 1024 * 1024 // 100MB
 	}
 	return &UnpackerScanner{
-		clamAddr:    clamAddr,
-		unpackerBin: unpackerBin,
-		insecure:    insecure,
-		public:      public,
-		maxFileSize: maxFileSize,
+		clamAddr:         clamAddr,
+		unpackerBin:      unpackerBin,
+		insecure:         insecure,
+		public:           public,
+		maxFileSize:      maxFileSize,
+		dockerConfigPath: dockerConfigPath,
 	}
 }
 
@@ -79,6 +87,9 @@ func (u *UnpackerScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 	}
 	if u.public {
 		args = append(args, "--public")
+	}
+	if u.dockerConfigPath != "" {
+		args = append(args, "--config", u.dockerConfigPath)
 	}
 	args = append(args, ref)
 

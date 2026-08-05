@@ -49,6 +49,20 @@ type IsolatedUnpackerConfig struct {
 	UnpackerPublic    bool
 	UnpackerMaxFileMB int
 
+	// RegistryAddr, RegistryCredentialsSecretName/UsernameKey/PasswordKey:
+	// once set, the worker builds a dockerconfig.json (main.go's
+	// writeDockerConfig, keyed to RegistryAddr) and passes it to
+	// unpacker's own --config flag, authenticating the image pull
+	// against scm-registry's token-auth (see docs/architecture.md's
+	// registry-auth section). Empty RegistryCredentialsSecretName
+	// disables this, the pre-registry-auth default -- RegistryAddr is
+	// forwarded as a plain env var (not a secret) regardless, harmless
+	// on its own since it's not credential material.
+	RegistryAddr                  string
+	RegistryCredentialsSecretName string
+	RegistryUsernameKey           string
+	RegistryPasswordKey           string
+
 	// VerboseLogs, forwarded to the worker as SCM_SCAN_VERBOSE, makes
 	// this Job set scanner.VerboseScanLogs at startup (see main.go's
 	// runScanWorker) -- see VerboseScanLogs's own comment in scanner.go.
@@ -67,7 +81,7 @@ type IsolatedUnpackerConfig struct {
 	ActiveDeadlineSeconds int64
 
 	CPURequest, MemoryRequest, EphemeralStorageRequest string
-	CPULimit, MemoryLimit, EphemeralStorageLimit        string
+	CPULimit, MemoryLimit, EphemeralStorageLimit       string
 }
 
 func (c IsolatedUnpackerConfig) withDefaults() IsolatedUnpackerConfig {
@@ -100,6 +114,14 @@ func (c IsolatedUnpackerConfig) withDefaults() IsolatedUnpackerConfig {
 	}
 	if c.EphemeralStorageLimit == "" {
 		c.EphemeralStorageLimit = "2Gi"
+	}
+	if c.RegistryCredentialsSecretName != "" {
+		if c.RegistryUsernameKey == "" {
+			c.RegistryUsernameKey = "REGISTRY_USERNAME"
+		}
+		if c.RegistryPasswordKey == "" {
+			c.RegistryPasswordKey = "REGISTRY_PASSWORD"
+		}
 	}
 	return c
 }
@@ -147,6 +169,14 @@ func (s *IsolatedUnpackerScanner) Scan(ctx context.Context, ref string) ([]artif
 		return nil, fmt.Errorf("generate scan job name: %w", err)
 	}
 
+	var secretEnv []k8sjob.SecretEnvVar
+	if s.cfg.RegistryCredentialsSecretName != "" {
+		secretEnv = append(secretEnv,
+			k8sjob.SecretEnvVar{Name: "REGISTRY_USERNAME", SecretName: s.cfg.RegistryCredentialsSecretName, SecretKey: s.cfg.RegistryUsernameKey},
+			k8sjob.SecretEnvVar{Name: "REGISTRY_PASSWORD", SecretName: s.cfg.RegistryCredentialsSecretName, SecretKey: s.cfg.RegistryPasswordKey},
+		)
+	}
+
 	job := k8sjob.NewScanJob(k8sjob.ScanJobConfig{
 		Name:                  name,
 		Namespace:             s.client.Namespace(),
@@ -161,9 +191,14 @@ func (s *IsolatedUnpackerScanner) Scan(ctx context.Context, ref string) ([]artif
 			"UNPACKER_INSECURE":    strconv.FormatBool(s.cfg.UnpackerInsecure),
 			"UNPACKER_PUBLIC":      strconv.FormatBool(s.cfg.UnpackerPublic),
 			"UNPACKER_MAX_FILE_MB": strconv.Itoa(s.cfg.UnpackerMaxFileMB),
+			// Only actually used by the worker to key the dockerconfig.json
+			// it builds when REGISTRY_USERNAME is also set (see
+			// main.go's writeDockerConfig) -- harmless to always forward.
+			"REGISTRY_ADDR": s.cfg.RegistryAddr,
 			// See VerboseLogs's own comment.
 			"SCM_SCAN_VERBOSE": strconv.FormatBool(s.cfg.VerboseLogs),
 		},
+		SecretEnvVars:           secretEnv,
 		CPURequest:              s.cfg.CPURequest,
 		MemoryRequest:           s.cfg.MemoryRequest,
 		EphemeralStorageRequest: s.cfg.EphemeralStorageRequest,
