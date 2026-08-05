@@ -176,12 +176,17 @@ func TestIsolatedGrypeScanner_Scan_MountsCacheVolumeReadOnly(t *testing.T) {
 }
 
 // TestIsolatedGrypeScanner_Scan_RegistryAuthEnv confirms
-// RegistryCredentialsSecretName wires SYFT_REGISTRY_AUTH_USERNAME/
-// PASSWORD (grype/Syft's own registry-auth env vars, confirmed via
-// `grype config --load` against the real binary -- NOT
-// GRYPE_REGISTRY_AUTH_*, see IsolatedGrypeConfig.RegistryAddr's
-// comment) and SYFT_REGISTRY_AUTH_AUTHORITY from RegistryAddr as a
-// plain env var.
+// RegistryCredentialsSecretName wires REGISTRY_USERNAME/PASSWORD from
+// the Secret and RegistryAddr forwards as the plain env var
+// REGISTRY_ADDR -- NOT SYFT_REGISTRY_AUTH_* (a first design that was
+// tried and then verified, against a real probe registry rather than
+// just grype's own config-reference docs, to never actually get sent
+// -- see IsolatedGrypeConfig.RegistryAddr's comment). The worker uses
+// this trio to build a dockerconfig.json the same way the default
+// (unpacker) branch of runScanWorker already does, then points grype
+// at it via DOCKER_CONFIG (grype.go's registryEnv) -- main.go's
+// concern, not this Job-building code's, so this test only confirms
+// the env wiring reaches the pod.
 func TestIsolatedGrypeScanner_Scan_RegistryAuthEnv(t *testing.T) {
 	var seenJobViaCreate bool
 	client := &recordingJobClient{
@@ -208,27 +213,27 @@ func TestIsolatedGrypeScanner_Scan_RegistryAuthEnv(t *testing.T) {
 	}
 	job := client.createdJobs[0]
 
-	var authority string
+	var addr string
 	for _, ev := range job.Spec.Template.Spec.Containers[0].Env {
-		if ev.Name == "SYFT_REGISTRY_AUTH_AUTHORITY" {
-			authority = ev.Value
+		if ev.Name == "REGISTRY_ADDR" {
+			addr = ev.Value
 		}
 	}
-	if authority != "scm-registry:5000" {
-		t.Fatalf("SYFT_REGISTRY_AUTH_AUTHORITY = %q, want %q", authority, "scm-registry:5000")
+	if addr != "scm-registry:5000" {
+		t.Fatalf("REGISTRY_ADDR = %q, want %q", addr, "scm-registry:5000")
 	}
 
 	foundUsername, foundPassword := false, false
 	for _, ev := range job.Spec.Template.Spec.Containers[0].Env {
-		if ev.Name == "SYFT_REGISTRY_AUTH_USERNAME" {
+		if ev.Name == "REGISTRY_USERNAME" {
 			foundUsername = true
 		}
-		if ev.Name == "SYFT_REGISTRY_AUTH_PASSWORD" {
+		if ev.Name == "REGISTRY_PASSWORD" {
 			foundPassword = true
 		}
 	}
 	if !foundUsername || !foundPassword {
-		t.Fatalf("expected SYFT_REGISTRY_AUTH_USERNAME/PASSWORD to be set from the Secret, got env %+v", job.Spec.Template.Spec.Containers[0].Env)
+		t.Fatalf("expected REGISTRY_USERNAME/PASSWORD to be set from the Secret, got env %+v", job.Spec.Template.Spec.Containers[0].Env)
 	}
 }
 

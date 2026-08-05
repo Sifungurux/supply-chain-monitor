@@ -16,7 +16,7 @@ func TestGrypeScanner_Args(t *testing.T) {
 	VerboseScanLogs = false
 	defer func() { VerboseScanLogs = false }()
 
-	s := NewGrypeScanner(GrypeDBConfig{})
+	s := NewGrypeScanner(GrypeDBConfig{}, false, "")
 	got := s.args("alpine:3.19")
 	want := []string{"registry:alpine:3.19", "-o", "json", "-q"}
 	if !reflect.DeepEqual(got, want) {
@@ -28,11 +28,46 @@ func TestGrypeScanner_Args_Verbose(t *testing.T) {
 	VerboseScanLogs = true
 	defer func() { VerboseScanLogs = false }()
 
-	s := NewGrypeScanner(GrypeDBConfig{})
+	s := NewGrypeScanner(GrypeDBConfig{}, false, "")
 	got := s.args("alpine:3.19")
 	want := []string{"registry:alpine:3.19", "-o", "json", "-vv"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+// TestGrypeScanner_RegistryEnv confirms registryEnv() maps to the two
+// mechanisms that were actually verified against the real grype binary
+// (see registryEnv's own comment): GRYPE_REGISTRY_INSECURE_USE_HTTP for
+// plain-HTTP registries like scm-registry, and DOCKER_CONFIG (NOT
+// SYFT_REGISTRY_AUTH_*, which a probe registry proved does nothing) for
+// credentials.
+func TestGrypeScanner_RegistryEnv(t *testing.T) {
+	cases := []struct {
+		name            string
+		plainHTTP       bool
+		dockerConfigDir string
+		want            []string
+	}{
+		{name: "neither set", want: nil},
+		{name: "plain http only", plainHTTP: true, want: []string{"GRYPE_REGISTRY_INSECURE_USE_HTTP=true"}},
+		{name: "docker config dir only", dockerConfigDir: "/tmp/scm-dockerconfig-abc", want: []string{"DOCKER_CONFIG=/tmp/scm-dockerconfig-abc"}},
+		{
+			name:            "both set, matching scm-registry's real shape",
+			plainHTTP:       true,
+			dockerConfigDir: "/tmp/scm-dockerconfig-abc",
+			want:            []string{"GRYPE_REGISTRY_INSECURE_USE_HTTP=true", "DOCKER_CONFIG=/tmp/scm-dockerconfig-abc"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewGrypeScanner(GrypeDBConfig{}, tc.plainHTTP, tc.dockerConfigDir)
+			got := s.registryEnv()
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("registryEnv() = %#v, want %#v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -162,7 +197,7 @@ func TestParseGrypeVulnerabilities_RealFixture(t *testing.T) {
 // as "cve" -- every finding comes from parseGrypeVulnerabilities, which
 // always sets Source: "grype".
 func TestGrypeScanner_Bucket(t *testing.T) {
-	s := NewGrypeScanner(GrypeDBConfig{})
+	s := NewGrypeScanner(GrypeDBConfig{}, false, "")
 	if got := s.Bucket(); got != "cve" {
 		t.Errorf("Bucket() = %q, want %q", got, "cve")
 	}

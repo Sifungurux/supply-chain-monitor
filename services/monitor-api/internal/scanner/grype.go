@@ -62,10 +62,66 @@ func (db GrypeDBConfig) env() []string {
 // via monitorApi.cveScanner (see main.go's buildImageScanners).
 type GrypeScanner struct {
 	db GrypeDBConfig
+
+	// plainHTTP and dockerConfigDir configure GrypeScanner's own
+	// registry pull -- see registryEnv's comment for what each actually
+	// does and why both were verified against the real binary rather
+	// than trusted from documentation.
+	plainHTTP       bool
+	dockerConfigDir string
 }
 
-func NewGrypeScanner(db GrypeDBConfig) *GrypeScanner {
-	return &GrypeScanner{db: db}
+// NewGrypeScanner. plainHTTP mirrors RegistryFetcher.PlainHTTP/
+// TRIVY's own implicit https-only behavior -- true for scm-registry,
+// which serves plain HTTP (see values.yaml's fetchPlainHTTP). If
+// dockerConfigDir is non-empty, it must be a directory containing a
+// file literally named "config.json" (main.go's writeDockerConfig
+// produces exactly that shape) -- see registryEnv's comment.
+func NewGrypeScanner(db GrypeDBConfig, plainHTTP bool, dockerConfigDir string) *GrypeScanner {
+	return &GrypeScanner{db: db, plainHTTP: plainHTTP, dockerConfigDir: dockerConfigDir}
+}
+
+// registryEnv builds the env vars that actually control grype's
+// registry pull (as opposed to db.env(), which controls its DB cache).
+// Both fields here were verified empirically against the real grype
+// binary, not assumed from documentation -- see this package's own
+// history for how each was discovered:
+//
+//   - GRYPE_REGISTRY_INSECURE_USE_HTTP: confirmed via `grype config
+//     --load` (a real, scalar boolean config key, unlike the auth
+//     array below) AND by reading go-containerregistry's own
+//     Registry.Scheme() (pkg/name/registry.go): it defaults to https
+//     for any hostname that isn't literally "localhost", a loopback
+//     address, or an RFC1918 private IP -- scm-registry's real
+//     in-cluster DNS name (scm-registry.<ns>.svc.cluster.local) matches
+//     none of those, so without this, every plain-HTTP scm-registry
+//     pull would fail a TLS handshake against a server that was never
+//     speaking TLS in the first place.
+//   - DOCKER_CONFIG: NOT SYFT_REGISTRY_AUTH_AUTHORITY/USERNAME/PASSWORD.
+//     Those env vars are documented in `grype config --load`'s output
+//     (grype shares Syft's config struct, hence the "SYFT_" prefix),
+//     but empirically do nothing: a probe registry confirmed grype
+//     never sends an Authorization header with them set, because
+//     they'd bind to a slice field (registry.auth[]) that plain env
+//     vars can't populate element-by-element -- the documented env var
+//     comment is aspirational, not wired up. What does work,
+//     confirmed against the same probe: pointing DOCKER_CONFIG at a
+//     directory containing a "config.json" (go-containerregistry's
+//     default credential-helper keychain, the same mechanism `docker
+//     login` itself would populate) -- grype picks that up
+//     automatically with zero grype-specific configuration. This is
+//     exactly the fallback this feature's plan flagged as a
+//     possibility before any of grype.go was written, and it's the one
+//     that turned out to be true.
+func (g *GrypeScanner) registryEnv() []string {
+	var env []string
+	if g.plainHTTP {
+		env = append(env, "GRYPE_REGISTRY_INSECURE_USE_HTTP=true")
+	}
+	if g.dockerConfigDir != "" {
+		env = append(env, "DOCKER_CONFIG="+g.dockerConfigDir)
+	}
+	return env
 }
 
 // Bucket implements BucketAffinity: every finding comes from
@@ -152,13 +208,10 @@ func (g *GrypeScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding
 // report bytes before any parsing.
 func (g *GrypeScanner) ScanRaw(ctx context.Context, ref string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "grype", g.args(ref)...)
-	// Start from the process's own environment, then layer the DB
-	// overrides on top -- dropping to just db.env() would also drop
-	// PATH and any SYFT_REGISTRY_AUTH_* credentials already set in this
-	// process's env (in-process caller) or inherited from the Job pod's
-	// env (isolated_grype.go's SecretEnvVars), silently breaking
-	// registry auth.
-	cmd.Env = append(os.Environ(), g.db.env()...)
+	// Start from the process's own environment, then layer the DB and
+	// registry overrides on top -- dropping to just db.env()/registryEnv()
+	// would also drop PATH, silently breaking the exec entirely.
+	cmd.Env = append(os.Environ(), append(g.db.env(), g.registryEnv()...)...)
 
 	var stdout, stderr bytes.Buffer
 	if VerboseScanLogs {

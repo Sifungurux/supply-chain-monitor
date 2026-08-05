@@ -66,19 +66,26 @@ type IsolatedGrypeConfig struct {
 	CPURequest, MemoryRequest, EphemeralStorageRequest string
 	CPULimit, MemoryLimit, EphemeralStorageLimit       string
 
-	// RegistryAddr is set as SYFT_REGISTRY_AUTH_AUTHORITY (a plain env
-	// var, not a Secret -- it's just a hostname, not a credential) so
-	// grype's registry-auth library knows which registry
-	// RegistryCredentialsSecretName's username/password apply to.
-	// Confirmed via `grype config --load` against the real binary: grype
-	// shares Syft's registry-auth code, so its env vars are
-	// SYFT_REGISTRY_AUTH_*, not GRYPE_REGISTRY_AUTH_* -- see grype.go's
-	// package comment.
+	// RegistryAddr is forwarded to the worker as the plain env var
+	// REGISTRY_ADDR -- exactly mirroring IsolatedUnpackerConfig's own
+	// RegistryAddr/REGISTRY_ADDR. The worker uses it (alongside
+	// REGISTRY_USERNAME/PASSWORD below) to build a dockerconfig.json via
+	// main.go's writeDockerConfig, the same helper the default
+	// (unpacker) branch of runScanWorker already calls -- then points
+	// grype at it via DOCKER_CONFIG (see grype.go's registryEnv, whose
+	// doc comment explains why this file does NOT set
+	// SYFT_REGISTRY_AUTH_* here: that was the first design tried, and it
+	// was verified -- against a real probe registry, not just read from
+	// docs -- to never actually get sent, since it targets a config-file
+	// array field env vars can't populate element-by-element).
 	RegistryAddr string
 	// RegistryCredentialsSecretName/UsernameKey/PasswordKey, when
 	// SecretName is set, forward scm-registry's read-only credentials
-	// into the Job as SYFT_REGISTRY_AUTH_USERNAME/PASSWORD. Empty
-	// SecretName disables this.
+	// into the Job as REGISTRY_USERNAME/PASSWORD -- consulted by the
+	// worker for both grype's own dockerconfig.json (above) and, in
+	// "sbom" mode, RegistryFetcher's own pull (same pair
+	// IsolatedTrivyScanner's identical fields already forward for that
+	// second purpose). Empty SecretName disables this.
 	RegistryCredentialsSecretName string
 	RegistryUsernameKey           string
 	RegistryPasswordKey           string
@@ -175,21 +182,19 @@ func (s *IsolatedGrypeScanner) Scan(ctx context.Context, ref string) ([]artifact
 		"SCM_SCAN_VERBOSE": strconv.FormatBool(s.cfg.VerboseLogs),
 	}
 	if s.cfg.RegistryAddr != "" {
-		env["SYFT_REGISTRY_AUTH_AUTHORITY"] = s.cfg.RegistryAddr
+		env["REGISTRY_ADDR"] = s.cfg.RegistryAddr
 	}
 	var secretEnv []k8sjob.SecretEnvVar
 	if s.cfg.RegistryCredentialsSecretName != "" {
+		// REGISTRY_USERNAME/PASSWORD: consulted by runScanWorker's grype
+		// branches to build a dockerconfig.json (main.go's
+		// writeDockerConfig, the same helper the default/unpacker branch
+		// already calls) that grype gets pointed at via DOCKER_CONFIG --
+		// see IsolatedGrypeConfig.RegistryAddr's comment for why this
+		// file, not SYFT_REGISTRY_AUTH_*. In "sbom" mode this same pair
+		// also feeds RegistryFetcher's own pull, same as
+		// IsolatedTrivyScanner's identical pair.
 		secretEnv = append(secretEnv,
-			// SYFT_REGISTRY_AUTH_USERNAME/PASSWORD: grype's own
-			// registry-auth env vars (shared with Syft, see
-			// IsolatedGrypeConfig.RegistryAddr's comment), for "image"
-			// mode's direct pull.
-			k8sjob.SecretEnvVar{Name: "SYFT_REGISTRY_AUTH_USERNAME", SecretName: s.cfg.RegistryCredentialsSecretName, SecretKey: s.cfg.RegistryUsernameKey},
-			k8sjob.SecretEnvVar{Name: "SYFT_REGISTRY_AUTH_PASSWORD", SecretName: s.cfg.RegistryCredentialsSecretName, SecretKey: s.cfg.RegistryPasswordKey},
-			// REGISTRY_USERNAME/PASSWORD: consulted by runScanWorker's
-			// "sbom" branch for its own RegistryFetcher pull, same as
-			// IsolatedTrivyScanner's identical pair -- see that type's
-			// comment.
 			k8sjob.SecretEnvVar{Name: "REGISTRY_USERNAME", SecretName: s.cfg.RegistryCredentialsSecretName, SecretKey: s.cfg.RegistryUsernameKey},
 			k8sjob.SecretEnvVar{Name: "REGISTRY_PASSWORD", SecretName: s.cfg.RegistryCredentialsSecretName, SecretKey: s.cfg.RegistryPasswordKey},
 		)
