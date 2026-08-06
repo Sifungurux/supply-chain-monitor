@@ -312,7 +312,7 @@ monitorApi:
   # "grype"/"both" also turn on grype-db-cache-primer-job.yaml/
   # grype-db-refresh-cronjob.yaml below, since grype then actually
   # needs a warm DB to read.
-  cveScanner: "trivy"
+  cveScanner: "both"
   # Operator-configured pluggable scanners -- plug in a different CVE
   # scanner (Grype, OSV-Scanner, ...) or SBOM tool alongside (never
   # instead of -- registration is additive) the built-in trivy/ClamAV
