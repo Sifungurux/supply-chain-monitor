@@ -748,6 +748,12 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
+	// Two CVE scanners (trivy, grype) can both report the same CVE ID in
+	// one round -- coalesce their Source values into one finding before
+	// merging, so the second scanner's result doesn't just overwrite the
+	// first's Source. Malware/misconfig/secret/other buckets only ever
+	// have one scanner each today, so they don't need this.
+	cveFindings = artifact.CoalesceSameIDSources(cveFindings)
 	updated, updErr := h.store.Update(id, func(art *artifact.Artifact) {
 		art.Status = status
 		art.Digest = digest

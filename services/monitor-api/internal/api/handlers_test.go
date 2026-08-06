@@ -1026,6 +1026,32 @@ func TestScanArtifact_MergesFindingsBySource(t *testing.T) {
 	}
 }
 
+// TestScanArtifact_CoalescesSameCVEAcrossScanners covers trivy+grype (or
+// any two CVE scanners) both reporting the same CVE ID in one round --
+// it must land as one finding with a joined Source, not two findings
+// where the second silently overwrites the first.
+func TestScanArtifact_CoalescesSameCVEAcrossScanners(t *testing.T) {
+	trivyLike := &fakeScanner{findings: []artifact.Finding{{ID: "CVE-2024-1", Severity: "high", Source: "trivy"}}}
+	grypeLike := &fakeScanner{findings: []artifact.Finding{{ID: "CVE-2024-1", Severity: "high", Source: "grype"}}}
+
+	h, store := newTestRouter(scanner.Registry{
+		artifact.TypeImage: {trivyLike, grypeLike},
+	})
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	got := decodeArtifact(t, rec)
+	if len(got.CVEFindings) != 1 {
+		t.Fatalf("cve findings = %+v, want 1 coalesced finding", got.CVEFindings)
+	}
+	if got.CVEFindings[0].Source != "grype, trivy" {
+		t.Fatalf("source = %q, want %q", got.CVEFindings[0].Source, "grype, trivy")
+	}
+}
+
 // TestScanArtifact_BackfillsMissingDigest covers the actual real-world
 // gap this exists to close: registration-time digest resolution is
 // best-effort and never retried on its own (see resolveDigest's own

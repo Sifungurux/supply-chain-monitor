@@ -1,6 +1,10 @@
 package artifact
 
-import "time"
+import (
+	"sort"
+	"strings"
+	"time"
+)
 
 // MergeFindings combines a single bucket's existing (already persisted)
 // findings with a freshly reported set from a new /scan or /findings
@@ -98,4 +102,59 @@ func MergeFindings(existing, reported []Finding, now time.Time, detectFixed bool
 	}
 
 	return merged
+}
+
+// CoalesceSameIDSources collapses a single scan round's freshly reported
+// findings that share an ID (e.g. trivy and grype both reporting
+// "CVE-2024-1234") into one finding per ID, with Source set to every
+// contributing tool, sorted and comma-joined (e.g. "grype, trivy").
+// Without this, MergeFindings' plain map-by-ID dedup would let whichever
+// scanner's finding lands second in the slice silently overwrite the
+// first's Source. Non-Source fields (Severity, Title, ...) come from
+// whichever finding for that ID appears first in reported -- scanArtifact
+// runs scanners concurrently, so which one that is isn't deterministic
+// run to run, but Severity/Title for the same CVE ID are expected to
+// agree across tools anyway.
+//
+// Each finding's own Source is split on "," before rejoining, so an
+// already-coalesced value passed back through (e.g. a bucket that went
+// through this twice) doesn't accumulate into "trivy, grype, trivy".
+func CoalesceSameIDSources(reported []Finding) []Finding {
+	type group struct {
+		finding Finding
+		sources map[string]bool
+	}
+
+	groups := make(map[string]*group, len(reported))
+	order := make([]string, 0, len(reported))
+
+	for _, f := range reported {
+		g, ok := groups[f.ID]
+		if !ok {
+			g = &group{finding: f, sources: map[string]bool{}}
+			groups[f.ID] = g
+			order = append(order, f.ID)
+		}
+		for _, s := range strings.Split(f.Source, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				g.sources[s] = true
+			}
+		}
+	}
+
+	coalesced := make([]Finding, 0, len(order))
+	for _, id := range order {
+		g := groups[id]
+		sources := make([]string, 0, len(g.sources))
+		for s := range g.sources {
+			sources = append(sources, s)
+		}
+		sort.Strings(sources)
+
+		f := g.finding
+		f.Source = strings.Join(sources, ", ")
+		coalesced = append(coalesced, f)
+	}
+
+	return coalesced
 }

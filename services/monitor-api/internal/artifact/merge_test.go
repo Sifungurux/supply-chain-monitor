@@ -178,3 +178,76 @@ func TestMergeFindings_MixOfNewStillOpenAndFixed(t *testing.T) {
 		t.Fatalf("CVE-C = %+v, want new+open+first_seen=now", byID["CVE-C"])
 	}
 }
+
+func TestCoalesceSameIDSources(t *testing.T) {
+	tests := []struct {
+		name     string
+		reported []artifact.Finding
+		want     []artifact.Finding
+	}{
+		{
+			name: "two scanners same ID joins sources",
+			reported: []artifact.Finding{
+				{ID: "CVE-1", Severity: "high", Title: "t", Source: "trivy"},
+				{ID: "CVE-1", Severity: "high", Title: "t", Source: "grype"},
+			},
+			want: []artifact.Finding{
+				{ID: "CVE-1", Severity: "high", Title: "t", Source: "grype, trivy"},
+			},
+		},
+		{
+			name: "three sources joined and deduped",
+			reported: []artifact.Finding{
+				{ID: "CVE-1", Source: "trivy"},
+				{ID: "CVE-1", Source: "grype"},
+				{ID: "CVE-1", Source: "trivy"},
+			},
+			want: []artifact.Finding{
+				{ID: "CVE-1", Source: "grype, trivy"},
+			},
+		},
+		{
+			name: "already-joined source passed through unchanged, not doubled",
+			reported: []artifact.Finding{
+				{ID: "CVE-1", Source: "grype, trivy"},
+			},
+			want: []artifact.Finding{
+				{ID: "CVE-1", Source: "grype, trivy"},
+			},
+		},
+		{
+			name: "different IDs stay independent",
+			reported: []artifact.Finding{
+				{ID: "CVE-1", Source: "trivy"},
+				{ID: "CVE-2", Source: "grype"},
+			},
+			want: []artifact.Finding{
+				{ID: "CVE-1", Source: "trivy"},
+				{ID: "CVE-2", Source: "grype"},
+			},
+		},
+		{
+			name: "empty source doesn't produce a stray comma",
+			reported: []artifact.Finding{
+				{ID: "CVE-1", Source: ""},
+			},
+			want: []artifact.Finding{
+				{ID: "CVE-1", Source: ""},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := artifact.CoalesceSameIDSources(tt.reported)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %+v, want %+v", got, tt.want)
+			}
+			for i := range got {
+				if got[i].ID != tt.want[i].ID || got[i].Source != tt.want[i].Source {
+					t.Fatalf("got[%d] = %+v, want %+v", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
