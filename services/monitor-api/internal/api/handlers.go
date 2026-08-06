@@ -584,8 +584,8 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 	// and ctx, none depends on another's output), and a single shared
 	// 5-minute budget above means a slow scanner used to eat directly
 	// into every scanner after it in the list -- with trivy, unpacker,
-	// and now an arbitrary number of operator-configured external
-	// scanners (see internal/scanner/external.go) all potentially
+	// and now an arbitrary number of operator-configured pluggable
+	// scanners (see internal/scanner/pluggable.go) all potentially
 	// registered for one type, that's no longer a two-scanner corner
 	// case. Findings are sorted into one of five buckets by
 	// classifyBucket below, exactly as before -- only *when* each
@@ -608,7 +608,7 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 		go func(i int, s scanner.Scanner) {
 			defer wg.Done()
 			// A panic from a Scanner implementation (in-process code, or
-			// a bug surfaced by an operator's own ExternalScanner
+			// a bug surfaced by an operator's own PluggableScanner
 			// command) must not take down the whole monitor-api
 			// process just because it now runs on its own goroutine
 			// rather than inline in this request's handler goroutine --
@@ -705,10 +705,10 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 	// the one bucket it declared on failure: a ClamAV error no longer
 	// blocks CVE fix-detection just because it happened in the same
 	// round. A scanner that *doesn't* implement it (SARIFScanner, an
-	// operator's ExternalScanner) blocks every bucket on failure,
+	// operator's PluggableScanner) blocks every bucket on failure,
 	// exactly like every scanner used to before this existed -- neither
 	// can honestly promise which bucket(s) it would have affected
-	// (SARIF mixes categories in one document; an ExternalScanner's own
+	// (SARIF mixes categories in one document; a PluggableScanner's own
 	// wire contract lets each finding set its own category independent
 	// of any configured default), so guessing would risk a real false
 	// "fixed" instead of just being coarse. See merge.go's own doc

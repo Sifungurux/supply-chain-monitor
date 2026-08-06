@@ -25,7 +25,7 @@ type Scanner interface {
 //
 // Deliberately opt-in, not part of Scanner itself: a scanner that can
 // legitimately return findings across more than one bucket in a single
-// call (SARIFScanner, or an ExternalScanner whose wire contract lets
+// call (SARIFScanner, or a PluggableScanner whose wire contract lets
 // each finding set its own category independently of any configured
 // default) has no single honest answer to give here -- claiming one
 // anyway risks a real false "fixed" if it's wrong, which is worse than

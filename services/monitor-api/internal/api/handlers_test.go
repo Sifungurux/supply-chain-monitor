@@ -1242,7 +1242,7 @@ func TestScanArtifact_ScannersRunConcurrently(t *testing.T) {
 }
 
 // TestScanArtifact_ScannerPanicIsRecovered proves a bug in one
-// Scanner (in-process code, or an operator's own ExternalScanner
+// Scanner (in-process code, or an operator's own PluggableScanner
 // command misbehaving) can't crash the whole monitor-api process now
 // that scanners run on their own goroutines -- net/http's per-request
 // panic recovery covers this handler's own goroutine, not one it

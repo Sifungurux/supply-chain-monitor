@@ -99,18 +99,18 @@ data:
   TRIVY_SKIP_DB_UPDATE: {{ .Values.monitorApi.trivyDB.skipUpdate | quote }}
   TRIVY_SKIP_JAVA_DB_UPDATE: {{ .Values.monitorApi.trivyDB.skipJavaUpdate | quote }}
   {{- end }}
-  # Operator-configured external scanners (a different CVE scanner than
+  # Operator-configured pluggable scanners (a different CVE scanner than
   # trivy, a different SBOM tool, ...) -- see
-  # internal/scanner/external.go, docs/architecture.md ("Pluggable
-  # external scanners"), and this value's own comment in values.yaml.
+  # internal/scanner/pluggable.go, docs/architecture.md ("Pluggable
+  # scanners"), and this value's own comment in values.yaml.
   # `toJson` on an empty list renders "[]", which main.go's
-  # getenv("EXTERNAL_SCANNERS", "") treats as present-but-empty -- fine,
+  # getenv("PLUGGABLE_SCANNERS", "") treats as present-but-empty -- fine,
   # since an empty JSON array unmarshals to zero specs either way; this
   # key is always set (unlike the TRIVY_DB_REPOSITORY block above,
   # which is conditional) so removing an entry from
-  # monitorApi.externalScanners actually clears it on the next upgrade
+  # monitorApi.pluggableScanners actually clears it on the next upgrade
   # instead of leaving a stale ConfigMap key around.
-  EXTERNAL_SCANNERS: {{ .Values.monitorApi.externalScanners | toJson | quote }}
+  PLUGGABLE_SCANNERS: {{ .Values.monitorApi.pluggableScanners | toJson | quote }}
   # Per-key request rate limiting -- see internal/api/ratelimit.go and
   # values.yaml's monitorApi.rateLimit comment. requestsPerSecond <= 0
   # (the default) disables it. Always set (not conditional) so turning
