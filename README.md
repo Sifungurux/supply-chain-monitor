@@ -613,6 +613,61 @@ runs in-process, since the SBOM file it scans is already fetched onto
 monitor-api's own local filesystem by the time `Scan` runs (see
 docs/architecture.md's Roadmap).
 
+### Choosing a CVE scanner: Trivy, Grype, or both
+
+Trivy is the default CVE scanner for `image`/`sbom` artifacts, but
+[Grype](https://github.com/anchore/grype) is available as a drop-in
+alternative or a second opinion, via `monitorApi.cveScanner` (env
+`CVE_SCANNER`):
+
+```yaml
+monitorApi:
+  cveScanner: "trivy"   # default — exactly today's behavior
+  # cveScanner: "grype"  # Grype only
+  # cveScanner: "both"   # both, findings merged (see below)
+```
+
+Grype gets full parity with Trivy, not a stripped-down add-on: it
+scans both `image` and `sbom` artifacts, runs in its own isolated
+Kubernetes Job the same way Trivy does (`IsolatedGrypeScanner`
+mirrors `IsolatedTrivyScanner`), and keeps its vulnerability DB warm
+via its own read-only PVC (`scm-grype-db-cache`) with a primer Job at
+install/upgrade time and a daily refresh `CronJob`
+(`monitorApi.grypeCache.refreshSchedule`, `0 4 * * *` UTC by
+default — staggered an hour after Trivy's own 03:00 refresh so they
+don't compete for disk/CPU on a small cluster). None of this
+Grype-specific infrastructure runs unless `cveScanner` is `"grype"`
+or `"both"`.
+
+**`cveScanner: "both"` doesn't duplicate findings.** When Trivy and
+Grype both report the same CVE ID for one scan round, they're merged
+into a single finding whose `source` lists every tool that found it
+(e.g. `"grype, trivy"`, alphabetically sorted) instead of one
+silently overwriting the other — see `CoalesceSameIDSources` in
+`internal/artifact/merge.go`.
+
+```bash
+curl -s -X POST localhost:8080/api/v1/artifacts/<id>/scan -H 'Authorization: Bearer <key>'
+curl -s localhost:8080/api/v1/artifacts/<id> -H 'Authorization: Bearer <key>' | \
+  jq '.cve_findings[] | {id, source}'
+# under cveScanner: both, a CVE both tools found: {"id":"CVE-2024-1234","source":"grype, trivy"}
+```
+
+**Registry credentials work differently for Grype than for Trivy —
+this is already wired up, but worth knowing if you're debugging a
+pull failure.** Trivy takes `TRIVY_USERNAME`/`TRIVY_PASSWORD` env vars
+directly; Grype's documented `SYFT_REGISTRY_AUTH_*` env vars looked
+like the equivalent but turned out not to work at all (confirmed by
+inspecting the actual requests it sends — no `Authorization` header
+went out no matter how they were set). Grype instead needs a real
+`~/.docker/config.json`-shaped file, pointed at via `DOCKER_CONFIG`;
+`main.go`'s `writeDockerConfig` already generates one from
+`REGISTRY_USERNAME`/`REGISTRY_PASSWORD` for both the malware-scan
+unpacker step and Grype, so no extra setup is needed here — see
+docs/architecture.md ("Adding Grype as a second CVE scanner") for the
+full story, including why `scm-registry`'s plain-HTTP setup also
+needs `GRYPE_REGISTRY_INSECURE_USE_HTTP=true`.
+
 ### Running monitor-api outside a Kubernetes pod
 
 Isolating the unpack+scan step (above) means `monitor-api` now needs a

@@ -2491,6 +2491,102 @@ never touches it, since a scan backfilling a digest that was simply never
 attempted is a different situation from a registration whose claimed
 digest was checked and found wrong.
 
+### Adding Grype as a second CVE scanner
+
+Trivy was the only CVE scanner for `image`/`sbom` artifacts up to this
+point — one tool, one vulnerability database, one set of blind spots.
+[Grype](https://github.com/anchore/grype) is now available as a
+selectable alternative or a concurrent second opinion via
+`monitorApi.cveScanner` (`CVE_SCANNER`): `"trivy"` (default, unchanged
+behavior — verified by a regression test asserting `buildImageScanners`/
+`buildSBOMScanners` return the exact same scanner list as before this
+feature existed), `"grype"`, or `"both"`.
+
+**Built to full parity with Trivy, not a stripped-down add-on.** Every
+new file mirrors an existing Trivy one almost exactly:
+`internal/scanner/grype.go` mirrors `trivy.go`, `grype_sbom.go` mirrors
+`sbom.go` as its own parallel file rather than a tool-parametric rewrite,
+and `isolated_grype.go` mirrors `isolated_trivy.go` — including its own
+`waitForCompletion`, deliberately duplicated rather than shared, the
+same convention `isolated_trivy.go`'s own copy documents ("Isolating
+Trivy scanning" above). Grype does *not* implement
+`ArtifactAwareScanner` — it isn't generating SBOM/SARIF documents the
+way Trivy's scan-worker Job is (see "Downloadable SBOM/SARIF documents"
+above), so `IsolatedGrypeConfig` simply omits those fields rather than
+carrying dead ones.
+
+**DB caching mirrors Trivy's PVC/primer/CronJob trio, not because it's
+convenient to copy but because it's required.** The isolated
+scan-worker Job runs with a read-only root filesystem and no
+ServiceAccount token (see "Isolating the unpack+scan step") — Grype
+can no more download or cache its vulnerability DB at scan time than
+Trivy can. `scm-grype-db-cache` (a separate PVC from Trivy's, since the
+two tools' DB formats aren't interchangeable) is kept warm by
+`grype-db-cache-primer-job.yaml` and a daily
+`grype-db-refresh-cronjob.yaml`, `monitorApi.grypeCache.refreshSchedule`
+defaulting to `0 4 * * *` UTC — deliberately staggered an hour after
+Trivy's own 03:00 refresh (itself an hour after the Postgres backup's
+02:00) so three unrelated daily jobs don't all compete for the same
+node's disk/CPU at once on a small cluster. Both the primer Job and
+refresh CronJob are gated behind `{{- if ne .Values.monitorApi.cveScanner
+"trivy" }}` — a deliberate deviation from Trivy's always-on trio, since
+every existing deployment defaults to `cveScanner: trivy` and shouldn't
+start spending cluster resources refreshing a DB nothing reads. The PVC
+itself is not gated (same reasoning as Trivy's: `WaitForFirstConsumer`
+binding needs it to exist regardless of whether anything mounts it yet).
+
+**Two facts this integration didn't ship on the guess.** Before writing
+any parsing or credential code, both of Grype's actual behaviors were
+confirmed against the real binary rather than trusted from
+documentation:
+
+- *`grype -o json`'s real schema* — `testdata/grype_report_sample.json`
+  is a trimmed real `grype registry:alpine:3.19 -o json` run (three
+  actual matches spanning fix states `""`, `"unknown"`, `"fixed"`), not
+  a shape guessed from Grype's docs, and
+  `TestParseGrypeVulnerabilities_RealFixture` scans against it.
+- *Grype's registry-auth mechanism* — Grype's own `grype config --load`
+  documents `SYFT_REGISTRY_AUTH_AUTHORITY`/`_USERNAME`/`_PASSWORD` env
+  vars as the way to authenticate. They don't work: a local HTTP probe
+  server (capturing every request's headers directly) recorded zero
+  `Authorization` headers sent no matter how those three vars were set.
+  The mechanism that actually works, confirmed the same way, is
+  `DOCKER_CONFIG` pointed at a directory containing a file literally
+  named `config.json` (go-containerregistry's default credential-helper
+  keychain lookup). `main.go`'s `writeDockerConfig` — already writing
+  exactly this shape of file for the unpacker malware-scan step's
+  `--config` flag (see "Registry authentication" in the README) — now
+  writes it once and points both the unpacker and
+  `NewGrypeScanner`'s `DOCKER_CONFIG` at the same directory, rather than
+  duplicating credential-file logic. Also discovered while verifying
+  this: go-containerregistry defaults to HTTPS for any registry host
+  that isn't literally `localhost`, a loopback address, or an RFC1918
+  private IP (read directly from `pkg/name/registry.go`'s `Scheme()`),
+  which `scm-registry`'s real in-cluster DNS name doesn't match —
+  `GRYPE_REGISTRY_INSECURE_USE_HTTP=true` is set alongside
+  `DOCKER_CONFIG` for exactly this reason. Trivy never needed this
+  because `TRIVY_USERNAME`/`TRIVY_PASSWORD` are real, functional env
+  vars — the two tools' registry-auth stories are genuinely different,
+  not just differently spelled.
+
+**Merging, not overwriting, when both tools report the same CVE.**
+`MergeFindings` (`internal/artifact/merge.go`) has always deduped
+purely on `Finding.ID` via a map — fine when only one CVE scanner ever
+ran, but under `cveScanner: "both"` it meant whichever of Trivy's or
+Grype's findings landed second in `scanArtifact`'s results slice
+silently discarded the other's `Source` before `MergeFindings` even
+saw it. `CoalesceSameIDSources`, called once on `cveFindings` right
+before `MergeFindings` (CVE bucket only — malware/misconfiguration/
+secret/other are untouched, this is a CVE-scanner-specific concern),
+groups a round's freshly-reported findings by ID and joins their
+`Source` values into one deduped, sorted, comma-separated string
+(`"grype, trivy"`). Sorted, not insertion-ordered, since
+`scanArtifact` runs scanners concurrently — insertion order isn't
+deterministic run to run. Each finding's own `Source` is split on `,`
+before rejoining, not just appended, so an already-coalesced value
+flowing back through a second round doesn't accumulate into
+`"trivy, grype, trivy"`.
+
 ## Roadmap / open gaps
 
 - ~~**Fix-detection is per-type, not per-bucket**~~ **Fixed** for
@@ -2641,6 +2737,12 @@ digest was checked and found wrong.
   an unauthenticated source registry when copying trivy's DBs via
   `oras cp`; add credential flags if the source ever needs to be a
   private mirror instead of public ghcr.io.
+- **No air-gapped mirroring story for Grype's DB**: `seed-trivy-db.sh`
+  (above) only ever mirrors Trivy's DBs. `scm-grype-db-cache`'s primer
+  Job and refresh CronJob (see "Adding Grype as a second CVE scanner")
+  pull straight from Grype's public DB source with no mirror option —
+  fine on a cluster with normal internet access, a real gap on one that
+  doesn't, unlike Trivy's already-solved path.
 - **Dashboard polish**: no pagination (fine at demo scale, not at
   hundreds of artifacts), no client-side sort/filter beyond
   newest-first, and registering a `file` artifact from the form doesn't
