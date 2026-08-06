@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -126,6 +127,13 @@ func (u *UnpackerScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 		return nil, fmt.Errorf("unpacker did not produce %q: %w", imageDir, statErr)
 	}
 
+	// Always-on, not gated behind VerboseScanLogs -- the point is
+	// confirming, from a scan-worker Job's pod logs alone, that clamav
+	// itself is the thing running right now, not just unpacker (which
+	// already finished by this point). See main.go's runScanWorker for
+	// the equivalent start/complete markers around trivy/grype.
+	log.Printf("unpacker: image unpacked, scanning files with clamav (%s)", u.clamAddr)
+
 	var findings []artifact.Finding
 	var attempted, failed int
 	var lastErr error
@@ -169,6 +177,7 @@ func (u *UnpackerScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 	if walkErr != nil {
 		return findings, fmt.Errorf("failed walking unpacked image: %w", walkErr)
 	}
+	log.Printf("unpacker: clamav scan complete -- %d file(s) scanned, %d failed, %d finding(s)", attempted, failed, len(findings))
 	// If every single file failed to scan (e.g. clamd was unreachable
 	// for the whole run), surface that as an error rather than quietly
 	// reporting a "clean" scan that never actually happened.
