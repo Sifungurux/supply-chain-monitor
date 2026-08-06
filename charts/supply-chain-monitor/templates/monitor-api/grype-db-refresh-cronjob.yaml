@@ -1,0 +1,66 @@
+# Keeps scm-grype-db-cache current after grype-db-cache-primer-job's
+# one-time install-time download -- every isolated grype scan-worker
+# Job always sets GRYPE_DB_AUTO_UPDATE=false (see main.go's
+# runScanWorker), so without this CronJob the DB would stay frozen at
+# whatever it was the day this chart was first installed. Mirrors
+# trivy-db-refresh-cronjob.yaml's shape closely -- see that file's
+# comment for the general pattern.
+#
+# Reuses monitor-api's own image, same as the primer Job -- grype is
+# already installed into it.
+#
+# concurrencyPolicy: Forbid (same as trivy's refresh CronJob): two
+# overlapping refreshes writing into the same PVC at once is only ever
+# wasted work, never worth allowing.
+#
+# Gated behind cveScanner != "trivy" -- see grype-db-cache-primer-job.yaml's
+# identical gating and values.yaml's monitorApi.cveScanner comment.
+{{- if ne .Values.monitorApi.cveScanner "trivy" }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scm-grype-db-refresh
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: scm-grype-db-refresh
+spec:
+  schedule: {{ .Values.monitorApi.grypeCache.refreshSchedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: scm-grype-db-refresh
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app: scm-grype-db-refresh
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: grype-db-refresh
+              image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  echo "refreshing grype vulnerability DB in ${GRYPE_DB_CACHE_DIR}"
+                  grype db update
+                  echo "grype DB cache refreshed"
+              env:
+                - name: GRYPE_DB_CACHE_DIR
+                  value: {{ .Values.monitorApi.grypeCache.mountPath | quote }}
+              volumeMounts:
+                - name: grype-cache
+                  mountPath: {{ .Values.monitorApi.grypeCache.mountPath | quote }}
+              resources:
+                {{- toYaml .Values.monitorApi.grypeCache.resources | nindent 16 }}
+          volumes:
+            - name: grype-cache
+              persistentVolumeClaim:
+                claimName: {{ .Values.monitorApi.grypeCache.pvcName }}
+{{- end }}

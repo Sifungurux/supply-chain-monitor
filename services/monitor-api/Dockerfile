@@ -66,6 +66,14 @@ ARG ORAS_VERSION=1.3.2
 # network/module-proxy dependency) in the process. Bump UNPACKER_VERSION
 # to update; no commit SHA to track anymore.
 ARG UNPACKER_VERSION=0.5.1
+# github.com/anchore/grype: alternative CVE scanner to trivy, selectable
+# via monitorApi.cveScanner (internal/scanner/grype.go). Ships
+# goreleaser tarballs named exactly like oras/unpacker's above
+# (grype_<version>_linux_<arch>.tar.gz -- confirmed against a real
+# release asset listing, not assumed), so it joins the same
+# download-a-release-tarball pattern rather than trivy's installer
+# script. Bump GRYPE_VERSION to update.
+ARG GRYPE_VERSION=0.116.1
 RUN apk add --no-cache ca-certificates curl tar \
     && curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin "v${TRIVY_VERSION}" \
     && ARCH="${TARGETARCH:-$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')}" \
@@ -75,6 +83,9 @@ RUN apk add --no-cache ca-certificates curl tar \
     && curl -sSL -o /tmp/unpacker.tar.gz "https://github.com/Sifungurux/unpacker/releases/download/v${UNPACKER_VERSION}/unpacker_${UNPACKER_VERSION}_linux_${ARCH}.tar.gz" \
     && tar -zxf /tmp/unpacker.tar.gz -C /usr/local/bin unpacker \
     && rm -f /tmp/unpacker.tar.gz \
+    && curl -sSL -o /tmp/grype.tar.gz "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_${ARCH}.tar.gz" \
+    && tar -zxf /tmp/grype.tar.gz -C /usr/local/bin grype \
+    && rm -f /tmp/grype.tar.gz \
     && apk del curl
 
 COPY --from=build       /out/monitor-api /usr/local/bin/monitor-api

@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: scm-docker-auth
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: scm-docker-auth
+  ports:
+    - name: http
+      port: {{ .Values.dockerAuth.service.port }}
+      targetPort: {{ .Values.dockerAuth.service.port }}
+  type: ClusterIP

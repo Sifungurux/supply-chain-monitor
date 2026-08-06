@@ -13,7 +13,16 @@
 registry:
   image:
     repository: registry
-    tag: "2"
+    # 3.x is the CNCF distribution/distribution successor to Docker's
+    # own registry:2, same project, same env-var-driven config
+    # convention this deployment already relies on
+    # (REGISTRY_STORAGE_DELETE_ENABLED below) -- verified breaking
+    # changes between 2 and 3 (default config path, S3-driver path-style
+    # default, explicit token-signing-algorithm declaration) are all
+    # irrelevant here: no mounted config file, filesystem storage
+    # driver, not S3. See docs/architecture.md's registry-auth section
+    # for the token-auth wiring this version enables.
+    tag: "3"
     pullPolicy: IfNotPresent
   # REGISTRY_STORAGE_DELETE_ENABLED=true is needed for anything that ever
   # deletes a tag/manifest (not exercised by this project's own tooling
@@ -35,6 +44,60 @@ registry:
     limits:
       cpu: 500m
       memory: 512Mi
+
+# dockerAuth runs cesanta/docker_auth, a token-authentication server for
+# the Docker Registry Token Authentication spec -- reused rather than
+# hand-rolled (a small, actively maintained, purpose-built project for
+# exactly this) to get real read/read-write/admin role separation for
+# scm-registry, which htpasswd-style basic auth can't express (it only
+# authenticates identity, with no notion of pull vs push vs delete). See
+# docs/architecture.md's registry-auth section for the full design.
+dockerAuth:
+  image:
+    repository: cesanta/docker_auth
+    # v1.14.0+ is required for registry:3 compatibility -- it added
+    # disableLegacyKeyId/JWK-thumbprint support for registry v3's
+    # changed JWT `kid` handling (see cesanta/docker_auth#386).
+    tag: "1.14.0"
+    pullPolicy: IfNotPresent
+  service:
+    port: 5001
+  # Must match registry.deployment's REGISTRY_AUTH_TOKEN_ISSUER exactly
+  # -- the registry rejects any token whose "iss" claim doesn't match.
+  tokenIssuer: scm-docker-auth
+  tokenExpirationSeconds: 900
+  # true because this deployment runs registry:3 (JWK-thumbprint key
+  # IDs) -- flip to false only if registry.image.tag is ever rolled
+  # back to a 2.x. See cesanta/docker_auth#386.
+  disableLegacyKeyId: true
+  # Three static accounts, one flat ACL rule each matching every
+  # repository (docker_auth's match.name defaults to "any" when
+  # omitted) -- this is a single shared registry with no multi-tenant
+  # repo namespacing today, so per-repo scoping would be pure
+  # unused flexibility. Add a `name:` pattern per account later if that
+  # ever changes. Passwords are dev-only cleartext placeholders, same
+  # convention as postgres.credentials.password above -- change before
+  # this points at anything shared. Hashed into docker_auth's config via
+  # Sprig's `bcrypt` template function at render time; the rendered
+  # Secret only ever holds the bcrypt hash, never the cleartext value
+  # below.
+  accounts:
+    reader:
+      username: scm-reader
+      password: changeme-reader
+    writer:
+      username: scm-writer
+      password: changeme-writer
+    admin:
+      username: scm-admin
+      password: changeme-admin
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
 
 clamav:
   image:
@@ -241,6 +304,15 @@ monitorApi:
     javaRepository: ""
     skipUpdate: "true"
     skipJavaUpdate: "true"
+  # Selects which CVE scanner(s) actually run for `image`/`sbom`
+  # artifacts: "trivy" (default -- identical behavior to every
+  # deployment before this key existed), "grype", or "both" (findings
+  # from a CVE both tools agree on merge into one, with a joined
+  # Source -- see internal/artifact/merge.go's CoalesceSameIDSources).
+  # "grype"/"both" also turn on grype-db-cache-primer-job.yaml/
+  # grype-db-refresh-cronjob.yaml below, since grype then actually
+  # needs a warm DB to read.
+  cveScanner: "trivy"
   # Operator-configured external scanners -- plug in a different CVE
   # scanner (Grype, OSV-Scanner, ...) or SBOM tool alongside (never
   # instead of -- registration is additive) the built-in trivy/ClamAV
@@ -298,6 +370,31 @@ monitorApi:
     # contend for disk/CPU on a single-node dev cluster at the same
     # moment.
     refreshSchedule: "0 3 * * *" # daily at 03:00 UTC
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 768Mi
+  # The shared PersistentVolumeClaim IsolatedGrypeScanner mounts
+  # read-only into every grype scan-worker Job -- grype's own
+  # counterpart to trivyCache above, kept warm by
+  # grype-db-cache-primer-job.yaml/grype-db-refresh-cronjob.yaml, both
+  # of which are inert (never scheduled) unless cveScanner is "grype"
+  # or "both".
+  grypeCache:
+    pvcName: scm-grype-db-cache
+    mountPath: /grype-cache
+    persistence:
+      # grype's vulnerability DB alone (no separate Java DB the way
+      # trivy has) is typically a few hundred MB -- same 2Gi headroom
+      # as trivyCache for consistency.
+      size: 2Gi
+    # Offset from both postgres.backup.schedule (02:00) and
+    # trivyCache.refreshSchedule (03:00) so none of the three contend
+    # for disk/CPU on a single-node dev cluster at the same moment.
+    refreshSchedule: "0 4 * * *" # daily at 04:00 UTC
     resources:
       requests:
         cpu: 100m

@@ -34,11 +34,11 @@ func writeFakeUnpacker(t *testing.T, script string) string {
 
 func newTestUnpackerScanner(t *testing.T, clamAddr, unpackerScript string, maxFileSize int64) *UnpackerScanner {
 	t.Helper()
-	return NewUnpackerScanner(clamAddr, writeFakeUnpacker(t, unpackerScript), false, false, maxFileSize)
+	return NewUnpackerScanner(clamAddr, writeFakeUnpacker(t, unpackerScript), false, false, maxFileSize, "")
 }
 
 func TestUnpackerScanner_Bucket(t *testing.T) {
-	s := NewUnpackerScanner("127.0.0.1:1", "unpacker", false, false, 0)
+	s := NewUnpackerScanner("127.0.0.1:1", "unpacker", false, false, 0, "")
 	if got := s.Bucket(); got != "malware" {
 		t.Fatalf("Bucket() = %q, want %q", got, "malware")
 	}
@@ -74,6 +74,33 @@ printf 'malware content' > "$2/image/sub/bad.txt"
 	// visible from the finding alone.
 	if !strings.Contains(f.Title, "sub/bad.txt") {
 		t.Errorf("Title = %q, want it to include the relative path %q", f.Title, "sub/bad.txt")
+	}
+}
+
+// TestUnpackerScanner_Scan_DockerConfigPathIsPassedThrough confirms
+// dockerConfigPath (set once registry auth is enabled -- see
+// main.go's writeDockerConfig) reaches unpacker as --config, the flag
+// docs/architecture.md's Roadmap already identified unpacker supports
+// for exactly this. The fake script records argv to argvFile, a fixed
+// path outside the ephemeral scm-unpack-* dir Scan creates and cleans
+// up itself, so it survives long enough for this test to read it back.
+func TestUnpackerScanner_Scan_DockerConfigPathIsPassedThrough(t *testing.T) {
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	script := `mkdir -p "$2/image"
+echo "$@" > ` + argvFile
+	s := newTestUnpackerScanner(t, "127.0.0.1:1", script, 0)
+	s.dockerConfigPath = "/creds/dockerconfig.json"
+
+	if _, err := s.Scan(context.Background(), "ref-does-not-matter:latest"); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	got, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read recorded argv: %v", err)
+	}
+	if !strings.Contains(string(got), "--config /creds/dockerconfig.json") {
+		t.Errorf("argv = %q, want it to include \"--config /creds/dockerconfig.json\"", string(got))
 	}
 }
 

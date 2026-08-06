@@ -1,0 +1,59 @@
+# Populates scm-grype-db-cache with a real, usable vulnerability DB
+# once, at install/upgrade time -- pairs with grype-db-cache-pvc.yaml's
+# hook annotations. Mirrors trivy-db-cache-primer-job.yaml's shape and
+# reasoning exactly (see that file's comment) -- every isolated grype
+# scan-worker Job passes GRYPE_DB_AUTO_UPDATE=false (main.go's
+# runScanWorker, via GrypeDBConfig.SkipDBUpdate), so it will never try
+# to fetch a DB itself; something has to put one there first.
+#
+# Reuses monitor-api's own image rather than pulling a separate grype
+# image -- grype is already installed into it (see Dockerfile).
+#
+# `grype db update` is grype's documented one-shot DB-population
+# command (confirmed via `grype db --help` against the real binary --
+# "Download and install the latest vulnerability database").
+#
+# Gated behind cveScanner != "trivy": every existing deployment
+# defaults to cveScanner: trivy and never reads this DB at all, so
+# there's no reason to spend install/upgrade time (or the DB's ~1GB+
+# download) downloading one nothing uses -- see values.yaml's
+# monitorApi.cveScanner comment.
+{{- if ne .Values.monitorApi.cveScanner "trivy" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scm-grype-db-cache-primer
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-4"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: primer
+          image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              echo "downloading grype vulnerability DB into ${GRYPE_DB_CACHE_DIR}"
+              grype db update
+              echo "grype DB cache primed"
+          env:
+            - name: GRYPE_DB_CACHE_DIR
+              value: {{ .Values.monitorApi.grypeCache.mountPath | quote }}
+          volumeMounts:
+            - name: grype-cache
+              mountPath: {{ .Values.monitorApi.grypeCache.mountPath | quote }}
+          resources:
+            {{- toYaml .Values.monitorApi.grypeCache.resources | nindent 12 }}
+      volumes:
+        - name: grype-cache
+          persistentVolumeClaim:
+            claimName: {{ .Values.monitorApi.grypeCache.pvcName }}
+{{- end }}

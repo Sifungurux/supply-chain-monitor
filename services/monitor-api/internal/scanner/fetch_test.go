@@ -85,7 +85,7 @@ func TestSingleFileIn(t *testing.T) {
 // binary or a registry -- unlike Scan() in every other file in this
 // package, this can run in any Go environment.
 func TestRegistryFetcher_Fetch_LocalPathPassthrough(t *testing.T) {
-	f := NewRegistryFetcher(true)
+	f := NewRegistryFetcher(true, "", "")
 	path, cleanup, err := f.Fetch(context.Background(), "/tmp/suspicious.bin")
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)

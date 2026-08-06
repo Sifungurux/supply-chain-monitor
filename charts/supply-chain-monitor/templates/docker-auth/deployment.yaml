@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scm-docker-auth
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: scm-docker-auth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scm-docker-auth
+  template:
+    metadata:
+      labels:
+        app: scm-docker-auth
+      annotations:
+        # Same reasoning as monitor-api/deployment.yaml's identical
+        # checksum/config annotation: forces a new pod any time either
+        # mounted Secret's rendered content changes, since neither the
+        # image tag nor the Deployment spec itself changes when only a
+        # values.yaml account/ACL edit does.
+        checksum/config: {{ include (print $.Template.BasePath "/docker-auth/config-secret.yaml") . | sha256sum }}
+        checksum/signing-cert: {{ include (print $.Template.BasePath "/docker-auth/signing-cert-secret.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: docker-auth
+          image: "{{ .Values.dockerAuth.image.repository }}:{{ .Values.dockerAuth.image.tag }}"
+          imagePullPolicy: {{ .Values.dockerAuth.image.pullPolicy }}
+          args:
+            - /config/config.yml
+          ports:
+            - containerPort: {{ .Values.dockerAuth.service.port }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: signing-cert
+              mountPath: /certs
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.dockerAuth.service.port }}
+            initialDelaySeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.dockerAuth.service.port }}
+            initialDelaySeconds: 5
+          resources:
+            {{- toYaml .Values.dockerAuth.resources | nindent 12 }}
+      volumes:
+        - name: config
+          secret:
+            secretName: scm-docker-auth-config
+        - name: signing-cert
+          secret:
+            secretName: scm-docker-auth-signing
