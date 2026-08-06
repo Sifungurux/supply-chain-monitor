@@ -919,10 +919,24 @@ confusing, intermittent timeouts under load.
 
 ### Debugging a specific scan-worker Job
 
+Every scan-worker Job prints a start line naming which tool it's
+running (`trivy`, `grype`, or `unpacker + clamav`) and a completion
+line with the finding count or error, regardless of `verboseLogs` — so
+`kubectl logs` on a `scm-scan-*` pod always shows *something* while a
+scan is in flight, not just silence until a final JSON result line.
+The malware path (`unpacker + clamav`) also logs the handoff between
+its two tools: "image unpacked, scanning files with clamav" once
+`unpacker` finishes pulling the image, then a scanned/failed/finding
+count once ClamAV's done. `verboseLogs` is a separate, much noisier
+knob on top of this — it tees the underlying CLI tool's own
+step-by-step output (trivy's own progress lines, unpacker's oras/crane
+pull attempts) into the same log stream, for the rarer case where the
+tool-level summary above isn't enough to tell what's actually stuck.
+
 Scan-worker Job pods are deleted right after each scan finishes (see
 `docs/architecture.md`, "Isolating the unpack+scan step"), so to
-actually watch one's logs while `verboseLogs` is on, trigger a scan and
-immediately tail Jobs in the namespace:
+actually watch one's logs live, trigger a scan and immediately tail
+Jobs in the namespace:
 
 ```bash
 kubectl get jobs -n supply-chain-monitor -w

@@ -284,8 +284,18 @@ func runScanWorker() {
 	var findings []artifact.Finding
 	var scanErr error
 
+	// Always-on activity markers, deliberately separate from
+	// VerboseScanLogs (see that variable's own comment) -- this isn't
+	// the CLI-tool firehose meant for deep debugging, it's the minimum
+	// a human `kubectl logs`-ing a scm-scan-* pod needs to confirm the
+	// right tool actually started and finished, rather than staring at
+	// an empty stream until the final ResultMarker line (or forever, if
+	// the pod is genuinely stuck). Two lines per scan: one here before
+	// dispatch, one right after the switch below once findings/scanErr
+	// are settled, regardless of which branch ran.
 	switch tool, mode := os.Getenv("SCM_SCAN_TOOL"), os.Getenv("SCM_SCAN_MODE"); tool {
 	case "trivy":
+		log.Printf("scan-worker: starting trivy scan (mode=%s) for %q", mode, ref)
 		// The shared trivy-db-cache PVC (see
 		// charts/supply-chain-monitor/templates/monitor-api/trivy-db-cache-pvc.yaml)
 		// is mounted read-only here -- freshness is entirely the primer
@@ -326,6 +336,7 @@ func runScanWorker() {
 			}
 		}
 	case "grype":
+		log.Printf("scan-worker: starting grype scan (mode=%s) for %q", mode, ref)
 		// grype's own counterpart to trivy-db-cache above -- see
 		// charts/supply-chain-monitor/templates/monitor-api/grype-db-cache-pvc.yaml.
 		// Same "always skip, freshness is the primer/refresh Job's
@@ -365,6 +376,7 @@ func runScanWorker() {
 			}
 		}
 	default:
+		log.Printf("scan-worker: starting malware scan (unpacker + clamav) for %q", ref)
 		clamAddr := getenv("CLAMAV_ADDR", "")
 		unpackerBin := getenv("UNPACKER_BIN", "unpacker")
 		unpackerInsecure := getenvBool("UNPACKER_INSECURE", true)
@@ -376,6 +388,12 @@ func runScanWorker() {
 		findings, scanErr = s.Scan(ctx, ref)
 	}
 
+	if scanErr != nil {
+		log.Printf("scan-worker: scan failed: %v", scanErr)
+	} else {
+		log.Printf("scan-worker: scan complete, %d finding(s)", len(findings))
+	}
+
 	result := scanner.WorkerResult{Findings: findings}
 	if scanErr != nil {
 		result.Error = scanErr.Error()
@@ -384,14 +402,15 @@ func runScanWorker() {
 	// Printed with scanner.ResultMarker as a prefix, not a bare
 	// json.Encoder.Encode, so IsolatedTrivyScanner/IsolatedUnpackerScanner
 	// (via scanner.ExtractWorkerResult) can find this exact line even
-	// when SCM_SCAN_VERBOSE also has trivy's or unpacker's own progress
-	// output mixed into the same pod log stream -- Kubernetes pod logs
-	// are a single combined stdout+stderr stream, so without this anchor
-	// any extra output written by a verbose scan (or even just
+	// with other output mixed into the same pod log stream -- this
+	// function's own always-on activity lines above, SCM_SCAN_VERBOSE's
+	// tool-progress firehose when that's also on, or even just
 	// cleanScanCache's own log.Printf on a cleanup failure, which
-	// already bit this project once before VerboseScanLogs existed --
-	// see trivy.go's Scan) could land ahead of or after the real result
-	// and break a naive whole-body JSON parse.
+	// already bit this project once before ResultMarker existed (see
+	// trivy.go's Scan). Kubernetes pod logs are a single combined
+	// stdout+stderr stream, so without this anchor any extra output
+	// could land ahead of or after the real result and break a naive
+	// whole-body JSON parse.
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "scan-worker: failed to marshal result: %v\n", err)
