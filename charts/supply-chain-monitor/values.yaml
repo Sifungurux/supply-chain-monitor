@@ -313,31 +313,35 @@ monitorApi:
   # grype-db-refresh-cronjob.yaml below, since grype then actually
   # needs a warm DB to read.
   cveScanner: "trivy"
-  # Operator-configured external scanners -- plug in a different CVE
+  # Operator-configured pluggable scanners -- plug in a different CVE
   # scanner (Grype, OSV-Scanner, ...) or SBOM tool alongside (never
   # instead of -- registration is additive) the built-in trivy/ClamAV
-  # scanners, with no Go code change here. Each entry's `command` must
-  # already be present in the monitor-api image (build a derived image
-  # FROM this one that adds it -- this project's own Dockerfile can't
-  # bake in every possible third-party scanner) and, when run with
-  # `args` (each occurrence of the literal string "{{ref}}" is replaced
-  # with the actual artifact ref/local path being scanned), must print
-  # a JSON array of findings on stdout:
+  # scanners, with no Go code change here. monitor-api runs this
+  # command itself, in-cluster -- for recording results a scan already
+  # produced somewhere else entirely (a CI pipeline, a different
+  # system), see POST /api/v1/artifacts/{id}/findings instead (README,
+  # "Submitting findings from an external scanner"). Each entry's
+  # `command` must already be present in the monitor-api image (build a
+  # derived image FROM this one that adds it -- this project's own
+  # Dockerfile can't bake in every possible third-party scanner) and,
+  # when run with `args` (each occurrence of the literal string
+  # "{{ref}}" is replaced with the actual artifact ref/local path being
+  # scanned), must print a JSON array of findings on stdout:
   #   [{"id":"CVE-2024-1234","severity":"high","title":"...","source":"grype","category":"cve"}, ...]
   # "source" and "category" are both optional per finding -- they fall
   # back to this entry's own `name`/`category` when a finding's own
-  # JSON omits them. See docs/architecture.md ("Pluggable external
-  # scanners") and README for the full contract plus a worked example
-  # (wiring Grype in via a small shim script).
+  # JSON omits them. See docs/architecture.md ("Pluggable scanners")
+  # and README for the full contract plus a worked example (wiring
+  # Grype in via a small shim script).
   #
-  # externalScanners:
+  # pluggableScanners:
   #   - name: grype
   #     artifactTypes: ["image"]
   #     command: grype-to-findings.sh   # a shim script, not grype itself -- see README
   #     args: ["{{ref}}"]
   #     category: cve
   #     timeoutSeconds: 300
-  externalScanners: []
+  pluggableScanners: []
   # Per-API-key request throttling (see internal/api/ratelimit.go and
   # router.go's withRateLimit) -- protects the scan pipeline/database
   # from one caller (buggy client, compromised key, runaway retry loop)

@@ -649,10 +649,10 @@ func buildSBOMScanners(disableScanIsolation bool, cveScanner string, trivyInProc
 	return cveScannersFor(cveScanner, trivyIsolated, grypeIsolated)
 }
 
-// registerExternalScanners adds each operator-configured external
-// scanner (EXTERNAL_SCANNERS -- see internal/scanner/external.go and
-// docs/architecture.md, "Pluggable external scanners") into reg, once
-// per artifact type it names. Additive, not replacing: this appends
+// registerPluggableScanners adds each operator-configured pluggable
+// scanner (PLUGGABLE_SCANNERS -- see internal/scanner/pluggable.go and
+// docs/architecture.md, "Pluggable scanners") into reg, once per
+// artifact type it names. Additive, not replacing: this appends
 // alongside whatever built-in scanners already exist for that type
 // (e.g. registering a Grype-backed scanner against "image" doesn't
 // remove trivy), the same way Registry already supports more than one
@@ -663,7 +663,7 @@ func buildSBOMScanners(disableScanIsolation bool, cveScanner string, trivyInProc
 // exactly like the built-in ClamAV/SBOM/SARIF scanners just above in
 // runAPIServer, since ref for those types may be an OCI registry
 // reference rather than a path already inside this pod. image
-// registrations are left unwrapped: an external CVE scanner plugged in
+// registrations are left unwrapped: a pluggable CVE scanner plugged in
 // for images is expected to resolve an OCI ref itself, the same way
 // trivy/unpacker already do -- wrapping it in FetchingScanner would
 // hand it a single fetched blob path instead of the image reference it
@@ -671,25 +671,25 @@ func buildSBOMScanners(disableScanIsolation bool, cveScanner string, trivyInProc
 //
 // Split out from runAPIServer specifically so the validation and
 // per-type wrapping decision is unit-testable (main_test.go) without
-// invoking any external command -- registerExternalScanners itself
+// invoking any configured command -- registerPluggableScanners itself
 // never calls Scan().
-func registerExternalScanners(reg scanner.Registry, specs []scanner.ExternalScannerConfig, fetcher scanner.Fetcher) error {
+func registerPluggableScanners(reg scanner.Registry, specs []scanner.PluggableScannerConfig, fetcher scanner.Fetcher) error {
 	for _, spec := range specs {
 		if spec.Name == "" {
-			return fmt.Errorf("external scanner config missing required \"name\"")
+			return fmt.Errorf("pluggable scanner config missing required \"name\"")
 		}
 		if spec.Command == "" {
-			return fmt.Errorf("external scanner %q missing required \"command\"", spec.Name)
+			return fmt.Errorf("pluggable scanner %q missing required \"command\"", spec.Name)
 		}
 		if len(spec.ArtifactTypes) == 0 {
-			return fmt.Errorf("external scanner %q must list at least one artifactType", spec.Name)
+			return fmt.Errorf("pluggable scanner %q must list at least one artifactType", spec.Name)
 		}
 
-		var s scanner.Scanner = scanner.NewExternalScanner(spec)
+		var s scanner.Scanner = scanner.NewPluggableScanner(spec)
 		for _, at := range spec.ArtifactTypes {
 			t := artifact.Type(at)
 			if !t.Valid() {
-				return fmt.Errorf("external scanner %q: %q is not a valid artifactType (must be one of image, file, sbom, sarif)", spec.Name, at)
+				return fmt.Errorf("pluggable scanner %q: %q is not a valid artifactType (must be one of image, file, sbom, sarif)", spec.Name, at)
 			}
 			registered := s
 			if t != artifact.TypeImage {
@@ -1023,18 +1023,18 @@ func runAPIServer() {
 		},
 	}
 
-	// Operator-configured external scanners (a different CVE scanner
+	// Operator-configured pluggable scanners (a different CVE scanner
 	// than trivy, a different SBOM tool, ...) on top of the built-in
-	// ones above -- see docs/architecture.md ("Pluggable external
-	// scanners") and README. Unset/empty by default, so nothing changes
-	// for anyone not using this.
-	if externalScannersEnv := getenv("EXTERNAL_SCANNERS", ""); externalScannersEnv != "" {
-		var specs []scanner.ExternalScannerConfig
-		if err := json.Unmarshal([]byte(externalScannersEnv), &specs); err != nil {
-			log.Fatalf("EXTERNAL_SCANNERS is not valid JSON: %v", err)
+	// ones above -- see docs/architecture.md ("Pluggable scanners") and
+	// README. Unset/empty by default, so nothing changes for anyone not
+	// using this.
+	if pluggableScannersEnv := getenv("PLUGGABLE_SCANNERS", ""); pluggableScannersEnv != "" {
+		var specs []scanner.PluggableScannerConfig
+		if err := json.Unmarshal([]byte(pluggableScannersEnv), &specs); err != nil {
+			log.Fatalf("PLUGGABLE_SCANNERS is not valid JSON: %v", err)
 		}
-		if err := registerExternalScanners(scanners, specs, fetcher); err != nil {
-			log.Fatalf("invalid EXTERNAL_SCANNERS config: %v", err)
+		if err := registerPluggableScanners(scanners, specs, fetcher); err != nil {
+			log.Fatalf("invalid PLUGGABLE_SCANNERS config: %v", err)
 		}
 	}
 

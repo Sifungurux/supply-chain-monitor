@@ -35,13 +35,13 @@ func TestLimitedBuffer_Write(t *testing.T) {
 	})
 }
 
-// TestExternalScanner_Scan_OutputExceedingLimitIsAnError proves the
+// TestPluggableScanner_Scan_OutputExceedingLimitIsAnError proves the
 // 10MiB cap is actually wired into Scan, not just the limitedBuffer
 // type in isolation -- `yes | head -c 11000000` cheaply produces just
 // over the limit without the test itself needing to build/hold an
 // 11MB string.
-func TestExternalScanner_Scan_OutputExceedingLimitIsAnError(t *testing.T) {
-	e := NewExternalScanner(ExternalScannerConfig{
+func TestPluggableScanner_Scan_OutputExceedingLimitIsAnError(t *testing.T) {
+	e := NewPluggableScanner(PluggableScannerConfig{
 		Name:    "firehose-scanner",
 		Command: "sh",
 		Args:    []string{"-c", "yes | head -c 11000000"},
@@ -53,8 +53,8 @@ func TestExternalScanner_Scan_OutputExceedingLimitIsAnError(t *testing.T) {
 	}
 }
 
-func TestExternalScanner_BuildArgs(t *testing.T) {
-	e := NewExternalScanner(ExternalScannerConfig{
+func TestPluggableScanner_BuildArgs(t *testing.T) {
+	e := NewPluggableScanner(PluggableScannerConfig{
 		Args: []string{"scan", "{{ref}}", "--tag={{ref}}", "--format", "json"},
 	})
 
@@ -70,20 +70,20 @@ func TestExternalScanner_BuildArgs(t *testing.T) {
 	}
 }
 
-func TestExternalScanner_BuildArgs_NoPlaceholderLeavesArgUntouched(t *testing.T) {
-	e := NewExternalScanner(ExternalScannerConfig{Args: []string{"--quiet"}})
+func TestPluggableScanner_BuildArgs_NoPlaceholderLeavesArgUntouched(t *testing.T) {
+	e := NewPluggableScanner(PluggableScannerConfig{Args: []string{"--quiet"}})
 	got := e.buildArgs("whatever")
 	if len(got) != 1 || got[0] != "--quiet" {
 		t.Fatalf("buildArgs = %v, want [--quiet] unchanged", got)
 	}
 }
 
-// TestExternalScanner_Scan_HappyPath exercises the full contract: a
+// TestPluggableScanner_Scan_HappyPath exercises the full contract: a
 // command's stdout, interpreted as a JSON array of findings, becomes
-// []artifact.Finding -- using `sh -c` as the "external scanner" so this
+// []artifact.Finding -- using `sh -c` as the "pluggable scanner" so this
 // runs without any real third-party binary installed.
-func TestExternalScanner_Scan_HappyPath(t *testing.T) {
-	e := NewExternalScanner(ExternalScannerConfig{
+func TestPluggableScanner_Scan_HappyPath(t *testing.T) {
+	e := NewPluggableScanner(PluggableScannerConfig{
 		Name:    "fake-cve-scanner",
 		Command: "sh",
 		Args: []string{"-c", `echo '[
@@ -121,8 +121,8 @@ func TestExternalScanner_Scan_HappyPath(t *testing.T) {
 	}
 }
 
-func TestExternalScanner_Scan_NoFindingsIsNotAnError(t *testing.T) {
-	e := NewExternalScanner(ExternalScannerConfig{Command: "sh", Args: []string{"-c", "echo '[]'"}})
+func TestPluggableScanner_Scan_NoFindingsIsNotAnError(t *testing.T) {
+	e := NewPluggableScanner(PluggableScannerConfig{Command: "sh", Args: []string{"-c", "echo '[]'"}})
 	findings, err := e.Scan(context.Background(), "alpine:3.19")
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
@@ -132,8 +132,8 @@ func TestExternalScanner_Scan_NoFindingsIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestExternalScanner_Scan_CommandFailureIncludesStderr(t *testing.T) {
-	e := NewExternalScanner(ExternalScannerConfig{
+func TestPluggableScanner_Scan_CommandFailureIncludesStderr(t *testing.T) {
+	e := NewPluggableScanner(PluggableScannerConfig{
 		Name:    "broken-scanner",
 		Command: "sh",
 		Args:    []string{"-c", "echo 'auth failed: bad token' >&2; exit 1"},
@@ -151,8 +151,8 @@ func TestExternalScanner_Scan_CommandFailureIncludesStderr(t *testing.T) {
 	}
 }
 
-func TestExternalScanner_Scan_MalformedOutputIsAnError(t *testing.T) {
-	e := NewExternalScanner(ExternalScannerConfig{
+func TestPluggableScanner_Scan_MalformedOutputIsAnError(t *testing.T) {
+	e := NewPluggableScanner(PluggableScannerConfig{
 		Name:    "chatty-scanner",
 		Command: "sh",
 		Args:    []string{"-c", "echo 'not json, some log line instead'"},
@@ -167,13 +167,13 @@ func TestExternalScanner_Scan_MalformedOutputIsAnError(t *testing.T) {
 	}
 }
 
-// TestExternalScanner_Scan_RefSubstitution confirms the actual ref
+// TestPluggableScanner_Scan_RefSubstitution confirms the actual ref
 // passed to Scan reaches the exec'd command, not just a literal
 // "{{ref}}" placeholder string -- using sh's own positional-parameter
 // substitution ($1) to surface whatever buildArgs produced back out
 // through the command's own output.
-func TestExternalScanner_Scan_RefSubstitution(t *testing.T) {
-	e := NewExternalScanner(ExternalScannerConfig{
+func TestPluggableScanner_Scan_RefSubstitution(t *testing.T) {
+	e := NewPluggableScanner(PluggableScannerConfig{
 		Command: "sh",
 		Args:    []string{"-c", `echo "[{\"id\":\"$1\",\"severity\":\"high\",\"title\":\"t\"}]"`, "sh", "{{ref}}"},
 	})
@@ -187,8 +187,8 @@ func TestExternalScanner_Scan_RefSubstitution(t *testing.T) {
 	}
 }
 
-func TestExternalScanner_Scan_TimeoutKillsALongRunningCommand(t *testing.T) {
-	e := NewExternalScanner(ExternalScannerConfig{
+func TestPluggableScanner_Scan_TimeoutKillsALongRunningCommand(t *testing.T) {
+	e := NewPluggableScanner(PluggableScannerConfig{
 		Name:           "slow-scanner",
 		Command:        "sh",
 		Args:           []string{"-c", "sleep 5 && echo '[]'"},
@@ -201,15 +201,15 @@ func TestExternalScanner_Scan_TimeoutKillsALongRunningCommand(t *testing.T) {
 	}
 }
 
-func TestExternalScanner_Timeout_DefaultsWhenUnset(t *testing.T) {
-	e := NewExternalScanner(ExternalScannerConfig{})
-	if got := e.timeout(); got != defaultExternalScannerTimeout {
-		t.Errorf("timeout() = %v, want the default %v", got, defaultExternalScannerTimeout)
+func TestPluggableScanner_Timeout_DefaultsWhenUnset(t *testing.T) {
+	e := NewPluggableScanner(PluggableScannerConfig{})
+	if got := e.timeout(); got != defaultPluggableScannerTimeout {
+		t.Errorf("timeout() = %v, want the default %v", got, defaultPluggableScannerTimeout)
 	}
 }
 
-func TestExternalScanner_Timeout_UsesConfiguredSeconds(t *testing.T) {
-	e := NewExternalScanner(ExternalScannerConfig{TimeoutSeconds: 42})
+func TestPluggableScanner_Timeout_UsesConfiguredSeconds(t *testing.T) {
+	e := NewPluggableScanner(PluggableScannerConfig{TimeoutSeconds: 42})
 	if got := e.timeout(); got.Seconds() != 42 {
 		t.Errorf("timeout() = %v, want 42s", got)
 	}

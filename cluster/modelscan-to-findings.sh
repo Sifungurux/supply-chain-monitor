@@ -1,7 +1,7 @@
 #!/bin/sh
-# modelscan-to-findings.sh -- ExternalScanner shim wiring ProtectAI's
+# modelscan-to-findings.sh -- PluggableScanner shim wiring ProtectAI's
 # modelscan (https://github.com/protectai/modelscan) into monitor-api's
-# pluggable external scanner mechanism (internal/scanner/external.go),
+# pluggable scanner mechanism (internal/scanner/pluggable.go),
 # for AI model artifacts registered as artifact type "image" (e.g.
 # Docker Model Runner's "ai/<model>:<tag>" refs, packaged as OCI
 # artifacts with artifactType application/vnd.cncf.model.manifest.v1+json
@@ -21,7 +21,7 @@
 # against refs where it happens to find nothing.
 #
 # Usage: monitor-api invokes this as `modelscan-to-findings.sh <ref>`
-# (see the {{ref}} substitution in ExternalScannerConfig.Args).
+# (see the {{ref}} substitution in PluggableScannerConfig.Args).
 #
 # Requires (see the Dockerfile snippet in README.md for a derived
 # image): oras (already baked into monitor-api's own Dockerfile),
@@ -71,7 +71,7 @@ RESULT_FILE="$WORKDIR/modelscan-result.json"
 # artifact is a format modelscan doesn't parse (safetensors/GGUF, most
 # likely -- see the caveat above), not a failure. Only 2/4 are real
 # errors, and those are left to propagate as a nonzero exit so
-# ExternalScanner surfaces them as an actual scan error instead of
+# PluggableScanner surfaces them as an actual scan error instead of
 # silently reporting "no findings."
 set +e
 modelscan -p "$WORKDIR" -r json -o "$RESULT_FILE" 1>&2

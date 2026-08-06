@@ -1250,14 +1250,22 @@ Kubernetes API client, a real `trivy` binary, or a real `unpacker` --
 it never invokes either scanner it's choosing between, just picks
 which one ends up in the registry.
 
-**Pluggable external scanners.** Every scanner up to this point --
-trivy, ClamAV, SBOMScanner, SARIFScanner -- is a fixed Go type this
-project ships. That's fine until someone wants a *different* CVE
-scanner (Grype, OSV-Scanner) or a different SBOM tool than trivy's own,
-which used to mean either living without it or writing a new Go type
-and rebuilding this binary. `internal/scanner/external.go`'s
-`ExternalScanner` closes that gap generically instead of one tool at a
-time: it shells out to an arbitrary operator-configured command and
+**Pluggable scanners.** (Originally named "external scanners" --
+renamed after that name was read the way `POST
+/api/v1/artifacts/{id}/findings` should be: "a scanner running outside
+this cluster." What this feature actually is sits closer to the
+opposite -- monitor-api runs the command itself, in-cluster, every
+`/scan`. "Pluggable" -- extending what monitor-api itself can run,
+with no Go code change -- says that; see "Submitting findings from an
+external scanner" above for the mechanism the old name was actually
+describing.) Every scanner up to this point -- trivy, ClamAV,
+SBOMScanner, SARIFScanner -- is a fixed Go type this project ships.
+That's fine until someone wants a *different* CVE scanner (Grype,
+OSV-Scanner) or a different SBOM tool than trivy's own, which used to
+mean either living without it or writing a new Go type and rebuilding
+this binary. `internal/scanner/pluggable.go`'s `PluggableScanner`
+closes that gap generically instead of one tool at a time: it shells
+out to an arbitrary operator-configured command and
 interprets its stdout as a JSON array of findings --
 `[{"id":...,"severity":...,"title":...,"source":...,"category":...},
 ...]` -- with no opinion at all about what produced that JSON. The
@@ -1283,49 +1291,49 @@ Two design choices worth calling out:
   this app -- deliberately, since a persisted finding's bucket already
   records its category, and letting it round-trip through the public
   API would just be a second, potentially-stale copy of the same fact.
-  `ExternalScanner` is the one place that has to break that rule: an
-  external command is the one caller that genuinely needs to *tell*
+  `PluggableScanner` is the one place that has to break that rule: the
+  configured command is the one caller that genuinely needs to *tell*
   monitor-api what category a finding belongs in, since nothing else
-  in this process computed it. `externalFinding`, a small
+  in this process computed it. `pluggableFinding`, a small
   JSON-tagged wire struct distinct from `artifact.Finding`, exists
   purely to carry that one field in from outside the process before
   being converted into a real `artifact.Finding` (with `Category` set
   programmatically, not via its own, deliberately absent, json tag).
-Registration (`registerExternalScanners` in `main.go`, driven by the
-`EXTERNAL_SCANNERS` env var -- a JSON array of
-`scanner.ExternalScannerConfig`, rendered from
-`charts/supply-chain-monitor/values.yaml`'s `monitorApi.externalScanners`
+Registration (`registerPluggableScanners` in `main.go`, driven by the
+`PLUGGABLE_SCANNERS` env var -- a JSON array of
+`scanner.PluggableScannerConfig`, rendered from
+`charts/supply-chain-monitor/values.yaml`'s `monitorApi.pluggableScanners`
 via `toJson` in `configmap.yaml`) is additive per artifact type, not a
-replacement: adding an external Grype-backed scanner against `image`
+replacement: adding a pluggable Grype-backed scanner against `image`
 doesn't remove trivy, the same "a type can have more than one scanner"
 design `Registry` already supported for image CVE+malware scanning.
 `file`/`sbom`/`sarif` registrations get wrapped in `FetchingScanner`,
 exactly like the built-in ClamAV/SBOM/SARIF scanners, since `ref` for
 those types may be an OCI registry reference rather than a path already
-inside this pod; `image` registrations are left unwrapped, since an
-external image/CVE scanner is expected to resolve an OCI ref itself
+inside this pod; `image` registrations are left unwrapped, since a
+pluggable image/CVE scanner is expected to resolve an OCI ref itself
 the same way trivy and unpacker already do -- handing it a single
 fetched blob path instead would be the wrong shape entirely.
-What this doesn't solve: getting the external tool's own binary *into*
-the image in the first place. This project's own `Dockerfile` can't
-reasonably bake in every possible third-party scanner on the chance
-someone configures it -- that's an operator concern, solved by
+What this doesn't solve: getting the third-party tool's own binary
+*into* the image in the first place. This project's own `Dockerfile`
+can't reasonably bake in every possible third-party scanner on the
+chance someone configures it -- that's an operator concern, solved by
 building a derived image (`FROM` this project's own monitor-api image,
 plus whatever `COPY`/`RUN apk add` the chosen tool needs) and pointing
 `monitorApi.image.repository`/`tag` at it. See README's "Pluggable
-external scanners" for a worked example wiring Grype in this way,
-including the shim script's exact shape.
+scanners" for a worked example wiring Grype in this way, including the
+shim script's exact shape.
 
 **Fixed: `scanArtifact`'s registered scanners ran one after another,
 not concurrently -- a real problem now that a type's scanner list can
 grow arbitrarily long.** Every scanner for a type (trivy, unpacker,
-now potentially several operator-configured `ExternalScanner`s) shared
-one 5-minute context, and the original loop called each `Scan` in
-turn: N scanners each taking a couple of minutes meant N times that
+now potentially several operator-configured `PluggableScanner`s)
+shared one 5-minute context, and the original loop called each `Scan`
+in turn: N scanners each taking a couple of minutes meant N times that
 long overall, with no benefit to running them one at a time (they're
 fully independent -- none depends on another's output). Worse, a slow
 scanner ate directly into the time budget every scanner *after* it in
-the list had left to work with, so adding a slow external scanner
+the list had left to work with, so adding a slow pluggable scanner
 could starve trivy/ClamAV of their share of the 5 minutes and fail
 them with a context-deadline error that had nothing to do with
 anything actually being wrong with them -- which then blocks
@@ -1345,7 +1353,7 @@ free: net/http's own per-connection panic recovery only protects the
 goroutine handling the HTTP request itself, not additional goroutines
 that handler spawns. A buggy `Scanner` (in-process code, or -- now
 that scanners can be arbitrary operator-configured commands via
-`ExternalScanner` -- a bug surfaced by a third-party tool's output)
+`PluggableScanner` -- a bug surfaced by a third-party tool's output)
 panicking would previously have crashed the one in-flight request;
 running it on its own goroutine without a `recover()` would instead
 crash the *entire monitor-api process*, taking down every other
@@ -1360,16 +1368,16 @@ panicking scanner surfaces as a recorded error rather than crashing the
 test process -- the test binary reaching its own assertions at all is
 most of what that test demonstrates.
 
-**Fixed: `ExternalScanner` read a command's stdout/stderr into an
+**Fixed: `PluggableScanner` read a command's stdout/stderr into an
 unbounded `bytes.Buffer`.** Every other input this app parses has some
 natural ceiling (an image's package list, a SARIF report) or comes from
 a trusted in-cluster component (trivy, ClamAV) -- an operator-configured
-`ExternalScanner` command is the first place this app runs something
+`PluggableScanner` command is the first place this app runs something
 that could be arbitrarily buggy or, if its config was ever compromised,
 outright malicious, with no cap at all on how much it could write to
-either stream. `limitedBuffer` (`internal/scanner/external.go`) wraps
+either stream. `limitedBuffer` (`internal/scanner/pluggable.go`) wraps
 `bytes.Buffer` and refuses any write that would push it past
-`maxExternalScannerOutputBytes` (10MiB, comfortably more than a
+`maxPluggableScannerOutputBytes` (10MiB, comfortably more than a
 legitimate findings list would ever need), returning an error instead
 -- which `os/exec`'s own internal copy from the child process's pipes
 treats as an ordinary copy failure, surfaced back through `cmd.Run()`
@@ -1416,7 +1424,7 @@ throttled.
 scan (image and file artifacts both go through it -- see "Why images
 need unpacking") holds a clamd connection for the scan's duration, so
 under concurrent load a single instance becomes the bottleneck the rest
-of the pipeline queues behind, however fast trivy/the external scanners
+of the pipeline queues behind, however fast trivy/the pluggable scanners
 run in parallel next to it (see the scanArtifact parallelization fix
 above). `clamav.replicas` in values.yaml (default `1`, unchanged
 out of the box) now drives `templates/clamav/deployment.yaml`'s
@@ -1495,9 +1503,9 @@ lose the declaration.
 bool: a failed scanner that declares its bucket only blocks that one
 bucket; a failed scanner that *doesn't* implement `BucketAffinity`
 still conservatively blocks all five, exactly as before. Deliberately
-**not** implemented by `SARIFScanner` or `ExternalScanner`: a single
+**not** implemented by `SARIFScanner` or `PluggableScanner`: a single
 SARIF document can mix CVEs, misconfigurations, secrets, and generic
-SAST issues all in one file, and an `ExternalScanner`'s own wire
+SAST issues all in one file, and a `PluggableScanner`'s own wire
 contract lets each finding set its own `category` independent of any
 configured default -- neither can honestly promise a single bucket, and
 guessing wrong would risk a real false "fixed" instead of just being
@@ -2593,7 +2601,7 @@ flowing back through a second round doesn't accumulate into
   scanners with a statically known bucket: see "Fixed: fix-detection
   was gated per-type, not per-bucket" below. Still coarse (blocks every
   bucket on failure) for SARIFScanner and any operator's
-  ExternalScanner, since neither can honestly declare a single bucket
+  PluggableScanner, since neither can honestly declare a single bucket
   -- documented there, not silently swept under this now-mostly-resolved
   entry.
 - ~~**SBOM trivy scanning still runs in-process**~~ **Fixed**: see
@@ -2605,7 +2613,7 @@ flowing back through a second round doesn't accumulate into
   fail trivy immediately with "unsupported artifact type" -- trivy's
   image scanner only understands container image manifests. A
   prototype shim wiring ProtectAI's `modelscan` in as an additional
-  `ExternalScanner` (see "Pluggable external scanners" above) already
+  `PluggableScanner` (see "Pluggable scanners" above) already
   exists at `cluster/modelscan-to-findings.sh`, tested against faked
   `oras`/`modelscan` binaries for its exit-code handling, but isn't
   wired into any chart values -- picking this back up means writing the

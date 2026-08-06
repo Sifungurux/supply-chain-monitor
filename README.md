@@ -697,17 +697,28 @@ Postgres connection. Leave it unset
 docs/architecture.md ("Running monitor-api outside a Kubernetes pod")
 for the full reasoning.
 
-### Pluggable external scanners
+### Pluggable scanners
 
 Trivy, ClamAV, and the built-in SBOM/SARIF scanners aren't the only
-option — `monitorApi.externalScanners` in
+option — `monitorApi.pluggableScanners` in
 `charts/supply-chain-monitor/values.yaml` lets you register an
 arbitrary command as an *additional* scanner for any artifact type,
-alongside (not instead of) the built-in ones:
+alongside (not instead of) the built-in ones.
+
+**This is not the same thing as "a scanner running somewhere else."**
+A pluggable scanner is a command *monitor-api itself* execs, in this
+cluster, every time `/scan` runs — the "external" in its old name
+meant "external to this project's Go code," not "external to this
+infrastructure." If what you actually want is to record results a
+scanner produced somewhere else entirely — a CI pipeline, a different
+cluster, a vendor's SaaS scanner — skip this section and use
+`POST /api/v1/artifacts/{id}/findings` instead (see "Submitting
+findings from an external scanner" above), which takes a JSON body
+over HTTP and never runs anything itself.
 
 ```yaml
 monitorApi:
-  externalScanners:
+  pluggableScanners:
     - name: grype
       artifactTypes: ["image"]
       command: grype-to-findings.sh
@@ -774,15 +785,15 @@ runs isolated in scan-worker Jobs, the same image is used automatically
 since `SCAN_WORKER_IMAGE` defaults to it — see `monitorApi.scanWorkerImage`)
 at your derived image.
 
-Registration is additive per artifact type — adding an external
+Registration is additive per artifact type — adding a pluggable
 scanner against `image` doesn't remove trivy or the malware scan, the
 same way `image` already runs both today. `file`/`sbom`/`sarif`
 registrations automatically get the same registry-fetch treatment
 (`ref` may be an OCI reference, not a local path) the built-in
 scanners for those types already get; `image` registrations receive
 the raw ref, since an image/CVE scanner is expected to resolve it
-itself, same as trivy. See docs/architecture.md ("Pluggable external
-scanners") for the full design.
+itself, same as trivy. See docs/architecture.md ("Pluggable scanners")
+for the full design.
 
 ### Rate limiting
 
