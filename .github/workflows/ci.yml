@@ -99,3 +99,22 @@ jobs:
         run: |
           shopt -s globstar
           shellcheck cluster/**/*.sh
+
+  # Structural lint only -- see helm-template below for the check that
+  # actually caught this chart's one real regression (a document
+  # rendering without apiVersion, which lint doesn't validate).
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: make helm-lint
+        run: make helm-lint
+
+  # Renders the chart for real and checks every emitted document has
+  # an apiVersion -- see cluster/check-helm-manifests.sh's own header.
+  helm-template:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: make helm-template
+        run: make helm-template

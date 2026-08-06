@@ -27,7 +27,7 @@ ifeq ($(SCM_RUNTIME),podman)
 export DOCKER_HOST := $(shell (podman system connection ls --format json | jq -r '.[] | select(.Default==true) | .URI') 2>/dev/null)
 endif
 
-.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test gateway-api-install build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
+.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test gateway-api-install build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap helm-lint helm-template db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -299,3 +299,18 @@ lock-deps:
 check-dashboard-configmap:
 	diff -q dashboard/index.html charts/supply-chain-monitor/files/index.html || \
 		(echo "charts/supply-chain-monitor/files/index.html is out of date -- run: cp dashboard/index.html charts/supply-chain-monitor/files/index.html" && exit 1)
+
+# Structural lint against the chart's own conventions (required fields,
+# indentation, etc.). Does NOT validate that a rendered document is a
+# well-formed Kubernetes object -- see helm-template below for the
+# check that actually catches that class of bug.
+helm-lint:
+	docker run --rm -v "$(CURDIR)":/src -w /src alpine/helm:4.2.0 lint charts/supply-chain-monitor
+
+# Renders the chart for real and fails if any emitted document is
+# missing apiVersion -- see cluster/check-helm-manifests.sh's own
+# header for the actual regression this exists to catch (helm lint and
+# a bare `helm template` both exit 0 on it; only `helm upgrade`'s
+# server-side validation against a real cluster did).
+helm-template:
+	docker run --rm -v "$(CURDIR)":/src -w /src --entrypoint sh alpine/helm:4.2.0 cluster/check-helm-manifests.sh
