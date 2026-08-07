@@ -12,7 +12,7 @@ import (
 // DigestResolver resolves an OCI ref to its content digest via a
 // registry manifest call, without pulling any blob content -- cheap
 // enough to run synchronously during artifact registration (see
-// internal/api/handlers.go's duplicate-registration check).
+// internal/api/artifacts.go's duplicate-registration check).
 //
 // An interface (rather than calling OrasDigestResolver directly) so
 // handler tests can inject a fake instead of shelling out to a real

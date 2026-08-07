@@ -6,7 +6,7 @@ import "strings"
 // wrapTrivyScanError where that applies, or raw text from a scan-worker
 // Job orchestration failure, a panic, or a pre-scan fetch failure -- to
 // a stable reason code and a short, non-raw message safe to show a
-// user. handlers.go:scanArtifact is the single point every one of
+// user. scan.go:scanArtifact is the single point every one of
 // those origins converges on (see its own comment for why), so this is
 // the only place that needs to know all of them.
 //
@@ -25,7 +25,7 @@ func ClassifyScanError(raw string) (reason, message string) {
 
 // ReasonRank orders reason codes by specificity, lowest (most specific)
 // first, matching classifiers' own ordering -- for a caller (currently
-// only handlers.go:scanArtifact) picking a single representative reason
+// only scan.go:scanArtifact) picking a single representative reason
 // when an artifact's several scanners fail for different reasons in the
 // same round. "unknown" always ranks last, whether or not it's the
 // literal string ClassifyScanError's fallback returns.

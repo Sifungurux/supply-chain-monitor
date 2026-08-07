@@ -27,7 +27,7 @@ const refPlaceholder = "{{ref}}"
 // different SBOM tool gets plugged in without a Go code change here --
 // see docs/architecture.md ("Pluggable scanners") for the full design
 // and a PLUGGABLE_SCANNERS example. Not to be confused with
-// `POST /api/v1/artifacts/{id}/findings` (see internal/api/handlers.go),
+// `POST /api/v1/artifacts/{id}/findings` (see internal/api/findings.go),
 // which is for a scanner that already ran somewhere entirely outside
 // this cluster (a CI pipeline, a different system) and just reports
 // its result in -- this type is for a scanner monitor-api itself runs.

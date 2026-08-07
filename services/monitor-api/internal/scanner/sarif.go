@@ -25,7 +25,7 @@ import (
 // IaC misconfiguration from Checkov, a SAST finding from CodeQL, all
 // in one file. classifySarifCategory below inspects each result's
 // rule name/ID/tags and sets Finding.Category accordingly, so
-// internal/api/handlers.go's classifyBucket can route each finding
+// internal/api/scan.go's classifyBucket can route each finding
 // into the bucket it actually belongs in (cve/misconfiguration/
 // secret/other) instead of lumping everything under Source == "sarif"
 // into OtherFindings. See docs/architecture.md ("Classifying SARIF

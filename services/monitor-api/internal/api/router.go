@@ -27,7 +27,7 @@ import (
 // (like most existing tests) can just pass 0 and get today's
 // unthrottled behavior back.
 // digestResolver enables best-effort duplicate-registration detection
-// (see handlers.go's resolveDigest) -- pass nil to disable it entirely
+// (see handler.go's resolveDigest) -- pass nil to disable it entirely
 // (every registration behaves exactly as it did before this existed).
 // fetchPlainHTTP mirrors the same flag RegistryFetcher is already
 // constructed with (FETCH_PLAIN_HTTP in main.go) -- see resolveDigest's
