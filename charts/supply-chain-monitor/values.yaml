@@ -110,8 +110,11 @@ clamav:
   # scm-clamav's Service already load-balances clamd connections across
   # however many pods are running. Only takes effect when
   # autoscaling.enabled is false (see below) -- the HPA owns replica
-  # count otherwise.
-  replicas: 6
+  # count otherwise. Matches autoscaling.minReplicas on purpose, so
+  # turning autoscaling off holds the pod count where it was instead of
+  # jumping to a different hand-picked number; raise it if scans queue
+  # behind clamd faster than this many instances keep up.
+  replicas: 2
   autoscaling:
     # HPA scales on CPU utilization (clamd scanning is CPU-bound, see
     # resources.requests.cpu below) between min/max replicas -- see

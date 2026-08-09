@@ -901,7 +901,9 @@ creates fine, it just can't read CPU metrics and never scales. If the
 target cluster doesn't have one, or its node pool can't itself grow to
 give the HPA somewhere to schedule new pods, set
 `clamav.autoscaling.enabled: false` to fall back to a fixed
-`clamav.replicas` (default `6`) instead — raise that manually if scans
+`clamav.replicas` (default `2`, matching `minReplicas` so turning
+autoscaling off holds the count steady rather than jumping) instead —
+raise that manually if scans
 start queuing behind clamd connections faster than one instance keeps
 up.
 
