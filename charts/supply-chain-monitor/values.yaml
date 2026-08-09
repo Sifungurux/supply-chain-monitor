@@ -128,19 +128,26 @@ clamav:
     targetCPUUtilizationPercentage: 70
   resources:
     # ephemeral-storage is declared, not left implicit, because each pod
-    # freshclams its own ~200Mi virus DB into its own writable layer (no
-    # shared PVC -- see deployment.yaml). Left undeclared, the scheduler
-    # reads that as "needs 0 disk" and happily stacks replicas onto a
-    # node that can't hold their DBs, and the kubelet then evicts them
-    # under DiskPressure -- which is exactly what autoscaling up to
-    # maxReplicas triggered before this was set ("Container clamav was
-    # using 171608Ki, request is 0"). With a real request the scheduler
-    # accounts for disk up front: pods that don't fit stay Pending
-    # (honest backpressure on a cluster that can't grow) instead of
-    # being placed, filling a node, and getting killed -- taking
-    # already-healthy replicas down with them. Request covers the
-    # steady-state DB; the limit leaves room for freshclam's update,
-    # which lands the new DB alongside the old before swapping.
+    # freshclams its own virus DB into its own writable layer (no shared
+    # PVC -- see deployment.yaml): measured 168Mi steady-state (main.cvd
+    # ~89Mi + daily.cld ~86Mi), peaking ~260Mi mid-update, since
+    # freshclam lands the new DB alongside the old before swapping.
+    #
+    # What this actually buys, and it isn't scheduler placement: under
+    # node DiskPressure the kubelet picks victims by how far each pod's
+    # disk usage exceeds its *request*, worst first. With no request set
+    # (the old state) clamav's entire 168Mi counted as over-request, so
+    # it sat at the front of the kill queue and got evicted en masse the
+    # first time autoscaling reached maxReplicas -- even though the real
+    # disk hogs were concurrent scan-worker Jobs (monitorApi.scanJob
+    # resources below, 2048Mi limit each). A request that covers actual
+    # peak keeps these pods *under* their request and out of that queue.
+    #
+    # request == limit on purpose: a limit above the request would let a
+    # pod grow back over its request and re-enter the eviction queue,
+    # which is the exact failure this closes. Capped at its own limit,
+    # a runaway pod fails alone instead of triggering node-wide pressure
+    # that takes healthy replicas with it.
     requests:
       cpu: 250m
       memory: 1Gi
@@ -148,7 +155,7 @@ clamav:
     limits:
       cpu: "2"
       memory: 4Gi
-      ephemeral-storage: 1Gi
+      ephemeral-storage: 512Mi
   # First boot downloads the virus DB (freshclam) and can take a few
   # minutes -- these generous probe settings are why.
   readiness:
