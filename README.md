@@ -905,6 +905,18 @@ give the HPA somewhere to schedule new pods, set
 start queuing behind clamd connections faster than one instance keeps
 up.
 
+**Scaling up is bounded by node disk, not just CPU.** Every replica
+freshclams its own ~200Mi virus DB into its own writable layer, so
+`clamav.resources` declares `ephemeral-storage` (request `512Mi`, limit
+`1Gi`). That declaration is what keeps autoscaling safe on a cluster
+that can't grow: the scheduler accounts for disk up front, so replicas
+that don't fit stay `Pending` instead of being placed, filling a node,
+and getting evicted under `DiskPressure` — which takes
+already-running healthy replicas down with them. If you see ClamAV pods
+stuck `Pending` at high load, the cluster is out of room and
+`maxReplicas` is above what it can actually host; either give the nodes
+more disk or lower `maxReplicas` to match reality.
+
 **Testing this for real, at scale**, needs two things the default local
 setup doesn't give you on its own:
 
