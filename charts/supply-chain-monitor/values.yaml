@@ -137,12 +137,33 @@ postgres:
   credentials:
     user: monitor_api
     db: monitor_api
-    # Dev-only placeholder -- change this (and switch to a real
-    # secret-management flow, e.g. sealed-secrets or an
-    # external-secrets operator) before this points at anything shared.
-    # Override via this HelmRelease's spec.values, never commit a real
-    # password here.
-    password: changeme123
+    # Empty on purpose -- rendered straight into the
+    # scm-postgres-credentials Secret (templates/postgres/secret.yaml),
+    # so a real value here would sit in plaintext in whatever values
+    # file/HelmRelease.spec.values sets it, including in git history if
+    # that gets committed. Left empty, Postgres's own entrypoint refuses
+    # to start -- POSTGRES_PASSWORD "must not be empty or undefined"
+    # per the upstream postgres image's own docs -- rather than
+    # silently coming up with no password -- fail closed, not a quiet
+    # insecure default. This project's own Flux deployment
+    # (k8s/releases/supply-chain-monitor-helmrelease.yaml) supplies a
+    # real value via spec.valuesFrom, sourced from a Secret that never
+    # touches this repo -- see README's "Bringing your own secrets" for
+    # that flow, or for setting this directly (--set, a gitignored
+    # values file, or existingSecret: true below) if you're not going
+    # through Flux.
+    password: ""
+    # When true, this chart does NOT render
+    # templates/postgres/secret.yaml at all -- you're expected to have
+    # already created a Secret named scm-postgres-credentials yourself
+    # (kubectl create secret generic, sealed-secrets, an
+    # external-secrets operator, SOPS, whatever your cluster already
+    # uses) with POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB keys. user/
+    # db/password above are ignored when this is true -- the Secret you
+    # created is the only source of truth. False (default) keeps
+    # today's behavior: the chart creates the Secret from the three
+    # values above, unchanged.
+    existingSecret: false
   persistence:
     size: 5Gi
   resources:
@@ -208,12 +229,24 @@ monitorApi:
     pool:
       maxConns: 10
       minConns: 2
-  # Dev-only API key for monitor-api's shared-key auth (see
-  # internal/api/router.go's withAuth). Generate a real random value
-  # (e.g. `openssl rand -hex 32`) and override it via this HelmRelease's
-  # spec.values before this points at anything shared -- same caveat as
-  # postgres.credentials.password.
-  apiKey: qwe4r56789009876543223456789
+  # Empty on purpose, same reasoning as postgres.credentials.password
+  # above -- rendered straight into the scm-monitor-api-auth Secret
+  # (templates/monitor-api/auth-secret.yaml) for monitor-api's
+  # shared-key auth (see internal/api/router.go's withAuth). Left
+  # empty, main.go's own startup check refuses to run ("API_KEY must be
+  # set") rather than serving with no auth -- fail closed. See
+  # postgres.credentials.password's comment above for how this gets a
+  # real value (Flux valuesFrom, --set, existingSecret, etc.) -- same
+  # options apply here.
+  apiKey: ""
+  # When true, this chart does NOT render
+  # templates/monitor-api/auth-secret.yaml at all -- you're expected to
+  # have already created a Secret named scm-monitor-api-auth yourself
+  # with an API_KEY key (e.g. `openssl rand -hex 32` for the value).
+  # apiKey above is ignored when this is true. False (default) keeps
+  # today's behavior: the chart creates the Secret from apiKey above,
+  # unchanged.
+  apiKeyExistingSecret: false
   # unpacker (github.com/Sifungurux/unpacker) pull settings, forwarded
   # into the env of each per-scan Kubernetes Job monitor-api creates.
   # Defaults assume a local, unauthenticated, plain-HTTP dev registry

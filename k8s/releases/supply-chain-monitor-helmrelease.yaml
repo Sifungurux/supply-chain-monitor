@@ -67,12 +67,28 @@ spec:
   # doesn't get marked failed while it's still just downloading (same
   # reasoning the old, separate clamav-helmrelease.yaml had).
   timeout: 15m
+  # postgres.credentials.password and monitorApi.apiKey are empty in
+  # the chart's own values.yaml on purpose -- a real value there would
+  # sit in plaintext in this file, in git. valuesFrom below sources
+  # both from the scm-chart-secrets Secret instead (create/update it
+  # with `make chart-secrets`, see cluster/chart-secrets.sh and
+  # README's "Bringing your own secrets") -- that Secret is cluster
+  # state, never a committed file. spec.values (below) takes precedence
+  # over valuesFrom per Flux's own merge order, so as long as
+  # dashboard.*/etc. below never sets these two keys, this stays safe.
+  valuesFrom:
+    - kind: Secret
+      name: scm-chart-secrets
+      valuesKey: postgres-password
+      targetPath: postgres.credentials.password
+    - kind: Secret
+      name: scm-chart-secrets
+      valuesKey: api-key
+      targetPath: monitorApi.apiKey
   # image.tag stays "dev" (the chart's default) for local iteration --
   # `make deploy` rebuilds monitor-api:dev and rollout-restarts the
   # Deployment directly, since Flux/Helm alone can't detect a same-tag
-  # image change. Real credentials/API keys go here too, if this ever
-  # points at more than a throwaway local cluster (see values.yaml's own
-  # comments on postgres.credentials.password and monitorApi.apiKey).
+  # image change.
   values:
     dashboard:
       # Chart default is false (fail-closed) -- this local dev cluster

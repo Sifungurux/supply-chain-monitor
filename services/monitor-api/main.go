@@ -272,7 +272,7 @@ func runScanWorker() {
 	scanner.VerboseScanLogs = getenvBool("SCM_SCAN_VERBOSE", false)
 
 	// Matches the scan timeout the API server itself used to apply
-	// in-process (see internal/api/handlers.go) -- the Job's own
+	// in-process (see internal/api/scan.go) -- the Job's own
 	// activeDeadlineSeconds (the Job template built in internal/k8sjob,
 	// scoped by charts/supply-chain-monitor/templates/monitor-api/rbac.yaml's Role) is set a
 	// little longer than this as a
@@ -469,8 +469,8 @@ func captureImageDocuments(ctx context.Context, rawReport []byte) {
 // sitting at status "registered" (oldest first), and scans each one via
 // POST .../scan -- the exact same endpoint a person clicking "Scan" in
 // the dashboard hits, which now also opportunistically backfills a
-// missing digest (see scanArtifact's own comment in internal/api/
-// handlers.go). Goes through the API rather than a direct Postgres
+// missing digest (see scanArtifact's own comment in
+// internal/api/scan.go). Goes through the API rather than a direct Postgres
 // connection deliberately: this mirrors how scan-worker Jobs already
 // call back to monitor-api's own Service (see UploadDocument) instead of
 // touching the database directly, so this is the second caller of that
@@ -523,7 +523,7 @@ func runSweepRegistered() {
 // the same few newest registrations winning every time. batchSize <= 0
 // means "nothing to do" (fails closed rather than defaulting to
 // unbounded), the same "cap rather than trust an unbounded number"
-// reasoning maxBulkArtifacts already uses in internal/api/handlers.go.
+// reasoning maxBulkArtifacts already uses in internal/api/artifacts.go.
 // Pure and side-effect-free -- unit-tested in main_test.go without any
 // HTTP involved, the same pattern buildImageScanners/buildSBOMScanners
 // already establish for this file.
@@ -893,7 +893,7 @@ func runAPIServer() {
 	// images) and/or running many scans concurrently, where per-Job
 	// scheduling delay and CPU contention both push real runtime up.
 	// SCAN_TIMEOUT_SECONDS is the API handler's own overall per-scan
-	// budget (see internal/api/handlers.go's scanArtifact/scanTimeout) --
+	// budget (see internal/api/scan.go's scanArtifact/scanTimeout) --
 	// it must stay comfortably above the value above, or this handler
 	// routinely reports "context deadline exceeded" before Kubernetes'
 	// own ActiveDeadlineSeconds would even have killed a genuinely stuck
@@ -1067,7 +1067,7 @@ func runAPIServer() {
 	rateLimitBurst := getenvFloat("RATE_LIMIT_BURST", 0)
 
 	// Best-effort duplicate-registration detection (see
-	// internal/api/handlers.go's resolveDigest) -- oras is already baked
+	// internal/api/handler.go's resolveDigest) -- oras is already baked
 	// into this image (Dockerfile), the same binary fetcher above uses.
 	// fetchPlainHTTP is the same flag already computed for fetcher, not
 	// a second config surface -- see NewRouter's own comment for why

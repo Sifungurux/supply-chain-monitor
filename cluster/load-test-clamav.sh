@@ -34,10 +34,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 API_BASE="${API_BASE:-http://localhost:8080}"
-# Matches Makefile's test-artifact default (the dev-only key baked into
-# charts/supply-chain-monitor/values.yaml's monitorApi.apiKey) -- override
-# if you've rotated it.
-SCM_API_KEY="${SCM_API_KEY:-qwe4r56789009876543223456789}"
+# No chart default to fall back to -- values.yaml's monitorApi.apiKey
+# is deliberately empty (see README's "Bringing your own secrets"), so
+# this must match whatever real value your cluster is actually running
+# with. Required, not defaulted: guessing wrong here would just be a
+# confusing wall of 401s partway through a 100-artifact batch.
+SCM_API_KEY="${SCM_API_KEY:?SCM_API_KEY is required, e.g.: SCM_API_KEY=... ./cluster/load-test-clamav.sh}"
 BATCH_FILE="${BATCH_FILE:-${REPO_ROOT}/testdata/bulk-test-images.json}"
 # How many /scan requests to have in flight at once -- this is the knob
 # that actually puts concurrent load on clamd; raise it toward (or past)

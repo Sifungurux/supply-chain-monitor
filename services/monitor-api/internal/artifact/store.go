@@ -31,7 +31,7 @@ type Store interface {
 	// expected, common case (most registrations are the first time
 	// their content has been seen), not an error condition. Never
 	// matches an empty digest: callers should only ever call this with
-	// a digest they've actually resolved (see internal/api/handlers.go's
+	// a digest they've actually resolved (see internal/api/artifacts.go's
 	// duplicate-registration check), not as a way to enumerate
 	// not-yet-resolved artifacts.
 	FindByDigest(digest string) (*Artifact, error)

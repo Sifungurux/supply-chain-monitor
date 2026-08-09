@@ -27,7 +27,7 @@ ifeq ($(SCM_RUNTIME),podman)
 export DOCKER_HOST := $(shell (podman system connection ls --format json | jq -r '.[] | select(.Default==true) | .URI') 2>/dev/null)
 endif
 
-.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test gateway-api-install build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap helm-lint helm-template db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
+.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap helm-lint helm-template db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -64,6 +64,15 @@ git-auth:
 
 git-test:
 	./cluster/test-git-connection.sh
+
+# Creates/updates the scm-chart-secrets Secret that
+# k8s/releases/supply-chain-monitor-helmrelease.yaml's spec.valuesFrom
+# sources postgres.credentials.password and monitorApi.apiKey from --
+# see cluster/chart-secrets.sh and README's "Bringing your own secrets".
+# Generates a random value for anything you don't pass in yourself
+# (POSTGRES_PASSWORD=... API_KEY=... make chart-secrets to pin either).
+chart-secrets:
+	./cluster/chart-secrets.sh
 
 # `make cluster-up` already runs this automatically (see
 # cluster/create-cluster.sh) -- standalone target for installing/
@@ -214,12 +223,18 @@ db-restore:
 	./cluster/postgres-restore.sh $(BACKUP)
 
 # quick smoke test against a port-forwarded API (run `make port-forward`
-# first). SCM_API_KEY must match whatever's in scm-monitor-api-auth (the
-# dev-only default in charts/supply-chain-monitor/values.yaml's
-# monitorApi.apiKey, unless you've rotated it) -- every endpoint but
-# /healthz requires it now (see README's Authentication section).
-SCM_API_KEY ?= qwe4r56789009876543223456789
+# first). SCM_API_KEY must match whatever's in scm-monitor-api-auth --
+# no chart default to fall back to since values.yaml's monitorApi.apiKey
+# is deliberately empty (see README's "Bringing your own secrets");
+# every endpoint but /healthz requires it (see README's Authentication
+# section). No fallback value here on purpose -- guessing wrong would
+# just be a confusing 401, a missing SCM_API_KEY should fail loudly
+# instead.
 test-artifact:
+	@if [ -z "$(SCM_API_KEY)" ]; then \
+		echo "SCM_API_KEY is required, e.g.: SCM_API_KEY=... make test-artifact" >&2; \
+		exit 1; \
+	fi
 	curl -s -X POST localhost:8080/api/v1/artifacts \
 		-H "Authorization: Bearer $(SCM_API_KEY)" \
 		-H 'Content-Type: application/json' \
@@ -235,8 +250,12 @@ test: test-api test-dashboard check-dashboard-configmap
 # network access if go.sum itself is out of date with go.mod. This only
 # exercises MemStore -- it needs no running Postgres. For a real
 # database round-trip, see test-postgres below.
+# go vet runs here too -- previously only ran inside lock-deps (a rare,
+# manual target), so nothing stopped a vet-flagging change (bad Printf
+# verb, a struct with a copied lock, unreachable code) from merging to
+# main between dependency updates. See docs/tech-debt-audit.md, #10.
 test-api:
-	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.22-alpine sh -c "go mod download && go test ./..."
+	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.22-alpine sh -c "go mod download && go vet ./... && go test ./..."
 
 # Integration test against a real, throwaway Percona Postgres container
 # (internal/artifact/postgres_store_integration_test.go, gated behind

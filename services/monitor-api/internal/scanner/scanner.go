@@ -16,7 +16,7 @@ type Scanner interface {
 // declare that it only ever produces findings for one specific bucket
 // ("cve", "malware", "misconfiguration", "secret", or "other" -- the
 // same vocabulary the API layer's classifyBucket sorts findings into).
-// scanArtifact (internal/api/handlers.go) uses this to gate
+// scanArtifact (internal/api/scan.go) uses this to gate
 // fix-detection per bucket instead of globally across the whole scan:
 // today, one scanner erroring blocks fix-detection for every bucket,
 // even ones that scanner could never have touched (a ClamAV failure
@@ -44,7 +44,7 @@ type BucketAffinity interface {
 // documents.go) that need to be uploaded back to monitor-api associated
 // with a specific artifact, and the Job has no other way to learn that
 // artifact's ID (it only ever receives ref -- see main.go's
-// runScanWorker). scanArtifact (internal/api/handlers.go) type-asserts
+// runScanWorker). scanArtifact (internal/api/scan.go) type-asserts
 // for this the same optional-capability way it already does for
 // BucketAffinity above, and calls ScanForArtifact instead of Scan when
 // available -- every other Scanner implementation is unaffected and

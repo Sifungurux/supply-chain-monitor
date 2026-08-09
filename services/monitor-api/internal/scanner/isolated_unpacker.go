@@ -210,7 +210,7 @@ func (s *IsolatedUnpackerScanner) Scan(ctx context.Context, ref string) ([]artif
 	// Cleanup always runs, and always with its own short-lived,
 	// never-already-canceled context -- ctx may be at (or past) its
 	// deadline by the time we get here (e.g. the poll loop below timed
-	// out), and internal/api/handlers.go already learned this lesson
+	// out), and internal/api/scan.go already learned this lesson
 	// once: never make cleanup/completion depend on a context that
 	// might already be dead. Registered *before* CreateJob is even
 	// attempted, not after: a defer only runs if control reached the

@@ -39,7 +39,7 @@ import (
 // "actually fixed" if this round's report can be trusted as a complete
 // picture of the bucket. scanArtifact sets this to false whenever any
 // registered scanner for the artifact's type errored this round (see
-// handlers.go) -- otherwise a Trivy failure with ClamAV still succeeding
+// internal/api/scan.go) -- otherwise a Trivy failure with ClamAV still succeeding
 // would silently mark every previously-open CVE "fixed" just because
 // Trivy didn't run, not because any of them actually got patched. An
 // external submitFindings call always passes true: the caller is

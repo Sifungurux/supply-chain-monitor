@@ -71,9 +71,14 @@ SCM_RUNTIME=podman ./cluster/create-cluster.sh  # podman, experimental
 
 ```bash
 make cluster-up       # colima start --kubernetes (or podman, if SCM_RUNTIME=podman); also installs Flux
+make chart-secrets     # generates the Postgres password + API key the chart needs (see "Bringing your own secrets" below)
 make deploy            # docker build + git push + trigger Flux reconcile + rollout restart
 kubectl -n supply-chain-monitor get pods -w   # wait for everything to go Ready
 ```
+
+`postgres.credentials.password` and `monitorApi.apiKey` are empty by
+default in the chart's `values.yaml` — Postgres and monitor-api both
+fail to start without `make chart-secrets` run first.
 
 `make cluster-up` also installs Flux (see "GitOps (Flux)" below) —
 `SCM_SKIP_FLUX=1 make cluster-up` if you don't want that yet. The whole
@@ -83,14 +88,18 @@ manifests directly, it pushes to Git and lets Flux do it (see "GitOps
 (Flux)"). That means `make deploy` needs this repo to actually be pushed
 to a Git remote first — see that section for the one-time setup.
 
-**This exact setup — a single Helm chart + Flux, path `./k8s` —
-hasn't been run end-to-end on a real cluster yet.** It was built and
-statically validated (every chart's YAML, template logic, and the
-dashboard's embedded HTML were checked by hand and by script) but never
-executed against a live Kubernetes API — treat your first `make
-cluster-up && make deploy` as the real integration test of this
-migration, and see "GitOps (Flux)" below for exactly what to check and
-report back if something doesn't come up clean.
+**This setup — a single Helm chart + Flux, path `./k8s` — has been run
+end-to-end on a real, multi-node podman/k3d cluster**, repeatedly,
+including `make deploy` and `make load-test-clamav` — see
+`docs/tech-debt-audit.md`'s Status section for what that testing found
+and fixed (a Flux `reconcileStrategy` bug that silently stopped chart
+updates from ever reaching the cluster, a Gateway API listener-port
+mismatch, an ephemeral-storage eviction under load, among others), all
+against the real cluster, not simulated. Colima (the default,
+recommended runtime — see "Choosing a runtime" below) hasn't been
+separately re-confirmed against this exact chart in the same round of
+testing; if you hit something there that doesn't match this doc,
+that's the more likely place to look first.
 
 Note: the `clamav` pod downloads its virus definition DB on first boot,
 which can take a few minutes before its readiness probe passes.
@@ -188,21 +197,82 @@ dashboard pod unable to mount its own HTML at all).
 Every endpoint except `/healthz` requires `Authorization: Bearer <key>`.
 The key is sourced from `API_KEY`, which `monitor-api` reads from the
 `scm-monitor-api-auth` Secret (rendered from
-`charts/supply-chain-monitor/values.yaml`'s `monitorApi.apiKey`) —
-override that value (never commit a real one) before this
-cluster is anything but local and throwaway, the same caveat as
+`charts/supply-chain-monitor/values.yaml`'s `monitorApi.apiKey` by
+default) — see "Bringing your own secrets" below before this cluster
+is anything but local and throwaway, the same caveat as
 `scm-postgres-credentials`. A request with no key, the wrong key, or a
 missing `Bearer ` prefix gets a `401`.
 
 ```bash
 curl -s localhost:8080/api/v1/artifacts \
-  -H 'Authorization: Bearer qwe4r56789009876543223456789'
+  -H "Authorization: Bearer $API_KEY"
 ```
 
 See docs/architecture.md ("Adding API authentication") for why a
 single shared key, why `/healthz` and CORS preflight `OPTIONS` are
 exempt, and what's still missing (per-client keys, rotation, rate
 limiting).
+
+### Bringing your own secrets
+
+`postgres.credentials.password` and `monitorApi.apiKey` are **empty**
+in the chart's own `values.yaml` — deliberately, so a real value never
+sits in plaintext in a committed file. Left empty, Postgres's own
+entrypoint refuses to start (it requires a non-empty
+`POSTGRES_PASSWORD`) and `monitor-api` refuses to start (`API_KEY must
+be set`) — a fresh `helm install` with truly default values fails
+loudly rather than coming up with a known, checked-in password. You
+need to supply real values one of two ways:
+
+**Through Flux (this project's actual deployment path):**
+`k8s/releases/supply-chain-monitor-helmrelease.yaml`'s `spec.valuesFrom`
+sources both from a Secret, `scm-chart-secrets`, in the `flux-system`
+namespace (not `supply-chain-monitor` — Flux requires a `valuesFrom`
+Secret to live alongside the `HelmRelease` object itself). Create/update
+it with:
+
+```bash
+make chart-secrets   # first run: generates a strong random value for
+                      # anything you don't pass in
+                      # POSTGRES_PASSWORD=... API_KEY=... make chart-secrets
+                      # rotates just the one(s) you pass — the other is
+                      # carried over unchanged from the existing Secret
+```
+
+Nothing in this repo ever sees either value — see
+`cluster/chart-secrets.sh`, which also prints the extra step Postgres
+needs on rotation (an `ALTER ROLE`, since it only reads
+`POSTGRES_PASSWORD` on first init against an empty volume — a plain
+pod restart against the existing PVC won't pick up a new one).
+`monitor-api` and `scm-dashboard` just need a restart, since a
+Secret's *content* changing doesn't trigger a rollout on its own, the
+same as any other running pod's env vars.
+
+**Without Flux** (a bare `helm install`/`helm upgrade`, or testing
+locally): pass real values directly —
+`--set postgres.credentials.password=... --set monitorApi.apiKey=...`,
+or a gitignored `-f my-secrets.yaml`.
+
+**Fully external management** (sealed-secrets, an external-secrets
+operator, SOPS, or you'd just rather `kubectl create secret` the exact
+Secret objects yourself): set `postgres.credentials.existingSecret: true`
+and/or `monitorApi.apiKeyExistingSecret: true` instead of either path
+above. The chart then skips rendering its own copy of that Secret
+entirely — you're expected to have already created one yourself under
+the exact name the rest of the chart already expects
+(`scm-postgres-credentials` with `POSTGRES_USER`/`POSTGRES_PASSWORD`/
+`POSTGRES_DB` keys, `scm-monitor-api-auth` with an `API_KEY` key, both
+in the `supply-chain-monitor` namespace this time, not `flux-system` —
+this is a different mechanism from `valuesFrom` above, matching
+whatever namespace the chart itself deploys into). If the named Secret
+doesn't actually exist when a pod that needs it starts, that pod fails
+to start (`CreateContainerConfigError`, missing key/Secret) — the
+normal, expected Kubernetes failure mode for this pattern, not
+something this chart adds extra validation on top of.
+
+The `dockerAuth.accounts.*.password` values (registry auth) are a
+separate, still-plaintext-only set of credentials — none of the above
+covers them yet; see docs/architecture.md's "Known limitations".
 
 ## API
 
@@ -230,14 +300,14 @@ request/response shapes.
 
 Example flow:
 
-```bashff
+```bash
 # a bash array, not a plain string -- keeps "Authorization: Bearer <key>"
 # as one argument through expansion instead of being word-split on the
 # space (a plain `AUTH='-H Authorization:Bearer\ <key>'` string looks
 # like it should work but silently truncates the header at the space
 # when $AUTH is expanded unquoted below; use "${AUTH[@]}", quoted, with
 # an array instead)
-AUTH=(-H "Authorization: Bearer qwe4r56789009876543223456789")
+AUTH=(-H "Authorization: Bearer $API_KEY")
 
 # register a container image artifact
 curl -s -X POST localhost:8080/api/v1/artifacts "${AUTH[@]}" \
@@ -491,7 +561,7 @@ oras push --plain-http -u scm-writer -p changeme-writer localhost:30500/scans/ap
 
 # register it -- ref is the registry reference, not a local path
 curl -s -X POST localhost:8080/api/v1/artifacts \
-  -H 'Authorization: Bearer qwe4r56789009876543223456789' \
+  -H "Authorization: Bearer $API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"ref":"scm-registry.supply-chain-monitor.svc.cluster.local:5000/scans/app-sarif:1","type":"sarif"}'
 ```
@@ -605,13 +675,8 @@ doesn't: an `sbom` artifact's ref may be an OCI registry reference
 rather than a path already on disk, and a scan-worker Job's pod can't
 see whatever monitor-api's own pod might have already fetched, so it
 fetches its own copy first (the same `oras pull`-backed fetch
-`FetchingScanner` already does in-process). See docs/architecture.md
-("Fixed: SBOM trivy scanning still ran in-process") for the full
-reasoning.
-`sbom`-type artifacts' trivy scan is **not** isolated yet — it still
-runs in-process, since the SBOM file it scans is already fetched onto
-monitor-api's own local filesystem by the time `Scan` runs (see
-docs/architecture.md's Roadmap).
+`FetchingScanner` already does in-process). See docs/architecture.md's
+"Scanning pipeline" section for the full reasoning.
 
 ### Choosing a CVE scanner: Trivy, Grype, or both
 
@@ -954,11 +1019,10 @@ using `POSTGRES_HOST`/`PORT`/`USER`/`DB`/`SSLMODE` (rendered from
 `charts/supply-chain-monitor/values.yaml`'s `monitorApi.postgres.*`
 keys) plus `POSTGRES_PASSWORD` from the `scm-postgres-credentials`
 Secret (from `charts/supply-chain-monitor/values.yaml`'s
-`postgres.credentials.password`) — override that placeholder password
-(via `k8s/releases/supply-chain-monitor-helmrelease.yaml`'s
-`spec.values`, never committed directly) before this cluster is
-anything but local and throwaway. `POSTGRES_DSN` is also accepted as a
-full connection string override if you'd rather set one directly.
+`postgres.credentials.password`) — see "Bringing your own secrets"
+above before this cluster is anything but local and throwaway.
+`POSTGRES_DSN` is also accepted as a full connection string override
+if you'd rather set one directly.
 
 ```bash
 make db-shell   # opens a psql shell in the scm-postgres pod
@@ -1264,14 +1328,11 @@ this content, and is reachable from the cluster.
 
 Once it is, `flux get kustomizations -A` and `flux get helmreleases -A`
 should show `flux-system` and both releases (`supply-chain-monitor` and
-`traefik`) `Ready`. **This exact setup has not been run against a real cluster yet** (see the note under
-Quickstart) — the first time you do, please report back exactly what
-`kubectl -n supply-chain-monitor get pods`, `flux get helmreleases -A`,
-and `make test-artifact` show, especially anything `NotReady`,
-`CrashLoopBackOff`, or failed, so any real issue (a bad chart value, a
-missed dependency, a typo an actual Kubernetes API would catch that
-static YAML validation can't) gets fixed quickly rather than sitting
-undiscovered.
+`traefik`) `Ready` — confirmed on a real podman/k3d cluster (see the
+note under Quickstart). If `kubectl -n supply-chain-monitor get pods`,
+`flux get helmreleases -A`, or `make test-artifact` ever show anything
+`NotReady`, `CrashLoopBackOff`, or failed on a fresh install, that's a
+real regression worth reporting, not an expected first-run rough edge.
 
 ### Ingress: Traefik + Gateway API
 
@@ -1314,83 +1375,44 @@ make cluster-down       # stops the VM/machine, keeps it around for next time
 make cluster-destroy    # stops AND deletes the VM/machine + its data
 ```
 
-## Known limitations (v1 stub — see docs/architecture.md for the plan)
+## Known limitations
 
-- **This single-chart + Flux setup hasn't been run against a
-  real cluster yet.** Every chart and CR was written and statically
-  validated (YAML parsing, template-balance checks, a from-scratch
-  re-derivation of the dashboard's rendered ConfigMap) but never
-  executed against a live Kubernetes API — no environment this project
-  has been built in has had Docker, kubectl, Helm, or Colima available.
-  Treat the first `make cluster-up && make deploy` as a real
-  integration test, not a routine deploy, and see "GitOps (Flux)"
-  above for what to check and report back.
-- **Traefik + Gateway API is unverified against a real cluster too, and
-  has no TLS/HTTPS yet.** Same disclosure as the rest of this list —
-  the `GatewayClass`/`Gateway`/`HTTPRoute` wiring is statically valid
-  YAML, but has never actually routed a real request. Report back
-  whether `http://<vm-or-localhost>:30080` reaches the dashboard, and
-  whether `kubectl get gatewayclass,gateway,httproute -A` shows
-  everything `Accepted`/`Programmed`. See docs/architecture.md's
-  Roadmap for what adding TLS would need.
-- **The private-repo Git credentials (`make git-auth`) haven't been
-  verified against the real repo either**, for the same reason: a
-  sandboxed assistant session has no GitHub PAT to test with. An
-  unauthenticated `git ls-remote`/`curl` from that sandbox confirmed
-  the expected failure (no creds → can't clone; GitHub 404s a private
-  repo request the same way it would a nonexistent one), but the actual
-  `make git-auth && make git-test` pass with a real token is still
-  yours to run and report back.
-- `charts/supply-chain-monitor/values.yaml`'s `postgres.credentials.password` ships a
-  placeholder in plaintext in the repo; fine for a local, throwaway
-  cluster, not for anywhere the Postgres data itself matters. Daily
-  backups exist now (see "Backing up and restoring Postgres"), but not
-  point-in-time recovery -- a restore can still lose up to a day of
-  data in the worst case.
-- `go.sum` isn't committed (couldn't be generated without a real Go
-  toolchain in the sandbox this was built in) -- the Dockerfile's build
-  stage runs `go mod tidy` at build time instead. Run `make lock-deps`
-  once from your own machine and commit the result for pinned,
-  reproducible builds (see "Pinned dependencies (go.sum)").
-- CVE scanning shells out to the `trivy` CLI per-request (no shared
-  `trivy-server` yet — see docs/architecture.md).
-- `file`/`sbom`/`sarif` artifacts can now be fetched from
-  `scm-registry` (via `oras pull`) or still assumed to be a local path
-  already inside the pod — but not from anywhere else (an S3 bucket, a
-  plain HTTPS URL). `Fetcher` is an interface specifically so another
-  source is a small addition later, not a rewrite.
+See `docs/architecture.md`'s "Known limitations" for the
+actively-maintained list of what's genuinely still open today (single
+shared API key with no rotation window, plaintext default secrets in
+`values.yaml`, no TLS on the Gateway, no `NetworkPolicy` on scan-worker
+pods, coarser fix-detection for SARIF/pluggable scanners, the untested
+`modelscan` prototype) — kept in one place rather than duplicated here,
+where a previous version of this list drifted out of sync with reality
+(see `docs/tech-debt-audit.md`, #11).
+
+A few more specific to running this repo day to day, not covered there:
+
+- `file`/`sbom`/`sarif` artifacts can only be fetched from
+  `scm-registry` (via `oras pull`) or a path already inside the
+  `monitor-api` pod — no S3/HTTPS fetcher yet. `Fetcher` is an
+  interface specifically so another source is a small addition later,
+  not a rewrite.
 - SARIF severity falls back to a rough three-level mapping
   (error/warning/note → high/medium/low) unless a rule carries a
   `security-severity` score, which not every SARIF producer sets.
-- `/scan`'s fixed-detection is per-*type*, not per-scanner: if any
-  registered scanner for the artifact's type errors, no bucket gets to
-  mark anything fixed that round, even if the scanner(s) covering some
-  other bucket succeeded cleanly (e.g. Trivy succeeding while ClamAV
-  errors means CVE fixes go undetected that round too, not just
-  malware). Safe (never a false "fixed"), just coarser than it could
-  be; would need per-bucket error tracking in `scanArtifact` to fix.
-- Both registry-fetching paths hardcode unauthenticated, plain-HTTP
-  access — `unpacker` via `--insecure --public`, the file/sbom/sarif
-  fetcher via `FETCH_PLAIN_HTTP` — fine for the local `scm-registry`;
-  scanning a private, authenticated registry isn't wired up on either
-  path yet (would need mounting a `dockerconfig.json`/credentials
-  secret and passing the right flags to both).
-- The scan-worker Job pod is hardened at the pod-security level but has
-  no `NetworkPolicy` restricting what it can reach on the pod network —
-  same as any other pod in the cluster today.
-- `monitor-api` requires a real Kubernetes ServiceAccount token to
-  start at all by default (it creates scan-worker Jobs on boot-adjacent
-  code paths) — set `DISABLE_SCAN_ISOLATION=true` to run it via a bare
-  `docker run` outside a cluster instead (see "Running monitor-api
-  outside a Kubernetes pod"), at the cost of moving image malware
-  scanning back in-process.
-- The API now requires a single shared `API_KEY` (see Authentication
-  above), but it's one key for every caller — no per-client identity,
-  no revocation of a single caller, no rotation window (changing the
-  key means updating every caller at once), and no rate limiting per
-  key. Fine for a small trusted team, not for anything wider.
+- CVE scanning shells out to the `trivy`/`grype` CLI per scan rather
+  than talking to a shared server process — fine at today's scan
+  volume.
+- Both registry-fetching paths (`UnpackerScanner`, the file/sbom/sarif
+  `Fetcher`) hardcode unauthenticated, plain-HTTP access — fine for the
+  local `scm-registry`; a private or authenticated registry isn't
+  wired up on either path yet (would need mounting a
+  `dockerconfig.json`/credentials secret and passing the right flags
+  to both).
+- `monitor-api` needs a real Kubernetes ServiceAccount token to start
+  by default, since it creates scan-worker Jobs on the hot path — set
+  `DISABLE_SCAN_ISOLATION=true` to run it via a bare `docker run`
+  outside a cluster instead (see "Running monitor-api outside a
+  Kubernetes pod"), at the cost of moving image scanning back
+  in-process.
 - The dashboard's auto-configured key/address (see "Auto-configured
   API address/key" above) is rendered with `sed`-based string escaping
-  in a shell script, not a real templating engine — fine for a flat key
-  and a plain URL, would need revisiting if that config ever grows more
-  complex.
+  in a shell script, not a real templating engine — fine for a flat
+  key and a plain URL, would need revisiting if that config ever grows
+  more complex.

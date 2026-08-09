@@ -78,7 +78,7 @@ type Finding struct {
 
 	// Category is a transient bucket-routing hint a Scanner may set on
 	// a finding it returns -- "cve", "malware", "misconfiguration",
-	// "secret", or "other" (see internal/api/handlers.go's
+	// "secret", or "other" (see internal/api/scan.go's
 	// classifyBucket). It exists because a single scan of a single
 	// artifact can legitimately produce findings that belong in more
 	// than one bucket (SARIFScanner is the reason this exists:
@@ -86,8 +86,8 @@ type Finding struct {
 	// can all appear in one SARIF document, and a CVE result in there
 	// belongs in cve_findings, not lumped in with a hardcoded-secret
 	// result). Most Scanners (TrivyScanner, ClamAVScanner, ...) don't
-	// need to set this at all -- handlers.go falls back to its old
-	// Source-based heuristic when Category is empty, so existing
+	// need to set this at all -- classifyBucket (internal/api/scan.go)
+	// falls back to its old Source-based heuristic when Category is empty, so existing
 	// scanners are unaffected.
 	//
 	// Never persisted and never round-tripped through the API: json:"-"
@@ -148,7 +148,7 @@ type Artifact struct {
 	// this artifact -- both empty until set, either at registration or
 	// via POST .../maintainer. Always set or cleared together: a team
 	// name with no way to reach them, or a contact address with no team
-	// context, isn't meaningful ownership info, so internal/api/handlers.go's
+	// context, isn't meaningful ownership info, so internal/api/artifacts.go's
 	// validateMaintainerPair rejects one being set without the other.
 	// Free text, not validated beyond that pairing -- this records
 	// organizational ownership, not an auth identity.
@@ -210,7 +210,7 @@ type Artifact struct {
 }
 
 // Document kinds -- the only two Store.SaveDocument/GetDocument accept
-// today (see handlers.go's validateDocumentKind). Kept as constants so
+// today (see internal/api/documents.go's validDocumentKind). Kept as constants so
 // a typo is a compile error rather than a silently-never-matching kind
 // string somewhere.
 const (

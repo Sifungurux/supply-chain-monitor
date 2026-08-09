@@ -73,7 +73,7 @@ var schemaStatements = []string{
 	// e.g. a "show only failed artifacts" filter.
 	`CREATE INDEX IF NOT EXISTS artifacts_created_at_idx ON artifacts (created_at DESC)`,
 	// Added for digest-based duplicate-registration detection (see
-	// FindByDigest below and internal/api/handlers.go). Same
+	// FindByDigest below and internal/api/artifacts.go). Same
 	// ADD COLUMN IF NOT EXISTS idempotency as the findings.status et al.
 	// migration below -- safe to run unconditionally on every startup,
 	// including against a table created before this feature existed.
@@ -724,7 +724,7 @@ func (s *PostgresStore) fillChildrenBatch(ctx context.Context, ids []string, byI
 // mutate always leaves the *complete* desired state of each slice
 // field on the Artifact (an append for stage history, a wholesale
 // replace for findings after a /scan call -- see
-// internal/api/handlers.go), never a delta. The simplest way to
+// internal/api/scan.go), never a delta. The simplest way to
 // persist that correctly for the normalized child tables is to delete
 // every existing row for this artifact in each one and re-insert
 // whatever mutate() left in the struct, in order -- not the most
@@ -762,7 +762,7 @@ func (s *PostgresStore) Update(id string, mutate func(*Artifact)) (*Artifact, er
 
 	// digest is included here (alongside status/current_stage) even
 	// though most Update callers never touch it -- it's set exactly
-	// once, shortly after Create, via internal/api/handlers.go's
+	// once, shortly after Create, via internal/api/artifacts.go's
 	// duplicate-registration check calling Update with a mutate func
 	// that only sets a.Digest. Without it in this SET clause, that
 	// mutation would apply to the in-memory Artifact returned to the
