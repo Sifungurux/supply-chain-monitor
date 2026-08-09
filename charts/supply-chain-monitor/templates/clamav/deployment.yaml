@@ -6,15 +6,20 @@ metadata:
   labels:
     app: scm-clamav
 spec:
-  # Configurable (default 1, see values.yaml's clamav.replicas comment)
-  # -- each pod independently freshclams its own virus DB into its own
-  # ephemeral storage (no shared PVC here), so scaling this up is just
-  # "more independent ClamAV instances behind the same Service", not a
-  # coordination problem the way scaling something with shared state
-  # would be. scm-clamav's Service (service.yaml) already load-balances
-  # across however many pods match this selector, so no other template
-  # needs to change for this to take effect.
+  # Configurable (see values.yaml's clamav.replicas/autoscaling
+  # comments) -- each pod independently freshclams its own virus DB
+  # into its own ephemeral storage (no shared PVC here), so scaling
+  # this up is just "more independent ClamAV instances behind the same
+  # Service", not a coordination problem the way scaling something
+  # with shared state would be. scm-clamav's Service (service.yaml)
+  # already load-balances across however many pods match this
+  # selector, so no other template needs to change for this to take
+  # effect. Omitted entirely when autoscaling.enabled -- the HPA
+  # (hpa.yaml) owns replica count then, and leaving this field set
+  # would fight it back to a fixed count on every reconcile.
+  {{- if not .Values.clamav.autoscaling.enabled }}
   replicas: {{ .Values.clamav.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       app: scm-clamav

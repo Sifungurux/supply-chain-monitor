@@ -108,10 +108,24 @@ clamav:
   # storage between pods -- see deployment.yaml's comment), so this is
   # safe to raise under concurrent scan load without any other change:
   # scm-clamav's Service already load-balances clamd connections across
-  # however many pods are running. Raise this if malware scans start
-  # queuing up behind clamd (each scan holds one clamd connection for
-  # its duration) faster than a single instance can keep up.
+  # however many pods are running. Only takes effect when
+  # autoscaling.enabled is false (see below) -- the HPA owns replica
+  # count otherwise.
   replicas: 6
+  autoscaling:
+    # HPA scales on CPU utilization (clamd scanning is CPU-bound, see
+    # resources.requests.cpu below) between min/max replicas -- see
+    # README's "Scaling ClamAV". Requires a metrics-server (the
+    # metrics.k8s.io API) in the target cluster; if it's missing, the
+    # HPA object still creates fine but can't read metrics and won't
+    # scale -- set this false to fall back to the static `replicas`
+    # above instead. Also can't do anything about node-level capacity:
+    # if the cluster itself has no room to schedule more pods, they
+    # just sit Pending regardless of what the HPA wants.
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
   resources:
     requests:
       cpu: 250m

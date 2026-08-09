@@ -882,24 +882,35 @@ throttled request volume per API key").
 
 ### Scaling ClamAV
 
-`clamav.replicas` in `charts/supply-chain-monitor/values.yaml` (default
-`1`) controls how many ClamAV pods run behind `scm-clamav`'s Service.
-Raise it if malware scans start queuing behind clamd connections faster
-than one instance keeps up — each pod freshclams its own DB
-independently (no shared storage), so this scales cleanly with no
-other change needed. A `topologySpreadConstraint` on the Deployment
+`clamav.autoscaling` in `charts/supply-chain-monitor/values.yaml`
+(enabled by default) puts a `HorizontalPodAutoscaler` in front of
+`scm-clamav` — it scales the Deployment between `minReplicas` (2) and
+`maxReplicas` (10) on CPU utilization (target `70%`), since clamd
+scanning is CPU-bound and each pod freshclams its own DB independently
+(no shared storage), so adding pods scales cleanly with no other
+change needed. A `topologySpreadConstraint` on the Deployment
 (`preferred`, not `required`, so it's a no-op on a single-node cluster)
 spreads replicas across nodes rather than letting the scheduler stack
-them all on one, so raising `clamav.replicas` on a multi-node cluster
-actually buys you separate nodes' worth of CPU, not just separate pods
-competing for the same node.
+them all on one, so scaling up on a multi-node cluster actually buys
+you separate nodes' worth of CPU, not just separate pods competing for
+the same node.
+
+**This needs a `metrics-server`** (the `metrics.k8s.io` API) in the
+target cluster to actually act on — without one the HPA object still
+creates fine, it just can't read CPU metrics and never scales. If the
+target cluster doesn't have one, or its node pool can't itself grow to
+give the HPA somewhere to schedule new pods, set
+`clamav.autoscaling.enabled: false` to fall back to a fixed
+`clamav.replicas` (default `6`) instead — raise that manually if scans
+start queuing behind clamd connections faster than one instance keeps
+up.
 
 **Testing this for real, at scale**, needs two things the default local
 setup doesn't give you on its own:
 
 1. **A multi-node cluster.** The default runtime, Colima
    (`cluster/create-cluster.sh`), runs k3s inside a single VM — one
-   node, no matter how you set `clamav.replicas`. For an actual
+   node, no matter how many replicas the HPA asks for. For an actual
    multi-node cluster, use the podman/k3d path with `SCM_K3D_AGENTS` set
    (see `cluster/k3d-config.yaml`):
    ```bash
@@ -909,12 +920,12 @@ setup doesn't give you on its own:
    load-test-clamav`) bulk-registers `testdata/bulk-test-images.json`
    (100 artifacts) and fires `PARALLELISM` (default 10) concurrent
    `POST /scan` requests, reporting success/failure counts and latency
-   (min/p50/p95/max). Run it once at `clamav.replicas: 1` and again
-   after scaling up (`helm upgrade ... --set clamav.replicas=4`) to see
-   whether latency actually drops rather than assuming it will:
+   (min/p50/p95/max). Watch the HPA react while it runs, then again
+   once it's done (scale-down lags behind by the HPA's default
+   stabilization window):
    ```bash
    make port-forward   # separate terminal
-   make load-test-clamav
+   kubectl -n supply-chain-monitor get hpa scm-clamav -w   # separate terminal
    PARALLELISM=30 ./cluster/load-test-clamav.sh   # heavier concurrency
    ```
 
