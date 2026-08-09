@@ -923,6 +923,16 @@ Jobs, `2048Mi` limit each) survived. Setting request to cover real peak
 keeps these pods under their request and out of the queue; keeping limit
 equal to request stops a pod growing back over it.
 
+**Every long-lived component declares `ephemeral-storage` for this
+reason**, not just ClamAV — `postgres`, `registry`, `dashboard`,
+`docker-auth`, `monitor-api`. Protecting only one component doesn't fix
+the problem, it just moves the target: the first run after ClamAV was
+given a request evicted **Postgres** instead, and losing the database
+took down 99 of 100 scans in that run. A pod with a PVC is not exempt —
+eviction ranking looks at the pod's ephemeral usage, not where its real
+data lives. If you add a component to this chart, give it an
+`ephemeral-storage` request or it becomes the new easiest victim.
+
 **Verify your cluster's disk accounting is real before trusting
 `maxReplicas`.** On the local k3d path the four "nodes" are containers
 sharing one filesystem, so each reports ~37GiB allocatable

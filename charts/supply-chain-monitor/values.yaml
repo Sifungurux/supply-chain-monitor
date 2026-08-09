@@ -38,12 +38,19 @@ registry:
     port: 5000
     nodePort: 30500
   resources:
+    # ephemeral-storage declared for the same reason as postgres and
+    # clamav: an undeclared request reads as 0 to the kubelet's eviction
+    # ranking, putting this pod at the front of the queue under node
+    # DiskPressure. Pushed images land on the PVC (persistence.size
+    # above), so what's left here is upload staging and logs.
     requests:
       cpu: 100m
       memory: 128Mi
+      ephemeral-storage: 256Mi
     limits:
       cpu: 500m
       memory: 512Mi
+      ephemeral-storage: 256Mi
 
 # dockerAuth runs cesanta/docker_auth, a token-authentication server for
 # the Docker Registry Token Authentication spec -- reused rather than
@@ -92,12 +99,18 @@ dockerAuth:
       username: scm-admin
       password: changeme-admin
   resources:
+    # ephemeral-storage declared for the same reason as the other
+    # components: undeclared reads as a 0 request to the kubelet's
+    # eviction ranking, putting the pod at the front of the queue under
+    # node DiskPressure. Token signing keeps nothing on disk beyond logs.
     requests:
       cpu: 50m
       memory: 32Mi
+      ephemeral-storage: 128Mi
     limits:
       cpu: 200m
       memory: 128Mi
+      ephemeral-storage: 128Mi
 
 clamav:
   image:
@@ -207,12 +220,24 @@ postgres:
   persistence:
     size: 5Gi
   resources:
+    # ephemeral-storage is declared even though the actual database lives
+    # on a PVC (persistence.size above), because under node DiskPressure
+    # the kubelet ranks eviction victims by how far usage exceeds their
+    # *request* -- a pod with none declared reads as 0 and goes first,
+    # PVC or not. This pod was evicted mid-load-test for exactly that
+    # reason once clamav stopped being the easiest target, which took the
+    # whole scan pipeline down with it (99 of 100 scans failed while the
+    # DB was gone). What lands here is WAL/temp/log churn, not table
+    # data, hence the modest figure; request == limit so a pod can't grow
+    # back over its own request and re-enter the queue.
     requests:
       cpu: 250m
       memory: 256Mi
+      ephemeral-storage: 512Mi
     limits:
       cpu: "1"
       memory: 768Mi
+      ephemeral-storage: 512Mi
   backup:
     enabled: true
     schedule: "0 2 * * *" # daily at 02:00 UTC
@@ -556,12 +581,19 @@ dashboard:
   service:
     nodePort: 30301
   resources:
+    # ephemeral-storage declared for the same reason as the other
+    # components: undeclared reads as a 0 request to the kubelet's
+    # eviction ranking, which puts the pod at the front of the queue
+    # under node DiskPressure. This one is a static-file nginx, so the
+    # writable layer is little more than logs.
     requests:
       cpu: 25m
       memory: 32Mi
+      ephemeral-storage: 128Mi
     limits:
       cpu: 200m
       memory: 64Mi
+      ephemeral-storage: 128Mi
 
 # Gateway API "skeleton": GatewayClass + Gateway + HTTPRoute routing to
 # the dashboard, all owned by this chart. Traefik itself -- the ingress
