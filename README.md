@@ -901,9 +901,39 @@ creates fine, it just can't read CPU metrics and never scales. If the
 target cluster doesn't have one, or its node pool can't itself grow to
 give the HPA somewhere to schedule new pods, set
 `clamav.autoscaling.enabled: false` to fall back to a fixed
-`clamav.replicas` (default `6`) instead — raise that manually if scans
+`clamav.replicas` (default `2`, matching `minReplicas` so turning
+autoscaling off holds the count steady rather than jumping) instead —
+raise that manually if scans
 start queuing behind clamd connections faster than one instance keeps
 up.
+
+**Scaling up is bounded by node disk, not just CPU.** Every replica
+freshclams its own virus DB into its own writable layer — measured
+168Mi steady-state, ~260Mi mid-update — so `clamav.resources` declares
+`ephemeral-storage` at `512Mi`, request *and* limit.
+
+That declaration is what keeps autoscaling from evicting itself, and the
+mechanism is eviction ranking rather than scheduler placement: under node
+`DiskPressure` the kubelet kills pods by how far their disk usage exceeds
+their **request**, worst first. Undeclared, ClamAV's whole 168Mi counted
+as over-request and it went to the front of that queue — so the first
+scale-up to `maxReplicas` evicted most of the new pods *and* some
+already-healthy ones, while the actual disk hogs (concurrent scan-worker
+Jobs, `2048Mi` limit each) survived. Setting request to cover real peak
+keeps these pods under their request and out of the queue; keeping limit
+equal to request stops a pod growing back over it.
+
+**Verify your cluster's disk accounting is real before trusting
+`maxReplicas`.** On the local k3d path the four "nodes" are containers
+sharing one filesystem, so each reports ~37GiB allocatable
+ephemeral-storage while the cluster physically has ~40GiB total — a 4×
+overcommit the scheduler cannot see. Autoscaling to 10 replicas is fine
+against ClamAV's own footprint (10 × 512Mi = 5GiB), but it shares that
+one real disk with every concurrent scan-worker Job, which is what
+tipped it into `DiskPressure` under a `PARALLELISM=30` load test. If
+ClamAV pods evict or sit `Pending` at high load, the cluster is out of
+real room: give the nodes more disk, or lower `maxReplicas` to what it
+can actually host.
 
 **Testing this for real, at scale**, needs two things the default local
 setup doesn't give you on its own:
