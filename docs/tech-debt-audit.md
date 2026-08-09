@@ -1,6 +1,6 @@
 # Tech debt audit — supply-chain-monitor
 
-Date: 2026-07-31. Scope: the whole repo (`services/monitor-api`, `charts/supply-chain-monitor`, `cluster/`, `dashboard/`, `docs/`). Method: direct inspection of the current codebase (file contents, git history, test layout), not a rehash of `docs/architecture.md`'s existing "Roadmap / open gaps" section — that section is good and current; this audit cross-references it rather than duplicating it, and adds findings that section doesn't cover (documentation staleness, CI, test-coverage gaps).
+Date: 2026-07-31, re-audited 2026-08-06. Scope: the whole repo (`services/monitor-api`, `charts/supply-chain-monitor`, `cluster/`, `dashboard/`, `docs/`). Method: direct inspection of the current codebase (file contents, git history, test layout), not a rehash of `docs/architecture.md`'s existing "Known limitations" section (named "Roadmap / open gaps" as of the original audit date) — that section is good and current; this audit cross-references it rather than duplicating it, and adds findings that section doesn't cover (documentation staleness, CI, test-coverage gaps).
 
 Scoring per item follows the brief: **Impact** (1–5, how much this slows the team down), **Risk** (1–5, cost of not fixing it), **Effort** (1–5, cost to fix — inverted in the formula). **Priority = (Impact + Risk) × (6 − Effort)**.
 
@@ -21,6 +21,49 @@ Scoring per item follows the brief: **Impact** (1–5, how much this slows the t
   `go.sum` explicitly) instead of `go mod tidy`; `make test-api`/`make
   test-postgres` do the same for consistency between local and CI runs.
 - **#8 (No shellcheck)**: addressed by the same CI workflow as #1 above.
+- **#10 (`go vet` not enforced in CI)**: fixed -- `make test-api` now
+  runs `go vet ./...` before `go test ./...`, in the same container, so
+  it's covered by the existing `test-api` CI job with no new job
+  needed. Both passed clean against the current tree; this closes the
+  gap rather than reacting to a bug it already caught.
+- **#11 (README's "Known limitations" section was stale)**: fixed.
+  Rewrote it to stop duplicating `docs/architecture.md`'s own
+  "Known limitations" (which drifted once already — see the
+  2026-08-06 update above) and instead point at it, keeping only
+  README-specific operational notes not covered there. Also fixed the
+  same stale "never run against a real cluster" claim where it
+  appeared twice more, outside that section (Quickstart, "GitOps
+  (Flux)") — same root cause, found while fixing #11's own section.
+- **#6 (Plaintext default password/API key)**: fixed, after a first
+  pass that missed the actual point -- `postgres.credentials.password`/
+  `monitorApi.apiKey` are now empty in `values.yaml` (no plaintext
+  default left to commit, not just an opt-in bypass next to one), with
+  Flux's `HelmRelease.spec.valuesFrom` (`make chart-secrets`) as this
+  project's real path to a value, `existingSecret`/`apiKeyExistingSecret`
+  for fully externally-managed Secrets, and Postgres/monitor-api's own
+  existing fail-closed startup checks covering the "nothing configured"
+  case. See "### 6." below for the full writeup, including what the
+  first pass got wrong, and what's deliberately still out of scope
+  (`dockerAuth.accounts.*.password`). #7 (single
+  shared key, no per-client identity) is a separate, still-open problem
+  -- see its own writeup.
+- **#9 (Two large files)**: `handlers.go` half fixed -- split from
+  1,081 lines into 7 resource-based files (`handler.go` 93,
+  `artifacts.go` 430, `scan.go` 286, `findings.go` 141, `stages.go`
+  48, `maintainer.go` 46, `documents.go` 93), each named after the
+  resource it handles. `handlers_test.go` (2,021 lines) split to
+  match, plus its CORS/Auth tests moved into `router_test.go` (the
+  better fit -- they test middleware, not a specific resource
+  handler) and its Swagger tests into a new `swagger_test.go`.
+  Verified with `go build`/`go vet`/`go test ./...` after every step;
+  test count is unchanged (75 `Test*` funcs in `internal/api` before
+  and after, same pass/fail outcomes). Splitting also surfaced and
+  fixed ~20 comments elsewhere in the codebase (`main.go`,
+  `internal/artifact/*.go`, `internal/scanner/*.go`) that pointed at
+  `internal/api/handlers.go` by name for a specific function --
+  `handlers.go` no longer exists, so every one of those was updated to
+  name the actual file the function moved to. `postgres_store.go` (961
+  lines) is untouched -- not in scope for this pass.
 - **#4 (PostgresStore untested by default)**: resolved as a side effect
   of #1 -- `test-postgres` is now its own CI job, so `postgres_store.go`
   is exercised on every push/PR, not just when a developer remembers to
@@ -110,19 +153,52 @@ this project's Node version (the test containers already pin
 
 Everything else in this document is still open.
 
+## Update — 2026-08-06
+
+Re-audited against the current repo (CI has grown two more jobs since
+the original pass — `test-swagger-docs`, `helm-lint`, `helm-template` —
+and Grype landed as a second CVE scanner, alongside a rename of
+"external scanners" to "pluggable scanners"). Two things fixed directly
+while re-auditing, since both were one-line doc bugs; three new items
+added below.
+
+**Fixed:**
+- `README.md`'s "Isolating Trivy scanning" section had two directly
+  contradictory paragraphs back to back — one stating `sbom` scans run
+  in an isolated Job "the same way" `image` does, immediately followed
+  by a leftover paragraph from before that shipped, stating the
+  opposite ("is **not** isolated yet — it still runs in-process").
+  `buildSBOMScanners` in `main.go` confirms the first paragraph is the
+  true one (isolated by default, in-process only under
+  `DISABLE_SCAN_ISOLATION`). Deleted the stale paragraph.
+- `docs/architecture.md` was rewritten this session from a
+  2,774-line changelog into a ~220-line current-state document (see
+  its git history) — its "Roadmap / open gaps" heading became "Known limitations", which
+  broke two `docs/architecture.md`'s Roadmap" cross-references in
+  `README.md` (now point at "Known limitations" instead) and silently
+  dropped the plaintext-secrets limitation this audit's own #6 finding
+  cross-references (restored).
+
+**New findings**, added to the table below: #10 (`go vet` not run in
+CI), #11 (README's "Known limitations" section is stale on a larger
+scale than the two paragraphs just fixed). #9's file-size numbers are
+updated to current line counts.
+
 ## Findings
 
 | # | Item | Category | Impact | Risk | Effort | Priority |
 |---|------|----------|:-:|:-:|:-:|:-:|
 | 1 | No CI at all | Infrastructure | 5 | 5 | 1 | 50 |
 | 2 | Stale docs: go.sum/digest comments say things no longer true | Documentation | 3 | 2 | 1 | 25 |
-| 3 | In-process malware-scan fallback has zero unit tests | Test | 4 | 4 | 2 | 32 |
+| 3 | In-process malware-scan fallback has zero unit tests (fixed — see Status) | Test | 4 | 4 | 2 | 32 |
 | 4 | PostgresStore's non-trivial logic only runs under a build tag nobody automates | Test | 4 | 4 | 2 | 32 |
 | 5 | `go mod tidy` in Dockerfile still re-resolves every build despite go.sum being committed | Dependency | 2 | 3 | 1 | 25 |
-| 6 | Plaintext default password/API key committed to values.yaml (already tracked in Roadmap) | Infrastructure/Security | 3 | 4 | 3 | 21 |
-| 7 | Single shared API key, no per-client identity (already tracked in Roadmap) | Architecture | 3 | 3 | 4 | 12 |
+| 6 | Plaintext default password/API key committed to values.yaml (fixed — see Status) | Infrastructure/Security | 3 | 4 | 3 | 21 |
+| 7 | Single shared API key, no per-client identity (already tracked in architecture.md's Known limitations) | Architecture | 3 | 3 | 4 | 12 |
 | 8 | No shellcheck/lint on `cluster/*.sh` (1,074 lines across 13 scripts) | Test | 3 | 3 | 1 | 30 |
-| 9 | `handlers.go` (754 lines) and `postgres_store.go` (827 lines) carry a lot of responsibility each | Code | 2 | 2 | 4 | 8 |
+| 9 | `handlers.go` split into 7 resource-based files (fixed); `postgres_store.go` (961 lines, was 827) still one file, untouched | Code | 2 | 1 | 4 | 6 |
+| 10 | `go vet` only runs inside the manual, rarely-used `make lock-deps` target — not enforced in CI | Test | 2 | 2 | 1 | 20 |
+| 11 | README's "Known limitations" section (~40 lines) is written entirely from a stale "never run against a real cluster, go.sum can't be generated" framing that predates this project's own confirmed real-cluster testing and committed go.sum | Documentation | 3 | 2 | 2 | 20 |
 
 (Sorted by priority below, not by table order.)
 
@@ -169,28 +245,51 @@ Follows directly from #2: now that `go.sum` is committed, `Dockerfile`'s `RUN go
 
 **Fix**: change `RUN go mod tidy` to `RUN go mod download && go mod verify`, or drop it entirely and let `go build` do the verification it already does implicitly. Either removes the every-build network dependency `go.sum` was committed to eliminate.
 
-### 6 / 7. Plaintext secrets, single shared API key — priority 21 / 12
+### 6. Plaintext default password/API key committed to values.yaml — priority 21 (fixed)
 
-Both already tracked in `docs/architecture.md`'s Roadmap ("Secret management", "AuthN/Z is a single shared key"). Repeating them here only to score them against the rest of this list: they're real, but lower priority than #1–#5 for a project still at the "local dev cluster, not yet exposed anywhere" stage the Roadmap itself describes. Worth doing before this cluster holds anything real, not necessarily before Phase 2's Tekton work.
+`postgres.credentials.password` and `monitorApi.apiKey` in `charts/supply-chain-monitor/values.yaml` were the only source of truth for `scm-postgres-credentials`/`scm-monitor-api-auth` — no way to keep a real value out of a committed values file short of not using the chart's own Secret-creation at all.
 
-### 9. Two large files — priority 8
+**First attempt, incomplete**: added `postgres.credentials.existingSecret` / `monitorApi.apiKeyExistingSecret` as an opt-in bypass, but left the plaintext defaults (`changeme123`, `qwe4r...`) sitting in `values.yaml` unchanged. Called out correctly on review: the actual vulnerability -- a real password ending up committed to git -- was completely unaddressed by default, since the new flags were off by default and nothing stopped anyone from just leaving `password: changeme123` as the effective value, same as before this "fix."
 
-`handlers.go` (754 lines: every HTTP handler in one file) and `postgres_store.go` (827 lines) aren't badly structured — both are heavily commented, single-responsibility-per-function, and this session's own manual reviews of them found no confusion attributable to size. Listed for completeness, not urgency: splitting `handlers.go` by resource (artifacts/findings/stages) would be a reasonable future refactor if it keeps growing, not something worth doing today.
+**Fix, corrected**: `postgres.credentials.password` and `monitorApi.apiKey` are now empty strings in `values.yaml` -- there is no plaintext default left to commit. Left empty, Postgres's own entrypoint refuses to start (`POSTGRES_PASSWORD` "must not be empty or undefined" per the upstream image's own docs) and `monitor-api`'s existing startup check refuses to run (`API_KEY must be set`) -- a fresh `helm install` with untouched defaults now fails loudly instead of coming up with a known password. A real value has to come from somewhere:
+
+- **Flux (this project's actual deployment path)**: `k8s/releases/supply-chain-monitor-helmrelease.yaml` gained `spec.valuesFrom`, sourcing both values from a `scm-chart-secrets` Secret in the `flux-system` namespace (`targetPath: postgres.credentials.password` / `monitorApi.apiKey`) -- `make chart-secrets` (new target, `cluster/chart-secrets.sh`, mirrors the existing `git-auth-secret.sh`/`make git-auth` pattern) creates/updates it, generating a random value via `openssl rand` for anything not explicitly passed in. Neither value ever touches a file in this repo.
+- **A bare `helm install`/`helm upgrade`**: `--set`/`-f` with a gitignored values file, same as any Helm chart.
+- **Fully externally-managed Secrets**: `existingSecret`/`apiKeyExistingSecret` from the first attempt, unchanged and still correct for this case -- confirmed on review that consumers (`postgres`/`monitor-api` Deployments, the backup CronJob, the dashboard's `render-config` initContainer, the sweep-registered CronJob, the scan-worker Job's `SCM_API_KEY`) do all reference the Secret by fixed name already, so this path genuinely works as designed; the "created secret is never used" concern raised on review turned out to be about the plaintext-default problem above, not a bug in this mechanism itself.
+
+Every place that referenced the old default values as a fallback got fixed too, once removing them turned those fallbacks into landmines: `Makefile`'s `test-artifact` target (`SCM_API_KEY ?= qwe4r...` → now `$(error ...)`s if unset) and `cluster/load-test-clamav.sh` (`${SCM_API_KEY:-qwe4r...}` → now `${SCM_API_KEY:?...}`), plus three README code examples that hardcoded the old key literally.
+
+Verified with `helm lint`/`helm template` against default values (confirms `POSTGRES_PASSWORD: ""` renders, i.e. the fail-closed path is real) and against `existingSecret: true` for both, added as a third scenario to `cluster/check-helm-manifests.sh` alongside the two existing ones. `shellcheck` clean on the new script. Documented in README's rewritten "Bringing your own secrets" section covering all three paths.
+
+Deliberately **not** covered: `dockerAuth.accounts.*.password` (the registry's own reader/writer/admin accounts) is a separate, still-plaintext-only set of credentials -- same class of gap, just not in scope for this pass; a natural follow-up if it's ever needed.
+
+### 7. Single shared API key, no per-client identity — priority 12
+
+Still tracked in `docs/architecture.md`'s "Known limitations" (formerly "Roadmap / open gaps" — renamed when that doc was condensed from a changelog into a current-state document; see the 2026-08-06 update above). A different problem from #6: #6 was about *where the key's value lives* (now fixable via `existingSecret`), this is about there being only *one* key at all, shared by every caller, with no revocation or rotation story — unaffected by the #6 fix, since `existingSecret: true` still means one Secret, one key, every caller.
+
+### 9. Two large files — priority 6 (half fixed)
+
+`handlers.go` (1,081 lines: every HTTP handler in one file) and `postgres_store.go` (961 lines, up from 827 at the original audit) had both grown noticeably — mostly from the finding-lifecycle, digest-resolution, and document-upload features that landed since. `handlers.go` is fixed — see the Status section above for the split and what it touched. `postgres_store.go` is untouched; still one file, still the only persistence path production actually uses, not urgent on its own (same reasoning the original finding gave) but the next candidate if this keeps growing.
+
+### 10. `go vet` not enforced in CI — priority 20
+
+`go vet` is part of `make lock-deps` (`go mod tidy && go vet ./... && go mod verify`) — a target run rarely, by hand, only when updating dependencies. It isn't part of `test-api` or any other CI job, so nothing stops a `vet`-flagging change (a bad `Printf` format string, a struct copied by value that contains a lock, an unreachable branch) from merging to `main`. Currently clean (`go vet ./...` passes with no output against the current tree), so this is a process gap, not an active bug — but it's a single, fast, dependency-free check that's already written into an existing Makefile target and just never made it into the CI job that runs alongside it.
+
+**Fix**: add `go vet ./...` as a step in the existing `test-api` CI job (same container, same `go.sum`, no new job needed) rather than only running it inside `lock-deps`.
+
+### 11. README's "Known limitations" section is stale — priority 20
+
+`README.md`'s "Known limitations (v1 stub — see docs/architecture.md for the plan)" section (currently ~40 lines, just past "Tearing down") is written entirely from the framing of a sandboxed assistant session that had never run this project against a real cluster and couldn't generate `go.sum`. Both premises are now false: the Status section of this very audit documents real multi-node podman/k3d cluster runs, and `go.sum` has been committed since `f0b9c95`. Specific stale claims in that section: "hasn't been run against a real cluster yet," "Traefik + Gateway API is unverified against a real cluster too" (contradicted by `docs/architecture.md`'s own now-condensed history of a confirmed real first run), and "`go.sum` isn't committed... couldn't be generated without a real Go toolchain in the sandbox this was built in." One two-line contradiction from this same section (the "Isolating Trivy scanning" SBOM paragraphs) was found and fixed directly during this re-audit; the "Known limitations" section itself needs a full rewrite reflecting what's actually still unverified today, not a spot-fix.
+
+**Fix**: rewrite the section from scratch against the current, real state of the project — cross-reference `docs/architecture.md`'s "Known limitations" for what's genuinely still open (single shared API key, plaintext default secrets, no TLS on the Gateway, no NetworkPolicy on scan-worker pods) rather than re-deriving a separate list that can drift from it again.
 
 ## Phased remediation plan
 
-Framed against the fact that Phase 2 (a Tekton pipeline for malware/CVE scanning) is starting next — this plan front-loads the items that make Phase 2 itself safer to build, and defers the rest.
+The original version of this plan was framed around "Phase 2: a Tekton pipeline for malware/CVE scanning," expected to start next. That never happened — the project's actual next steps went a different direction instead (Grype as a second CVE scanner, the pluggable-scanner mechanism for arbitrary third-party tools, always-on scan-worker activity logging). No Tekton reference exists anywhere else in this repo. Re-framed below around what's actually still open, not a phase that was never built.
 
-**Before Phase 2 starts** (small, high-leverage, protects the new work too):
-1. Stand up CI (#1) — `test-api`, `test-dashboard`, `check-dashboard-configmap` on push/PR. Once this exists, the Tekton pipeline work in Phase 2 gets the same safety net from day one instead of retrofitting it later.
-2. Fix the two stale docs (#2) — five-minute fix, removes two landmines for whoever (human or Claude) reads this repo's docs next.
-3. Fix the Dockerfile's `go mod tidy` (#5) — small, and Phase 2 will likely touch the Dockerfile anyway (adding a Tekton-facing entrypoint or similar), so it's a natural time to also fix this.
+**Do incrementally, not blocking:**
+1. Per-client API keys (#7) — a real auth-model change (today: one shared key, no revocation, no rotation window), do before this serves more than one trusted team.
+2. `dockerAuth.accounts.*.password` — the one plaintext-secret gap #6's fix didn't cover; same `existingSecret` pattern would apply.
+3. Split `postgres_store.go` by concern, if it keeps growing (the remaining half of #9) — not urgent today.
 
-**Alongside Phase 2** (do incrementally, not a blocking prerequisite):
-4. Add `shellcheck` to CI (#8) once CI exists — one more `make`-style target, no reason to delay past #1.
-5. Add tests for the in-process scanner fallback (#3) — worth doing before Phase 2's pipeline potentially starts exercising `DISABLE_SCAN_ISOLATION` paths in a CI/test context, if Tekton tasks end up running scans outside the isolated-Job path.
-6. Wire `test-postgres` into CI as a proper service-container job (#4) — depends on #1 existing first.
-
-**Defer past Phase 2** (real, but lower urgency at this project's current stage):
-7. Secret management (#6) and per-client API keys (#7) — do before this cluster ever holds real data or is reachable from outside a local dev machine, not before Phase 2.
-8. Splitting up large files (#9) — revisit only if `handlers.go`/`postgres_store.go` keep growing; not worth touching preemptively.
+Findings #1, #2, #3, #4, #5, #6, #8, #9 (handlers.go half), #10, #11 are resolved — see the Status section above.
