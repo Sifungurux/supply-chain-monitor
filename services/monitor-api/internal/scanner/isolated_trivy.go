@@ -126,7 +126,7 @@ func (c IsolatedTrivyConfig) withDefaults() IsolatedTrivyConfig {
 		c.MemoryRequest = "512Mi"
 	}
 	if c.EphemeralStorageRequest == "" {
-		c.EphemeralStorageRequest = "128Mi"
+		c.EphemeralStorageRequest = ephemeralStorageRequestFor(c.SubCommand)
 	}
 	if c.CPULimit == "" {
 		c.CPULimit = "1"
@@ -140,11 +140,7 @@ func (c IsolatedTrivyConfig) withDefaults() IsolatedTrivyConfig {
 		c.MemoryLimit = "1Gi"
 	}
 	if c.EphemeralStorageLimit == "" {
-		// Small on purpose: --cache-backend memory means the scan cache
-		// never touches disk, and the vulnerability DB itself is a
-		// read-only mount, not something this Job writes -- there's
-		// nothing here that should ever grow.
-		c.EphemeralStorageLimit = "256Mi"
+		c.EphemeralStorageLimit = ephemeralStorageLimitFor(c.SubCommand)
 	}
 	if c.APIKeySecretName == "" {
 		// Same Secret the dashboard's render-config initContainer and

@@ -104,7 +104,10 @@ func (c IsolatedUnpackerConfig) withDefaults() IsolatedUnpackerConfig {
 		c.MemoryRequest = "256Mi"
 	}
 	if c.EphemeralStorageRequest == "" {
-		c.EphemeralStorageRequest = "512Mi"
+		// Same pull-and-extract work, same numbers, as the "image"-mode
+		// trivy/grype Jobs -- see isolated.go for the measurements and
+		// for why the request stays well under the limit.
+		c.EphemeralStorageRequest = ephemeralStorageRequestFor("image")
 	}
 	if c.CPULimit == "" {
 		c.CPULimit = "1"
@@ -113,7 +116,10 @@ func (c IsolatedUnpackerConfig) withDefaults() IsolatedUnpackerConfig {
 		c.MemoryLimit = "1Gi"
 	}
 	if c.EphemeralStorageLimit == "" {
-		c.EphemeralStorageLimit = "2Gi"
+		// Was 2Gi, which the measured 2395Mi peak
+		// (mcr.microsoft.com/playwright:v1.44.0) already exceeded. Read
+		// isolated.go's ceiling note before raising it again.
+		c.EphemeralStorageLimit = ephemeralStorageLimitFor("image")
 	}
 	if c.RegistryCredentialsSecretName != "" {
 		if c.RegistryUsernameKey == "" {
