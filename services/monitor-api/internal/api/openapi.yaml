@@ -197,6 +197,13 @@ paths:
         that stopped being reported as fixed. Synchronous -- the response
         carries the fully updated artifact once every scanner has finished
         (or the shared per-scan timeout elapses).
+
+
+        Scanning is capped server-side (SCAN_CONCURRENCY /
+        monitorApi.scanConcurrency, off by default). A request that
+        arrives with every slot busy waits up to 30s for one, then gets
+        a 429 with Retry-After -- the artifact is left untouched, not
+        marked scanning.
       responses:
         "200":
           description: Scan completed.
@@ -204,6 +211,19 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Artifact" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429":
+          description: >-
+            The scan concurrency cap is saturated and no slot freed up
+            within the queue wait. Retry after the interval in the
+            Retry-After header. (Per-key rate limiting can also answer
+            429 -- the error message distinguishes them.)
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "501":
           description: No scanner is registered for this artifact's type.
           content:

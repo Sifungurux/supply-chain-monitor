@@ -397,6 +397,33 @@ monitorApi:
   # starting to fail outright. See docs/architecture.md ("Requiring a
   # verified digest at registration").
   requireDigest: false
+  # Maximum scans running at once, server-side (SCAN_CONCURRENCY).
+  #
+  # Read this as Jobs, not scans: ONE image scan fans out to one
+  # scan-worker Job per registered scanner, all running concurrently --
+  # with cveScanner "both" that's three (trivy + grype + unpacker), so
+  # this cap of 4 permits up to ~12 concurrent image-mode Jobs. Each
+  # extracts the whole image under scan into its own /tmp (512Mi
+  # request, 3Gi limit, measured peaks 1.8-2.6Gi -- see
+  # internal/scanner/isolated.go's ephemeralStorageLimitFor). Multiply
+  # before changing this: with cveScanner "trivy" the same 4 is ~8 Jobs,
+  # and a fourth registered scanner would make it 16.
+  #
+  # Why 4 rather than something derived from node disk: a 100-image load
+  # test at PARALLELISM=10 (so ~30 Jobs in flight) ran with zero
+  # evictions once the per-Job ephemeral sizing was fixed, so 4 sits
+  # deliberately below the level this cluster is known to survive. The
+  # cap isn't here to throttle normal use -- it's the bound that stops
+  # an unbounded burst (a client firing 50 or 100 scans at once) from
+  # putting every node under DiskPressure at the same time, which the
+  # per-Job limit alone can never prevent.
+  #
+  # A request that arrives with every slot busy waits up to 30s for one
+  # and then gets a 429 with Retry-After -- so a burst slightly wider
+  # than this (the dashboard, cluster/load-test-clamav.sh's PARALLELISM)
+  # just queues rather than failing. 0 disables the cap entirely, which
+  # is the binary's own default when this isn't set.
+  scanConcurrency: 4
   # Uncomment (and set enabled: true) for air-gapped operation -- see
   # cluster/seed-trivy-db.sh and README's "Air-gapped operation".
   trivyDB:

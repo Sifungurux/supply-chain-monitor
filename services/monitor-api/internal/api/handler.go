@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"time"
@@ -40,6 +41,83 @@ type handler struct {
 	// requireDigest is monitorApi.requireDigest / REQUIRE_DIGEST -- see
 	// NewRouter's own comment for the full behavior this gates.
 	requireDigest bool
+	// scanSlots caps how many scans run at once across the whole
+	// process: one buffered slot per permitted concurrent scan, taken
+	// for the duration of a scan and released when it finishes. nil
+	// means unlimited (the behavior before this existed) -- see
+	// ScanLimits and acquireScanSlot.
+	scanSlots chan struct{}
+	// scanQueueWait bounds how long a scan request waits for a slot
+	// before giving up with a 429. Falls back to
+	// defaultScanQueueWait if zero.
+	scanQueueWait time.Duration
+}
+
+// defaultScanQueueWait is how long a scan request waits for a free slot
+// before being rejected. Long enough that a burst slightly wider than
+// the cap (the dashboard's Scan buttons clicked in quick succession,
+// cluster/load-test-clamav.sh's PARALLELISM) mostly just queues and
+// succeeds; short enough that a genuinely saturated server sheds load
+// instead of accumulating connections that will each wait out a
+// multi-minute scan.
+const defaultScanQueueWait = 30 * time.Second
+
+// errScanQueueFull means the wait above elapsed with every scan slot
+// still busy -- distinct from ctx.Err(), which means the client gave up
+// on its own while queued.
+var errScanQueueFull = errors.New("scan queue full")
+
+// ScanLimits bounds concurrent scanning. Zero value = unlimited, which
+// is exactly the behavior every caller had before this existed.
+//
+// This exists because nothing server-side bounded concurrent scans:
+// each one spawns an isolated scan-worker Job that extracts the whole
+// image under scan to disk (up to ~2.4Gi -- see
+// charts/supply-chain-monitor's scan-Job ephemeral sizing), so the only
+// thing standing between the cluster and node-level disk exhaustion was
+// however many scans a client chose to fire at once.
+type ScanLimits struct {
+	// Concurrency is the maximum number of scans running at once.
+	// <= 0 means unlimited, the same "a nonsensical zero-or-negative
+	// value reads as off" convention rateLimitRPS already uses.
+	Concurrency int
+	// QueueWait is how long a scan waits for a free slot before a 429.
+	// <= 0 means defaultScanQueueWait, matching how scanTimeout treats
+	// a zero value.
+	QueueWait time.Duration
+}
+
+// acquireScanSlot blocks until a scan slot is free, the queue wait
+// elapses (errScanQueueFull -> the caller should answer 429), or ctx is
+// done (the client hung up while queued -- there's nobody left to
+// answer, so the slot is deliberately never taken). Returns the
+// function that releases the slot.
+//
+// ctx here is the *request* context, unlike the scan itself, which
+// deliberately runs on context.Background() so a disconnect can't kill
+// a scan already in progress (see scanArtifact). Watching it while
+// merely queued is the opposite case: nothing has started yet, so a
+// client that walked away should free its place rather than have a scan
+// run for it anyway.
+func (h *handler) acquireScanSlot(ctx context.Context) (func(), error) {
+	if h.scanSlots == nil {
+		return func() {}, nil
+	}
+	wait := h.scanQueueWait
+	if wait <= 0 {
+		wait = defaultScanQueueWait
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case h.scanSlots <- struct{}{}:
+		return func() { <-h.scanSlots }, nil
+	case <-timer.C:
+		return nil, errScanQueueFull
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // digestResolveTimeout bounds how long a single registry manifest call

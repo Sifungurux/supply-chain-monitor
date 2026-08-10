@@ -20,7 +20,7 @@ func newRateLimitedTestRouter(t *testing.T, rps, burst float64) http.Handler {
 	t.Helper()
 	store := artifact.NewMemStore()
 	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
-	return api.NewRouter(store, tracker, scanner.Registry{}, testAPIKey, rps, burst, nil, false, 0, false)
+	return api.NewRouter(store, tracker, scanner.Registry{}, testAPIKey, rps, burst, nil, false, 0, false, api.ScanLimits{})
 }
 
 func TestRateLimit_ExceedingBurstReturns429(t *testing.T) {

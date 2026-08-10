@@ -1117,7 +1117,26 @@ func runAPIServer() {
 	// silently.
 	requireDigest := getenvBool("REQUIRE_DIGEST", false)
 
-	router := api.NewRouter(store, stageTracker, scanners, apiKey, rateLimitRPS, rateLimitBurst, digestResolver, fetchPlainHTTP, scanTimeout, requireDigest)
+	// SCAN_CONCURRENCY caps how many scans run at once across this
+	// process (see internal/api's ScanLimits). Nothing bounded this
+	// before: every scan spawns an isolated scan-worker Job that
+	// extracts the whole image under scan to disk (measured up to
+	// ~2.4Gi), so a client firing 50 scans at once was 50 Jobs
+	// competing for node disk -- the resource exhaustion the scan-Job
+	// ephemeral-storage sizing can only survive, not prevent.
+	// 0 (the default) is unlimited, the same "zero-or-negative reads as
+	// off" convention RATE_LIMIT_RPS above uses -- the chart ships a
+	// real value (monitorApi.scanConcurrency) so a deployed cluster gets
+	// the bound without a bare `go run` silently changing behavior.
+	// Deliberately not validated against anything: unlike the
+	// SCAN_TIMEOUT/ACTIVE_DEADLINE pair above, no other setting can
+	// contradict it.
+	scanConcurrency := getenvInt("SCAN_CONCURRENCY", 0)
+	if scanConcurrency > 0 {
+		log.Printf("scan concurrency capped at %d concurrent scans (SCAN_CONCURRENCY)", scanConcurrency)
+	}
+
+	router := api.NewRouter(store, stageTracker, scanners, apiKey, rateLimitRPS, rateLimitBurst, digestResolver, fetchPlainHTTP, scanTimeout, requireDigest, api.ScanLimits{Concurrency: scanConcurrency})
 
 	srv := &http.Server{
 		Addr:         listenAddr,

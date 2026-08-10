@@ -228,6 +228,17 @@ recorded.
   `Store.List` is kept for callers that genuinely want everything.
   Filters are applied in the database (a `WHERE` clause shared by the
   page query and its `COUNT(*)`), not in Go after loading every row.
+- Concurrent scans are capped server-side (`SCAN_CONCURRENCY` /
+  `monitorApi.scanConcurrency`, 4 in the chart, 0 = unlimited in the
+  binary). A saturated cap queues the request for 30s and then answers
+  `429` + `Retry-After`; the slot is taken *after* the 404/501 checks and
+  *before* the status flips to `scanning`, so a rejected scan leaves the
+  artifact untouched. The cap counts scans, but the resource is Jobs:
+  one image scan spawns one scan-worker Job per registered scanner,
+  concurrently — three at the chart's default `cveScanner: "both"`
+  (trivy, grype, unpacker) — each extracting a whole image to disk. The
+  per-Job ephemeral limit only ever contained one Job at a time; this is
+  what bounds them collectively.
 - Key routes beyond CRUD: `POST /api/v1/artifacts/bulk` (batch
   registration, best-effort per entry, capped at 500), `POST
   /api/v1/artifacts/{id}/scan`, `POST /api/v1/artifacts/{id}/findings`
@@ -333,6 +344,9 @@ a rebuild, so nothing else notices a new image is available.
 - Both fetch paths (`RegistryFetcher`, `UnpackerScanner`) assume
   unauthenticated, plain-HTTP access to the registry — no credentials
   wired up for a private or TLS-terminated registry.
+- The scan concurrency cap is per-process, not cluster-wide: two
+  monitor-api replicas would each allow `SCAN_CONCURRENCY` scans. Fine
+  today (the chart runs one replica), wrong the moment it doesn't.
 - No `NetworkPolicy` on scan-worker Job pods — locked down at the
   pod-security level, but not restricted at the network level.
 - No TLS on the Gateway.

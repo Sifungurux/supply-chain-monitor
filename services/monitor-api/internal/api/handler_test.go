@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -69,7 +70,7 @@ func newTestRouter(scanners scanner.Registry) (http.Handler, *artifact.MemStore)
 	// digestResolver nil: dedup disabled by default here too -- see
 	// TestCreateArtifact_Duplicate* for the tests that exercise it
 	// deliberately with a fake resolver instead.
-	return api.NewRouter(store, tracker, scanners, testAPIKey, 0, 0, nil, false, 0, false), store
+	return api.NewRouter(store, tracker, scanners, testAPIKey, 0, 0, nil, false, 0, false, api.ScanLimits{}), store
 }
 
 // newTestRouterWithDigestResolver is newTestRouter plus a digest
@@ -79,7 +80,7 @@ func newTestRouter(scanners scanner.Registry) (http.Handler, *artifact.MemStore)
 func newTestRouterWithDigestResolver(resolver scanner.DigestResolver) (http.Handler, *artifact.MemStore) {
 	store := artifact.NewMemStore()
 	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
-	return api.NewRouter(store, tracker, scanner.Registry{}, testAPIKey, 0, 0, resolver, false, 0, false), store
+	return api.NewRouter(store, tracker, scanner.Registry{}, testAPIKey, 0, 0, resolver, false, 0, false, api.ScanLimits{}), store
 }
 
 // newTestRouterWithRequireDigest is newTestRouterWithDigestResolver plus
@@ -89,7 +90,7 @@ func newTestRouterWithDigestResolver(resolver scanner.DigestResolver) (http.Hand
 func newTestRouterWithRequireDigest(resolver scanner.DigestResolver) (http.Handler, *artifact.MemStore) {
 	store := artifact.NewMemStore()
 	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
-	return api.NewRouter(store, tracker, scanner.Registry{}, testAPIKey, 0, 0, resolver, false, 0, true), store
+	return api.NewRouter(store, tracker, scanner.Registry{}, testAPIKey, 0, 0, resolver, false, 0, true, api.ScanLimits{}), store
 }
 
 // fakeDigestResolver lets tests exercise duplicate-registration
@@ -106,12 +107,15 @@ type fakeDigestResolver struct {
 	// TestScanArtifact_DoesNotReResolveAnAlreadySetDigest to prove an
 	// already-resolved digest never triggers a redundant registry call.
 	// Zero value is fine for every other test using this type; none of
-	// them read it.
-	calls int
+	// them read it. Atomic because bulkCreateArtifacts resolves a
+	// batch's digests concurrently (bulkDigestResolveConcurrency), so
+	// the bulk tests call this from several goroutines at once -- a
+	// plain int++ here is a real data race under `go test -race`.
+	calls atomic.Int64
 }
 
 func (f *fakeDigestResolver) Resolve(_ context.Context, ref string, _ bool) (string, error) {
-	f.calls++
+	f.calls.Add(1)
 	if ref == f.errRef {
 		return "", errors.New("fake registry unreachable")
 	}

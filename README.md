@@ -422,6 +422,38 @@ turn it off. See docs/architecture.md ("Sweeping registered-but-
 unscanned artifacts, and backfilling missing digests") for the full
 reasoning.
 
+### Capping concurrent scans
+
+One scan fans out to a scan-worker Job **per registered scanner**, all
+running at once — with `cveScanner: "both"` that's three (trivy, grype,
+unpacker) — and each extracts the whole image under scan into its own
+`/tmp` (512Mi request, 3Gi limit, measured peaks 1.8–2.6Gi). That
+per-Job limit stops one Job from filling a node; it does nothing about
+fifty scans' worth of Jobs at once, which an unbounded
+`POST /api/v1/artifacts/{id}/scan` allowed.
+
+`monitorApi.scanConcurrency` (`SCAN_CONCURRENCY`, **4** in the chart —
+so up to ~12 concurrent Jobs at the default `cveScanner`; multiply
+before changing it) caps how many scans run at once across the process. A request arriving
+with every slot busy waits up to 30s for one, then gets a `429` with
+`Retry-After` — so a burst slightly wider than the cap just queues, and
+only a genuinely saturated server sheds load:
+
+```bash
+curl -s -o /dev/null -w '%{http_code} %header{Retry-After}\n' \
+  -X POST localhost:8080/api/v1/artifacts/$ID/scan \
+  -H "Authorization: Bearer $API_KEY"
+# 429 30
+```
+
+A rejected request leaves the artifact untouched — it is never marked
+`scanning`. `0` disables the cap entirely (the binary's own default when
+the chart isn't in play). Note that per-key rate limiting
+(`RATE_LIMIT_RPS`) also answers `429`; the two are distinguishable by
+the error message. `cluster/load-test-clamav.sh` honors `Retry-After`
+and reports retries separately, so a load test at `PARALLELISM` above
+the cap still measures the scan pipeline rather than the cap.
+
 ### Requiring a verified digest at registration
 
 `expected_digest` above is normally optional, and a mismatch refuses the
