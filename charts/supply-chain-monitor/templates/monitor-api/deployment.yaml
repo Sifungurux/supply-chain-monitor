@@ -34,6 +34,13 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/monitor-api/configmap.yaml") . | sha256sum }}
     spec:
       serviceAccountName: monitor-api
+      # Matches the hardening every scan-worker Job already carries (see
+      # internal/k8sjob/job.go's NewScanJob): the API server has no more
+      # need for root or for a writable image than a scan worker does.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
       containers:
         - name: monitor-api
           image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
@@ -98,3 +105,28 @@ spec:
             failureThreshold: 6
           resources:
             {{- toYaml .Values.monitorApi.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # readOnlyRootFilesystem needs a writable /tmp: monitor-api
+            # is NOT write-free the way "all persistence goes through
+            # Postgres" suggests. main.go's writeDockerConfig does
+            # os.MkdirTemp + os.WriteFile at startup whenever registry
+            # credentials are configured (they are -- REGISTRY_USERNAME
+            # comes from scm-registry-credentials) and log.Fatalf's if
+            # that fails, so without this the pod CrashLoopBackOffs
+            # before it ever serves a request. FetchingScanner
+            # (internal/scanner/fetch.go) and the SBOM/SARIF document
+            # generation path do the same per request.
+            #
+            # This mirrors NewScanJob's own "scratch" emptyDir at /tmp --
+            # the hardening being matched here has always included it,
+            # for exactly this reason.
+            - name: scratch
+              mountPath: /tmp
+      volumes:
+        - name: scratch
+          emptyDir: {}

@@ -41,6 +41,20 @@ spec:
             app: scm-grype-db-refresh
         spec:
           restartPolicy: Never
+          # Same hardening the scan-worker Jobs carry (internal/k8sjob/
+          # job.go's NewScanJob), plus fsGroup -- which is load-bearing
+          # here, not decoration. This Job used to run as root and
+          # created its cache directories root-owned; a uid-65534
+          # process cannot write into those (measured: "Permission
+          # denied" touching scm-grype-db-cache/6). fsGroup makes
+          # kubelet recursively chgrp the volume to 65534 and add group
+          # write at mount time, which is what lets the non-root refresh
+          # keep updating a cache root created earlier by root.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            fsGroup: 65534
           containers:
             - name: grype-db-refresh
               image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
@@ -50,12 +64,22 @@ spec:
                   set -eu
                   echo "refreshing grype vulnerability DB in ${GRYPE_DB_CACHE_DIR}"
                   grype db update
-                  # Same 0700-directory problem the primer Job fixes,
-                  # and it has to be repeated here: a refresh that
-                  # installs a new schema version creates a fresh
-                  # subdirectory with the same restrictive mode. See
-                  # grype-db-cache-primer-job.yaml for the full symptom.
-                  chmod -R a+rX "${GRYPE_DB_CACHE_DIR}"
+                  # The 0700-directory problem this used to solve is
+                  # mostly gone now that this Job runs as 65534 -- the
+                  # same uid the scan-worker runs as -- so every
+                  # directory it creates is already owned and readable
+                  # by the reader. See grype-db-cache-primer-job.yaml
+                  # for the original symptom (grype silently returning
+                  # zero findings for four days).
+                  #
+                  # Kept, but best-effort: anything left over from when
+                  # this Job ran as root cannot be chmod'd by a
+                  # non-owner ("Operation not permitted"), and under
+                  # `set -eu` that would fail the whole refresh. Those
+                  # leftovers are already reachable via the fsGroup
+                  # above, so failing here would break a working refresh
+                  # to fix nothing.
+                  chmod -R a+rX "${GRYPE_DB_CACHE_DIR}" 2>/dev/null || true
                   echo "grype DB cache refreshed"
               env:
                 - name: GRYPE_DB_CACHE_DIR
