@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/api"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
 )
@@ -418,4 +419,24 @@ func TestPickArtifactsToSweep(t *testing.T) {
 			t.Fatalf("got %d artifacts, want 0", len(got))
 		}
 	})
+}
+
+// TestScanQueueWaitFitsInsideWriteTimeout guards the interaction that
+// made the scan concurrency cap's 429 unobservable in production: the
+// queue wait was set to exactly the http.Server WriteTimeout, so a
+// request that waited the full wait and then wrote its 429 raced the
+// write deadline and lost -- rejected clients saw a dropped connection
+// (curl 000), never the status code or Retry-After they were meant to
+// act on. Caught by measurement in-cluster, not by a test; this is the
+// test so the next edit to either value can't reintroduce it silently.
+func TestScanQueueWaitFitsInsideWriteTimeout(t *testing.T) {
+	if api.DefaultScanQueueWait >= httpWriteTimeout {
+		t.Fatalf("api.DefaultScanQueueWait (%s) must stay below httpWriteTimeout (%s) -- a queued scan's 429 needs time left on the write deadline to actually reach the client",
+			api.DefaultScanQueueWait, httpWriteTimeout)
+	}
+	// Not just below -- with room to spare, so writing the response
+	// isn't a photo finish on a loaded server.
+	if margin := httpWriteTimeout - api.DefaultScanQueueWait; margin < 5*time.Second {
+		t.Fatalf("only %s of margin between the scan queue wait and the write timeout -- too tight to reliably write a 429", margin)
+	}
 }

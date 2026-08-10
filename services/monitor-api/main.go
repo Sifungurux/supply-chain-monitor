@@ -42,6 +42,21 @@ func getenvBool(key string, fallback bool) bool {
 	return b
 }
 
+// httpWriteTimeout bounds how long a handler has to write its response
+// once the request's headers have been read. Named (not an inline
+// literal on the http.Server below) because it's a real ceiling on
+// other things: api.DefaultScanQueueWait has to fit inside it, or a
+// queued scan's 429 races this deadline and the client sees a dropped
+// connection instead of a status code -- see that constant's own
+// comment, and TestScanQueueWaitFitsInsideWriteTimeout.
+//
+// Note this also caps every *successful* synchronous scan response: a
+// scan that takes longer than this completes server-side (it runs on
+// context.Background()) but its caller never receives the result. That
+// predates the scan queue and is a bigger design question than a
+// timeout value -- see docs/architecture.md's known limitations.
+const httpWriteTimeout = 30 * time.Second
+
 func getenvInt(key string, fallback int) int {
 	v := os.Getenv(key)
 	if v == "" {
@@ -1142,7 +1157,7 @@ func runAPIServer() {
 		Addr:         listenAddr,
 		Handler:      router,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		WriteTimeout: httpWriteTimeout,
 	}
 
 	log.Printf("monitor-api listening on %s", listenAddr)

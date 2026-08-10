@@ -49,18 +49,29 @@ type handler struct {
 	scanSlots chan struct{}
 	// scanQueueWait bounds how long a scan request waits for a slot
 	// before giving up with a 429. Falls back to
-	// defaultScanQueueWait if zero.
+	// DefaultScanQueueWait if zero.
 	scanQueueWait time.Duration
 }
 
-// defaultScanQueueWait is how long a scan request waits for a free slot
+// DefaultScanQueueWait is how long a scan request waits for a free slot
 // before being rejected. Long enough that a burst slightly wider than
 // the cap (the dashboard's Scan buttons clicked in quick succession,
 // cluster/load-test-clamav.sh's PARALLELISM) mostly just queues and
 // succeeds; short enough that a genuinely saturated server sheds load
 // instead of accumulating connections that will each wait out a
 // multi-minute scan.
-const defaultScanQueueWait = 30 * time.Second
+//
+// It must stay comfortably BELOW main.go's http.Server WriteTimeout,
+// and that ceiling is the whole reason this isn't 30s: WriteTimeout
+// starts when the request headers are read, so a request that waits the
+// full queue wait and only then writes its 429 races the write deadline
+// -- and loses. At 30s against a 30s WriteTimeout the 429 was never
+// observable at all: a rejected client saw a dropped connection
+// (curl reports 000) instead of the status code and Retry-After it was
+// supposed to act on. Measured in-cluster, not theorized. main_test.go
+// asserts the relationship so a future edit to either value fails a
+// test rather than silently making rejections invisible again.
+const DefaultScanQueueWait = 10 * time.Second
 
 // errScanQueueFull means the wait above elapsed with every scan slot
 // still busy -- distinct from ctx.Err(), which means the client gave up
@@ -82,7 +93,7 @@ type ScanLimits struct {
 	// value reads as off" convention rateLimitRPS already uses.
 	Concurrency int
 	// QueueWait is how long a scan waits for a free slot before a 429.
-	// <= 0 means defaultScanQueueWait, matching how scanTimeout treats
+	// <= 0 means DefaultScanQueueWait, matching how scanTimeout treats
 	// a zero value.
 	QueueWait time.Duration
 }
@@ -105,7 +116,7 @@ func (h *handler) acquireScanSlot(ctx context.Context) (func(), error) {
 	}
 	wait := h.scanQueueWait
 	if wait <= 0 {
-		wait = defaultScanQueueWait
+		wait = DefaultScanQueueWait
 	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
