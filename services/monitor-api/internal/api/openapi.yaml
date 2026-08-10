@@ -61,15 +61,48 @@ paths:
   /api/v1/artifacts:
     get:
       tags: [artifacts]
-      summary: List every registered artifact
+      summary: List artifacts, newest first (paginated)
+      description: >-
+        Returns one page of artifacts. `total` (and the `X-Total-Count`
+        header) is how many artifacts match the filters, not how many are
+        in this page. Follow the `Link` header's `next`/`prev` relations
+        to page through the rest.
+      parameters:
+        - name: limit
+          in: query
+          description: Page size. Anything above 200 is a 400, not a silent clamp.
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          description: How many artifacts to skip.
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: status
+          in: query
+          description: >-
+            Only artifacts with this exact status. An unrecognized value
+            matches nothing (an empty page), it isn't an error.
+          schema: { type: string, example: scanned }
+        - name: type
+          in: query
+          description: Only artifacts of this exact type.
+          schema: { type: string, enum: [image, file, sbom, sarif] }
       responses:
         "200":
-          description: All artifacts.
+          description: One page of artifacts.
+          headers:
+            X-Total-Count:
+              description: Artifacts matching the filters, across all pages.
+              schema: { type: integer }
+            Link:
+              description: >-
+                RFC 5988 next/prev links (relative references), present
+                only when there is a page in that direction.
+              schema: { type: string }
+              example: '</api/v1/artifacts?limit=50&offset=50>; rel="next"'
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: "#/components/schemas/Artifact" }
+              schema: { $ref: "#/components/schemas/ArtifactPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
     post:
       tags: [artifacts]
       summary: Register one artifact
@@ -371,6 +404,21 @@ components:
       type: object
       properties:
         error: { type: string }
+
+    ArtifactPage:
+      type: object
+      required: [total, artifacts]
+      properties:
+        total:
+          type: integer
+          description: >-
+            Artifacts matching the filters across all pages -- not the
+            length of `artifacts`. Mirrors the X-Total-Count header, for
+            callers that can't read response headers.
+          example: 812
+        artifacts:
+          type: array
+          items: { $ref: "#/components/schemas/Artifact" }
 
     CreateArtifactRequest:
       type: object

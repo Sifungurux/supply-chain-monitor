@@ -659,3 +659,79 @@ func TestPostgresStore_MigratesLegacyJSONBSchema(t *testing.T) {
 		t.Fatalf("Get after reconnecting to an already-migrated schema: %v", err)
 	}
 }
+
+// TestPostgresStore_ListPage exercises the SQL that MemStore's own
+// ListPage can't: the built-up WHERE clause, its matching COUNT(*), and
+// LIMIT/OFFSET. Every assertion is scoped to the artifacts this test
+// creates (by ref prefix and by filtering on a type nothing else here
+// uses) so it doesn't fight the other tests sharing this database.
+func TestPostgresStore_ListPage(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	created := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		a, err := s.Create(fmt.Sprintf("listpage-test-%d:1.0", i), artifact.TypeSARIF)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		created = append(created, a.ID)
+		t.Cleanup(func() { _ = s.Delete(a.ID) })
+	}
+	// One of them scanned, so the status filter has something to select
+	// on that the other four don't match.
+	if _, err := s.Update(created[0], func(a *artifact.Artifact) { a.Status = artifact.StatusScanned }); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Type filter: total counts all five matches, the page holds two.
+	page, total, err := s.ListPage(2, 0, "", string(artifact.TypeSARIF))
+	if err != nil {
+		t.Fatalf("ListPage: %v", err)
+	}
+	if total != 5 {
+		t.Fatalf("total = %d, want 5 -- COUNT(*) must apply the same filter as the page query", total)
+	}
+	if len(page) != 2 {
+		t.Fatalf("page has %d artifacts, want 2 (LIMIT)", len(page))
+	}
+
+	// Paging with the same filter must partition the set: every id once,
+	// none missing.
+	seen := map[string]bool{}
+	for offset := 0; offset < total; offset += 2 {
+		p, _, err := s.ListPage(2, offset, "", string(artifact.TypeSARIF))
+		if err != nil {
+			t.Fatalf("ListPage(offset=%d): %v", offset, err)
+		}
+		for _, a := range p {
+			if seen[a.ID] {
+				t.Fatalf("artifact %s appeared on more than one page", a.ID)
+			}
+			seen[a.ID] = true
+		}
+	}
+	for _, id := range created {
+		if !seen[id] {
+			t.Fatalf("artifact %s never appeared on any page", id)
+		}
+	}
+
+	// Both filters together, and the batched child-loading still runs
+	// (Update above left a stage history behind to load).
+	page, total, err = s.ListPage(50, 0, string(artifact.StatusScanned), string(artifact.TypeSARIF))
+	if err != nil {
+		t.Fatalf("ListPage(status+type): %v", err)
+	}
+	if total != 1 || len(page) != 1 || page[0].ID != created[0] {
+		t.Fatalf("status+type filter returned total=%d len=%d, want exactly the scanned artifact %s", total, len(page), created[0])
+	}
+
+	// An offset past the end is an empty page, not an error.
+	page, total, err = s.ListPage(50, 500, "", string(artifact.TypeSARIF))
+	if err != nil {
+		t.Fatalf("ListPage(offset past end): %v", err)
+	}
+	if len(page) != 0 || total != 5 {
+		t.Fatalf("offset past the end: len=%d total=%d, want 0 and 5", len(page), total)
+	}
+}

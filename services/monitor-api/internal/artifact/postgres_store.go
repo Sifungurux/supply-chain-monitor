@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -63,14 +64,13 @@ var schemaStatements = []string{
 	// List() and FindByFindingID both `ORDER BY created_at DESC` over
 	// the whole artifacts table -- without an index, that's a full
 	// table scan plus an explicit sort on every single call, and both
-	// are hit on every dashboard load. Deliberately NOT indexing
-	// status or updated_at here even though they're an obvious-looking
-	// next target: neither column is actually filtered or sorted on
-	// anywhere in this codebase today (checked -- every WHERE clause on
-	// this table is `WHERE id = $1`), so an index on either would be
-	// pure write-path overhead (every INSERT/UPDATE has to maintain it)
-	// for zero current benefit. Add one if/when a real query needs it,
-	// e.g. a "show only failed artifacts" filter.
+	// are hit on every dashboard load. ListPage's optional
+	// `WHERE status = $1 / type = $1` filters are still served by this
+	// index alone (created_at leads, Postgres filters the rest): both
+	// columns have a handful of distinct values across the whole table,
+	// so an index on either would be near-useless for selectivity while
+	// costing every INSERT/UPDATE. Revisit if one status ever grows to
+	// dominate the table and its filtered page reads get slow.
 	`CREATE INDEX IF NOT EXISTS artifacts_created_at_idx ON artifacts (created_at DESC)`,
 	// Added for digest-based duplicate-registration detection (see
 	// FindByDigest below and internal/api/artifacts.go). Same
@@ -569,16 +569,17 @@ func (s *PostgresStore) Get(id string) (*Artifact, error) {
 	return a, nil
 }
 
-// List loads every artifact, then fills in findings/stage
-// history/errors with three batched queries total (one per child
-// table, using `WHERE artifact_id = ANY($1)`) rather than three per
-// artifact -- an N+1 query pattern that would otherwise scale linearly
-// with the number of artifacts returned.
-func (s *PostgresStore) List() ([]*Artifact, error) {
-	ctx := context.Background()
-	rows, err := s.pool.Query(ctx, selectArtifactColumns+" ORDER BY created_at DESC")
+// queryArtifacts runs an artifacts query, then fills in findings/stage
+// history/errors for every row it returned with four batched queries
+// total (one per child table, using `WHERE artifact_id = ANY($1)`)
+// rather than four per artifact -- an N+1 query pattern that would
+// otherwise scale linearly with the number of artifacts returned. Every
+// multi-row read (List, ListPage, FindByFindingID) goes through here so
+// none of them can quietly regress into N+1.
+func (s *PostgresStore) queryArtifacts(ctx context.Context, sql string, args ...any) ([]*Artifact, error) {
+	rows, err := s.pool.Query(ctx, sql, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list artifacts: %w", err)
+		return nil, err
 	}
 
 	out := make([]*Artifact, 0)
@@ -596,7 +597,7 @@ func (s *PostgresStore) List() ([]*Artifact, error) {
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return nil, fmt.Errorf("list artifacts: %w", err)
+		return nil, err
 	}
 	rows.Close()
 
@@ -604,9 +605,73 @@ func (s *PostgresStore) List() ([]*Artifact, error) {
 		return out, nil
 	}
 	if err := s.fillChildrenBatch(ctx, ids, byID); err != nil {
-		return nil, fmt.Errorf("load findings/history for listed artifacts: %w", err)
+		return nil, fmt.Errorf("load findings/history: %w", err)
 	}
 	return out, nil
+}
+
+// List loads every artifact, newest first.
+func (s *PostgresStore) List() ([]*Artifact, error) {
+	out, err := s.queryArtifacts(context.Background(), selectArtifactColumns+" ORDER BY created_at DESC")
+	if err != nil {
+		return nil, fmt.Errorf("list artifacts: %w", err)
+	}
+	return out, nil
+}
+
+// listFilterClause builds the shared WHERE clause (and its arguments)
+// for ListPage's page query and its COUNT(*) query, so the two can't
+// drift into filtering differently -- a count that doesn't match the
+// rows is exactly the bug that makes next/prev links point at empty
+// pages. Every value is a placeholder ($1, $2), never interpolated.
+func listFilterClause(statusFilter, typeFilter string) (string, []any) {
+	var clauses []string
+	var args []any
+	if statusFilter != "" {
+		args = append(args, statusFilter)
+		clauses = append(clauses, fmt.Sprintf("status = $%d", len(args)))
+	}
+	if typeFilter != "" {
+		args = append(args, typeFilter)
+		clauses = append(clauses, fmt.Sprintf("type = $%d", len(args)))
+	}
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(clauses, " AND "), args
+}
+
+// ListPage is List plus filtering, LIMIT/OFFSET and a total count --
+// see the Store interface's own comment. `ORDER BY created_at DESC,
+// id DESC` rather than created_at alone: two artifacts registered in
+// the same instant (routine for a bulk registration, which inserts a
+// batch as fast as it can) are otherwise ordered arbitrarily by
+// Postgres, and offset paging over an unstable order silently skips
+// and repeats rows between pages. The artifacts_created_at_idx index
+// still serves the created_at leg; id only breaks ties.
+//
+// The count query is deliberately a second round trip rather than a
+// window function (`COUNT(*) OVER ()`) tacked onto the page query:
+// the window variant returns the count on every row of the page, which
+// means scanArtifactRow's column list would have to differ between
+// List and ListPage -- and that column list is shared by Get/Update
+// too.
+func (s *PostgresStore) ListPage(limit, offset int, statusFilter, typeFilter string) ([]*Artifact, int, error) {
+	ctx := context.Background()
+	where, args := listFilterClause(statusFilter, typeFilter)
+
+	var total int
+	if err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM artifacts"+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count artifacts: %w", err)
+	}
+
+	pageSQL := selectArtifactColumns + where +
+		fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+	out, err := s.queryArtifacts(ctx, pageSQL, append(append([]any{}, args...), limit, offset)...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list artifacts page: %w", err)
+	}
+	return out, total, nil
 }
 
 func (s *PostgresStore) fillChildrenBatch(ctx context.Context, ids []string, byID map[string]*Artifact) error {
@@ -854,39 +919,12 @@ func (s *PostgresStore) Delete(id string) error {
 // artifact row. See docs/architecture.md, "Normalizing findings and
 // stage history into their own tables."
 func (s *PostgresStore) FindByFindingID(findingID string) ([]*Artifact, error) {
-	ctx := context.Background()
-	rows, err := s.pool.Query(ctx, selectArtifactColumns+`
+	out, err := s.queryArtifacts(context.Background(), selectArtifactColumns+`
 		WHERE id IN (SELECT DISTINCT artifact_id FROM findings WHERE finding_id = $1)
 		ORDER BY created_at DESC
 	`, findingID)
 	if err != nil {
 		return nil, fmt.Errorf("find artifacts by finding id: %w", err)
-	}
-
-	out := make([]*Artifact, 0)
-	ids := make([]string, 0)
-	byID := make(map[string]*Artifact)
-	for rows.Next() {
-		a, err := scanArtifactRow(rows)
-		if err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scan artifact row: %w", err)
-		}
-		out = append(out, a)
-		ids = append(ids, a.ID)
-		byID[a.ID] = a
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, fmt.Errorf("find artifacts by finding id: %w", err)
-	}
-	rows.Close()
-
-	if len(ids) == 0 {
-		return out, nil
-	}
-	if err := s.fillChildrenBatch(ctx, ids, byID); err != nil {
-		return nil, fmt.Errorf("load findings/history for matched artifacts: %w", err)
 	}
 	return out, nil
 }

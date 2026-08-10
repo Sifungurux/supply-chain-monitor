@@ -492,7 +492,7 @@ func runSweepRegistered() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	all, err := listArtifactsFromAPI(ctx, apiBase, apiKey)
+	all, err := listRegisteredFromAPI(ctx, apiBase, apiKey)
 	if err != nil {
 		log.Fatalf("sweep-registered: could not list artifacts: %v", err)
 	}
@@ -556,31 +556,67 @@ func countByStatus(all []artifact.Artifact, status artifact.Status) int {
 	return n
 }
 
-// listArtifactsFromAPI calls GET /api/v1/artifacts against monitor-api's
-// own Service -- see runSweepRegistered's own comment for why this goes
-// through the API rather than a direct Postgres connection.
-func listArtifactsFromAPI(ctx context.Context, apiBase, apiKey string) ([]artifact.Artifact, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(apiBase, "/")+"/api/v1/artifacts", nil)
-	if err != nil {
-		return nil, fmt.Errorf("build list request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+// sweepPageSize is how many artifacts one listRegisteredFromAPI page
+// request asks for -- monitor-api's own maximum (see maxListLimit in
+// internal/api/artifacts.go), since this is a batch job that wants the
+// whole backlog in as few round trips as it can get, not a UI paging
+// through it.
+const sweepPageSize = 200
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list artifacts: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("list artifacts: server returned %d: %s", resp.StatusCode, string(body))
-	}
-
+// listRegisteredFromAPI calls GET /api/v1/artifacts against
+// monitor-api's own Service -- see runSweepRegistered's own comment for
+// why this goes through the API rather than a direct Postgres
+// connection.
+//
+// That endpoint is paginated (50 per page by default, 200 max), so this
+// walks every page rather than assuming one response holds the lot:
+// pickArtifactsToSweep picks the *oldest* registered artifacts, and the
+// API returns newest-first, so stopping after one page would starve
+// exactly the artifacts the sweep exists to get to. The status filter
+// is pushed server-side, so the pages only carry rows this actually
+// wants -- countByStatus over the result is still correct, it just
+// counts everything now.
+func listRegisteredFromAPI(ctx context.Context, apiBase, apiKey string) ([]artifact.Artifact, error) {
 	var all []artifact.Artifact
-	if err := json.NewDecoder(resp.Body).Decode(&all); err != nil {
-		return nil, fmt.Errorf("decode artifact list: %w", err)
+	for offset := 0; ; {
+		url := fmt.Sprintf("%s/api/v1/artifacts?status=%s&limit=%d&offset=%d",
+			strings.TrimRight(apiBase, "/"), artifact.StatusRegistered, sweepPageSize, offset)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("build list request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("list artifacts: %w", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			return nil, fmt.Errorf("list artifacts: server returned %d: %s", resp.StatusCode, string(body))
+		}
+		var page struct {
+			Total     int                 `json:"total"`
+			Artifacts []artifact.Artifact `json:"artifacts"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&page)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("decode artifact list: %w", err)
+		}
+
+		all = append(all, page.Artifacts...)
+		// Advance by what actually came back, and stop on an empty page
+		// regardless of what Total claims -- the only guard against
+		// looping forever if the two ever disagree (they can legitimately
+		// disagree mid-sweep: artifacts get registered and scanned while
+		// this runs).
+		if len(page.Artifacts) == 0 || len(all) >= page.Total {
+			return all, nil
+		}
+		offset += len(page.Artifacts)
 	}
-	return all, nil
 }
 
 // scanArtifactViaAPI calls POST /api/v1/artifacts/{id}/scan -- the same

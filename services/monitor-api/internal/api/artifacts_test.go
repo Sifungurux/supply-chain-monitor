@@ -2,7 +2,9 @@ package api_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -84,12 +86,9 @@ func TestBulkCreateArtifacts_Success(t *testing.T) {
 
 	// Confirm they actually landed in the store, not just echoed back.
 	listRec := doJSON(t, h, http.MethodGet, "/api/v1/artifacts", nil)
-	var list []artifact.Artifact
-	if err := json.Unmarshal(listRec.Body.Bytes(), &list); err != nil {
-		t.Fatalf("decode list: %v", err)
-	}
-	if len(list) != 3 {
-		t.Fatalf("store has %d artifacts, want 3", len(list))
+	page := decodeArtifactPage(t, listRec)
+	if len(page.Artifacts) != 3 {
+		t.Fatalf("store has %d artifacts, want 3", len(page.Artifacts))
 	}
 }
 
@@ -650,12 +649,9 @@ func TestListAndGetArtifact(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	var list []artifact.Artifact
-	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(list) != 0 {
-		t.Fatalf("expected empty list, got %d", len(list))
+	page := decodeArtifactPage(t, rec)
+	if len(page.Artifacts) != 0 || page.Total != 0 {
+		t.Fatalf("expected an empty page, got total=%d len=%d", page.Total, len(page.Artifacts))
 	}
 
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
@@ -702,11 +698,7 @@ func TestDeleteArtifact_Success(t *testing.T) {
 	}
 
 	rec = doJSON(t, h, http.MethodGet, "/api/v1/artifacts", nil)
-	var list []artifact.Artifact
-	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
-		t.Fatalf("decode list: %v", err)
-	}
-	for _, a := range list {
+	for _, a := range decodeArtifactPage(t, rec).Artifacts {
 		if a.ID == created.ID {
 			t.Fatalf("List after delete still includes the deleted artifact: %+v", a)
 		}
@@ -753,3 +745,158 @@ func TestDeleteArtifact_DeletingTwiceReturns404TheSecondTime(t *testing.T) {
 // their own tables") -- MemStore's FindByFindingID is a linear scan,
 // PostgresStore's is an indexed query, but findings.go doesn't know or
 // care which Store it's talking to.
+
+// TestListArtifacts_Pagination walks a 5-artifact store two at a time
+// and checks the pages partition the set: no artifact appears twice, and
+// nothing goes missing. That's the property offset paging actually has
+// to hold, and the one an unstable sort order silently breaks -- which
+// is why both stores order by (created_at DESC, id DESC) rather than
+// created_at alone.
+func TestListArtifacts_Pagination(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	want := map[string]bool{}
+	for _, ref := range []string{"a:1", "b:1", "c:1", "d:1", "e:1"} {
+		want[mustCreate(t, store, ref, artifact.TypeImage).ID] = true
+	}
+
+	seen := map[string]bool{}
+	for _, tc := range []struct {
+		offset   int
+		wantLen  int
+		wantNext bool
+		wantPrev bool
+	}{
+		{offset: 0, wantLen: 2, wantNext: true, wantPrev: false},
+		{offset: 2, wantLen: 2, wantNext: true, wantPrev: true},
+		{offset: 4, wantLen: 1, wantNext: false, wantPrev: true},
+		{offset: 6, wantLen: 0, wantNext: false, wantPrev: true}, // past the end
+	} {
+		path := fmt.Sprintf("/api/v1/artifacts?limit=2&offset=%d", tc.offset)
+		rec := doJSON(t, h, http.MethodGet, path, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("offset=%d: status = %d, want 200, body=%s", tc.offset, rec.Code, rec.Body.String())
+		}
+		page := decodeArtifactPage(t, rec)
+		if page.Total != 5 {
+			t.Fatalf("offset=%d: total = %d, want 5", tc.offset, page.Total)
+		}
+		if got := rec.Header().Get("X-Total-Count"); got != "5" {
+			t.Fatalf("offset=%d: X-Total-Count = %q, want %q", tc.offset, got, "5")
+		}
+		if len(page.Artifacts) != tc.wantLen {
+			t.Fatalf("offset=%d: page has %d artifacts, want %d", tc.offset, len(page.Artifacts), tc.wantLen)
+		}
+		link := rec.Header().Get("Link")
+		if strings.Contains(link, `rel="next"`) != tc.wantNext {
+			t.Fatalf("offset=%d: Link = %q, want next=%v", tc.offset, link, tc.wantNext)
+		}
+		if strings.Contains(link, `rel="prev"`) != tc.wantPrev {
+			t.Fatalf("offset=%d: Link = %q, want prev=%v", tc.offset, link, tc.wantPrev)
+		}
+		for _, a := range page.Artifacts {
+			if seen[a.ID] {
+				t.Fatalf("offset=%d: artifact %s (%s) appeared on more than one page", tc.offset, a.ID, a.Ref)
+			}
+			seen[a.ID] = true
+		}
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("paging saw %d artifacts, want all %d", len(seen), len(want))
+	}
+	for id := range want {
+		if !seen[id] {
+			t.Fatalf("artifact %s never appeared on any page", id)
+		}
+	}
+}
+
+// TestListArtifacts_Filters covers both filters, including that total
+// counts the *matching* artifacts rather than everything in the store --
+// a total that ignores the filter would make the dashboard's next link
+// point at an empty page.
+func TestListArtifacts_Filters(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	scanned := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	mustCreate(t, store, "busybox:latest", artifact.TypeImage)
+	sbom := mustCreate(t, store, "/tmp/app.sbom.json", artifact.TypeSBOM)
+	if _, err := store.Update(scanned.ID, func(a *artifact.Artifact) { a.Status = artifact.StatusScanned }); err != nil {
+		t.Fatalf("store.Update: %v", err)
+	}
+
+	for _, tc := range []struct {
+		query  string
+		wantID string
+	}{
+		{query: "status=scanned", wantID: scanned.ID},
+		{query: "type=sbom", wantID: sbom.ID},
+		{query: "status=scanned&type=sbom", wantID: ""}, // both filters apply, nothing matches
+		{query: "status=banana", wantID: ""},            // unknown value is an empty page, not a 400
+	} {
+		rec := doJSON(t, h, http.MethodGet, "/api/v1/artifacts?"+tc.query, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200, body=%s", tc.query, rec.Code, rec.Body.String())
+		}
+		page := decodeArtifactPage(t, rec)
+		if tc.wantID == "" {
+			if page.Total != 0 || len(page.Artifacts) != 0 {
+				t.Fatalf("%s: total=%d len=%d, want an empty page", tc.query, page.Total, len(page.Artifacts))
+			}
+			continue
+		}
+		if page.Total != 1 || len(page.Artifacts) != 1 {
+			t.Fatalf("%s: total=%d len=%d, want exactly 1", tc.query, page.Total, len(page.Artifacts))
+		}
+		if page.Artifacts[0].ID != tc.wantID {
+			t.Fatalf("%s: matched %s (%s), want %s", tc.query, page.Artifacts[0].ID, page.Artifacts[0].Ref, tc.wantID)
+		}
+	}
+}
+
+// TestListArtifacts_RejectsBadBounds -- an out-of-range limit is a 400
+// rather than a silent clamp, so a caller asking for 1000 finds out it
+// isn't getting 1000 (see maxListLimit's own comment). Negative/
+// non-numeric values are rejected here at the HTTP boundary because
+// neither Store can do anything sensible with them.
+func TestListArtifacts_RejectsBadBounds(t *testing.T) {
+	h, _ := newTestRouter(scanner.Registry{})
+
+	for _, query := range []string{
+		"limit=201",
+		"limit=1000",
+		"limit=0",
+		"limit=-1",
+		"limit=fifty",
+		"offset=-1",
+		"offset=abc",
+	} {
+		rec := doJSON(t, h, http.MethodGet, "/api/v1/artifacts?"+query, nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d, want 400, body=%s", query, rec.Code, rec.Body.String())
+		}
+	}
+
+	// The boundary itself is fine -- 200 is allowed, 201 isn't.
+	rec := doJSON(t, h, http.MethodGet, "/api/v1/artifacts?limit=200", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("limit=200: status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestListArtifacts_DefaultLimit confirms the default page size caps a
+// store bigger than one page -- the whole point of the change (the
+// dashboard polls this endpoint every 10s).
+func TestListArtifacts_DefaultLimit(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	for i := 0; i < 55; i++ {
+		mustCreate(t, store, fmt.Sprintf("img:%d", i), artifact.TypeImage)
+	}
+
+	rec := doJSON(t, h, http.MethodGet, "/api/v1/artifacts", nil)
+	page := decodeArtifactPage(t, rec)
+	if page.Total != 55 {
+		t.Fatalf("total = %d, want 55", page.Total)
+	}
+	if len(page.Artifacts) != 50 {
+		t.Fatalf("default page has %d artifacts, want 50", len(page.Artifacts))
+	}
+}

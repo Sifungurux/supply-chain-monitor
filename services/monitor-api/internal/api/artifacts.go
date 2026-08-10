@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -392,13 +395,118 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, bulkCreateArtifactsResponse{Created: created, Failed: failed, Duplicates: duplicates, Results: results})
 }
 
+// defaultListLimit/maxListLimit bound one page of GET
+// /api/v1/artifacts. The endpoint used to return every artifact in the
+// store on every call -- with the dashboard polling it every 10s, that
+// grows without bound as artifacts accumulate, dragging every
+// artifact's full findings/stage history through the wire each time.
+// maxListLimit is the same "cap rather than trust an unbounded number"
+// reasoning maxBulkArtifacts already applies to the registration path,
+// and it's enforced as a 400 rather than a silent clamp so a caller
+// asking for 1000 finds out it isn't getting 1000.
+const (
+	defaultListLimit = 50
+	maxListLimit     = 200
+)
+
+// parseListBound parses one non-negative integer query param, returning
+// def when it's absent/empty. Rejects anything non-numeric or negative
+// -- neither store can do anything sensible with a negative offset
+// (Postgres errors, a slice panics), so this is the trust boundary that
+// keeps them from ever seeing one.
+func parseListBound(raw string, def int) (int, error) {
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("must be a non-negative integer, got %q", raw)
+	}
+	return n, nil
+}
+
+// pageLink builds one RFC 5988 Link header entry, as a relative
+// reference (`</api/v1/artifacts?limit=50&offset=50>`) rather than an
+// absolute URL: monitor-api sits behind a Kubernetes Service and, in
+// the dashboard's case, is reached at whatever base the browser was
+// pointed at, so it can't know its own scheme/host -- and a relative
+// reference is a perfectly valid link target (RFC 3986 §4.2).
+// Preserves the caller's filters so paging doesn't silently drop them.
+func pageLink(r *http.Request, limit, offset int, rel string) string {
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(limit))
+	q.Set("offset", strconv.Itoa(offset))
+	for _, name := range []string{"status", "type"} {
+		if v := r.URL.Query().Get(name); v != "" {
+			q.Set(name, v)
+		}
+	}
+	return fmt.Sprintf("<%s?%s>; rel=%q", r.URL.Path, q.Encode(), rel)
+}
+
+type listArtifactsResponse struct {
+	// Total is how many artifacts match the filters, not how many are
+	// in this page -- what a caller needs to render "50 of 812" or
+	// decide whether another page exists. Mirrors the X-Total-Count
+	// header for callers that can't read response headers (a
+	// cross-origin browser fetch only sees headers named in
+	// Access-Control-Expose-Headers -- see withCORS).
+	Total     int                  `json:"total"`
+	Artifacts []*artifact.Artifact `json:"artifacts"`
+}
+
+// listArtifacts returns one page of artifacts, newest first. The
+// response is an object wrapping the array (rather than the bare array
+// it used to return) specifically so the total can travel in the body
+// -- see listArtifactsResponse.Total.
 func (h *handler) listArtifacts(w http.ResponseWriter, r *http.Request) {
-	list, err := h.store.List()
+	q := r.URL.Query()
+	limit, err := parseListBound(q.Get("limit"), defaultListLimit)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "limit "+err.Error())
+		return
+	}
+	offset, err := parseListBound(q.Get("offset"), 0)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "offset "+err.Error())
+		return
+	}
+	if limit < 1 {
+		writeError(w, http.StatusBadRequest, "limit must be at least 1")
+		return
+	}
+	if limit > maxListLimit {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("limit must be %d or less", maxListLimit))
+		return
+	}
+
+	// status/type are passed through to the store unvalidated: they're
+	// bound as query parameters (never interpolated into SQL), and an
+	// unrecognized value legitimately matches nothing -- an empty page
+	// is a truthful answer to "show me artifacts with status=banana,"
+	// where a 400 would just be a second enum to keep in sync.
+	list, total, err := h.store.ListPage(limit, offset, q.Get("status"), q.Get("type"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, list)
+
+	links := make([]string, 0, 2)
+	if offset+limit < total {
+		links = append(links, pageLink(r, limit, offset+limit, "next"))
+	}
+	if offset > 0 {
+		prev := offset - limit
+		if prev < 0 {
+			prev = 0
+		}
+		links = append(links, pageLink(r, limit, prev, "prev"))
+	}
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
+	if len(links) > 0 {
+		w.Header().Set("Link", strings.Join(links, ", "))
+	}
+	writeJSON(w, http.StatusOK, listArtifactsResponse{Total: total, Artifacts: list})
 }
 
 func (h *handler) getArtifact(w http.ResponseWriter, r *http.Request) {

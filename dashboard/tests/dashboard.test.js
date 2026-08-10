@@ -56,6 +56,19 @@ const SAMPLE_ARTIFACTS = [
   }
 ];
 
+// GET /api/v1/artifacts is paginated server-side: the dashboard asks
+// for `?limit=50&offset=0` (plus any status/type filter) and reads a
+// {total, artifacts} object rather than a bare array. These two helpers
+// keep every mock below matching the real URL shape and returning the
+// real body shape.
+function isArtifactsList(url) {
+  return /\/api\/v1\/artifacts(\?|$)/.test(url);
+}
+
+function artifactsPage(list) {
+  return jsonResponse({ total: list.length, artifacts: list });
+}
+
 function jsonResponse(data) {
   return Promise.resolve({
     ok: true,
@@ -128,7 +141,7 @@ test('renders artifact rows, summary cards, and stage pills from a live API resp
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(SAMPLE_ARTIFACTS);
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
       return errorResponse(404, { error: 'not found' });
     }
   });
@@ -159,7 +172,7 @@ test('Details navigates to the artifact detail page with last-scan/digest/CVE/ma
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(SAMPLE_ARTIFACTS);
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
       return errorResponse(404, {});
     }
   });
@@ -212,7 +225,7 @@ test('a bookmarked detail URL resolves once the artifact list loads, and an unkn
     url: 'http://localhost:30301/#/artifacts/a1',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(SAMPLE_ARTIFACTS);
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
       return errorResponse(404, {});
     }
   });
@@ -247,7 +260,7 @@ test('the detail page shows a download button only for documents that have actua
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(artifacts);
+      if (isArtifactsList(url)) return artifactsPage(artifacts);
       return errorResponse(404, {});
     }
   });
@@ -280,7 +293,7 @@ test('clicking a document download button fetches it with the API key and trigge
     url: 'http://localhost:30301/',
     fetchImpl(url, opts) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(artifacts);
+      if (isArtifactsList(url)) return artifactsPage(artifacts);
       if (url.endsWith('/api/v1/artifacts/d1/documents/sbom')) {
         capturedRequest = { url, headers: (opts && opts.headers) || {} };
         return Promise.resolve({
@@ -330,7 +343,7 @@ test('search filters the artifact table by ref, digest, stage, and CVE/malware i
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(SAMPLE_ARTIFACTS);
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
       return errorResponse(404, {});
     }
   });
@@ -395,7 +408,7 @@ test('search matches maintainer team/email, and shows a distinct message when no
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(artifactsWithMaintainer);
+      if (isArtifactsList(url)) return artifactsPage(artifactsWithMaintainer);
       return errorResponse(404, {});
     }
   });
@@ -426,7 +439,10 @@ test('search matches maintainer team/email, and shows a distinct message when no
   type('no-such-artifact-zzz');
   const emptyRow = doc.querySelector('#artifact-rows tr .empty');
   assert.ok(emptyRow, 'a no-match row is shown');
-  assert.match(emptyRow.textContent, /No artifacts match "no-such-artifact-zzz"/);
+  // The message says "on this page" now: search only filters the page
+  // the server sent, so it points at the status/type filters for
+  // narrowing the whole set (see the note under the search box).
+  assert.match(emptyRow.textContent, /No artifacts on this page match "no-such-artifact-zzz"/);
 
   dom.window.close();
 });
@@ -460,7 +476,7 @@ test('search matches an artifact id, but not a finding that has since been fixed
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(withFixed);
+      if (isArtifactsList(url)) return artifactsPage(withFixed);
       return errorResponse(404, {});
     }
   });
@@ -491,7 +507,7 @@ test('editing maintainer on the detail page POSTs to the maintainer endpoint and
     fetchImpl(url, opts) {
       calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(SAMPLE_ARTIFACTS);
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
       if (url.endsWith('/a1/maintainer') && opts && opts.method === 'POST') {
         const sent = JSON.parse(opts.body);
         return jsonResponse({ ...SAMPLE_ARTIFACTS[0], maintainer_team: sent.team, maintainer_email: sent.email });
@@ -534,7 +550,7 @@ test('shows an empty-state row, not a blank table, when there are no artifacts',
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
   });
@@ -553,7 +569,7 @@ test('the empty-state row points at "Register one above" only when the register 
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
@@ -593,7 +609,7 @@ test("defaults the API base to the dashboard's own host on port 30300, not a har
     url: 'http://192.168.64.12:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
   });
@@ -623,7 +639,7 @@ test('escapes user-supplied artifact data before it reaches innerHTML', async ()
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(malicious);
+      if (isArtifactsList(url)) return artifactsPage(malicious);
       return errorResponse(404, {});
     }
   });
@@ -655,7 +671,7 @@ test('renders SARIF/other findings in their own count column and detail section'
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(withOther);
+      if (isArtifactsList(url)) return artifactsPage(withOther);
       return errorResponse(404, {});
     }
   });
@@ -699,7 +715,7 @@ test('renders misconfiguration and secret findings in their own count columns an
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(withMisconfigAndSecret);
+      if (isArtifactsList(url)) return artifactsPage(withMisconfigAndSecret);
       return errorResponse(404, {});
     }
   });
@@ -758,7 +774,7 @@ test('a fixed finding shows a Fixed badge, dims, and drops out of open-finding c
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(withFixed);
+      if (isArtifactsList(url)) return artifactsPage(withFixed);
       return errorResponse(404, {});
     }
   });
@@ -793,7 +809,7 @@ test('an artifact registered unsafe (REQUIRE_DIGEST mismatch) shows an Unsafe ba
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(withUnsafe);
+      if (isArtifactsList(url)) return artifactsPage(withUnsafe);
       return errorResponse(404, {});
     }
   });
@@ -837,7 +853,7 @@ test('a finding first seen on the artifact\'s most recent update gets a New badg
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(withNew);
+      if (isArtifactsList(url)) return artifactsPage(withNew);
       return errorResponse(404, {});
     }
   });
@@ -863,7 +879,7 @@ test('sends the saved API key as a Bearer Authorization header on every request'
     fetchImpl(url, opts) {
       calls.push({ url, headers: (opts && opts.headers) || {} });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
@@ -907,7 +923,7 @@ test('saving the form persists the API key to localStorage and re-sends it', asy
     fetchImpl(url, opts) {
       calls.push({ url, headers: (opts && opts.headers) || {} });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
   });
@@ -931,7 +947,7 @@ test('uses window.SCM_CONFIG (injected by the render-config initContainer) when 
     fetchImpl(url, opts) {
       calls.push({ url, headers: (opts && opts.headers) || {} });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
@@ -961,7 +977,7 @@ test('a value saved in localStorage still overrides window.SCM_CONFIG', async ()
     fetchImpl(url, opts) {
       calls.push({ url, headers: (opts && opts.headers) || {} });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
@@ -984,7 +1000,7 @@ test('falls back to the old manual-entry behavior when window.SCM_CONFIG is abse
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
   });
@@ -1003,7 +1019,7 @@ test('the "+ Register an artifact" link stays hidden unless allowManualRegistrat
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
   });
@@ -1016,7 +1032,7 @@ test('the "+ Register an artifact" link stays hidden unless allowManualRegistrat
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
@@ -1032,7 +1048,7 @@ test('the "+ Register an artifact" link stays hidden unless allowManualRegistrat
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
@@ -1052,7 +1068,7 @@ test('the connection settings (API/Key/Refresh/status) stay visible unless showC
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
   });
@@ -1065,7 +1081,7 @@ test('the connection settings (API/Key/Refresh/status) stay visible unless showC
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
@@ -1081,7 +1097,7 @@ test('the connection settings (API/Key/Refresh/status) stay visible unless showC
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
@@ -1098,7 +1114,7 @@ test('an error stays visible even with showConnectionSettings: "false" -- a brok
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
@@ -1132,10 +1148,10 @@ test('clicking "+ Register an artifact" opens the register modal, closing on out
     url: 'http://localhost:30301/',
     fetchImpl(url, opts) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts') && opts && opts.method === 'POST') {
+      if (isArtifactsList(url) && opts && opts.method === 'POST') {
         return jsonResponse({ id: 'new1', ...JSON.parse(opts.body) });
       }
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
@@ -1190,12 +1206,12 @@ test('register form POSTs the entered ref/type and reloads the list', async () =
     fetchImpl(url, opts) {
       calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts') && opts && opts.method === 'POST') {
+      if (isArtifactsList(url) && opts && opts.method === 'POST') {
         registered = true;
         return jsonResponse({ id: 'new1', ...JSON.parse(opts.body) });
       }
-      if (url.endsWith('/api/v1/artifacts')) {
-        return jsonResponse(registered ? SAMPLE_ARTIFACTS.slice(0, 1) : []);
+      if (isArtifactsList(url)) {
+        return artifactsPage(registered ? SAMPLE_ARTIFACTS.slice(0, 1) : []);
       }
       return errorResponse(404, {});
     }
@@ -1228,10 +1244,10 @@ test('registering with maintainer team + email sends both fields and clears them
     fetchImpl(url, opts) {
       calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts') && opts && opts.method === 'POST') {
+      if (isArtifactsList(url) && opts && opts.method === 'POST') {
         return jsonResponse({ id: 'new1', ...JSON.parse(opts.body) });
       }
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
   });
@@ -1263,7 +1279,7 @@ test('registering with only maintainer team (no email) is rejected client-side w
     fetchImpl(url, opts) {
       calls.push({ url, method: (opts && opts.method) || 'GET' });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
   });
@@ -1289,10 +1305,10 @@ test('filling in the expected-digest field sends expected_digest and surfaces a 
     fetchImpl(url, opts) {
       calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts') && opts && opts.method === 'POST') {
+      if (isArtifactsList(url) && opts && opts.method === 'POST') {
         return errorResponse(409, { error: 'resolved digest does not match the expected digest -- registration refused' });
       }
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
   });
@@ -1325,10 +1341,10 @@ test('leaving the expected-digest field blank registers normally, with no expect
     fetchImpl(url, opts) {
       calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts') && opts && opts.method === 'POST') {
+      if (isArtifactsList(url) && opts && opts.method === 'POST') {
         return jsonResponse({ id: 'new1', ...JSON.parse(opts.body) });
       }
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
   });
@@ -1361,8 +1377,8 @@ test('clicking Delete and confirming sends a DELETE request and reloads the list
         deleted = true;
         return jsonResponse({});
       }
-      if (url.endsWith('/api/v1/artifacts')) {
-        return jsonResponse(deleted ? SAMPLE_ARTIFACTS.slice(1) : SAMPLE_ARTIFACTS);
+      if (isArtifactsList(url)) {
+        return artifactsPage(deleted ? SAMPLE_ARTIFACTS.slice(1) : SAMPLE_ARTIFACTS);
       }
       return errorResponse(404, {});
     },
@@ -1404,8 +1420,8 @@ test('clicking Delete from the detail page removes the artifact and navigates ba
         deleted = true;
         return jsonResponse({});
       }
-      if (url.endsWith('/api/v1/artifacts')) {
-        return jsonResponse(deleted ? SAMPLE_ARTIFACTS.slice(1) : SAMPLE_ARTIFACTS);
+      if (isArtifactsList(url)) {
+        return artifactsPage(deleted ? SAMPLE_ARTIFACTS.slice(1) : SAMPLE_ARTIFACTS);
       }
       return errorResponse(404, {});
     },
@@ -1442,7 +1458,7 @@ test('clicking Delete and cancelling the confirm dialog makes no request', async
       const method = (opts && opts.method) || 'GET';
       calls.push({ url, method });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/artifacts')) return jsonResponse(SAMPLE_ARTIFACTS);
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
@@ -1458,6 +1474,81 @@ test('clicking Delete and cancelling the confirm dialog makes no request', async
 
   assert.ok(!calls.some((c) => c.method === 'DELETE'), 'no DELETE call should be made when the user cancels');
   assert.equal(doc.querySelectorAll('#artifact-rows tr[data-id]').length, 3, 'list unchanged');
+
+  dom.window.close();
+});
+
+// The list endpoint is paginated server-side, so the dashboard sends
+// limit/offset and drives Previous/Next off the total the server
+// reports -- these two tests pin the request it actually makes, which
+// is the part a stale offset or a dropped filter breaks silently.
+test('Next and Previous request the neighbouring page and show the current range', async () => {
+  const requested = [];
+  const page = (offset) => SAMPLE_ARTIFACTS.slice(0, 1).map((a) => ({ ...a, id: 'p' + offset }));
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (isArtifactsList(url)) {
+        requested.push(url);
+        const offset = Number(new URL(url, 'http://x').searchParams.get('offset'));
+        // 120 artifacts total: page 1 has a next, and offset 50 has both.
+        return jsonResponse({ total: 120, artifacts: page(offset) });
+      }
+      return errorResponse(404, { error: 'not found' });
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  assert.match(requested[0], /limit=50&offset=0/);
+  assert.match(doc.getElementById('page-range').textContent, /1–50 of 120/);
+  assert.equal(doc.getElementById('page-prev').disabled, true, 'no previous page from offset 0');
+  assert.equal(doc.getElementById('page-next').disabled, false);
+
+  doc.getElementById('page-next').click();
+  await tick(20);
+  assert.match(requested[requested.length - 1], /limit=50&offset=50/);
+  assert.match(doc.getElementById('page-range').textContent, /51–100 of 120/);
+  assert.equal(doc.getElementById('page-prev').disabled, false);
+
+  doc.getElementById('page-prev').click();
+  await tick(20);
+  assert.match(requested[requested.length - 1], /limit=50&offset=0/);
+
+  dom.window.close();
+});
+
+test('choosing a status filter sends it to the server and returns to the first page', async () => {
+  const requested = [];
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (isArtifactsList(url)) {
+        requested.push(url);
+        return jsonResponse({ total: 120, artifacts: SAMPLE_ARTIFACTS.slice(0, 1) });
+      }
+      return errorResponse(404, { error: 'not found' });
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  doc.getElementById('page-next').click();
+  await tick(20);
+  assert.match(requested[requested.length - 1], /offset=50/);
+
+  const status = doc.getElementById('filter-status');
+  status.value = 'scanned';
+  status.dispatchEvent(new dom.window.Event('change'));
+  await tick(20);
+
+  const last = requested[requested.length - 1];
+  assert.match(last, /status=scanned/, 'the filter is applied by the server, not client-side');
+  assert.match(last, /offset=0/, 'changing a filter goes back to the first page');
 
   dom.window.close();
 });
