@@ -167,8 +167,9 @@
   #status { font-size: 12px; color: var(--text-muted); }
   #status.error { color: var(--danger); }
   section { margin-bottom: 28px; }
-  .search-row { display: flex; justify-content: center; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 6px; }
+  .search-row { display: flex; justify-content: center; margin: 0 0 8px; }
   #search-input { width: 320px; max-width: 100%; }
+  .filter-row { display: flex; justify-content: center; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 6px; }
   .search-note { text-align: center; font-size: 12px; color: var(--text-muted); margin: 0 0 14px; }
   .pager { display: flex; justify-content: center; align-items: center; gap: 10px; margin: 12px 0 0; font-size: 13px; }
   .pager .range { color: var(--text-muted); font-family: var(--font-mono); }
@@ -315,6 +316,8 @@
       <h2>Artifacts</h2>
       <div class="search-row">
         <input type="search" id="search-input" placeholder="Search ref, digest, maintainer, stage, CVE/malware id or title…" />
+      </div>
+      <div class="filter-row">
         <select id="filter-status" aria-label="Filter by status">
           <option value="">Any status</option>
           <option value="registered">registered</option>
