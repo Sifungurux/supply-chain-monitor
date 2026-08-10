@@ -48,6 +48,16 @@ spec:
             app: scm-sweep-registered
         spec:
           restartPolicy: Never
+          # Same hardening the scan-worker Jobs carry (internal/k8sjob/
+          # job.go's NewScanJob). Safe without a writable /tmp, unlike
+          # the API Deployment: `monitor-api sweep-registered` returns
+          # from main() before runAPIServer's writeDockerConfig is ever
+          # reached, and does nothing but HTTP calls to monitor-api's own
+          # Service (see runSweepRegistered).
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
           containers:
             - name: sweep-registered
               image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
