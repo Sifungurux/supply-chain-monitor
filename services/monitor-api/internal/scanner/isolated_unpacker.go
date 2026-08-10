@@ -116,9 +116,9 @@ func (c IsolatedUnpackerConfig) withDefaults() IsolatedUnpackerConfig {
 		c.MemoryLimit = "1Gi"
 	}
 	if c.EphemeralStorageLimit == "" {
-		// Measured peak is 1909Mi (rust:1.79) -- about 5% under this
-		// limit, so a materially larger image will hit it. Read
-		// isolated.go's ceiling note before raising it.
+		// Was 2Gi, which the measured 2395Mi peak
+		// (mcr.microsoft.com/playwright:v1.44.0) already exceeded. Read
+		// isolated.go's ceiling note before raising it again.
 		c.EphemeralStorageLimit = ephemeralStorageLimitFor("image")
 	}
 	if c.RegistryCredentialsSecretName != "" {

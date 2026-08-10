@@ -11,9 +11,9 @@ func TestEphemeralStorageDefaultsBySubCommand(t *testing.T) {
 		subCommand    string
 		request, want string
 	}{
-		{"image", "512Mi", "2Gi"},
+		{"image", "512Mi", "3Gi"},
 		{"sbom", "128Mi", "256Mi"},
-		{"", "512Mi", "2Gi"}, // unset means image -- see each withDefaults
+		{"", "512Mi", "3Gi"}, // unset means image -- see each withDefaults
 	} {
 		if got := ephemeralStorageRequestFor(tc.subCommand); got != tc.request {
 			t.Errorf("request for %q = %q, want %q", tc.subCommand, got, tc.request)
@@ -25,22 +25,22 @@ func TestEphemeralStorageDefaultsBySubCommand(t *testing.T) {
 
 	// The defaults have to actually reach the Job spec, not just exist.
 	trivy := IsolatedTrivyConfig{SubCommand: "image"}.withDefaults()
-	if trivy.EphemeralStorageLimit != "2Gi" {
-		t.Errorf("trivy image EphemeralStorageLimit = %q, want 2Gi", trivy.EphemeralStorageLimit)
+	if trivy.EphemeralStorageLimit != "3Gi" {
+		t.Errorf("trivy image EphemeralStorageLimit = %q, want 3Gi", trivy.EphemeralStorageLimit)
 	}
 	if sbom := (IsolatedTrivyConfig{SubCommand: "sbom"}).withDefaults(); sbom.EphemeralStorageLimit != "256Mi" {
 		t.Errorf("trivy sbom EphemeralStorageLimit = %q, want 256Mi", sbom.EphemeralStorageLimit)
 	}
 	grype := IsolatedGrypeConfig{SubCommand: "image"}.withDefaults()
-	if grype.EphemeralStorageLimit != "2Gi" {
-		t.Errorf("grype image EphemeralStorageLimit = %q, want 2Gi", grype.EphemeralStorageLimit)
+	if grype.EphemeralStorageLimit != "3Gi" {
+		t.Errorf("grype image EphemeralStorageLimit = %q, want 3Gi", grype.EphemeralStorageLimit)
 	}
 	if sbom := (IsolatedGrypeConfig{SubCommand: "sbom"}).withDefaults(); sbom.EphemeralStorageLimit != "256Mi" {
 		t.Errorf("grype sbom EphemeralStorageLimit = %q, want 256Mi", sbom.EphemeralStorageLimit)
 	}
 	unpacker := IsolatedUnpackerConfig{}.withDefaults()
-	if unpacker.EphemeralStorageLimit != "2Gi" || unpacker.EphemeralStorageRequest != "512Mi" {
-		t.Errorf("unpacker eph = %q/%q, want 512Mi/2Gi",
+	if unpacker.EphemeralStorageLimit != "3Gi" || unpacker.EphemeralStorageRequest != "512Mi" {
+		t.Errorf("unpacker eph = %q/%q, want 512Mi/3Gi",
 			unpacker.EphemeralStorageRequest, unpacker.EphemeralStorageLimit)
 	}
 }
