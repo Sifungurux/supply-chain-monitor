@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -512,12 +513,30 @@ func runSweepRegistered() {
 		log.Fatalf("sweep-registered: could not list artifacts: %v", err)
 	}
 
+	// Artifacts stuck at "scanning" get reclaimed here too. A scan runs
+	// in a background goroutine now (the API answers 202 immediately),
+	// so a pod restart mid-scan leaves its artifact marked scanning with
+	// nothing left to finish it -- invisible forever otherwise, since
+	// the normal sweep only looks at "registered". Re-scanning IS the
+	// reclaim: POST /scan doesn't care what the current status is, and a
+	// completed scan overwrites it.
+	if stale, staleErr := listStaleScanningFromAPI(ctx, apiBase, apiKey); staleErr != nil {
+		log.Printf("sweep-registered: could not list stuck scans (continuing with registered artifacts only): %v", staleErr)
+	} else if len(stale) > 0 {
+		log.Printf("sweep-registered: %d artifact(s) stuck in %q for over %s -- reclaiming by re-scanning", len(stale), artifact.StatusScanning, staleScanningAfter)
+		all = append(all, stale...)
+	}
+
 	toScan := pickArtifactsToSweep(all, batchSize)
 	log.Printf("sweep-registered: %d artifact(s) registered-but-unscanned, scanning %d (SWEEP_BATCH_SIZE=%d)", countByStatus(all, artifact.StatusRegistered), len(toScan), batchSize)
 
 	missingDigest := 0
 	for _, a := range toScan {
 		updated, err := scanArtifactViaAPI(ctx, apiBase, apiKey, a.ID)
+		if errors.Is(err, errScanCapSaturated) {
+			log.Printf("sweep-registered: %s (%s) skipped -- scan concurrency limit reached, next run retries it", a.ID, a.Ref)
+			continue
+		}
 		if err != nil {
 			log.Printf("sweep-registered: scan %s (%s) failed: %v", a.ID, a.Ref, err)
 			continue
@@ -592,10 +611,19 @@ const sweepPageSize = 200
 // wants -- countByStatus over the result is still correct, it just
 // counts everything now.
 func listRegisteredFromAPI(ctx context.Context, apiBase, apiKey string) ([]artifact.Artifact, error) {
+	return listByStatusFromAPI(ctx, apiBase, apiKey, artifact.StatusRegistered)
+}
+
+// listByStatusFromAPI walks every page of GET /api/v1/artifacts for one
+// status. Paging matters: the endpoint returns 50 per page by default
+// (200 max) newest-first, while pickArtifactsToSweep wants the oldest,
+// so stopping after one page would starve exactly the backlog the sweep
+// exists to work through.
+func listByStatusFromAPI(ctx context.Context, apiBase, apiKey string, status artifact.Status) ([]artifact.Artifact, error) {
 	var all []artifact.Artifact
 	for offset := 0; ; {
 		url := fmt.Sprintf("%s/api/v1/artifacts?status=%s&limit=%d&offset=%d",
-			strings.TrimRight(apiBase, "/"), artifact.StatusRegistered, sweepPageSize, offset)
+			strings.TrimRight(apiBase, "/"), status, sweepPageSize, offset)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return nil, fmt.Errorf("build list request: %w", err)
@@ -634,10 +662,48 @@ func listRegisteredFromAPI(ctx context.Context, apiBase, apiKey string) ([]artif
 	}
 }
 
+// staleScanningAfter is how long an artifact must have sat at
+// "scanning" before the sweep treats it as abandoned rather than
+// in-flight. Comfortably above SCAN_TIMEOUT_SECONDS' 660s default (the
+// longest a live scan can legitimately take before the handler gives
+// up), so a slow-but-healthy scan is never yanked out from under
+// itself.
+const staleScanningAfter = 20 * time.Minute
+
+// listStaleScanningFromAPI returns artifacts stuck at "scanning" longer
+// than staleScanningAfter -- see runSweepRegistered for why they exist
+// and why re-scanning is the reclaim. Uses the same status filter and
+// paging as listRegisteredFromAPI; UpdatedAt is when the status flipped
+// to scanning, so it doubles as "when did this scan start".
+func listStaleScanningFromAPI(ctx context.Context, apiBase, apiKey string) ([]artifact.Artifact, error) {
+	scanning, err := listByStatusFromAPI(ctx, apiBase, apiKey, artifact.StatusScanning)
+	if err != nil {
+		return nil, err
+	}
+	cutoff := time.Now().UTC().Add(-staleScanningAfter)
+	var stale []artifact.Artifact
+	for _, a := range scanning {
+		if a.UpdatedAt.Before(cutoff) {
+			stale = append(stale, a)
+		}
+	}
+	return stale, nil
+}
+
 // scanArtifactViaAPI calls POST /api/v1/artifacts/{id}/scan -- the same
 // endpoint a person clicking "Scan" in the dashboard hits, so a swept
 // artifact is scanned exactly the way a manual one is, including the
-// opportunistic digest backfill scanArtifact now does.
+// opportunistic digest backfill that endpoint does.
+//
+// That endpoint is asynchronous now: it answers 202 the moment a scan
+// starts, so this polls GET /api/v1/artifacts/{id} until the artifact
+// leaves "scanning" before reporting. The sweep's entire output is
+// "scanned, digest resolved / still not resolved", which read off the
+// 202 body would describe an artifact whose scan hasn't run yet.
+//
+// A saturated scan cap answers 429. That is not a failure worth logging
+// as one: the artifact stays where it was and the next run picks it up
+// oldest-first, exactly as designed.
 func scanArtifactViaAPI(ctx context.Context, apiBase, apiKey, id string) (*artifact.Artifact, error) {
 	url := strings.TrimRight(apiBase, "/") + "/api/v1/artifacts/" + id + "/scan"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
@@ -650,17 +716,60 @@ func scanArtifactViaAPI(ctx context.Context, apiBase, apiKey, id string) (*artif
 	if err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, errScanCapSaturated
+	}
+	if resp.StatusCode != http.StatusAccepted {
 		return nil, fmt.Errorf("scan: server returned %d: %s", resp.StatusCode, string(body))
 	}
+	return waitForScanToFinish(ctx, apiBase, apiKey, id)
+}
 
-	var a artifact.Artifact
-	if err := json.NewDecoder(resp.Body).Decode(&a); err != nil {
-		return nil, fmt.Errorf("decode scan response: %w", err)
+// errScanCapSaturated marks the one "failure" the sweep treats as
+// routine -- see scanArtifactViaAPI.
+var errScanCapSaturated = errors.New("scan concurrency limit reached")
+
+// scanPollInterval is how often the sweep re-checks one in-flight scan.
+// Scans take minutes, so this is deliberately unhurried.
+const scanPollInterval = 5 * time.Second
+
+// waitForScanToFinish polls one artifact until it leaves "scanning".
+// Bounded by ctx (runSweepRegistered gives the whole sweep 10 minutes),
+// so a scan that outlives the sweep is reported as still in flight
+// rather than blocking this run forever.
+func waitForScanToFinish(ctx context.Context, apiBase, apiKey, id string) (*artifact.Artifact, error) {
+	url := strings.TrimRight(apiBase, "/") + "/api/v1/artifacts/" + id
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("build poll request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("poll scan status: %w", err)
+		}
+		var a artifact.Artifact
+		decodeErr := json.NewDecoder(resp.Body).Decode(&a)
+		status := resp.StatusCode
+		resp.Body.Close()
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("poll scan status: server returned %d", status)
+		}
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode polled artifact: %w", decodeErr)
+		}
+		if a.Status != artifact.StatusScanning {
+			return &a, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("gave up waiting for %s to finish scanning: %w", id, ctx.Err())
+		case <-time.After(scanPollInterval):
+		}
 	}
-	return &a, nil
 }
 
 // cveScannersFor picks which CVE scanner(s) a given cveScanner setting

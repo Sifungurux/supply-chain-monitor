@@ -96,6 +96,37 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
+// copyArtifact returns a snapshot callers can read without holding
+// MemStore's lock. Get/List/Create/Update all hand out one of these
+// rather than the pointer they store, so a caller reading an artifact
+// can never observe a concurrent Update tearing its fields -- which is
+// exactly what happens now that scans run in a background goroutine
+// while the API keeps serving reads of the same artifact.
+//
+// PostgresStore has always had these semantics for free (every read
+// scans a fresh struct), so this makes the two implementations agree
+// rather than leaving MemStore subtly racier than the backend it
+// stands in for.
+//
+// The slices are copied too, not just the struct: Update's mutate
+// callbacks append to StageHistory, and an append that fits in spare
+// capacity would otherwise write into an array a previous caller is
+// still reading.
+func copyArtifact(a *Artifact) *Artifact {
+	if a == nil {
+		return nil
+	}
+	out := *a
+	out.StageHistory = append([]StageEvent(nil), a.StageHistory...)
+	out.CVEFindings = append([]Finding(nil), a.CVEFindings...)
+	out.MalwareFindings = append([]Finding(nil), a.MalwareFindings...)
+	out.MisconfigFindings = append([]Finding(nil), a.MisconfigFindings...)
+	out.SecretFindings = append([]Finding(nil), a.SecretFindings...)
+	out.OtherFindings = append([]Finding(nil), a.OtherFindings...)
+	out.LastScanErrors = append([]string(nil), a.LastScanErrors...)
+	return &out
+}
+
 func (s *MemStore) Create(ref string, t Type) (*Artifact, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -110,7 +141,7 @@ func (s *MemStore) Create(ref string, t Type) (*Artifact, error) {
 		UpdatedAt: now,
 	}
 	s.data[a.ID] = a
-	return a, nil
+	return copyArtifact(a), nil
 }
 
 func (s *MemStore) Get(id string) (*Artifact, error) {
@@ -121,7 +152,7 @@ func (s *MemStore) Get(id string) (*Artifact, error) {
 	if !ok {
 		return nil, fmt.Errorf("artifact %q not found", id)
 	}
-	return a, nil
+	return copyArtifact(a), nil
 }
 
 func (s *MemStore) List() ([]*Artifact, error) {
@@ -130,7 +161,7 @@ func (s *MemStore) List() ([]*Artifact, error) {
 
 	out := make([]*Artifact, 0, len(s.data))
 	for _, a := range s.data {
-		out = append(out, a)
+		out = append(out, copyArtifact(a))
 	}
 	return out, nil
 }
@@ -154,7 +185,7 @@ func (s *MemStore) ListPage(limit, offset int, statusFilter, typeFilter string) 
 		if typeFilter != "" && string(a.Type) != typeFilter {
 			continue
 		}
-		filtered = append(filtered, a)
+		filtered = append(filtered, copyArtifact(a))
 	}
 	sort.Slice(filtered, func(i, j int) bool {
 		if !filtered[i].CreatedAt.Equal(filtered[j].CreatedAt) {
@@ -184,7 +215,7 @@ func (s *MemStore) Update(id string, mutate func(*Artifact)) (*Artifact, error) 
 	}
 	mutate(a)
 	a.UpdatedAt = time.Now().UTC()
-	return a, nil
+	return copyArtifact(a), nil
 }
 
 func (s *MemStore) Delete(id string) error {
@@ -242,7 +273,7 @@ func (s *MemStore) FindByFindingID(findingID string) ([]*Artifact, error) {
 		if findingIDMatches(a.CVEFindings, findingID) ||
 			findingIDMatches(a.MalwareFindings, findingID) ||
 			findingIDMatches(a.OtherFindings, findingID) {
-			out = append(out, a)
+			out = append(out, copyArtifact(a))
 		}
 	}
 	return out, nil
@@ -273,5 +304,5 @@ func (s *MemStore) FindByDigest(digest string) (*Artifact, error) {
 			match = a
 		}
 	}
-	return match, nil
+	return copyArtifact(match), nil
 }

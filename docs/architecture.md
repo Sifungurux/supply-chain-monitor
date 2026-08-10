@@ -228,13 +228,23 @@ recorded.
   `Store.List` is kept for callers that genuinely want everything.
   Filters are applied in the database (a `WHERE` clause shared by the
   page query and its `COUNT(*)`), not in Go after loading every row.
+- `POST /api/v1/artifacts/{id}/scan` is **asynchronous**: it answers
+  `202` with a `Location` pointing at the artifact, runs every scanner
+  for that type concurrently in a background goroutine, and callers poll
+  `GET /api/v1/artifacts/{id}` until `status` leaves `scanning`. It used
+  to block until every scanner finished, which the 30s `http.Server`
+  `WriteTimeout` made unworkable — a 30–330s scan had its connection torn
+  down before the response could be written, so callers saw a dropped
+  connection while the work completed server-side. A scan interrupted by
+  a pod restart leaves its artifact at `scanning`; the `sweep-registered`
+  CronJob reclaims those by re-scanning anything stuck over 20 minutes
+  (`staleScanningAfter`), which is why "re-scan" is the reclaim rather
+  than a status-rewriting endpoint that doesn't exist.
 - Concurrent scans are capped server-side (`SCAN_CONCURRENCY` /
   `monitorApi.scanConcurrency`, 4 in the chart, 0 = unlimited in the
-  binary). A saturated cap queues the request for 10s and then answers
-  `429` + `Retry-After` — the wait is kept well under the 30s
-  `http.Server` `WriteTimeout`, since a 429 written at the deadline
-  reaches the client as a dropped connection rather than a status code
-  (`main_test.go` asserts the margin); the slot is taken *after* the 404/501 checks and
+  binary). A saturated cap answers `429` + `Retry-After` immediately —
+  no queue, since scanning is asynchronous and no caller is blocked on
+  the response; the slot is taken *after* the 404/501 checks and
   *before* the status flips to `scanning`, so a rejected scan leaves the
   artifact untouched. The cap counts scans, but the resource is Jobs:
   one image scan spawns one scan-worker Job per registered scanner,

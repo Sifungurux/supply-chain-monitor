@@ -190,35 +190,46 @@ paths:
       - $ref: "#/components/parameters/ArtifactID"
     post:
       tags: [artifacts]
-      summary: Run every registered scanner for this artifact's type
+      summary: Start a scan (asynchronous)
       description: >-
-        Runs all scanners registered for the artifact's type concurrently,
-        merges results into the five finding buckets, and marks findings
-        that stopped being reported as fixed. Synchronous -- the response
-        carries the fully updated artifact once every scanner has finished
-        (or the shared per-scan timeout elapses).
+        Starts a scan and returns 202 immediately -- it does not wait for
+        the scan to finish. Every scanner registered for the artifact's
+        type then runs concurrently in the background, results are merged
+        into the five finding buckets, and findings that stopped being
+        reported are marked fixed.
+
+
+        Poll GET /api/v1/artifacts/{id} (the Location header points
+        there) until status leaves "scanning": it settles on "scanned",
+        or "failed" if every scanner failed. The 202 body is the artifact
+        as the scan started, so its findings are the previous scan's.
 
 
         Scanning is capped server-side (SCAN_CONCURRENCY /
-        monitorApi.scanConcurrency, off by default). A request that
-        arrives with every slot busy waits up to 10s for one, then gets
-        a 429 with Retry-After -- the artifact is left untouched, not
-        marked scanning. (The wait is deliberately well under the
-        server's 30s write timeout, or the 429 would race that deadline
-        and reach the client as a dropped connection instead.)
+        monitorApi.scanConcurrency, off by default). A request arriving
+        with every slot busy is rejected immediately with 429 +
+        Retry-After -- there is no queue, since no caller is waiting on
+        the response -- and the artifact is left untouched, not marked
+        scanning.
       responses:
-        "200":
-          description: Scan completed.
+        "202":
+          description: >-
+            Scan started. Body is the artifact at status "scanning";
+            Location points at the resource to poll.
+          headers:
+            Location:
+              description: The artifact to poll for the result.
+              schema: { type: string }
+              example: /api/v1/artifacts/8f14e45fceea167a
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Artifact" }
         "404": { $ref: "#/components/responses/NotFound" }
         "429":
           description: >-
-            The scan concurrency cap is saturated and no slot freed up
-            within the queue wait. Retry after the interval in the
-            Retry-After header. (Per-key rate limiting can also answer
-            429 -- the error message distinguishes them.)
+            The scan concurrency cap is saturated. Retry after the
+            interval in the Retry-After header. (Per-key rate limiting
+            can also answer 429 -- the error message distinguishes them.)
           headers:
             Retry-After:
               description: Seconds to wait before retrying.
@@ -231,11 +242,6 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-        "502":
-          description: Every registered scanner failed.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Artifact" }
 
   /api/v1/artifacts/{id}/stage:
     parameters:

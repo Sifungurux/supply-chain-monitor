@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -16,6 +15,21 @@ import (
 
 const defaultScanTimeout = 5 * time.Minute
 
+// scanArtifact starts a scan and returns 202 immediately -- it does not
+// wait for the scan to finish. The scan runs in a background goroutine
+// and the caller polls GET /api/v1/artifacts/{id} (the Location header
+// points there) until status leaves "scanning".
+//
+// This used to block until every scanner finished, which never actually
+// worked end to end: main.go's http.Server sets WriteTimeout, the
+// deadline starts when the request headers are read, and a real scan
+// runs 30-330s -- so the server tore down the connection before the
+// response could be written and the caller saw a dropped connection
+// (curl reports 000) for anything but the fastest scans. The work always
+// completed server-side; only the answer was lost. Returning 202 up
+// front means the response is written in milliseconds, well inside any
+// write deadline, and "how do I learn the result" becomes a poll of the
+// endpoint the dashboard already polls every 10s.
 func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	a, err := h.store.Get(id)
@@ -32,55 +46,75 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 
 	// Take a scan slot before touching anything -- deliberately after
 	// the 404/501 checks above (a request that was never going to scan
-	// shouldn't sit in the queue, or occupy a slot) and before the
-	// status flips to "scanning" (an artifact must never be left marked
-	// scanning by a request that ended in a 429).
+	// shouldn't burn a slot) and before the status flips to "scanning"
+	// (an artifact must never be left marked scanning by a request that
+	// ended in a 429).
 	//
-	// `defer release()` caps concurrent *scans* only because this
-	// handler is fully synchronous: wg.Wait() below joins every scanner
-	// goroutine before this function returns. If scanning ever becomes
-	// asynchronous (return 202, finish in the background), this defer
-	// silently degrades into a cap on request duration instead -- the
-	// release has to move with the work.
-	release, err := h.acquireScanSlot(r.Context())
-	if err != nil {
-		if errors.Is(err, errScanQueueFull) {
-			wait := h.scanQueueWait
-			if wait <= 0 {
-				wait = DefaultScanQueueWait
-			}
-			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())))
-			// Names the scan cap specifically: withRateLimit answers 429
-			// too, and an operator reading a load-test log can't tell the
-			// two apart from the status code alone.
-			writeError(w, http.StatusTooManyRequests,
-				fmt.Sprintf("scan concurrency limit reached (%d scans already in flight) -- retry shortly", cap(h.scanSlots)))
-			return
-		}
-		// The client hung up while queued -- there's nothing to write a
-		// response to, and this is the only trace it happened.
-		log.Printf("scan request for artifact %s abandoned while queued for a scan slot: %v", id, err)
+	// Non-blocking now: the queue-then-reject wait this used to do only
+	// existed because a client was blocked on the response. Nobody waits
+	// any more, so either a slot is free or the caller is told to retry
+	// -- which keeps the in-flight set hard-bounded by SCAN_CONCURRENCY
+	// with no server-side backlog that a pod restart could silently drop.
+	release, ok := h.tryAcquireScanSlot()
+	if !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(scanRetryAfter.Seconds())))
+		// Names the scan cap specifically: withRateLimit answers 429 too,
+		// and an operator reading a load-test log can't tell the two
+		// apart from the status code alone.
+		writeError(w, http.StatusTooManyRequests,
+			fmt.Sprintf("scan concurrency limit reached (%d scans already in flight) -- retry shortly", cap(h.scanSlots)))
 		return
 	}
-	defer release()
 
-	_, _ = h.store.Update(id, func(art *artifact.Artifact) {
+	updated, err := h.store.Update(id, func(art *artifact.Artifact) {
 		art.Status = artifact.StatusScanning
 	})
+	if err != nil {
+		release()
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
-	// Deliberately NOT derived from r.Context(): a scan can legitimately
-	// run long (trivy's first-run vulnerability DB download alone can
-	// take a couple of minutes), and net/http cancels r.Context() the
-	// moment the client connection goes away for any reason -- a closed
-	// tab, a network hiccup, a proxy's idle timeout. Tying the scan to
-	// that meant an interrupted browser connection would SIGKILL
-	// whatever scanner was mid-run (surfacing as "signal: killed") and
-	// instantly fail every scanner after it in the loop ("context
-	// canceled"), even though nothing about the scan itself was wrong.
-	// Using context.Background() here means the scan runs to completion
-	// and updates the store regardless of what the original HTTP client
-	// does; the dashboard's own polling picks up the result afterward
-	// either way.
+	// The slot is released by runScan itself, not deferred here: it has
+	// to travel with the work, or it would cap request duration
+	// (milliseconds) instead of concurrent scans.
+	go h.runScan(a, scanners, release)
+
+	w.Header().Set("Location", "/api/v1/artifacts/"+id)
+	writeJSON(w, http.StatusAccepted, updated)
+}
+
+// runScan is everything the old synchronous handler did after the status
+// flip, minus the HTTP response. It owns the scan slot and must release
+// it on every path, including a panic -- a leaked slot permanently
+// shrinks the cap, and enough of them would stop scanning entirely.
+func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, release func()) {
+	defer release()
+	defer func() {
+		if rec := recover(); rec != nil {
+			// Nothing is listening on an HTTP response any more, so an
+			// unrecovered panic here would take the whole process down
+			// rather than failing one request. Mark the artifact failed
+			// and keep serving.
+			log.Printf("scan for artifact %s panicked: %v", a.ID, rec)
+			if _, err := h.store.Update(a.ID, func(art *artifact.Artifact) {
+				art.Status = artifact.StatusFailed
+				art.LastScanErrors = []string{"scan panicked -- see server logs"}
+			}); err != nil {
+				log.Printf("could not mark artifact %s failed after a panic: %v", a.ID, err)
+			}
+		}
+	}()
+
+	id := a.ID
+
+	// Deliberately NOT derived from any request context: the request
+	// that started this scan has already been answered with a 202, and a
+	// scan can legitimately run long (trivy's first-run vulnerability DB
+	// download alone can take a couple of minutes). Tying it to a client
+	// connection used to mean an interrupted browser SIGKILLed whatever
+	// scanner was mid-run; now there is no connection to tie it to at
+	// all. scanTimeout is the only bound.
 	scanTimeout := h.scanTimeout
 	if scanTimeout <= 0 {
 		scanTimeout = defaultScanTimeout
@@ -253,7 +287,9 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 	// again (digest stays "", same as before this scan).
 	digest := a.Digest
 	if digest == "" {
-		digest = h.resolveDigest(r.Context(), a.Ref, a.Type)
+		// context.Background(), not a request context: the HTTP request
+		// that started this scan returned 202 long ago.
+		digest = h.resolveDigest(context.Background(), a.Ref, a.Type)
 	}
 
 	now := time.Now().UTC()
@@ -276,16 +312,13 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 		art.LastScanAt = &now
 	})
 	if updErr != nil {
-		writeError(w, http.StatusInternalServerError, updErr.Error())
+		// Nobody to return a 500 to -- the artifact is left at whatever
+		// the store last persisted (status "scanning"), which the sweep
+		// CronJob reclaims once it goes stale.
+		log.Printf("could not persist scan results for artifact %s: %v", id, updErr)
 		return
 	}
-
-	if status == artifact.StatusFailed {
-		writeJSON(w, http.StatusBadGateway, updated)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, updated)
+	log.Printf("scan finished for artifact %s (%s): status=%s, %d scan error(s)", id, updated.Ref, updated.Status, len(updated.LastScanErrors))
 }
 
 // classifyBucket decides which of the five finding buckets (cve,
