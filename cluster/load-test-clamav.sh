@@ -54,7 +54,13 @@ PARALLELISM="${PARALLELISM:-10}"
 # Bounded on purpose: an unbounded retry would turn a saturated server
 # into a script that never finishes, which is a worse outcome for a
 # measurement tool than a run that completes and reports the rejections.
-MAX_429_RETRIES="${MAX_429_RETRIES:-10}"
+MAX_429_RETRIES="${MAX_429_RETRIES:-500}"
+# Total seconds one artifact will keep re-trying a 429 before giving up.
+# This is the bound that actually matters: with SCAN_CONCURRENCY=4 and
+# ~100s per scan, 100 artifacts take ~25 waves, so the last one in line
+# waits over half an hour by design. A retry *count* alone (the previous
+# bound of 10, ~100s) reported that expected queueing as 74 failures.
+MAX_429_WAIT_S="${MAX_429_WAIT_S:-2700}"
 # Scans are asynchronous (POST returns 202), so each worker polls the
 # artifact until it leaves "scanning" -- these bound that poll. The
 # timeout is above the API's own SCAN_TIMEOUT_SECONDS default (660s) so
@@ -159,7 +165,7 @@ echo
 echo "Scanning ${id_count} artifacts, ${PARALLELISM} concurrent requests (this exercises clamd -- expect it to take a while)..."
 start_ts="$(date +%s)"
 
-export API_BASE SCM_API_KEY results_file tmp_dir MAX_429_RETRIES SCAN_POLL_INTERVAL_S SCAN_POLL_TIMEOUT_S
+export API_BASE SCM_API_KEY results_file tmp_dir MAX_429_RETRIES MAX_429_WAIT_S SCAN_POLL_INTERVAL_S SCAN_POLL_TIMEOUT_S
 # Scanning is asynchronous: POST /scan answers 202 the moment a scan
 # starts, so this fires the POST and then polls GET /artifacts/{id}
 # until the artifact leaves "scanning". Without the poll every timing
@@ -175,7 +181,7 @@ export API_BASE SCM_API_KEY results_file tmp_dir MAX_429_RETRIES SCAN_POLL_INTER
 # than the cap. Retries are counted and reported separately.
 scan_one() {
   local id="$1"
-  local t0 t1 elapsed_ms status retry_after retries=0 outcome
+  local t0 t1 elapsed_ms status retry_after retries=0 waited_429=0 outcome
   # $$ (not BASHPID): each xargs worker is its own `bash -c` process, so
   # $$ is already unique per worker -- and it works on the bash 3.2 that
   # ships as /bin/bash on macOS, where BASHPID is unset and every worker
@@ -189,12 +195,13 @@ scan_one() {
     [ "${status}" = "429" ] || break
     # Bounded: a server that stays saturated must still let this script
     # finish and report, rather than retrying forever.
-    if [ "${retries}" -ge "${MAX_429_RETRIES}" ]; then
+    if [ "${retries}" -ge "${MAX_429_RETRIES}" ] || [ "${waited_429}" -ge "${MAX_429_WAIT_S}" ]; then
       break
     fi
     retry_after="$(awk 'tolower($1) == "retry-after:" {gsub(/\r/, "", $2); print $2}' "${hdr}")"
     retries=$((retries + 1))
     sleep "${retry_after:-5}"
+    waited_429=$((waited_429 + ${retry_after:-5}))
   done
   rm -f "${hdr}"
 
@@ -218,9 +225,11 @@ scan_one() {
       outcome="poll-http-${status}"
       break
     fi
-    # Deliberately not jq: this runs once per poll per worker, and the
-    # status field is a plain string in a flat object.
-    outcome="$(sed -n 's/.*"status":"\([a-z]*\)".*/\1/p' "${tmp_dir}/art.$$" | head -1)"
+    # grep -o (not sed): an artifact carries a "status" field per
+    # finding as well as its own, and sed's greedy .* matched the LAST
+    # one -- reporting every completed scan as "open", a finding status,
+    # instead of "scanned". Taking the first match is the artifact's own.
+    outcome="$(grep -o '"status":"[a-z]*"' "${tmp_dir}/art.$$" | head -1 | cut -d'"' -f4)"
     [ "${outcome}" = "scanning" ] || break
     sleep "${SCAN_POLL_INTERVAL_S}"
     waited=$((waited + SCAN_POLL_INTERVAL_S))
