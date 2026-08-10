@@ -43,6 +43,18 @@ spec:
               set -eu
               echo "downloading grype vulnerability DB into ${GRYPE_DB_CACHE_DIR}"
               grype db update
+              # grype creates its own schema-versioned subdirectory
+              # (e.g. .../6/) mode 0700, owned by this Job's root user.
+              # The scan-worker Jobs that read this PVC run as uid 65534
+              # (see k8sjob.NewScanJob's securityContext), so without
+              # this they can't even traverse into it -- grype exits 1
+              # on every scan with an empty stderr, which surfaced as
+              # "grype scan failed for ...: exit status 1 ()" and, until
+              # 2026-08-10, meant grype had never recorded a single
+              # finding while trivy had 145k. The DB files themselves
+              # are already world-readable; only the directory bit is
+              # missing, and a+rX adds traversal without granting write.
+              chmod -R a+rX "${GRYPE_DB_CACHE_DIR}"
               echo "grype DB cache primed"
           env:
             - name: GRYPE_DB_CACHE_DIR
