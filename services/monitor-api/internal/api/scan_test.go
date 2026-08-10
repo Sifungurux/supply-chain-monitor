@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -22,7 +21,7 @@ func TestScanArtifact_NoScannerRegistered(t *testing.T) {
 	h, store := newTestRouter(scanner.Registry{})
 	created := mustCreate(t, store, "some.sbom.json", artifact.TypeSBOM)
 
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
+	rec, _ := scanAndWait(t, h, store, created.ID)
 	if rec.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501, body=%s", rec.Code, rec.Body.String())
 	}
@@ -37,11 +36,11 @@ func TestScanArtifact_MergesFindingsBySource(t *testing.T) {
 	})
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	rec, scanned := scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
-	got := decodeArtifact(t, rec)
+	got := *scanned
 	if got.Status != artifact.StatusScanned {
 		t.Fatalf("status = %q, want %q", got.Status, artifact.StatusScanned)
 	}
@@ -69,11 +68,11 @@ func TestScanArtifact_CoalescesSameCVEAcrossScanners(t *testing.T) {
 	})
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	rec, scanned := scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
-	got := decodeArtifact(t, rec)
+	got := *scanned
 	if len(got.CVEFindings) != 1 {
 		t.Fatalf("cve findings = %+v, want 1 coalesced finding", got.CVEFindings)
 	}
@@ -106,11 +105,11 @@ func TestScanArtifact_BackfillsMissingDigest(t *testing.T) {
 		t.Fatalf("test setup: expected no digest yet, got %q", created.Digest)
 	}
 
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	rec, scanned := scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
-	got := decodeArtifact(t, rec)
+	got := *scanned
 	if got.Digest != "sha256:backfilled" {
 		t.Fatalf("digest = %q, want the resolver's value backfilled by the scan", got.Digest)
 	}
@@ -133,11 +132,11 @@ func TestScanArtifact_DoesNotReResolveAnAlreadySetDigest(t *testing.T) {
 		t.Fatalf("store.Update: %v", err)
 	}
 
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	rec, scanned := scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
-	got := decodeArtifact(t, rec)
+	got := *scanned
 	if got.Digest != "sha256:already-set" {
 		t.Fatalf("digest = %q, want the pre-existing digest left untouched", got.Digest)
 	}
@@ -158,11 +157,11 @@ func TestScanArtifact_SARIFFindingsGoToOtherBucket(t *testing.T) {
 	})
 	created := mustCreate(t, store, "/tmp/results.sarif", artifact.TypeSARIF)
 
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	rec, scanned := scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
-	got := decodeArtifact(t, rec)
+	got := *scanned
 	if len(got.OtherFindings) != 1 || got.OtherFindings[0].ID != "no-hardcoded-secret" {
 		t.Fatalf("other findings = %+v, want the sarif finding", got.OtherFindings)
 	}
@@ -189,11 +188,11 @@ func TestScanArtifact_CategoryRoutesToMisconfigAndSecretBuckets(t *testing.T) {
 	})
 	created := mustCreate(t, store, "/tmp/results.sarif", artifact.TypeSARIF)
 
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	rec, scanned := scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
-	got := decodeArtifact(t, rec)
+	got := *scanned
 
 	if len(got.CVEFindings) != 1 || got.CVEFindings[0].ID != "CVE-2023-1" {
 		t.Fatalf("cve findings = %+v", got.CVEFindings)
@@ -221,11 +220,11 @@ func TestScanArtifact_PartialFailureStillReportsSuccessfulFindings(t *testing.T)
 	})
 	created := mustCreate(t, store, "ghcr.io/example/app:latest", artifact.TypeImage)
 
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (one of two scanners still succeeded), body=%s", rec.Code, rec.Body.String())
+	rec, scanned := scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (one of two scanners still succeeded), body=%s", rec.Code, rec.Body.String())
 	}
-	got := decodeArtifact(t, rec)
+	got := *scanned
 	if got.Status != artifact.StatusScanned {
 		t.Fatalf("status = %q, want %q", got.Status, artifact.StatusScanned)
 	}
@@ -255,17 +254,17 @@ func TestScanArtifact_ScannersRunConcurrently(t *testing.T) {
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 
 	start := time.Now()
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
+	rec, scanned := scanAndWait(t, h, store, created.ID)
 	elapsed := time.Since(start)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
 	if elapsed > 400*time.Millisecond {
 		t.Fatalf("scan took %v, want well under %v (three %v scanners should overlap, not run one after another)", elapsed, 400*time.Millisecond, delay)
 	}
 
-	got := decodeArtifact(t, rec)
+	got := *scanned
 	if len(got.CVEFindings) != 1 || len(got.MalwareFindings) != 1 {
 		t.Fatalf("expected both scanners' findings to still land in the right buckets, got cve=%+v malware=%+v", got.CVEFindings, got.MalwareFindings)
 	}
@@ -286,11 +285,11 @@ func TestScanArtifact_ScannerPanicIsRecovered(t *testing.T) {
 	})
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (one of two scanners still succeeded), body=%s", rec.Code, rec.Body.String())
+	rec, scanned := scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (one of two scanners still succeeded), body=%s", rec.Code, rec.Body.String())
 	}
-	got := decodeArtifact(t, rec)
+	got := *scanned
 	if len(got.CVEFindings) != 1 {
 		t.Fatalf("expected the non-panicking scanner's finding to survive, got %+v", got.CVEFindings)
 	}
@@ -327,11 +326,15 @@ func TestScanArtifact_AllScannersFail(t *testing.T) {
 	})
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502, body=%s", rec.Code, rec.Body.String())
+	// The 502 this used to answer is gone with the 202: by the time
+	// every scanner has failed, the response was written long ago. The
+	// failure surfaces as the artifact's own status instead, which is
+	// what a polling caller reads.
+	rec, scanned := scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
-	got := decodeArtifact(t, rec)
+	got := *scanned
 	if got.Status != artifact.StatusFailed {
 		t.Fatalf("status = %q, want %q", got.Status, artifact.StatusFailed)
 	}
@@ -399,20 +402,20 @@ func TestScanArtifact_SecondScanMarksMissingFindingAsFixed(t *testing.T) {
 	h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {trivy}})
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("first scan status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	rec, scanned := scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first scan status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
-	got := decodeArtifact(t, rec)
+	got := *scanned
 	if len(got.CVEFindings) != 1 || got.CVEFindings[0].Status != artifact.FindingStatusOpen {
 		t.Fatalf("after first scan, cve findings = %+v", got.CVEFindings)
 	}
 
-	rec = doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("second scan status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	rec, scanned = scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("second scan status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
-	got = decodeArtifact(t, rec)
+	got = *scanned
 	if len(got.CVEFindings) != 1 {
 		t.Fatalf("expected the CVE to still be present (fixed, not deleted), got %+v", got.CVEFindings)
 	}
@@ -444,9 +447,9 @@ func TestScanArtifact_PartialFailureDoesNotMarkFindingsFixed(t *testing.T) {
 	h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {trivy, broken}})
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("first scan status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	rec, scanned := scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first scan status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
 
 	// Second scan: trivy no longer reports CVE-2024-1, AND the other
@@ -454,11 +457,11 @@ func TestScanArtifact_PartialFailureDoesNotMarkFindingsFixed(t *testing.T) {
 	// were merged as if this round were trustworthy, the missing CVE
 	// would look "fixed" even though nothing about it actually changed
 	// -- the only real event this round is an unrelated scanner breaking.
-	rec = doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("second scan status = %d, want 200 (one of two scanners still ran), body=%s", rec.Code, rec.Body.String())
+	rec, scanned = scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("second scan status = %d, want 202 (one of two scanners still ran), body=%s", rec.Code, rec.Body.String())
 	}
-	got := decodeArtifact(t, rec)
+	got := *scanned
 	if len(got.CVEFindings) != 1 {
 		t.Fatalf("expected the CVE to survive untouched despite the partial failure, got %+v", got.CVEFindings)
 	}
@@ -499,9 +502,9 @@ func TestScanArtifact_FailureOnlyBlocksItsOwnBucket(t *testing.T) {
 	h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {trivy, broken}})
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("first scan status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	rec, scanned := scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first scan status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
 
 	// Second scan: trivy (bucket "cve") succeeds and no longer reports
@@ -509,11 +512,11 @@ func TestScanArtifact_FailureOnlyBlocksItsOwnBucket(t *testing.T) {
 	// bucket should be blocked from fix-detection -- CVE-2024-1 should
 	// still be marked fixed, since the scanner that failed couldn't have
 	// produced a CVE finding anyway.
-	rec = doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("second scan status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	rec, scanned = scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("second scan status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
-	got := decodeArtifact(t, rec)
+	got := *scanned
 	if len(got.CVEFindings) != 1 {
 		t.Fatalf("expected CVE-2024-1 to still be present (fixed, not deleted), got %+v", got.CVEFindings)
 	}
@@ -564,92 +567,46 @@ func TestScanArtifact_SurvivesCanceledRequestContext(t *testing.T) {
 	if s.sawCanceledCtx {
 		t.Fatal("scanner saw an already-canceled context -- scanArtifact must not derive the scan's context from r.Context()")
 	}
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
-	got := decodeArtifact(t, rec)
+	got := waitForScan(t, store, created.ID)
 	if got.Status != artifact.StatusScanned {
 		t.Fatalf("status = %q, want %q (scan should complete despite the canceled request context)", got.Status, artifact.StatusScanned)
 	}
 }
 
-// newScanCappedRouter builds a router with a scan concurrency cap and a
-// deliberately tiny queue wait, so the "queue exhausted" path is
-// testable in milliseconds rather than the 30s a real deployment waits.
-func newScanCappedRouter(scanners scanner.Registry, concurrency int, queueWait time.Duration) (http.Handler, *artifact.MemStore) {
+// newScanCappedRouter builds a router with a scan concurrency cap.
+func newScanCappedRouter(scanners scanner.Registry, concurrency int) (http.Handler, *artifact.MemStore) {
 	store := artifact.NewMemStore()
 	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
 	return api.NewRouter(store, tracker, scanners, testAPIKey, 0, 0, nil, false, 0, false,
-		api.ScanLimits{Concurrency: concurrency, QueueWait: queueWait}), store
+		api.ScanLimits{Concurrency: concurrency}), store
 }
 
-// TestScanArtifact_ConcurrencyCapQueuesRatherThanRejecting -- a burst
-// slightly wider than the cap is the common case (the dashboard's Scan
-// buttons, cluster/load-test-clamav.sh's PARALLELISM), and it should
-// just queue: with a cap of 1 and a scanner that takes 100ms, two
-// concurrent requests both succeed, and the second finishes after the
-// first rather than alongside it.
-func TestScanArtifact_ConcurrencyCapQueuesRatherThanRejecting(t *testing.T) {
-	slow := &sleepingScanner{delay: 100 * time.Millisecond}
-	h, store := newScanCappedRouter(scanner.Registry{artifact.TypeImage: {slow}}, 1, 5*time.Second)
-	first := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
-	second := mustCreate(t, store, "busybox:latest", artifact.TypeImage)
-
-	start := time.Now()
-	codes := make(chan int, 2)
-	var wg sync.WaitGroup
-	for _, id := range []string{first.ID, second.ID} {
-		wg.Add(1)
-		go func(id string) {
-			defer wg.Done()
-			codes <- doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+id+"/scan", nil).Code
-		}(id)
-	}
-	wg.Wait()
-	close(codes)
-	elapsed := time.Since(start)
-
-	for code := range codes {
-		if code != http.StatusOK {
-			t.Fatalf("status = %d, want 200 -- a burst within the queue wait should queue, not be rejected", code)
-		}
-	}
-	// Serialized by the cap: two 100ms scans one after the other, not
-	// both at once. The floor is deliberately well under 200ms so this
-	// doesn't turn into a timing-flake on a loaded machine.
-	if elapsed < 150*time.Millisecond {
-		t.Fatalf("two capped scans took %v -- too fast to have been serialized by a cap of 1", elapsed)
-	}
-}
-
-// TestScanArtifact_ConcurrencyCapRejectsWhenQueueWaitElapses covers the
-// saturated case: the slot never frees within the queue wait, so the
-// second request gets a 429 with a Retry-After -- and, critically, the
-// artifact it was going to scan is NOT left marked "scanning", which is
-// what taking the slot before flipping the status would cause.
-func TestScanArtifact_ConcurrencyCapRejectsWhenQueueWaitElapses(t *testing.T) {
+// TestScanArtifact_ConcurrencyCapRejectsWhenSaturated -- with scans
+// asynchronous, a saturated cap answers 429 immediately rather than
+// queueing: nobody is blocked on the response, so there is no client
+// experience a wait would improve, and no server-side backlog to lose
+// on a restart. The artifact must also NOT be left marked "scanning",
+// which is what taking the slot after the status flip would cause.
+func TestScanArtifact_ConcurrencyCapRejectsWhenSaturated(t *testing.T) {
 	slow := &sleepingScanner{delay: 2 * time.Second}
-	h, store := newScanCappedRouter(scanner.Registry{artifact.TypeImage: {slow}}, 1, 50*time.Millisecond)
+	h, store := newScanCappedRouter(scanner.Registry{artifact.TypeImage: {slow}}, 1)
 	first := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 	second := mustCreate(t, store, "busybox:latest", artifact.TypeImage)
 
-	inFlight := make(chan struct{})
-	go func() {
-		close(inFlight)
-		doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+first.ID+"/scan", nil)
-	}()
-	<-inFlight
-	// Give the first request time to actually take the slot -- without
-	// this the second could win the race and pass for the wrong reason.
-	time.Sleep(200 * time.Millisecond)
+	if rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+first.ID+"/scan", nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("first scan status = %d, want 202", rec.Code)
+	}
 
 	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+second.ID+"/scan", nil)
 	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429, body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("second scan status = %d, want 429, body=%s", rec.Code, rec.Body.String())
 	}
 	retryAfter, err := strconv.Atoi(rec.Header().Get("Retry-After"))
-	if err != nil || retryAfter < 0 {
-		t.Fatalf("Retry-After = %q, want a non-negative integer (err=%v)", rec.Header().Get("Retry-After"), err)
+	if err != nil || retryAfter <= 0 {
+		t.Fatalf("Retry-After = %q, want a positive integer (err=%v)", rec.Header().Get("Retry-After"), err)
 	}
 	if !strings.Contains(rec.Body.String(), "scan concurrency") {
 		t.Fatalf("429 body = %s, want it to name the scan cap (withRateLimit answers 429 too)", rec.Body.String())
@@ -664,30 +621,51 @@ func TestScanArtifact_ConcurrencyCapRejectsWhenQueueWaitElapses(t *testing.T) {
 	}
 }
 
-// TestScanArtifact_NoCapIsUnlimited pins the zero value: every existing
-// caller (and every other test in this package) passes ScanLimits{} and
-// must keep the pre-cap behavior -- scans run concurrently, nothing
-// queues, nothing is rejected.
-func TestScanArtifact_NoCapIsUnlimited(t *testing.T) {
-	slow := &sleepingScanner{delay: 150 * time.Millisecond}
-	h, store := newScanCappedRouter(scanner.Registry{artifact.TypeImage: {slow}}, 0, 0)
+// TestScanArtifact_ConcurrencyCapReleasesSlotWhenScanFinishes is the
+// test that catches a leaked slot. runScan owns the release now (the
+// handler returns long before the scan does), so a missed release would
+// permanently shrink the cap -- and with cap 1, 429 every scan from
+// then on, forever. Nothing else in this suite would notice.
+func TestScanArtifact_ConcurrencyCapReleasesSlotWhenScanFinishes(t *testing.T) {
+	quick := &sleepingScanner{delay: 20 * time.Millisecond}
+	h, store := newScanCappedRouter(scanner.Registry{artifact.TypeImage: {quick}}, 1)
 	first := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 	second := mustCreate(t, store, "busybox:latest", artifact.TypeImage)
 
-	start := time.Now()
-	var wg sync.WaitGroup
-	for _, id := range []string{first.ID, second.ID} {
-		wg.Add(1)
-		go func(id string) {
-			defer wg.Done()
-			if code := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+id+"/scan", nil).Code; code != http.StatusOK {
-				t.Errorf("status = %d, want 200", code)
-			}
-		}(id)
+	if _, a := scanAndWait(t, h, store, first.ID); a.Status != artifact.StatusScanned {
+		t.Fatalf("first scan ended %q, want scanned", a.Status)
 	}
-	wg.Wait()
+	// The slot the first scan held must be back in the pool.
+	rec, a := scanAndWait(t, h, store, second.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("second scan status = %d, want 202 -- the first scan's slot was never released", rec.Code)
+	}
+	if a.Status != artifact.StatusScanned {
+		t.Fatalf("second scan ended %q, want scanned", a.Status)
+	}
+}
 
-	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
-		t.Fatalf("two uncapped scans took %v -- they should have overlapped, not serialized", elapsed)
+// TestScanArtifact_NoCapAcceptsConcurrentScans pins the zero value:
+// ScanLimits{} means unlimited, so scans that overlap in time are all
+// accepted and all complete -- the behavior every caller had before the
+// cap existed.
+func TestScanArtifact_NoCapAcceptsConcurrentScans(t *testing.T) {
+	slow := &sleepingScanner{delay: 100 * time.Millisecond}
+	h, store := newScanCappedRouter(scanner.Registry{artifact.TypeImage: {slow}}, 0)
+	ids := []string{
+		mustCreate(t, store, "alpine:3.19", artifact.TypeImage).ID,
+		mustCreate(t, store, "busybox:latest", artifact.TypeImage).ID,
+		mustCreate(t, store, "debian:12", artifact.TypeImage).ID,
+	}
+
+	for _, id := range ids {
+		if rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+id+"/scan", nil); rec.Code != http.StatusAccepted {
+			t.Fatalf("scan of %s status = %d, want 202 -- an uncapped router must never reject", id, rec.Code)
+		}
+	}
+	for _, id := range ids {
+		if a := waitForScan(t, store, id); a.Status != artifact.StatusScanned {
+			t.Fatalf("artifact %s ended %q, want scanned", id, a.Status)
+		}
 	}
 }

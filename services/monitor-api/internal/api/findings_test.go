@@ -16,9 +16,9 @@ func TestFindByFindingID(t *testing.T) {
 	affected := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 	mustCreate(t, store, "debian:12", artifact.TypeImage) // never scanned -- must not show up below
 
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+affected.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("scan status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	rec, _ := scanAndWait(t, h, store, affected.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("scan status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
 
 	rec = doJSON(t, h, http.MethodGet, "/api/v1/findings/CVE-2024-9999/artifacts", nil)
@@ -82,9 +82,9 @@ func TestSubmitFindings_LeavesOtherBucketsAlone(t *testing.T) {
 	h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {trivyLike}})
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 
-	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("scan status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	rec, _ := scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("scan status = %d, want 202, body=%s", rec.Code, rec.Body.String())
 	}
 
 	rec = doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/findings", map[string]any{

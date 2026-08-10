@@ -188,3 +188,56 @@ func TestHealthz(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 }
+
+// scanAndWait fires POST /scan and blocks until the artifact leaves
+// status "scanning", returning the POST's response recorder and the
+// artifact's final state.
+//
+// Scanning is asynchronous now (202 + poll -- see scanArtifact), so a
+// test that asserted on the POST response's body is asserting on the
+// artifact as it looked the instant the scan *started*. Everything that
+// used to read findings straight off that response goes through here
+// instead. Polls the store directly rather than the HTTP endpoint:
+// tests already hold the MemStore, and this keeps the wait cheap.
+func scanAndWait(t *testing.T, h http.Handler, store *artifact.MemStore, id string) (*httptest.ResponseRecorder, *artifact.Artifact) {
+	t.Helper()
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+id+"/scan", nil)
+	if rec.Code != http.StatusAccepted {
+		return rec, nil
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		a, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get while waiting for scan: %v", err)
+		}
+		if a.Status != artifact.StatusScanning {
+			return rec, a
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("artifact %s still %q after 5s -- the background scan never finished", id, a.Status)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// waitForScan blocks until an artifact leaves status "scanning" and
+// returns its final state -- the same wait scanAndWait does, for tests
+// that issue the POST themselves rather than through doJSON.
+func waitForScan(t *testing.T, store *artifact.MemStore, id string) *artifact.Artifact {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		a, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get while waiting for scan: %v", err)
+		}
+		if a.Status != artifact.StatusScanning {
+			return a
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("artifact %s still %q after 5s -- the background scan never finished", id, a.Status)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}

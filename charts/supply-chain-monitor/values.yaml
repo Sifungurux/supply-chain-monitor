@@ -418,12 +418,12 @@ monitorApi:
   # putting every node under DiskPressure at the same time, which the
   # per-Job limit alone can never prevent.
   #
-  # A request that arrives with every slot busy waits up to 10s for one
-  # and then gets a 429 with Retry-After -- so a burst slightly wider
-  # than this (the dashboard, cluster/load-test-clamav.sh's PARALLELISM)
-  # just queues rather than failing. (10s, not longer, because the API's
-  # own 30s HTTP write timeout has to leave room for the 429 to actually
-  # be written -- see api.DefaultScanQueueWait.) 0 disables the cap entirely, which
+  # A request that arrives with every slot busy is rejected immediately
+  # with a 429 and Retry-After -- scans are asynchronous (the API answers
+  # 202 and the caller polls), so there is no waiting client a queue
+  # would help, and nothing to lose on a restart. Callers that fire more
+  # than this at once (the dashboard, cluster/load-test-clamav.sh's
+  # PARALLELISM) should retry on 429. 0 disables the cap entirely, which
   # is the binary's own default when this isn't set.
   scanConcurrency: 4
   # Uncomment (and set enabled: true) for air-gapped operation -- see

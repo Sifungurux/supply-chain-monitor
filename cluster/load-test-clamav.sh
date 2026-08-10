@@ -15,7 +15,8 @@
 #      registered, PARALLELISM at a time (there's no batch-scan endpoint
 #      -- see docs/architecture.md, scan is one-artifact-per-request by
 #      design), timing each request.
-#   3. Reports success/failure counts, 429-retry counts (see scan_one --
+#   3. Reports per-artifact outcomes (scanned/failed/timeout), 429-retry
+#      counts (see scan_one --
 #      the server caps concurrent scans and this honors Retry-After
 #      rather than counting the cap as a failure), and latency
 #      (min/avg/max/total wall clock) so a before/after comparison
@@ -54,6 +55,13 @@ PARALLELISM="${PARALLELISM:-10}"
 # into a script that never finishes, which is a worse outcome for a
 # measurement tool than a run that completes and reports the rejections.
 MAX_429_RETRIES="${MAX_429_RETRIES:-10}"
+# Scans are asynchronous (POST returns 202), so each worker polls the
+# artifact until it leaves "scanning" -- these bound that poll. The
+# timeout is above the API's own SCAN_TIMEOUT_SECONDS default (660s) so
+# a legitimately slow scan is reported as its real outcome rather than
+# as a timeout of this script's own making.
+SCAN_POLL_INTERVAL_S="${SCAN_POLL_INTERVAL_S:-5}"
+SCAN_POLL_TIMEOUT_S="${SCAN_POLL_TIMEOUT_S:-900}"
 
 for bin in curl jq xargs; do
   if ! command -v "${bin}" >/dev/null 2>&1; then
@@ -151,19 +159,23 @@ echo
 echo "Scanning ${id_count} artifacts, ${PARALLELISM} concurrent requests (this exercises clamd -- expect it to take a while)..."
 start_ts="$(date +%s)"
 
-export API_BASE SCM_API_KEY results_file tmp_dir MAX_429_RETRIES
-# A 429 here is monitor-api's server-side scan concurrency cap
-# (SCAN_CONCURRENCY / monitorApi.scanConcurrency), not a failure: the
-# server queues a request for ~10s and only then sheds it, so a
-# PARALLELISM wider than the cap is *expected* to see some. Retrying
-# (honoring Retry-After) is what keeps this script measuring what it
-# exists to measure -- how the scan pipeline copes with N concurrent
-# scans -- rather than turning the cap itself into a wall of failures
-# that can't be compared against a pre-cap run. Retries are counted and
-# reported separately so the queueing is visible rather than hidden.
+export API_BASE SCM_API_KEY results_file tmp_dir MAX_429_RETRIES SCAN_POLL_INTERVAL_S SCAN_POLL_TIMEOUT_S
+# Scanning is asynchronous: POST /scan answers 202 the moment a scan
+# starts, so this fires the POST and then polls GET /artifacts/{id}
+# until the artifact leaves "scanning". Without the poll every timing
+# below would measure how long it takes to *enqueue* a scan (a few ms),
+# not how long the pipeline takes to run one -- which is the entire
+# point of this script.
+#
+# A 429 is monitor-api's server-side scan concurrency cap
+# (SCAN_CONCURRENCY / monitorApi.scanConcurrency), not a failure: with
+# scans asynchronous the cap sheds immediately rather than queueing, so
+# a PARALLELISM wider than the cap is *expected* to see them. Retrying
+# (honoring Retry-After) keeps this measuring the scan pipeline rather
+# than the cap. Retries are counted and reported separately.
 scan_one() {
   local id="$1"
-  local t0 t1 elapsed_ms status retry_after retries=0
+  local t0 t1 elapsed_ms status retry_after retries=0 outcome
   # $$ (not BASHPID): each xargs worker is its own `bash -c` process, so
   # $$ is already unique per worker -- and it works on the bash 3.2 that
   # ships as /bin/bash on macOS, where BASHPID is unset and every worker
@@ -176,8 +188,7 @@ scan_one() {
       -H "Authorization: Bearer ${SCM_API_KEY}")"
     [ "${status}" = "429" ] || break
     # Bounded: a server that stays saturated must still let this script
-    # finish and report, rather than retrying forever. The final 429 is
-    # recorded like any other status, so the run's tally stays honest.
+    # finish and report, rather than retrying forever.
     if [ "${retries}" -ge "${MAX_429_RETRIES}" ]; then
       break
     fi
@@ -186,9 +197,39 @@ scan_one() {
     sleep "${retry_after:-5}"
   done
   rm -f "${hdr}"
+
+  if [ "${status}" != "202" ]; then
+    # Never started -- record the HTTP code itself as the outcome.
+    t1="$(now_ms)"
+    echo "http-${status} $((t1 - t0)) ${id} ${retries}" >> "${results_file}"
+    return
+  fi
+
+  # Poll until the scan lands. SCAN_POLL_TIMEOUT_S bounds it so one
+  # wedged artifact can't hang the whole run (see MAX_429_RETRIES for
+  # the same reasoning on the other loop).
+  local waited=0
+  outcome="timeout"
+  while [ "${waited}" -lt "${SCAN_POLL_TIMEOUT_S}" ]; do
+    status="$(curl -s -o "${tmp_dir}/art.$$" -w '%{http_code}' \
+      "${API_BASE}/api/v1/artifacts/${id}" \
+      -H "Authorization: Bearer ${SCM_API_KEY}")"
+    if [ "${status}" != "200" ]; then
+      outcome="poll-http-${status}"
+      break
+    fi
+    # Deliberately not jq: this runs once per poll per worker, and the
+    # status field is a plain string in a flat object.
+    outcome="$(sed -n 's/.*"status":"\([a-z]*\)".*/\1/p' "${tmp_dir}/art.$$" | head -1)"
+    [ "${outcome}" = "scanning" ] || break
+    sleep "${SCAN_POLL_INTERVAL_S}"
+    waited=$((waited + SCAN_POLL_INTERVAL_S))
+  done
+  rm -f "${tmp_dir}/art.$$"
+
   t1="$(now_ms)"
   elapsed_ms=$((t1 - t0))
-  echo "${status} ${elapsed_ms} ${id} ${retries}" >> "${results_file}"
+  echo "${outcome} ${elapsed_ms} ${id} ${retries}" >> "${results_file}"
 }
 export -f scan_one
 
@@ -201,8 +242,8 @@ echo
 echo "=== Results ==="
 echo "Total wall clock: ${total_wall_s}s for ${id_count} scans (parallelism=${PARALLELISM})"
 
-awk '{print $1}' "${results_file}" | sort | uniq -c | sort -rn | while read -r count code; do
-  echo "  HTTP ${code}: ${count}"
+awk '{print $1}' "${results_file}" | sort | uniq -c | sort -rn | while read -r count outcome; do
+  echo "  ${outcome}: ${count}"
 done
 
 echo
@@ -227,9 +268,9 @@ if [[ "${retry_total}" -gt 0 ]]; then
   echo "  (server-side SCAN_CONCURRENCY / monitorApi.scanConcurrency -- raise it, or lower PARALLELISM, to reduce this)"
 fi
 
-fail_count="$(awk '$1 != "200" {c++} END{print c+0}' "${results_file}")"
+fail_count="$(awk '$1 != "scanned" {c++} END{print c+0}' "${results_file}")"
 if [[ "${fail_count}" -gt 0 ]]; then
   echo
-  echo "${fail_count} scan(s) did not return 200 -- non-200 status codes and their artifact ids:"
-  awk '$1 != "200" {print "  " $1, $3}' "${results_file}"
+  echo "${fail_count} scan(s) did not end up \"scanned\" -- outcome and artifact id:"
+  awk '$1 != "scanned" {print "  " $1, $3}' "${results_file}"
 fi

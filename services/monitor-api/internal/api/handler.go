@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log"
 	"net/http"
 	"time"
@@ -47,36 +46,13 @@ type handler struct {
 	// means unlimited (the behavior before this existed) -- see
 	// ScanLimits and acquireScanSlot.
 	scanSlots chan struct{}
-	// scanQueueWait bounds how long a scan request waits for a slot
-	// before giving up with a 429. Falls back to
-	// DefaultScanQueueWait if zero.
-	scanQueueWait time.Duration
 }
 
-// DefaultScanQueueWait is how long a scan request waits for a free slot
-// before being rejected. Long enough that a burst slightly wider than
-// the cap (the dashboard's Scan buttons clicked in quick succession,
-// cluster/load-test-clamav.sh's PARALLELISM) mostly just queues and
-// succeeds; short enough that a genuinely saturated server sheds load
-// instead of accumulating connections that will each wait out a
-// multi-minute scan.
-//
-// It must stay comfortably BELOW main.go's http.Server WriteTimeout,
-// and that ceiling is the whole reason this isn't 30s: WriteTimeout
-// starts when the request headers are read, so a request that waits the
-// full queue wait and only then writes its 429 races the write deadline
-// -- and loses. At 30s against a 30s WriteTimeout the 429 was never
-// observable at all: a rejected client saw a dropped connection
-// (curl reports 000) instead of the status code and Retry-After it was
-// supposed to act on. Measured in-cluster, not theorized. main_test.go
-// asserts the relationship so a future edit to either value fails a
-// test rather than silently making rejections invisible again.
-const DefaultScanQueueWait = 10 * time.Second
-
-// errScanQueueFull means the wait above elapsed with every scan slot
-// still busy -- distinct from ctx.Err(), which means the client gave up
-// on its own while queued.
-var errScanQueueFull = errors.New("scan queue full")
+// scanRetryAfter is the Retry-After (seconds) sent with the 429 a
+// saturated scan cap returns. Advisory: a scan runs for minutes, so
+// there is no exact right answer -- short enough that a caller retrying
+// on it makes progress as slots free up, without hammering.
+const scanRetryAfter = 10 * time.Second
 
 // ScanLimits bounds concurrent scanning. Zero value = unlimited, which
 // is exactly the behavior every caller had before this existed.
@@ -92,42 +68,29 @@ type ScanLimits struct {
 	// <= 0 means unlimited, the same "a nonsensical zero-or-negative
 	// value reads as off" convention rateLimitRPS already uses.
 	Concurrency int
-	// QueueWait is how long a scan waits for a free slot before a 429.
-	// <= 0 means DefaultScanQueueWait, matching how scanTimeout treats
-	// a zero value.
-	QueueWait time.Duration
 }
 
-// acquireScanSlot blocks until a scan slot is free, the queue wait
-// elapses (errScanQueueFull -> the caller should answer 429), or ctx is
-// done (the client hung up while queued -- there's nobody left to
-// answer, so the slot is deliberately never taken). Returns the
-// function that releases the slot.
+// tryAcquireScanSlot takes a scan slot if one is free right now, and
+// reports whether it got one. Non-blocking on purpose: scans are
+// asynchronous (see scanArtifact), so there is no client waiting whose
+// experience a short queue would improve -- a saturated cap answers 429
+// immediately, and the in-flight set stays hard-bounded with no
+// server-side backlog to lose on a restart.
 //
-// ctx here is the *request* context, unlike the scan itself, which
-// deliberately runs on context.Background() so a disconnect can't kill
-// a scan already in progress (see scanArtifact). Watching it while
-// merely queued is the opposite case: nothing has started yet, so a
-// client that walked away should free its place rather than have a scan
-// run for it anyway.
-func (h *handler) acquireScanSlot(ctx context.Context) (func(), error) {
+// (This replaced a queue-then-reject wait that existed only because the
+// caller used to block on the response. That wait had to be kept below
+// main.go's http.Server WriteTimeout or its own 429 raced the write
+// deadline -- a constraint asynchronous scanning removes outright, since
+// every response is now written in milliseconds.)
+func (h *handler) tryAcquireScanSlot() (func(), bool) {
 	if h.scanSlots == nil {
-		return func() {}, nil
+		return func() {}, true
 	}
-	wait := h.scanQueueWait
-	if wait <= 0 {
-		wait = DefaultScanQueueWait
-	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-
 	select {
 	case h.scanSlots <- struct{}{}:
-		return func() { <-h.scanSlots }, nil
-	case <-timer.C:
-		return nil, errScanQueueFull
-	case <-ctx.Done():
-		return nil, ctx.Err()
+		return func() { <-h.scanSlots }, true
+	default:
+		return nil, false
 	}
 }
 

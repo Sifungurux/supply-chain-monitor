@@ -422,6 +422,40 @@ turn it off. See docs/architecture.md ("Sweeping registered-but-
 unscanned artifacts, and backfilling missing digests") for the full
 reasoning.
 
+### Scanning is asynchronous
+
+`POST /api/v1/artifacts/{id}/scan` returns **202** as soon as the scan
+starts and does not wait for it to finish. Poll
+`GET /api/v1/artifacts/{id}` (the `Location` header points there) until
+`status` leaves `scanning` — it settles on `scanned`, or `failed` if
+every scanner failed:
+
+```bash
+curl -s -o /dev/null -w '%{http_code} %header{Location}\n' \
+  -X POST localhost:8080/api/v1/artifacts/$ID/scan \
+  -H "Authorization: Bearer $API_KEY"
+# 202 /api/v1/artifacts/8f14e45fceea167a
+
+curl -s localhost:8080/api/v1/artifacts/$ID \
+  -H "Authorization: Bearer $API_KEY" | jq -r .status
+# scanning  ... then: scanned
+```
+
+The 202 body is the artifact as the scan *started*, so its findings are
+the previous scan's — read results from the poll, not from the 202.
+
+This used to block until every scanner finished, which never worked end
+to end: the API's `http.Server` sets a 30s write timeout, the deadline
+starts when the request headers are read, and a real scan runs
+30–330s — so the server tore the connection down before it could answer
+and callers saw a dropped connection (`curl` reports `000`) for anything
+but the fastest scans. The work always completed server-side; only the
+answer was lost.
+
+A scan interrupted by a pod restart leaves its artifact at `scanning`
+with nothing left to finish it; the `sweep-registered` CronJob reclaims
+those by re-scanning anything stuck there for over 20 minutes.
+
 ### Capping concurrent scans
 
 One scan fans out to a scan-worker Job **per registered scanner**, all
@@ -434,10 +468,10 @@ fifty scans' worth of Jobs at once, which an unbounded
 
 `monitorApi.scanConcurrency` (`SCAN_CONCURRENCY`, **4** in the chart —
 so up to ~12 concurrent Jobs at the default `cveScanner`; multiply
-before changing it) caps how many scans run at once across the process. A request arriving
-with every slot busy waits up to 10s for one, then gets a `429` with
-`Retry-After` — so a burst slightly wider than the cap just queues, and
-only a genuinely saturated server sheds load:
+before changing it) caps how many scans run at once across the process.
+Scanning is asynchronous, so nobody is blocked on the response: a
+request arriving with every slot busy is rejected immediately with a
+`429` and `Retry-After`, rather than queueing:
 
 ```bash
 curl -s -o /dev/null -w '%{http_code} %header{Retry-After}\n' \
