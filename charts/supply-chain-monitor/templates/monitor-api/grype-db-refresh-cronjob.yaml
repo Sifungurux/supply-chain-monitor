@@ -50,6 +50,12 @@ spec:
                   set -eu
                   echo "refreshing grype vulnerability DB in ${GRYPE_DB_CACHE_DIR}"
                   grype db update
+                  # Same 0700-directory problem the primer Job fixes,
+                  # and it has to be repeated here: a refresh that
+                  # installs a new schema version creates a fresh
+                  # subdirectory with the same restrictive mode. See
+                  # grype-db-cache-primer-job.yaml for the full symptom.
+                  chmod -R a+rX "${GRYPE_DB_CACHE_DIR}"
                   echo "grype DB cache refreshed"
               env:
                 - name: GRYPE_DB_CACHE_DIR
