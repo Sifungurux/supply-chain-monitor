@@ -435,7 +435,7 @@ fifty scans' worth of Jobs at once, which an unbounded
 `monitorApi.scanConcurrency` (`SCAN_CONCURRENCY`, **4** in the chart —
 so up to ~12 concurrent Jobs at the default `cveScanner`; multiply
 before changing it) caps how many scans run at once across the process. A request arriving
-with every slot busy waits up to 30s for one, then gets a `429` with
+with every slot busy waits up to 10s for one, then gets a `429` with
 `Retry-After` — so a burst slightly wider than the cap just queues, and
 only a genuinely saturated server sheds load:
 
@@ -443,7 +443,7 @@ only a genuinely saturated server sheds load:
 curl -s -o /dev/null -w '%{http_code} %header{Retry-After}\n' \
   -X POST localhost:8080/api/v1/artifacts/$ID/scan \
   -H "Authorization: Bearer $API_KEY"
-# 429 30
+# 429 10
 ```
 
 A rejected request leaves the artifact untouched — it is never marked

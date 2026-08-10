@@ -47,7 +47,7 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errScanQueueFull) {
 			wait := h.scanQueueWait
 			if wait <= 0 {
-				wait = defaultScanQueueWait
+				wait = DefaultScanQueueWait
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())))
 			// Names the scan cap specifically: withRateLimit answers 429

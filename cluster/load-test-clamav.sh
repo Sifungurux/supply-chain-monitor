@@ -154,7 +154,7 @@ start_ts="$(date +%s)"
 export API_BASE SCM_API_KEY results_file tmp_dir MAX_429_RETRIES
 # A 429 here is monitor-api's server-side scan concurrency cap
 # (SCAN_CONCURRENCY / monitorApi.scanConcurrency), not a failure: the
-# server queues a request for 30s and only then sheds it, so a
+# server queues a request for ~10s and only then sheds it, so a
 # PARALLELISM wider than the cap is *expected* to see some. Retrying
 # (honoring Retry-After) is what keeps this script measuring what it
 # exists to measure -- how the scan pipeline copes with N concurrent

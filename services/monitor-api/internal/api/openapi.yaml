@@ -201,9 +201,11 @@ paths:
 
         Scanning is capped server-side (SCAN_CONCURRENCY /
         monitorApi.scanConcurrency, off by default). A request that
-        arrives with every slot busy waits up to 30s for one, then gets
+        arrives with every slot busy waits up to 10s for one, then gets
         a 429 with Retry-After -- the artifact is left untouched, not
-        marked scanning.
+        marked scanning. (The wait is deliberately well under the
+        server's 30s write timeout, or the 429 would race that deadline
+        and reach the client as a dropped connection instead.)
       responses:
         "200":
           description: Scan completed.

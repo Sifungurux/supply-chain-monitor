@@ -230,8 +230,11 @@ recorded.
   page query and its `COUNT(*)`), not in Go after loading every row.
 - Concurrent scans are capped server-side (`SCAN_CONCURRENCY` /
   `monitorApi.scanConcurrency`, 4 in the chart, 0 = unlimited in the
-  binary). A saturated cap queues the request for 30s and then answers
-  `429` + `Retry-After`; the slot is taken *after* the 404/501 checks and
+  binary). A saturated cap queues the request for 10s and then answers
+  `429` + `Retry-After` — the wait is kept well under the 30s
+  `http.Server` `WriteTimeout`, since a 429 written at the deadline
+  reaches the client as a dropped connection rather than a status code
+  (`main_test.go` asserts the margin); the slot is taken *after* the 404/501 checks and
   *before* the status flips to `scanning`, so a rejected scan leaves the
   artifact untouched. The cap counts scans, but the resource is Jobs:
   one image scan spawns one scan-worker Job per registered scanner,
