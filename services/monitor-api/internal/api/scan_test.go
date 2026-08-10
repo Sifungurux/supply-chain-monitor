@@ -6,6 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -92,7 +95,7 @@ func TestScanArtifact_BackfillsMissingDigest(t *testing.T) {
 	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:backfilled"}}
 	h := api.NewRouter(store, tracker, scanner.Registry{
 		artifact.TypeImage: {&fakeScanner{}},
-	}, testAPIKey, 0, 0, resolver, false, 0, false)
+	}, testAPIKey, 0, 0, resolver, false, 0, false, api.ScanLimits{})
 
 	// mustCreate goes straight through the store, bypassing
 	// createArtifact's own registration-time resolveDigest call --
@@ -123,7 +126,7 @@ func TestScanArtifact_DoesNotReResolveAnAlreadySetDigest(t *testing.T) {
 	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:should-never-be-fetched"}}
 	h := api.NewRouter(store, tracker, scanner.Registry{
 		artifact.TypeImage: {&fakeScanner{}},
-	}, testAPIKey, 0, 0, resolver, false, 0, false)
+	}, testAPIKey, 0, 0, resolver, false, 0, false, api.ScanLimits{})
 
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 	if _, err := store.Update(created.ID, func(a *artifact.Artifact) { a.Digest = "sha256:already-set" }); err != nil {
@@ -138,8 +141,8 @@ func TestScanArtifact_DoesNotReResolveAnAlreadySetDigest(t *testing.T) {
 	if got.Digest != "sha256:already-set" {
 		t.Fatalf("digest = %q, want the pre-existing digest left untouched", got.Digest)
 	}
-	if resolver.calls != 0 {
-		t.Fatalf("resolver.Resolve called %d times, want 0 -- an already-resolved digest must not trigger a redundant registry call", resolver.calls)
+	if resolver.calls.Load() != 0 {
+		t.Fatalf("resolver.Resolve called %d times, want 0 -- an already-resolved digest must not trigger a redundant registry call", resolver.calls.Load())
 	}
 }
 
@@ -567,5 +570,124 @@ func TestScanArtifact_SurvivesCanceledRequestContext(t *testing.T) {
 	got := decodeArtifact(t, rec)
 	if got.Status != artifact.StatusScanned {
 		t.Fatalf("status = %q, want %q (scan should complete despite the canceled request context)", got.Status, artifact.StatusScanned)
+	}
+}
+
+// newScanCappedRouter builds a router with a scan concurrency cap and a
+// deliberately tiny queue wait, so the "queue exhausted" path is
+// testable in milliseconds rather than the 30s a real deployment waits.
+func newScanCappedRouter(scanners scanner.Registry, concurrency int, queueWait time.Duration) (http.Handler, *artifact.MemStore) {
+	store := artifact.NewMemStore()
+	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
+	return api.NewRouter(store, tracker, scanners, testAPIKey, 0, 0, nil, false, 0, false,
+		api.ScanLimits{Concurrency: concurrency, QueueWait: queueWait}), store
+}
+
+// TestScanArtifact_ConcurrencyCapQueuesRatherThanRejecting -- a burst
+// slightly wider than the cap is the common case (the dashboard's Scan
+// buttons, cluster/load-test-clamav.sh's PARALLELISM), and it should
+// just queue: with a cap of 1 and a scanner that takes 100ms, two
+// concurrent requests both succeed, and the second finishes after the
+// first rather than alongside it.
+func TestScanArtifact_ConcurrencyCapQueuesRatherThanRejecting(t *testing.T) {
+	slow := &sleepingScanner{delay: 100 * time.Millisecond}
+	h, store := newScanCappedRouter(scanner.Registry{artifact.TypeImage: {slow}}, 1, 5*time.Second)
+	first := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	second := mustCreate(t, store, "busybox:latest", artifact.TypeImage)
+
+	start := time.Now()
+	codes := make(chan int, 2)
+	var wg sync.WaitGroup
+	for _, id := range []string{first.ID, second.ID} {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			codes <- doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+id+"/scan", nil).Code
+		}(id)
+	}
+	wg.Wait()
+	close(codes)
+	elapsed := time.Since(start)
+
+	for code := range codes {
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 -- a burst within the queue wait should queue, not be rejected", code)
+		}
+	}
+	// Serialized by the cap: two 100ms scans one after the other, not
+	// both at once. The floor is deliberately well under 200ms so this
+	// doesn't turn into a timing-flake on a loaded machine.
+	if elapsed < 150*time.Millisecond {
+		t.Fatalf("two capped scans took %v -- too fast to have been serialized by a cap of 1", elapsed)
+	}
+}
+
+// TestScanArtifact_ConcurrencyCapRejectsWhenQueueWaitElapses covers the
+// saturated case: the slot never frees within the queue wait, so the
+// second request gets a 429 with a Retry-After -- and, critically, the
+// artifact it was going to scan is NOT left marked "scanning", which is
+// what taking the slot before flipping the status would cause.
+func TestScanArtifact_ConcurrencyCapRejectsWhenQueueWaitElapses(t *testing.T) {
+	slow := &sleepingScanner{delay: 2 * time.Second}
+	h, store := newScanCappedRouter(scanner.Registry{artifact.TypeImage: {slow}}, 1, 50*time.Millisecond)
+	first := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	second := mustCreate(t, store, "busybox:latest", artifact.TypeImage)
+
+	inFlight := make(chan struct{})
+	go func() {
+		close(inFlight)
+		doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+first.ID+"/scan", nil)
+	}()
+	<-inFlight
+	// Give the first request time to actually take the slot -- without
+	// this the second could win the race and pass for the wrong reason.
+	time.Sleep(200 * time.Millisecond)
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+second.ID+"/scan", nil)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429, body=%s", rec.Code, rec.Body.String())
+	}
+	retryAfter, err := strconv.Atoi(rec.Header().Get("Retry-After"))
+	if err != nil || retryAfter < 0 {
+		t.Fatalf("Retry-After = %q, want a non-negative integer (err=%v)", rec.Header().Get("Retry-After"), err)
+	}
+	if !strings.Contains(rec.Body.String(), "scan concurrency") {
+		t.Fatalf("429 body = %s, want it to name the scan cap (withRateLimit answers 429 too)", rec.Body.String())
+	}
+
+	rejected, getErr := store.Get(second.ID)
+	if getErr != nil {
+		t.Fatalf("store.Get: %v", getErr)
+	}
+	if rejected.Status == artifact.StatusScanning {
+		t.Fatalf("a rejected scan left artifact %s marked %q -- the slot must be taken before the status flips", second.ID, rejected.Status)
+	}
+}
+
+// TestScanArtifact_NoCapIsUnlimited pins the zero value: every existing
+// caller (and every other test in this package) passes ScanLimits{} and
+// must keep the pre-cap behavior -- scans run concurrently, nothing
+// queues, nothing is rejected.
+func TestScanArtifact_NoCapIsUnlimited(t *testing.T) {
+	slow := &sleepingScanner{delay: 150 * time.Millisecond}
+	h, store := newScanCappedRouter(scanner.Registry{artifact.TypeImage: {slow}}, 0, 0)
+	first := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	second := mustCreate(t, store, "busybox:latest", artifact.TypeImage)
+
+	start := time.Now()
+	var wg sync.WaitGroup
+	for _, id := range []string{first.ID, second.ID} {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			if code := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+id+"/scan", nil).Code; code != http.StatusOK {
+				t.Errorf("status = %d, want 200", code)
+			}
+		}(id)
+	}
+	wg.Wait()
+
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("two uncapped scans took %v -- they should have overlapped, not serialized", elapsed)
 	}
 }

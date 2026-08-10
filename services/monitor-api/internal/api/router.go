@@ -44,8 +44,16 @@ import (
 // mismatch (or an unresolvable ref) into Artifact.Unsafe = true instead
 // of a rejection -- see createArtifact/bulkCreateArtifacts and
 // Artifact.Unsafe's own comment for why this is a mark, not a block.
-func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner.Registry, apiKey string, rateLimitRPS float64, rateLimitBurst float64, digestResolver scanner.DigestResolver, fetchPlainHTTP bool, scanTimeout time.Duration, requireDigest bool) http.Handler {
-	h := &handler{store: store, tracker: tracker, scanners: scanners, digestResolver: digestResolver, fetchPlainHTTP: fetchPlainHTTP, scanTimeout: scanTimeout, requireDigest: requireDigest}
+// scanLimits caps concurrent scanning -- the zero value is unlimited,
+// exactly what every caller got before it existed (see ScanLimits).
+// It's a struct rather than this function's twelfth positional
+// parameter; further scan-related knobs belong in it rather than
+// lengthening this signature again.
+func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner.Registry, apiKey string, rateLimitRPS float64, rateLimitBurst float64, digestResolver scanner.DigestResolver, fetchPlainHTTP bool, scanTimeout time.Duration, requireDigest bool, scanLimits ScanLimits) http.Handler {
+	h := &handler{store: store, tracker: tracker, scanners: scanners, digestResolver: digestResolver, fetchPlainHTTP: fetchPlainHTTP, scanTimeout: scanTimeout, requireDigest: requireDigest, scanQueueWait: scanLimits.QueueWait}
+	if scanLimits.Concurrency > 0 {
+		h.scanSlots = make(chan struct{}, scanLimits.Concurrency)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.healthz)

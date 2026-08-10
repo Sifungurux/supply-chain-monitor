@@ -15,8 +15,11 @@
 #      registered, PARALLELISM at a time (there's no batch-scan endpoint
 #      -- see docs/architecture.md, scan is one-artifact-per-request by
 #      design), timing each request.
-#   3. Reports success/failure counts and latency (min/avg/max/total
-#      wall clock) so a before/after comparison across different
+#   3. Reports success/failure counts, 429-retry counts (see scan_one --
+#      the server caps concurrent scans and this honors Retry-After
+#      rather than counting the cap as a failure), and latency
+#      (min/avg/max/total wall clock) so a before/after comparison
+#      across different
 #      clamav.replicas values (and, on the podman/k3d runtime, different
 #      SCM_K3D_AGENTS node counts -- see cluster/k3d-config.yaml) is
 #      actually a comparison of numbers, not vibes.
@@ -45,6 +48,12 @@ BATCH_FILE="${BATCH_FILE:-${REPO_ROOT}/testdata/bulk-test-images.json}"
 # that actually puts concurrent load on clamd; raise it toward (or past)
 # clamav.replicas to see queuing show up as rising latency/timeouts.
 PARALLELISM="${PARALLELISM:-10}"
+# How many times one scan retries a 429 from the server-side scan
+# concurrency cap before giving up and recording the 429 (see scan_one).
+# Bounded on purpose: an unbounded retry would turn a saturated server
+# into a script that never finishes, which is a worse outcome for a
+# measurement tool than a run that completes and reports the rejections.
+MAX_429_RETRIES="${MAX_429_RETRIES:-10}"
 
 for bin in curl jq xargs; do
   if ! command -v "${bin}" >/dev/null 2>&1; then
@@ -117,7 +126,11 @@ echo "Registered: ${created} created, ${duplicates} already registered (matched 
 
 ids_file="$(mktemp)"
 results_file="$(mktemp)"
-trap 'rm -f "${ids_file}" "${results_file}"' EXIT
+# tmp_dir holds one response-header file per concurrent scan_one worker
+# (keyed by BASHPID) -- scan_one needs Retry-After off a 429, and a
+# single shared file would be raced by PARALLELISM workers at once.
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "${ids_file}" "${results_file}" "${tmp_dir}"' EXIT
 
 # `.results[]?` (not `.results[]`) so a response shape this script didn't
 # expect (e.g. an auth error body with no `.results` key at all) yields
@@ -138,17 +151,44 @@ echo
 echo "Scanning ${id_count} artifacts, ${PARALLELISM} concurrent requests (this exercises clamd -- expect it to take a while)..."
 start_ts="$(date +%s)"
 
-export API_BASE SCM_API_KEY results_file
+export API_BASE SCM_API_KEY results_file tmp_dir MAX_429_RETRIES
+# A 429 here is monitor-api's server-side scan concurrency cap
+# (SCAN_CONCURRENCY / monitorApi.scanConcurrency), not a failure: the
+# server queues a request for 30s and only then sheds it, so a
+# PARALLELISM wider than the cap is *expected* to see some. Retrying
+# (honoring Retry-After) is what keeps this script measuring what it
+# exists to measure -- how the scan pipeline copes with N concurrent
+# scans -- rather than turning the cap itself into a wall of failures
+# that can't be compared against a pre-cap run. Retries are counted and
+# reported separately so the queueing is visible rather than hidden.
 scan_one() {
   local id="$1"
-  local t0 t1 elapsed_ms status
+  local t0 t1 elapsed_ms status retry_after retries=0
+  # $$ (not BASHPID): each xargs worker is its own `bash -c` process, so
+  # $$ is already unique per worker -- and it works on the bash 3.2 that
+  # ships as /bin/bash on macOS, where BASHPID is unset and every worker
+  # would race one shared header file.
+  local hdr="${tmp_dir}/hdr.$$"
   t0="$(now_ms)"
-  status="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
-    "${API_BASE}/api/v1/artifacts/${id}/scan" \
-    -H "Authorization: Bearer ${SCM_API_KEY}")"
+  while :; do
+    status="$(curl -s -o /dev/null -D "${hdr}" -w '%{http_code}' -X POST \
+      "${API_BASE}/api/v1/artifacts/${id}/scan" \
+      -H "Authorization: Bearer ${SCM_API_KEY}")"
+    [ "${status}" = "429" ] || break
+    # Bounded: a server that stays saturated must still let this script
+    # finish and report, rather than retrying forever. The final 429 is
+    # recorded like any other status, so the run's tally stays honest.
+    if [ "${retries}" -ge "${MAX_429_RETRIES}" ]; then
+      break
+    fi
+    retry_after="$(awk 'tolower($1) == "retry-after:" {gsub(/\r/, "", $2); print $2}' "${hdr}")"
+    retries=$((retries + 1))
+    sleep "${retry_after:-5}"
+  done
+  rm -f "${hdr}"
   t1="$(now_ms)"
   elapsed_ms=$((t1 - t0))
-  echo "${status} ${elapsed_ms} ${id}" >> "${results_file}"
+  echo "${status} ${elapsed_ms} ${id} ${retries}" >> "${results_file}"
 }
 export -f scan_one
 
@@ -173,6 +213,19 @@ awk '{print $2}' "${results_file}" | sort -n | awk '
     printf "Per-scan latency (ms) -- min: %d  p50: %d  p95: %d  max: %d  avg: %.0f\n",
       a[1], a[int(NR*0.5)+1<=NR?int(NR*0.5)+1:NR], a[int(NR*0.95)+1<=NR?int(NR*0.95)+1:NR], a[NR], sum/NR
   }'
+
+# Queueing behind the server-side scan cap shows up here rather than in
+# the status-code tally above (a retried 429 eventually reports its real
+# status) -- so a run against a capped server stays comparable to one
+# against an uncapped one, with the waiting made explicit instead of
+# vanishing into latency.
+retry_total="$(awk '{r+=$4} END{print r+0}' "${results_file}")"
+if [[ "${retry_total}" -gt 0 ]]; then
+  retried_scans="$(awk '$4 > 0 {c++} END{print c+0}' "${results_file}")"
+  echo
+  echo "Queued behind the scan concurrency cap: ${retried_scans} scan(s) retried after a 429, ${retry_total} retries total."
+  echo "  (server-side SCAN_CONCURRENCY / monitorApi.scanConcurrency -- raise it, or lower PARALLELISM, to reduce this)"
+fi
 
 fail_count="$(awk '$1 != "200" {c++} END{print c+0}' "${results_file}")"
 if [[ "${fail_count}" -gt 0 ]]; then

@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -27,6 +29,40 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "no scanner registered for type "+string(a.Type))
 		return
 	}
+
+	// Take a scan slot before touching anything -- deliberately after
+	// the 404/501 checks above (a request that was never going to scan
+	// shouldn't sit in the queue, or occupy a slot) and before the
+	// status flips to "scanning" (an artifact must never be left marked
+	// scanning by a request that ended in a 429).
+	//
+	// `defer release()` caps concurrent *scans* only because this
+	// handler is fully synchronous: wg.Wait() below joins every scanner
+	// goroutine before this function returns. If scanning ever becomes
+	// asynchronous (return 202, finish in the background), this defer
+	// silently degrades into a cap on request duration instead -- the
+	// release has to move with the work.
+	release, err := h.acquireScanSlot(r.Context())
+	if err != nil {
+		if errors.Is(err, errScanQueueFull) {
+			wait := h.scanQueueWait
+			if wait <= 0 {
+				wait = defaultScanQueueWait
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())))
+			// Names the scan cap specifically: withRateLimit answers 429
+			// too, and an operator reading a load-test log can't tell the
+			// two apart from the status code alone.
+			writeError(w, http.StatusTooManyRequests,
+				fmt.Sprintf("scan concurrency limit reached (%d scans already in flight) -- retry shortly", cap(h.scanSlots)))
+			return
+		}
+		// The client hung up while queued -- there's nothing to write a
+		// response to, and this is the only trace it happened.
+		log.Printf("scan request for artifact %s abandoned while queued for a scan slot: %v", id, err)
+		return
+	}
+	defer release()
 
 	_, _ = h.store.Update(id, func(art *artifact.Artifact) {
 		art.Status = artifact.StatusScanning

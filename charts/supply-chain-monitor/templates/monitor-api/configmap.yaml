@@ -58,6 +58,10 @@ data:
   # first. main.go's runAPIServer validates that relationship at startup.
   SCAN_WORKER_ACTIVE_DEADLINE_SECONDS: {{ .Values.monitorApi.scanWorker.activeDeadlineSeconds | quote }}
   SCAN_TIMEOUT_SECONDS: {{ .Values.monitorApi.scanTimeoutSeconds | quote }}
+  # Server-side cap on concurrent scans -- the bound that keeps N
+  # simultaneous scan-worker Jobs from exhausting a node's disk between
+  # them. See monitorApi.scanConcurrency's own comment in values.yaml.
+  SCAN_CONCURRENCY: {{ .Values.monitorApi.scanConcurrency | quote }}
   # file/sbom/sarif artifacts can be registered with an OCI registry
   # reference instead of a path already inside this pod -- oras pull
   # fetches them from scm-registry first (see internal/scanner/fetch.go).
