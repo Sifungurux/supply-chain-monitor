@@ -402,21 +402,28 @@ monitorApi:
   # Read this as Jobs, not scans: ONE image scan fans out to one
   # scan-worker Job per registered scanner, all running concurrently --
   # with cveScanner "both" that's three (trivy + grype + unpacker), so
-  # this cap of 4 permits up to ~12 concurrent image-mode Jobs. Each
+  # this cap of 8 permits up to ~24 concurrent image-mode Jobs. Each
   # extracts the whole image under scan into its own /tmp (512Mi
   # request, 3Gi limit, measured peaks 1.8-2.6Gi -- see
   # internal/scanner/isolated.go's ephemeralStorageLimitFor). Multiply
-  # before changing this: with cveScanner "trivy" the same 4 is ~8 Jobs,
-  # and a fourth registered scanner would make it 16.
+  # before changing this: with cveScanner "trivy" the same 8 is ~16
+  # Jobs, and a fourth registered scanner would make it 32.
   #
-  # Why 4 rather than something derived from node disk: a 100-image load
-  # test at PARALLELISM=10 (so ~30 Jobs in flight) ran with zero
-  # evictions once the per-Job ephemeral sizing was fixed, so 4 sits
-  # deliberately below the level this cluster is known to survive. The
-  # cap isn't here to throttle normal use -- it's the bound that stops
-  # an unbounded burst (a client firing 50 or 100 scans at once) from
-  # putting every node under DiskPressure at the same time, which the
-  # per-Job limit alone can never prevent.
+  # Raised from 4 to 8 once scanning became asynchronous: clients poll
+  # instead of holding a connection, so the cap is now purely a resource
+  # bound and the previous value made a 100-artifact batch queue for
+  # ~40 minutes. The reference point is a 100-image load test at
+  # PARALLELISM=10 (~30 Jobs in flight) that ran with zero evictions
+  # once the per-Job ephemeral sizing was fixed, so ~24 stays inside
+  # what this cluster is known to survive.
+  #
+  # This is the setting to lower first if scan-worker Jobs start getting
+  # evicted: 24 Jobs at their measured peak would want more transient
+  # disk than a single node has free (~14G at the time of writing), and
+  # only the fact that peaks don't coincide keeps that in bounds. The
+  # cap's real job is stopping an unbounded burst -- a client firing 50
+  # or 100 scans at once -- from putting every node under DiskPressure,
+  # which the per-Job limit alone can never prevent.
   #
   # A request that arrives with every slot busy is rejected immediately
   # with a 429 and Retry-After -- scans are asynchronous (the API answers
@@ -425,7 +432,7 @@ monitorApi:
   # than this at once (the dashboard, cluster/load-test-clamav.sh's
   # PARALLELISM) should retry on 429. 0 disables the cap entirely, which
   # is the binary's own default when this isn't set.
-  scanConcurrency: 4
+  scanConcurrency: 8
   # Uncomment (and set enabled: true) for air-gapped operation -- see
   # cluster/seed-trivy-db.sh and README's "Air-gapped operation".
   trivyDB:

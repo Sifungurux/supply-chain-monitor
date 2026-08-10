@@ -466,8 +466,8 @@ per-Job limit stops one Job from filling a node; it does nothing about
 fifty scans' worth of Jobs at once, which an unbounded
 `POST /api/v1/artifacts/{id}/scan` allowed.
 
-`monitorApi.scanConcurrency` (`SCAN_CONCURRENCY`, **4** in the chart —
-so up to ~12 concurrent Jobs at the default `cveScanner`; multiply
+`monitorApi.scanConcurrency` (`SCAN_CONCURRENCY`, **8** in the chart —
+so up to ~24 concurrent Jobs at the default `cveScanner`; multiply
 before changing it) caps how many scans run at once across the process.
 Scanning is asynchronous, so nobody is blocked on the response: a
 request arriving with every slot busy is rejected immediately with a
