@@ -155,9 +155,12 @@ clamav:
     # (the old state) clamav's entire 168Mi counted as over-request, so
     # it sat at the front of the kill queue and got evicted en masse the
     # first time autoscaling reached maxReplicas -- even though the real
-    # disk hogs were concurrent scan-worker Jobs (monitorApi.scanJob
-    # resources below, 2048Mi limit each). A request that covers actual
-    # peak keeps these pods *under* their request and out of that queue.
+    # disk hogs were concurrent scan-worker Jobs, which extract whole
+    # container images to /tmp (measured up to 1909Mi each; their
+    # resources are Go defaults, not chart values -- see
+    # services/monitor-api/internal/scanner/isolated.go). A request that
+    # covers actual peak keeps these pods *under* their request and out
+    # of that queue.
     #
     # request == limit on purpose: a limit above the request would let a
     # pod grow back over its request and re-enter the eviction queue,

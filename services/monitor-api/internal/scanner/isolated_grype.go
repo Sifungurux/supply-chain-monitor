@@ -117,7 +117,7 @@ func (c IsolatedGrypeConfig) withDefaults() IsolatedGrypeConfig {
 		c.MemoryRequest = "512Mi"
 	}
 	if c.EphemeralStorageRequest == "" {
-		c.EphemeralStorageRequest = "128Mi"
+		c.EphemeralStorageRequest = ephemeralStorageRequestFor(c.SubCommand)
 	}
 	if c.CPULimit == "" {
 		c.CPULimit = "1"
@@ -129,7 +129,7 @@ func (c IsolatedGrypeConfig) withDefaults() IsolatedGrypeConfig {
 		c.MemoryLimit = "1Gi"
 	}
 	if c.EphemeralStorageLimit == "" {
-		c.EphemeralStorageLimit = "256Mi"
+		c.EphemeralStorageLimit = ephemeralStorageLimitFor(c.SubCommand)
 	}
 	if c.RegistryCredentialsSecretName != "" {
 		if c.RegistryUsernameKey == "" {
