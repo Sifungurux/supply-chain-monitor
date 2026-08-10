@@ -135,6 +135,11 @@ func withCORS(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		// Without this, a cross-origin browser fetch can read the
+		// response body but not these two headers -- the pagination
+		// metadata listArtifacts sets would be invisible to exactly the
+		// client (the dashboard) it exists for.
+		w.Header().Set("Access-Control-Expose-Headers", "X-Total-Count, Link")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

@@ -218,6 +218,16 @@ recorded.
 - `GET /swagger` and `GET /openapi.yaml` serve a hand-written OpenAPI
   3.0 spec (`internal/api/openapi.yaml`, embedded via `go:embed`),
   covering every route the dashboard itself uses.
+- `GET /api/v1/artifacts` is paginated server-side:
+  `?limit=50&offset=0` (max 200, over that is a `400` rather than a
+  silent clamp) with optional `?status=`/`?type=` filters, answering
+  `{"total": N, "artifacts": [...]}` plus `X-Total-Count` and RFC 5988
+  `Link` next/prev headers. `Store.ListPage` backs it — one page plus a
+  total, ordered by `(created_at DESC, id DESC)` so paging over an
+  unstable tie order can't skip or repeat rows. The unpaginated
+  `Store.List` is kept for callers that genuinely want everything.
+  Filters are applied in the database (a `WHERE` clause shared by the
+  page query and its `COUNT(*)`), not in Go after loading every row.
 - Key routes beyond CRUD: `POST /api/v1/artifacts/bulk` (batch
   registration, best-effort per entry, capped at 500), `POST
   /api/v1/artifacts/{id}/scan`, `POST /api/v1/artifacts/{id}/findings`
@@ -326,7 +336,10 @@ a rebuild, so nothing else notices a new image is available.
 - No `NetworkPolicy` on scan-worker Job pods — locked down at the
   pod-security level, but not restricted at the network level.
 - No TLS on the Gateway.
-- Dashboard has no pagination or filtering beyond newest-first.
+- The dashboard's search box only searches the page currently loaded
+  (server-side `status`/`type` filters narrow the whole set instead);
+  every summary card except "Artifacts" counts that one page too --
+  there's no aggregate endpoint behind them.
 - SARIF and pluggable scanners can't declare a single finding bucket,
   so a failure in either still conservatively blocks fix-detection for
   all five buckets that scan round.

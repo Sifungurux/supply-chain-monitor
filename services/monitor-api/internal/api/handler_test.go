@@ -160,6 +160,23 @@ func decodeArtifact(t *testing.T, rec *httptest.ResponseRecorder) artifact.Artif
 	return a
 }
 
+// artifactPage mirrors GET /api/v1/artifacts' paginated response body
+// (see listArtifactsResponse) -- total plus one page of artifacts,
+// rather than the bare array the endpoint used to return.
+type artifactPage struct {
+	Total     int                 `json:"total"`
+	Artifacts []artifact.Artifact `json:"artifacts"`
+}
+
+func decodeArtifactPage(t *testing.T, rec *httptest.ResponseRecorder) artifactPage {
+	t.Helper()
+	var page artifactPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode artifact page response: %v (body=%s)", err, rec.Body.String())
+	}
+	return page
+}
+
 func TestHealthz(t *testing.T) {
 	h, _ := newTestRouter(scanner.Registry{})
 	rec := doJSON(t, h, http.MethodGet, "/healthz", nil)

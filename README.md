@@ -208,6 +208,18 @@ curl -s localhost:8080/api/v1/artifacts \
   -H "Authorization: Bearer $API_KEY"
 ```
 
+That endpoint is paginated: it answers with
+`{"total": N, "artifacts": [...]}` where `total` counts everything
+matching the filters (not the page), plus `X-Total-Count` and RFC 5988
+`Link` headers carrying next/prev. Default page size is 50, the maximum
+is 200 (a larger `limit` is a `400`, not a silent clamp), and
+`?status=` / `?type=` narrow the set server-side:
+
+```bash
+curl -s "localhost:8080/api/v1/artifacts?limit=100&offset=100&status=scanned&type=image" \
+  -H "Authorization: Bearer $API_KEY"
+```
+
 See docs/architecture.md ("Adding API authentication") for why a
 single shared key, why `/healthz` and CORS preflight `OPTIONS` are
 exempt, and what's still missing (per-client keys, rotation, rate
@@ -288,7 +300,7 @@ request/response shapes.
 | GET    | `/api/v1/pipeline/stages`         | list configured pipeline stages            |
 | POST   | `/api/v1/artifacts`                | register an artifact `{ref, type}`         |
 | POST   | `/api/v1/artifacts/bulk`           | register many artifacts in one request `{artifacts: [{ref, type}, ...]}`, max 500 |
-| GET    | `/api/v1/artifacts`                | list all tracked artifacts                 |
+| GET    | `/api/v1/artifacts`                | list tracked artifacts, newest first — paginated (`?limit=50&offset=0`, max 200) with optional `?status=`/`?type=` filters |
 | GET    | `/api/v1/artifacts/{id}`           | get one artifact (findings, current stage) |
 | DELETE | `/api/v1/artifacts/{id}`           | permanently delete an artifact and everything recorded against it (no undo) |
 | POST   | `/api/v1/artifacts/{id}/scan`      | run the scanner appropriate for its type   |

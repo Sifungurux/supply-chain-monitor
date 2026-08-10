@@ -167,8 +167,11 @@
   #status { font-size: 12px; color: var(--text-muted); }
   #status.error { color: var(--danger); }
   section { margin-bottom: 28px; }
-  .search-row { display: flex; justify-content: center; margin: 0 0 14px; }
+  .search-row { display: flex; justify-content: center; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 6px; }
   #search-input { width: 320px; max-width: 100%; }
+  .search-note { text-align: center; font-size: 12px; color: var(--text-muted); margin: 0 0 14px; }
+  .pager { display: flex; justify-content: center; align-items: center; gap: 10px; margin: 12px 0 0; font-size: 13px; }
+  .pager .range { color: var(--text-muted); font-family: var(--font-mono); }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
   .card {
     background: var(--color-surface); border: 1px solid var(--border);
@@ -312,7 +315,22 @@
       <h2>Artifacts</h2>
       <div class="search-row">
         <input type="search" id="search-input" placeholder="Search ref, digest, maintainer, stage, CVE/malware id or title…" />
+        <select id="filter-status" aria-label="Filter by status">
+          <option value="">Any status</option>
+          <option value="registered">registered</option>
+          <option value="scanning">scanning</option>
+          <option value="scanned">scanned</option>
+          <option value="failed">failed</option>
+        </select>
+        <select id="filter-type" aria-label="Filter by type">
+          <option value="">Any type</option>
+          <option value="image">image</option>
+          <option value="file">file</option>
+          <option value="sbom">sbom</option>
+          <option value="sarif">sarif</option>
+        </select>
       </div>
+      <p class="search-note">Search only looks at the artifacts on this page — narrow the set with the status/type filters, which are applied by the server.</p>
       <table>
         <thead>
           <tr>
@@ -321,6 +339,11 @@
         </thead>
         <tbody id="artifact-rows"></tbody>
       </table>
+      <div class="pager">
+        <button type="button" id="page-prev">← Previous</button>
+        <span class="range" id="page-range"></span>
+        <button type="button" id="page-next">Next →</button>
+      </div>
     </section>
   </div>
 
@@ -391,9 +414,23 @@
     artifacts: [],
     busy: {},
     searchQuery: '',
-    detailTab: 'cve_findings'
+    detailTab: 'cve_findings',
+    // GET /api/v1/artifacts is paginated server-side (50 per page by
+    // default, 200 max). state.artifacts therefore holds ONE page, not
+    // the whole store -- total is what the server says matches the
+    // current filters, across every page.
+    limit: 50,
+    offset: 0,
+    total: 0,
+    filterStatus: '',
+    filterType: ''
   };
   var lastDetailId = null;
+  // Cache for an artifact opened by URL (#/artifacts/<id>) that isn't on
+  // the page currently loaded -- see renderDetailView. Keyed by id so
+  // the 10s poll doesn't refetch it on every tick, and so a definitive
+  // "not found" isn't retried forever either (the id maps to null).
+  var detailCache = {};
 
   // currentDetailID reads the artifact id straight out of location.hash
   // (#/artifacts/<id>) rather than mirroring it into state -- location.hash
@@ -425,6 +462,11 @@
     stages: document.getElementById('stages'),
     rows: document.getElementById('artifact-rows'),
     search: document.getElementById('search-input'),
+    filterStatus: document.getElementById('filter-status'),
+    filterType: document.getElementById('filter-type'),
+    pagePrev: document.getElementById('page-prev'),
+    pageNext: document.getElementById('page-next'),
+    pageRange: document.getElementById('page-range'),
     form: document.getElementById('register-form'),
     ref: document.getElementById('reg-ref'),
     type: document.getElementById('reg-type'),
@@ -685,12 +727,31 @@
     else if (injected.showConnectionSettings === 'false') els.status.hidden = true;
   }
 
+  // artifactsPath builds the paginated list URL from the current page
+  // and filters -- the filters are applied by the server, so switching
+  // one narrows the whole set, not just the rows already on screen.
+  function artifactsPath() {
+    var q = 'limit=' + state.limit + '&offset=' + state.offset;
+    if (state.filterStatus) q += '&status=' + encodeURIComponent(state.filterStatus);
+    if (state.filterType) q += '&type=' + encodeURIComponent(state.filterType);
+    return '/api/v1/artifacts?' + q;
+  }
+
   async function loadAll() {
     try {
       var stagesRes = await fetchJSON('/api/v1/pipeline/stages');
-      var artifacts = await fetchJSON('/api/v1/artifacts');
+      var page = await fetchJSON(artifactsPath());
       state.stages = (stagesRes && stagesRes.stages) || [];
-      state.artifacts = artifacts || [];
+      state.artifacts = (page && page.artifacts) || [];
+      state.total = (page && page.total) || 0;
+      // Deleting the last artifact on the final page (or a filter change
+      // racing the 10s poll) can leave the offset past the end -- that
+      // reads as "no artifacts" rather than "wrong page," so step back
+      // and reload instead of showing an empty table.
+      if (!state.artifacts.length && state.offset > 0 && state.offset >= state.total) {
+        state.offset = Math.max(0, (Math.ceil(state.total / state.limit) - 1) * state.limit);
+        return loadAll();
+      }
       setStatus('Connected to ' + state.apiBase, false);
       render();
     } catch (err) {
@@ -713,6 +774,22 @@
     renderCards();
     renderStages();
     renderRows();
+    renderPager();
+  }
+
+  // renderPager shows which slice of the (server-side) result set is on
+  // screen and enables/disables prev/next accordingly. The dashboard
+  // doesn't parse the API's Link header for this -- it has limit,
+  // offset and total already, and arithmetic on those is less machinery
+  // than a header parser for the same two buttons.
+  function renderPager() {
+    var first = state.total === 0 ? 0 : state.offset + 1;
+    var last = Math.min(state.offset + state.limit, state.total);
+    els.pageRange.textContent = state.total === 0
+      ? '0 artifacts'
+      : first + '–' + last + ' of ' + state.total;
+    els.pagePrev.disabled = state.offset <= 0;
+    els.pageNext.disabled = state.offset + state.limit >= state.total;
   }
 
   function renderDetailView(id) {
@@ -726,15 +803,38 @@
       state.detailTab = 'cve_findings';
       lastDetailId = id;
     }
-    var a = state.artifacts.filter(function (x) { return x.id === id; })[0];
+    var a = state.artifacts.filter(function (x) { return x.id === id; })[0] || detailCache[id];
     if (!a) {
+      // Now that the list is paginated, a bookmarked/shared detail URL
+      // is routinely for an artifact that isn't on the page currently
+      // loaded -- so fall back to fetching that one artifact by id
+      // rather than claiming it doesn't exist. detailCache also records
+      // a definitive miss (as null) so a genuinely deleted artifact
+      // isn't refetched on every 10s poll.
+      if (!(id in detailCache)) {
+        detailCache[id] = null;
+        els.detailBody.innerHTML = '<p class="muted">Loading…</p>';
+        fetchJSON('/api/v1/artifacts/' + encodeURIComponent(id))
+          .then(function (fetched) {
+            detailCache[id] = fetched;
+            if (currentDetailID() === id) render();
+          })
+          // A failure (404, or the API being unreachable) leaves the
+          // cached null in place: re-rendering with the entry deleted
+          // would refetch immediately, and that catch would re-render
+          // again -- a loop. The 10s poll's own error banner is what
+          // reports an unreachable API.
+          .catch(function () { if (currentDetailID() === id) render(); });
+        return;
+      }
       // A genuinely missing artifact (bad link, or deleted in another
       // tab) gets a real empty state instead of silently rendering
-      // nothing -- this also covers the moment right after loadAll()
-      // resolves on a hard reload of a detail URL, before the id is in
-      // state.artifacts yet.
+      // nothing.
+      // Covers both "no such id" and "the fetch above failed" -- the
+      // dashboard can't tell those apart through fetchJSON, so the
+      // wording doesn't claim more than it knows.
       els.detailBody.innerHTML =
-        '<p class="muted">Artifact not found. It may have been deleted.</p>' +
+        '<p class="muted">Artifact not found — it may have been deleted, or the API is unreachable.</p>' +
         '<button type="button" class="link-btn" data-action="back">← Back to artifacts</button>';
       return;
     }
@@ -742,7 +842,13 @@
   }
 
   function renderCards() {
-    var total = state.artifacts.length;
+    // Everything except the first card counts the artifacts on THIS
+    // page -- the server only sends one page now, so a store-wide
+    // "with CVEs" number isn't available without an aggregate endpoint.
+    // The Artifacts card uses state.total (all pages) because "how many
+    // artifacts are there" is the one number that reading as
+    // "50, always" would be actively misleading.
+    var total = state.total;
     var scanning = state.artifacts.filter(function (a) { return a.status === 'scanning'; }).length;
     var withCVEs = state.artifacts.filter(function (a) { return openFindings(a.cve_findings).length > 0; }).length;
     var withMalware = state.artifacts.filter(function (a) { return openFindings(a.malware_findings).length > 0; }).length;
@@ -796,7 +902,8 @@
     }
     var matched = state.artifacts.filter(function (a) { return matchesSearch(a, state.searchQuery); });
     if (!matched.length) {
-      els.rows.innerHTML = '<tr><td colspan="11" class="empty">No artifacts match &quot;' + esc(state.searchQuery.trim()) + '&quot;.</td></tr>';
+      els.rows.innerHTML = '<tr><td colspan="11" class="empty">No artifacts on this page match &quot;' +
+        esc(state.searchQuery.trim()) + '&quot; — try the status/type filters, or another page.</td></tr>';
       return;
     }
     var rows = [];
@@ -1100,6 +1207,11 @@
       setStatus('Scan failed for ' + id + ' — ' + err.message, true);
     } finally {
       delete state.busy[id];
+      // Drop any cached copy first: if this artifact is being viewed
+      // from a detail URL but isn't on the loaded page, the cache is
+      // what renderDetailView reads, and it still holds the pre-scan
+      // findings (see detailCache).
+      delete detailCache[id];
       await loadAll();
     }
   }
@@ -1126,6 +1238,7 @@
       setStatus('Delete failed for ' + id + ' — ' + err.message, true);
     } finally {
       delete state.busy[id];
+      delete detailCache[id];
       await loadAll();
     }
   }
@@ -1218,6 +1331,28 @@
   els.search.addEventListener('input', function () {
     state.searchQuery = els.search.value;
     renderRows();
+  });
+
+  // Changing a filter resets to the first page: staying on offset 400
+  // of the old result set would almost always land past the end of the
+  // new, narrower one.
+  function applyFilters() {
+    state.filterStatus = els.filterStatus.value;
+    state.filterType = els.filterType.value;
+    state.offset = 0;
+    loadAll();
+  }
+  els.filterStatus.addEventListener('change', applyFilters);
+  els.filterType.addEventListener('change', applyFilters);
+
+  els.pagePrev.addEventListener('click', function () {
+    state.offset = Math.max(0, state.offset - state.limit);
+    loadAll();
+  });
+  els.pageNext.addEventListener('click', function () {
+    if (state.offset + state.limit >= state.total) return;
+    state.offset += state.limit;
+    loadAll();
   });
 
   loadAll();

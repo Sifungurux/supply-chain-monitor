@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -18,6 +19,18 @@ type Store interface {
 	Create(ref string, t Type) (*Artifact, error)
 	Get(id string) (*Artifact, error)
 	List() ([]*Artifact, error)
+	// ListPage returns one page of artifacts (newest first) plus the
+	// total number matching the filters -- the total, not the page
+	// length, so a caller can render "showing 50 of 812" and build
+	// next/prev links (see internal/api's listArtifacts). An empty
+	// statusFilter/typeFilter means "don't filter on that column".
+	//
+	// List() is kept alongside this deliberately: it's what the
+	// package's own tests and the paging-agnostic callers still use.
+	// Callers must pass limit >= 1 and offset >= 0 -- validating and
+	// bounding those is the HTTP layer's job (see maxListLimit), not
+	// something each Store re-implements.
+	ListPage(limit, offset int, statusFilter, typeFilter string) ([]*Artifact, int, error)
 	Update(id string, mutate func(*Artifact)) (*Artifact, error)
 	// FindByFindingID returns every artifact with a CVE/malware/other
 	// finding matching findingID (e.g. "CVE-2024-1234") in any bucket --
@@ -120,6 +133,45 @@ func (s *MemStore) List() ([]*Artifact, error) {
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+// ListPage filters, sorts and slices the in-memory map. The sort is
+// (CreatedAt DESC, ID DESC), not CreatedAt alone: MemStore ranges over
+// a map, so artifacts created in the same nanosecond -- routine in a
+// test that registers a handful in a tight loop -- would otherwise come
+// back in a different order on every call, and offset paging over an
+// unstable order silently skips and repeats rows. PostgresStore's
+// ListPage orders by the same two columns for the same reason.
+func (s *MemStore) ListPage(limit, offset int, statusFilter, typeFilter string) ([]*Artifact, int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	filtered := make([]*Artifact, 0, len(s.data))
+	for _, a := range s.data {
+		if statusFilter != "" && string(a.Status) != statusFilter {
+			continue
+		}
+		if typeFilter != "" && string(a.Type) != typeFilter {
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		if !filtered[i].CreatedAt.Equal(filtered[j].CreatedAt) {
+			return filtered[i].CreatedAt.After(filtered[j].CreatedAt)
+		}
+		return filtered[i].ID > filtered[j].ID
+	})
+
+	total := len(filtered)
+	if offset >= total {
+		return []*Artifact{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return filtered[offset:end], total, nil
 }
 
 func (s *MemStore) Update(id string, mutate func(*Artifact)) (*Artifact, error) {
