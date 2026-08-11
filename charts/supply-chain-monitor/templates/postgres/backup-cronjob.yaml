@@ -41,9 +41,26 @@ spec:
             app: scm-postgres-backup
         spec:
           restartPolicy: Never
+          # uid 26 is the Percona image's postgres user -- the same identity
+          # the database itself runs as, and the one that owns anything this
+          # writes to the backups PVC.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 26
+            runAsGroup: 26
+            fsGroup: 26
           containers:
             - name: pg-dump
               image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
+              # Deliberately no readOnlyRootFilesystem: these run trivy/grype/psql,
+              # which use TMPDIR and other rootfs paths that have not been verified
+              # here. Dropping capabilities and privilege escalation is safe
+              # regardless -- assuming a read-only rootfs is what crash-looped
+              # monitor-api when it was added without checking.
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
               command: ["sh", "-c"]
               args:
                 - |

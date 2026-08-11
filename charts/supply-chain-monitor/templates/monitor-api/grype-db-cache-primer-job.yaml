@@ -34,9 +34,27 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      # Mirrors the DB-refresh CronJob this primes (see
+      # grype-db-refresh-cronjob.yaml): same uid as the scan-worker that
+      # reads the cache, and fsGroup so a cache root created by an
+      # earlier root-run Job stays writable.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
       containers:
         - name: primer
           image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
+          # Deliberately no readOnlyRootFilesystem: these run trivy/grype/psql,
+          # which use TMPDIR and other rootfs paths that have not been verified
+          # here. Dropping capabilities and privilege escalation is safe
+          # regardless -- assuming a read-only rootfs is what crash-looped
+          # monitor-api when it was added without checking.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           command: ["sh", "-c"]
           args:
             - |
@@ -54,7 +72,16 @@ spec:
               # finding while trivy had 145k. The DB files themselves
               # are already world-readable; only the directory bit is
               # missing, and a+rX adds traversal without granting write.
-              chmod -R a+rX "${GRYPE_DB_CACHE_DIR}"
+              # Best-effort, exactly as in grype-db-refresh-cronjob.yaml:
+              # now that this Job runs as 65534, anything left over from
+              # when it ran as root cannot be chmod'd by a non-owner
+              # ("Operation not permitted"), and under `set -eu` that
+              # fails the whole Job -- which is precisely what happened
+              # the first time this was run non-root. The leftovers are
+              # already reachable via the fsGroup above, and a DB this
+              # Job installs comes out owned by 65534 anyway, so failing
+              # here would break a working primer to fix nothing.
+              chmod -R a+rX "${GRYPE_DB_CACHE_DIR}" 2>/dev/null || true
               echo "grype DB cache primed"
           env:
             - name: GRYPE_DB_CACHE_DIR

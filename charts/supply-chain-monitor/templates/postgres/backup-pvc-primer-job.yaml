@@ -29,9 +29,24 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      # Nothing to write and nothing to own: this Job exists only to
+      # bind the PVC so it is provisioned before anything needs it.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
       containers:
         - name: primer
           image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
+          # Deliberately no readOnlyRootFilesystem: these run trivy/grype/psql,
+          # which use TMPDIR and other rootfs paths that have not been verified
+          # here. Dropping capabilities and privilege escalation is safe
+          # regardless -- assuming a read-only rootfs is what crash-looped
+          # monitor-api when it was added without checking.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           command: ["sh", "-c", "echo scm-postgres-backups primed && exit 0"]
           volumeMounts:
             - name: backups

@@ -23,6 +23,12 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/docker-auth/config-secret.yaml") . | sha256sum }}
         checksum/signing-cert: {{ include (print $.Template.BasePath "/docker-auth/signing-cert-secret.yaml") . | sha256sum }}
     spec:
+      # Non-root: docker_auth reads its config and certs from two
+      # Secrets and writes nothing, so it needs no writable path at all.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
       containers:
         - name: docker-auth
           image: "{{ .Values.dockerAuth.image.repository }}:{{ .Values.dockerAuth.image.tag }}"
@@ -32,6 +38,14 @@ spec:
           ports:
             - containerPort: {{ .Values.dockerAuth.service.port }}
           volumeMounts:
+            # readOnlyRootFilesystem needs a writable /tmp: docker_auth
+            # logs via glog, which creates files under /tmp at startup
+            # and exits(2) if it cannot ("cannot create log: ...
+            # read-only file system"). Verified by watching it
+            # CrashLoopBackOff without this -- the same trap monitor-api
+            # hit with its docker config.
+            - name: scratch
+              mountPath: /tmp
             - name: config
               mountPath: /config
               readOnly: true
@@ -48,7 +62,14 @@ spec:
             initialDelaySeconds: 5
           resources:
             {{- toYaml .Values.dockerAuth.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
       volumes:
+        - name: scratch
+          emptyDir: {}
         - name: config
           secret:
             secretName: scm-docker-auth-config

@@ -20,6 +20,26 @@ spec:
       labels:
         app: scm-postgres
     spec:
+      # Postgres already runs as uid 26 because the Percona image says
+      # so. Declaring it makes an incidental property enforced: with
+      # runAsNonRoot the pod refuses to start if a future image tag ever
+      # changes that, instead of silently coming up as root.
+      #
+      # Deliberately NO readOnlyRootFilesystem on the container below:
+      # postgres writes its socket to /var/run/postgresql and temp files
+      # outside the data PVC, so a read-only rootfs would break it. The
+      # data directory is a PVC and unaffected either way.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 26
+        runAsGroup: 26
+      # Deliberately NO fsGroup, unlike the cache PVCs elsewhere in this
+      # chart. PGDATA is already owned 26:26 with mode 0700, so uid 26
+      # needs no help reaching it -- and fsGroup would actively BREAK
+      # postgres: kubelet applies group read/write recursively, turning
+      # 0700 into 0770, and postgres refuses to start on anything other
+      # than 0700 or 0750 ("data directory has invalid permissions").
+      # fsGroup is for volumes the runAsUser does not already own.
       containers:
         - name: postgres
           image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
@@ -52,6 +72,10 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.postgres.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
       volumes:
         - name: data
           persistentVolumeClaim:
