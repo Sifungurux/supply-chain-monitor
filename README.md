@@ -464,7 +464,19 @@ The generic webhook payload:
 **"New" means new to this artifact in this scan round.** A re-scan
 reporting the same findings is silent, so a nightly sweep doesn't page
 about a CVE that has been known for weeks; a finding that was fixed and
-came back counts as new again. That decision isn't recomputed here — it
+came back counts as new again.
+
+**An artifact's first ever scan never notifies.** Every finding is "new"
+there only because nobody had looked before — that's not a change in the
+artifact, which is what this signal is for. Without the suppression,
+switching notifications on in an existing deployment pages once per
+already-registered artifact as the sweep works through the backlog, and
+re-registering anything re-pages it. The trade-off, accepted
+deliberately: importing an image that already carries a critical CVE
+stays quiet until a later scan changes something — the findings are on
+the API and dashboard immediately either way. (A first scan that
+*failed* still counts as having looked, so the next successful scan
+does notify.) That decision isn't recomputed here — it
 reuses the `FirstSeenAt` stamp `MergeFindings` already assigns (see
 docs/architecture.md, "Tracking finding lifecycle").
 

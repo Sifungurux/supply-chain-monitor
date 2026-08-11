@@ -321,7 +321,10 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 	}
 	log.Printf("scan finished for artifact %s (%s): status=%s, %d scan error(s)", id, updated.Ref, updated.Status, len(updated.LastScanErrors))
 
-	h.notifyNewFindings(updated, now)
+	// a is the pre-scan snapshot taken before this scan started, so
+	// a.LastScanAt == nil means this was the artifact's first ever scan
+	// -- see notifyNewFindings for why that suppresses notification.
+	h.notifyNewFindings(updated, now, a.LastScanAt == nil)
 }
 
 // notifyNewFindings fires the configured notifiers when this scan round
@@ -341,8 +344,30 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 // the scan's own completion, and a panicking Notifier must not take the
 // process down -- runScan's recover covers its own goroutine, not the
 // ones spawned here.
-func (h *handler) notifyNewFindings(a *artifact.Artifact, roundStamp time.Time) {
+func (h *handler) notifyNewFindings(a *artifact.Artifact, roundStamp time.Time, firstScan bool) {
 	if len(h.notifiers) == 0 {
+		return
+	}
+	// An artifact's first ever scan is suppressed. Every finding it
+	// reports is "new" only in the sense that nobody had looked before
+	// -- they are not a change in the artifact, which is what this
+	// notification is meant to signal. Without this, enabling
+	// notifications on an existing deployment pages once per
+	// already-registered artifact as the sweep works through the
+	// backlog, and re-registering anything re-pages it.
+	//
+	// The cost, accepted deliberately: importing an image that already
+	// carries a critical CVE stays quiet until a later scan changes
+	// something. "This image is new to us" is a registration event, not
+	// a scan-result change, and the artifact's own findings are on the
+	// API and dashboard immediately either way.
+	//
+	// Note a first scan that FAILED still stamps LastScanAt, so the
+	// following successful scan is not treated as a first scan and does
+	// notify -- which is right: we did look, and this is the first time
+	// we have actually seen the contents.
+	if firstScan {
+		log.Printf("scan for artifact %s was its first -- notifications suppressed (every finding is new on a first look)", a.ID)
 		return
 	}
 	threshold := h.notifyMinSeverity

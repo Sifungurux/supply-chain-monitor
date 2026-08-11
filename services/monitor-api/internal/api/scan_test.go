@@ -724,18 +724,52 @@ func newNotifyingRouter(t *testing.T, scanners scanner.Registry, n notify.Notifi
 		api.Notifications{Notifiers: []notify.Notifier{n}, MinSeverity: minSeverity}), store
 }
 
-func TestScanArtifact_NotifiesOnNewFindingsAtOrAboveThreshold(t *testing.T) {
+// TestScanArtifact_SuppressesNotificationOnFirstScan -- every finding
+// on an artifact's first scan is "new" only because nobody had looked
+// before. Without this, enabling notifications on an existing
+// deployment pages once per already-registered artifact as the sweep
+// works through the backlog.
+func TestScanArtifact_SuppressesNotificationOnFirstScan(t *testing.T) {
 	trivy := &fakeScanner{findings: []artifact.Finding{
 		{ID: "CVE-2024-CRIT", Severity: "CRITICAL", Title: "openssl", Source: "trivy"},
-		{ID: "CVE-2024-LOW", Severity: "LOW", Title: "zlib", Source: "trivy"},
 	}}
 	n := newFakeNotifier()
 	h, store := newNotifyingRouter(t, scanner.Registry{artifact.TypeImage: {trivy}}, n, "high")
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 
+	_, final := scanAndWait(t, h, store, created.ID)
+	if final.Status != artifact.StatusScanned || len(final.CVEFindings) != 1 {
+		t.Fatalf("scan itself should be unaffected: status=%q findings=%+v", final.Status, final.CVEFindings)
+	}
+	select {
+	case <-n.got:
+		t.Fatal("notified on an artifact's first ever scan -- that is a backlog pager, not a change signal")
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// TestScanArtifact_NotifiesOnNewFindingsAtOrAboveThreshold covers the
+// real signal: an artifact already has scan history, and a later scan
+// introduces something new.
+func TestScanArtifact_NotifiesOnNewFindingsAtOrAboveThreshold(t *testing.T) {
+	trivy := &sequenceScanner{results: [][]artifact.Finding{
+		// First scan: establishes history. Suppressed.
+		{{ID: "CVE-2024-OLD", Severity: "CRITICAL", Title: "known already", Source: "trivy"}},
+		// Second: the old one persists, two arrive.
+		{
+			{ID: "CVE-2024-OLD", Severity: "CRITICAL", Title: "known already", Source: "trivy"},
+			{ID: "CVE-2024-NEW", Severity: "CRITICAL", Title: "openssl", Source: "trivy"},
+			{ID: "CVE-2024-NOISE", Severity: "LOW", Title: "zlib", Source: "trivy"},
+		},
+	}}
+	n := newFakeNotifier()
+	h, store := newNotifyingRouter(t, scanner.Registry{artifact.TypeImage: {trivy}}, n, "high")
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	scanAndWait(t, h, store, created.ID) // first scan: suppressed
 	scanAndWait(t, h, store, created.ID)
 	if !n.waitForNotify(t) {
-		t.Fatal("no notification delivered for a new CRITICAL finding")
+		t.Fatal("no notification for a newly introduced CRITICAL finding")
 	}
 
 	events := n.delivered()
@@ -746,34 +780,35 @@ func TestScanArtifact_NotifiesOnNewFindingsAtOrAboveThreshold(t *testing.T) {
 	if e.ArtifactID != created.ID || e.ArtifactRef != "alpine:3.19" {
 		t.Fatalf("event identifies the wrong artifact: %+v", e)
 	}
-	// The LOW finding is new too, but below the threshold -- it must not
-	// be included, or a "high" subscriber gets paged with noise.
-	if len(e.NewFindings) != 1 || e.NewFindings[0].ID != "CVE-2024-CRIT" {
-		t.Fatalf("new findings = %+v, want only the CRITICAL one", e.NewFindings)
+	// Only the genuinely-new, at-or-above-threshold finding: not the
+	// CVE carried over from the first scan, and not the new LOW one.
+	if len(e.NewFindings) != 1 || e.NewFindings[0].ID != "CVE-2024-NEW" {
+		t.Fatalf("new findings = %+v, want only CVE-2024-NEW", e.NewFindings)
 	}
 	if e.Severity != "CRITICAL" {
 		t.Fatalf("worst severity = %q, want CRITICAL", e.Severity)
 	}
 }
 
-// TestScanArtifact_DoesNotNotifyForPreExistingFindings is the test that
-// matters most: a re-scan reporting the SAME findings must be silent.
-// Without it, every scheduled re-scan would page about findings that
-// have been known for weeks.
+// TestScanArtifact_DoesNotNotifyForPreExistingFindings -- a re-scan
+// reporting the same findings must be silent, or a nightly sweep pages
+// about a CVE that has been known for weeks.
 func TestScanArtifact_DoesNotNotifyForPreExistingFindings(t *testing.T) {
-	trivy := &fakeScanner{findings: []artifact.Finding{
-		{ID: "CVE-2024-CRIT", Severity: "CRITICAL", Title: "openssl", Source: "trivy"},
+	trivy := &sequenceScanner{results: [][]artifact.Finding{
+		{}, // 1st: no findings, establishes history
+		{{ID: "CVE-2024-CRIT", Severity: "CRITICAL", Source: "trivy"}}, // 2nd: new -> notifies
+		{{ID: "CVE-2024-CRIT", Severity: "CRITICAL", Source: "trivy"}}, // 3rd: same -> silent
 	}}
 	n := newFakeNotifier()
 	h, store := newNotifyingRouter(t, scanner.Registry{artifact.TypeImage: {trivy}}, n, "high")
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 
 	scanAndWait(t, h, store, created.ID)
+	scanAndWait(t, h, store, created.ID)
 	if !n.waitForNotify(t) {
-		t.Fatal("first scan should have notified")
+		t.Fatal("the scan that introduced the CVE should have notified")
 	}
 
-	// Second scan, identical findings: they are no longer new.
 	scanAndWait(t, h, store, created.ID)
 	select {
 	case <-n.got:
@@ -781,19 +816,26 @@ func TestScanArtifact_DoesNotNotifyForPreExistingFindings(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 	}
 	if len(n.delivered()) != 1 {
-		t.Fatalf("delivered %d events across two scans, want 1", len(n.delivered()))
+		t.Fatalf("delivered %d events across three scans, want 1", len(n.delivered()))
 	}
 }
 
 func TestScanArtifact_DoesNotNotifyBelowThreshold(t *testing.T) {
-	trivy := &fakeScanner{findings: []artifact.Finding{
-		{ID: "CVE-2024-MED", Severity: "MEDIUM", Source: "trivy"},
-		{ID: "CVE-2024-UNK", Severity: "UNKNOWN", Source: "trivy"},
+	// Two scans on purpose: a single scan of a fresh artifact would be
+	// suppressed as a first scan, and this test would pass even if the
+	// severity filter were broken.
+	trivy := &sequenceScanner{results: [][]artifact.Finding{
+		{}, // 1st: establishes history
+		{
+			{ID: "CVE-2024-MED", Severity: "MEDIUM", Source: "trivy"},
+			{ID: "CVE-2024-UNK", Severity: "UNKNOWN", Source: "trivy"},
+		},
 	}}
 	n := newFakeNotifier()
 	h, store := newNotifyingRouter(t, scanner.Registry{artifact.TypeImage: {trivy}}, n, "high")
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 
+	scanAndWait(t, h, store, created.ID)
 	_, final := scanAndWait(t, h, store, created.ID)
 	if final.Status != artifact.StatusScanned {
 		t.Fatalf("scan status = %q, want scanned", final.Status)
@@ -817,12 +859,16 @@ func TestScanArtifact_NotifierFailureDoesNotAffectTheScan(t *testing.T) {
 		{"panics", &fakeNotifier{got: make(chan struct{}, 10), panics: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			trivy := &fakeScanner{findings: []artifact.Finding{
-				{ID: "CVE-2024-CRIT", Severity: "CRITICAL", Source: "trivy"},
+			// Two scans: the notifier is never reached on a first scan
+			// (suppressed), so a single scan here would exercise nothing.
+			trivy := &sequenceScanner{results: [][]artifact.Finding{
+				{},
+				{{ID: "CVE-2024-CRIT", Severity: "CRITICAL", Source: "trivy"}},
 			}}
 			h, store := newNotifyingRouter(t, scanner.Registry{artifact.TypeImage: {trivy}}, tc.broken, "high")
 			created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 
+			scanAndWait(t, h, store, created.ID)
 			_, final := scanAndWait(t, h, store, created.ID)
 			if final.Status != artifact.StatusScanned {
 				t.Fatalf("scan status = %q, want scanned -- a broken notifier must not fail a scan", final.Status)

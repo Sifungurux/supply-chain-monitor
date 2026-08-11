@@ -483,6 +483,13 @@ monitorApi:
   # doesn't page about a CVE that has been known for weeks. A finding
   # that was fixed and has come back counts as new again.
   #
+  # An artifact's FIRST ever scan never notifies: everything is "new"
+  # there only because nobody had looked before. Without that, turning
+  # these on in an existing deployment pages once per already-registered
+  # artifact while the sweep drains the backlog. The cost, accepted
+  # deliberately: importing an image that already carries a critical CVE
+  # is quiet until a later scan changes something.
+  #
   # Delivery is fire-and-forget: a destination that is down, slow, or
   # broken is logged and dropped, and can never fail a scan or delay its
   # result.
