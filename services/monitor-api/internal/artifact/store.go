@@ -48,6 +48,26 @@ type Store interface {
 	// duplicate-registration check), not as a way to enumerate
 	// not-yet-resolved artifacts.
 	FindByDigest(digest string) (*Artifact, error)
+	// FindByRef returns the first-registered artifact with this exact
+	// ref, or (nil, nil) if none exists -- the same "not found is the
+	// expected case" convention FindByDigest uses.
+	//
+	// This exists as the fallback for registrations whose digest could
+	// not be resolved. Dedup normally keys on digest, which is the
+	// right key: a mutable tag can legitimately point at different
+	// content over time, and only the digest can tell those apart. But
+	// resolution fails routinely -- a dead or moved ref, a rate-limited
+	// registry, or a ref that is a local filesystem path and never had
+	// a digest to resolve -- and with no digest the dedup check was
+	// skipped entirely, so every re-registration created a brand new
+	// artifact. Measured on a live deployment: 5 unresolvable refs
+	// registered across ~9 runs left 43 duplicate rows, every one with
+	// digest = ''.
+	//
+	// Callers must only consult this when their own resolution came
+	// back empty -- see internal/api/artifacts.go. When a digest DOES
+	// resolve it is strictly better evidence and wins outright.
+	FindByRef(ref string) (*Artifact, error)
 	// Delete permanently removes an artifact and everything recorded
 	// against it (stage history, findings, scan errors) -- there is no
 	// undo and no soft-delete/archive semantics (see
@@ -286,6 +306,28 @@ func findingIDMatches(findings []Finding, findingID string) bool {
 		}
 	}
 	return false
+}
+
+// FindByRef scans for the earliest artifact with this exact ref. Same
+// oldest-wins tie-break as FindByDigest, so repeated registrations
+// converge on the original rather than the most recent.
+func (s *MemStore) FindByRef(ref string) (*Artifact, error) {
+	if ref == "" {
+		return nil, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var match *Artifact
+	for _, a := range s.data {
+		if a.Ref != ref {
+			continue
+		}
+		if match == nil || a.CreatedAt.Before(match.CreatedAt) {
+			match = a
+		}
+	}
+	return copyArtifact(match), nil
 }
 
 func (s *MemStore) FindByDigest(digest string) (*Artifact, error) {

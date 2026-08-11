@@ -77,6 +77,31 @@ func checkExpectedDigest(w http.ResponseWriter, ref, resolvedDigest, expectedDig
 	return false
 }
 
+// findDuplicate returns the artifact this registration duplicates, or
+// nil. digest wins when it resolved; ref is the fallback when it didn't.
+//
+// Falling back to ref matters because an unresolvable digest is routine,
+// not exceptional -- a dead or moved ref, a rate-limited registry, or a
+// ref that is a local filesystem path and never had a digest at all.
+// Skipping the check in that case (the previous behaviour) meant every
+// re-registration created a new artifact: a live deployment accumulated
+// 43 duplicate rows from 5 unresolvable refs across ~9 runs.
+//
+// The fallback matches ANY artifact with that ref, including one that
+// already has a digest. That's deliberate: if we cannot resolve a digest
+// now, we have no evidence this is different content, and creating an
+// unscannable second row is worse than pointing at the one that exists.
+// The narrower "only match other digest-less artifacts" rule would have
+// left exactly the case this project hit -- artifacts registered fine,
+// then re-registered during a registry rate-limit window -- still
+// duplicating.
+func (h *handler) findDuplicate(ref, digest string) (*artifact.Artifact, error) {
+	if digest != "" {
+		return h.store.FindByDigest(digest)
+	}
+	return h.store.FindByRef(ref)
+}
+
 func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 	limitBody(w, r, maxSmallJSONBytes)
 	var req createArtifactRequest
@@ -121,21 +146,28 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 	} else if !checkExpectedDigest(w, req.Ref, digest, req.ExpectedDigest) {
 		return
 	}
-	if digest != "" {
-		existing, err := h.store.FindByDigest(digest)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
+	// Duplicate detection. Digest is the right key when we have one --
+	// only a digest can tell "the same image registered twice" from "a
+	// mutable tag whose content changed". When resolution came back
+	// empty we have no such evidence, and the fallback is the ref
+	// itself: see findDuplicate.
+	existing, err := h.findDuplicate(req.Ref, digest)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if existing != nil {
+		reason := "an artifact with this digest is already registered"
+		if digest == "" {
+			reason = "an artifact with this ref is already registered (its digest could not be resolved, so the ref is the only thing to match on)"
 		}
-		if existing != nil {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":                 "an artifact with this digest is already registered",
-				"digest":                digest,
-				"existing_artifact_id":  existing.ID,
-				"existing_artifact_ref": existing.Ref,
-			})
-			return
-		}
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":                 reason,
+			"digest":                digest,
+			"existing_artifact_id":  existing.ID,
+			"existing_artifact_ref": existing.Ref,
+		})
+		return
 	}
 
 	a, err := h.store.Create(req.Ref, t)
@@ -275,7 +307,14 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 	// fixed processing order to catch two entries in the *same* request
 	// sharing a digest (e.g. the same image listed under two tags), not
 	// just duplicates of something registered in an earlier request.
-	seenInBatch := make(map[string]*artifact.Artifact) // digest -> artifact created earlier in this batch
+	// Two maps, because an entry is keyed by whichever evidence it has.
+	// seenInBatch catches the same image listed twice under different
+	// tags; seenRefsInBatch catches the same REF listed twice when no
+	// digest resolved -- without it a batch containing one unresolvable
+	// ref twice creates two artifacts in a single request, the same
+	// accumulation bug the store-level check fixes across requests.
+	seenInBatch := make(map[string]*artifact.Artifact)     // digest -> artifact created earlier in this batch
+	seenRefsInBatch := make(map[string]*artifact.Artifact) // ref    -> ditto, for entries with no digest
 	results := make([]bulkCreateArtifactsResult, 0, len(req.Artifacts))
 	created, failed, duplicates := 0, 0, 0
 	for i, item := range req.Artifacts {
@@ -320,30 +359,46 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 			results = append(results, res)
 			continue
 		}
-		if digest != "" {
-			if dup, ok := seenInBatch[digest]; ok {
-				res.Artifact = dup
-				res.Error = fmt.Sprintf("duplicate of %q earlier in this same batch (artifact %s, same digest)", dup.Ref, dup.ID)
-				res.Duplicate = true
-				duplicates++
-				results = append(results, res)
-				continue
+		// Same-batch duplicate, keyed by digest when there is one and by
+		// ref when there isn't.
+		if dup, ok := seenInBatch[digest]; ok && digest != "" {
+			res.Artifact = dup
+			res.Error = fmt.Sprintf("duplicate of %q earlier in this same batch (artifact %s, same digest)", dup.Ref, dup.ID)
+			res.Duplicate = true
+			duplicates++
+			results = append(results, res)
+			continue
+		}
+		if dup, ok := seenRefsInBatch[item.Ref]; ok && digest == "" {
+			res.Artifact = dup
+			res.Error = fmt.Sprintf("duplicate of the same ref earlier in this batch (artifact %s; no digest resolved, so the ref is the only thing to match on)", dup.ID)
+			res.Duplicate = true
+			duplicates++
+			results = append(results, res)
+			continue
+		}
+		// Already registered by an earlier request. Reported as a
+		// duplicate result rather than a failure: re-submitting a batch
+		// is normal (cluster/load-test-clamav.sh does it every run) and
+		// must stay a successful no-op.
+		existing, err := h.findDuplicate(item.Ref, digest)
+		if err != nil {
+			res.Error = err.Error()
+			failed++
+			results = append(results, res)
+			continue
+		}
+		if existing != nil {
+			res.Artifact = existing
+			why := "same digest"
+			if digest == "" {
+				why = "same ref; no digest resolved"
 			}
-			existing, err := h.store.FindByDigest(digest)
-			if err != nil {
-				res.Error = err.Error()
-				failed++
-				results = append(results, res)
-				continue
-			}
-			if existing != nil {
-				res.Artifact = existing
-				res.Error = fmt.Sprintf("duplicate of existing artifact %s (same digest)", existing.ID)
-				res.Duplicate = true
-				duplicates++
-				results = append(results, res)
-				continue
-			}
+			res.Error = fmt.Sprintf("duplicate of existing artifact %s (%s)", existing.ID, why)
+			res.Duplicate = true
+			duplicates++
+			results = append(results, res)
+			continue
 		}
 
 		a, err := h.store.Create(item.Ref, t)
@@ -365,6 +420,8 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 		}
 		if digest != "" {
 			seenInBatch[digest] = a
+		} else {
+			seenRefsInBatch[item.Ref] = a
 		}
 		if item.MaintainerTeam != "" || item.MaintainerEmail != "" {
 			if updated, err := h.store.Update(a.ID, func(art *artifact.Artifact) {
@@ -376,6 +433,8 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 				a = updated
 				if digest != "" {
 					seenInBatch[digest] = a
+				} else {
+					seenRefsInBatch[item.Ref] = a
 				}
 			}
 		}

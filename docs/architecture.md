@@ -275,6 +275,15 @@ recorded.
   (trivy, grype, unpacker) — each extracting a whole image to disk. The
   per-Job ephemeral limit only ever contained one Job at a time; this is
   what bounds them collectively.
+- **Duplicate registration** keys on the resolved content digest, and
+  falls back to the exact ref when no digest could be resolved
+  (`Store.FindByRef`). The fallback exists because an empty digest is
+  routine — dead ref, rate-limited registry, or a local path that never
+  had one — and skipping the check there meant every re-registration
+  created a new artifact: a live deployment accumulated 43 duplicate
+  rows from 5 unresolvable refs. A resolved digest always wins, since
+  only a digest separates "same image twice" from "mutable tag whose
+  content changed"; the ref is used only where no such evidence exists.
 - Key routes beyond CRUD: `POST /api/v1/artifacts/bulk` (batch
   registration, best-effort per entry, capped at 500), `POST
   /api/v1/artifacts/{id}/scan`, `POST /api/v1/artifacts/{id}/findings`

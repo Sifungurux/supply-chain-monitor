@@ -88,6 +88,14 @@ var schemaStatements = []string{
 	// comment), so indexing '' values for every such row would be pure
 	// write-path overhead for a value FindByDigest never searches for.
 	`CREATE INDEX IF NOT EXISTS artifacts_digest_idx ON artifacts (digest) WHERE digest != ''`,
+	// Powers FindByRef, the dedup fallback for registrations whose
+	// digest wouldn't resolve (see that method). Not partial, unlike
+	// the digest index above: every artifact has a ref, so there is no
+	// subset worth excluding. Not UNIQUE either -- two artifacts
+	// legitimately share a ref when a mutable tag's content changed and
+	// both resolutions succeeded, which is exactly what digest dedup is
+	// for; this index only has to make the lookup cheap.
+	`CREATE INDEX IF NOT EXISTS artifacts_ref_idx ON artifacts (ref)`,
 	// Added for the dashboard's Details modal (see Artifact.LastScanAt's
 	// comment) -- same idempotent ADD COLUMN IF NOT EXISTS as digest
 	// above. NULL (not a zero-value default) is deliberate: it's the
@@ -956,6 +964,35 @@ func (s *PostgresStore) FindByDigest(digest string) (*Artifact, error) {
 	}
 	if err := s.fillChildren(ctx, s.pool, a); err != nil {
 		return nil, fmt.Errorf("find artifact by digest: %w", err)
+	}
+	return a, nil
+}
+
+// FindByRef returns the first-registered artifact with this exact ref --
+// the dedup fallback used only when a digest could not be resolved. See
+// the Store interface's comment for why that fallback exists.
+// `ORDER BY created_at ASC LIMIT 1` matches FindByDigest's oldest-wins
+// tie-break, so repeated registrations converge on the original row
+// instead of chaining off the most recent one.
+func (s *PostgresStore) FindByRef(ref string) (*Artifact, error) {
+	if ref == "" {
+		return nil, nil
+	}
+	ctx := context.Background()
+	row := s.pool.QueryRow(ctx, selectArtifactColumns+`
+		WHERE ref = $1
+		ORDER BY created_at ASC
+		LIMIT 1
+	`, ref)
+	a, err := scanArtifactRow(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find artifact by ref: %w", err)
+	}
+	if err := s.fillChildren(ctx, s.pool, a); err != nil {
+		return nil, fmt.Errorf("find artifact by ref: %w", err)
 	}
 	return a, nil
 }
