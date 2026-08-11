@@ -327,31 +327,10 @@ func (s *IsolatedTrivyScanner) ScanForArtifact(ctx context.Context, ref, artifac
 	return result.Findings, nil
 }
 
-// waitForCompletion is identical to IsolatedUnpackerScanner's -- see
-// that method's comment. Not shared as a free function only because
-// each type still needs its own s.client/s.cfg.PollInterval; the logic
-// itself is a few lines and not worth an extra abstraction for.
+// waitForCompletion delegates to the shared wait loop -- see waitForJob
+// in jobwait.go for the retry and backoff behaviour, and why polling
+// every Job at a flat interval was enough to saturate this project's
+// API server at SCAN_CONCURRENCY=8.
 func (s *IsolatedTrivyScanner) waitForCompletion(ctx context.Context, name string) error {
-	ticker := time.NewTicker(s.cfg.PollInterval)
-	defer ticker.Stop()
-
-	for {
-		succeeded, failed, err := s.client.JobStatus(ctx, name)
-		if err != nil {
-			return fmt.Errorf("check job status: %w", err)
-		}
-		if failed {
-			return fmt.Errorf("trivy scan job failed to run (crashed or was killed before producing a result)")
-		}
-		if succeeded {
-			return nil
-		}
-
-		select {
-		case <-ticker.C:
-			continue
-		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for trivy scan job to complete: %w", ctx.Err())
-		}
-	}
+	return waitForJob(ctx, s.client, name, "trivy scan job", s.cfg.PollInterval)
 }

@@ -264,30 +264,10 @@ func (s *IsolatedGrypeScanner) Scan(ctx context.Context, ref string) ([]artifact
 	return result.Findings, nil
 }
 
-// waitForCompletion is identical to IsolatedTrivyScanner's -- see that
-// method's comment for why this small amount of duplication is
-// deliberate rather than shared.
+// waitForCompletion delegates to the shared wait loop -- see waitForJob
+// in jobwait.go for the retry and backoff behaviour, and why polling
+// every Job at a flat interval was enough to saturate this project's
+// API server at SCAN_CONCURRENCY=8.
 func (s *IsolatedGrypeScanner) waitForCompletion(ctx context.Context, name string) error {
-	ticker := time.NewTicker(s.cfg.PollInterval)
-	defer ticker.Stop()
-
-	for {
-		succeeded, failed, err := s.client.JobStatus(ctx, name)
-		if err != nil {
-			return fmt.Errorf("check job status: %w", err)
-		}
-		if failed {
-			return fmt.Errorf("grype scan job failed to run (crashed or was killed before producing a result)")
-		}
-		if succeeded {
-			return nil
-		}
-
-		select {
-		case <-ticker.C:
-			continue
-		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for grype scan job to complete: %w", ctx.Err())
-		}
-	}
+	return waitForJob(ctx, s.client, name, "grype scan job", s.cfg.PollInterval)
 }
