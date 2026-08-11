@@ -228,6 +228,15 @@ recorded.
   `Store.List` is kept for callers that genuinely want everything.
   Filters are applied in the database (a `WHERE` clause shared by the
   page query and its `COUNT(*)`), not in Go after loading every row.
+- **Outbound notifications** (`internal/notify`, off by default): when a
+  scan introduces new findings at or above `NOTIFY_MIN_SEVERITY`, a
+  generic webhook (optionally HMAC-SHA256 signed) and/or a Slack
+  incoming webhook receive the event. "New" reuses `MergeFindings`'
+  `FirstSeenAt` stamp rather than recomputing it, so a re-scan reporting
+  the same findings is silent. Delivery is fire-and-forget on its own
+  goroutine: a destination that errors, hangs, or panics is logged and
+  dropped, and cannot fail a scan — the one-way counterpart to the
+  inbound webhooks CI/CD already uses to register artifacts.
 - `POST /api/v1/artifacts/{id}/scan` is **asynchronous**: it answers
   `202` with a `Location` pointing at the artifact, runs every scanner
   for that type concurrently in a background goroutine, and callers poll

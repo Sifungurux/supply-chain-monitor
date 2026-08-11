@@ -62,6 +62,12 @@ data:
   # simultaneous scan-worker Jobs from exhausting a node's disk between
   # them. See monitorApi.scanConcurrency's own comment in values.yaml.
   SCAN_CONCURRENCY: {{ .Values.monitorApi.scanConcurrency | quote }}
+  # Outbound scan notifications -- see monitorApi.notifications in
+  # values.yaml. Only the non-secret settings live here; the HMAC secret
+  # and the Slack URL come from the scm-monitor-api-notify Secret (see
+  # notify-secret.yaml for why the Slack URL counts as a credential).
+  NOTIFY_WEBHOOK_URL: {{ .Values.monitorApi.notifications.webhookURL | quote }}
+  NOTIFY_MIN_SEVERITY: {{ .Values.monitorApi.notifications.minSeverity | quote }}
   # file/sbom/sarif artifacts can be registered with an OCI registry
   # reference instead of a path already inside this pod -- oras pull
   # fetches them from scm-registry first (see internal/scanner/fetch.go).

@@ -49,8 +49,11 @@ import (
 // It's a struct rather than this function's twelfth positional
 // parameter; further scan-related knobs belong in it rather than
 // lengthening this signature again.
-func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner.Registry, apiKey string, rateLimitRPS float64, rateLimitBurst float64, digestResolver scanner.DigestResolver, fetchPlainHTTP bool, scanTimeout time.Duration, requireDigest bool, scanLimits ScanLimits) http.Handler {
-	h := &handler{store: store, tracker: tracker, scanners: scanners, digestResolver: digestResolver, fetchPlainHTTP: fetchPlainHTTP, scanTimeout: scanTimeout, requireDigest: requireDigest}
+// notifications is optional: a zero value (no notifiers) leaves the
+// service behaving exactly as it did before outbound notifications
+// existed -- nothing is sent, and nothing can fail.
+func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner.Registry, apiKey string, rateLimitRPS float64, rateLimitBurst float64, digestResolver scanner.DigestResolver, fetchPlainHTTP bool, scanTimeout time.Duration, requireDigest bool, scanLimits ScanLimits, notifications Notifications) http.Handler {
+	h := &handler{store: store, tracker: tracker, scanners: scanners, digestResolver: digestResolver, fetchPlainHTTP: fetchPlainHTTP, scanTimeout: scanTimeout, requireDigest: requireDigest, notifiers: notifications.Notifiers, notifyMinSeverity: notifications.MinSeverity}
 	if scanLimits.Concurrency > 0 {
 		h.scanSlots = make(chan struct{}, scanLimits.Concurrency)
 	}

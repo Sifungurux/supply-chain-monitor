@@ -50,6 +50,15 @@ spec:
           envFrom:
             - configMapRef:
                 name: monitor-api-config
+            {{- if or .Values.monitorApi.notifications.webhookSecret .Values.monitorApi.notifications.slackURL }}
+            # Notification credentials (HMAC secret, Slack URL) -- see
+            # notify-secret.yaml. optional: false is deliberate: if the
+            # chart rendered the Secret, a missing one means something
+            # deleted it, and starting without notifications configured
+            # while claiming they are is worse than failing to start.
+            - secretRef:
+                name: scm-monitor-api-notify
+            {{- end }}
           env:
             - name: POSTGRES_PASSWORD
               valueFrom:

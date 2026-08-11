@@ -474,6 +474,40 @@ monitorApi:
   # PARALLELISM) should retry on 429. 0 disables the cap entirely, which
   # is the binary's own default when this isn't set.
   scanConcurrency: 8
+  # Outbound notifications when a scan introduces NEW findings at or
+  # above minSeverity. Everything here is optional: with no URL set,
+  # nothing is sent and nothing can fail. See README, "Notifications".
+  #
+  # "New" means new to THIS artifact in THIS scan round -- a re-scan
+  # that reports the same findings again is silent, so a nightly sweep
+  # doesn't page about a CVE that has been known for weeks. A finding
+  # that was fixed and has come back counts as new again.
+  #
+  # Delivery is fire-and-forget: a destination that is down, slow, or
+  # broken is logged and dropped, and can never fail a scan or delay its
+  # result.
+  notifications:
+    # Generic receiver. Gets the raw event as JSON:
+    #   {artifact_id, artifact_ref, severity, new_findings: [...]}
+    webhookURL: ""
+    # Optional HMAC-SHA256 secret. When set, each request carries
+    #   X-Signature-256: sha256=<hex>
+    # over the exact request body -- the same shape GitHub uses, so a
+    # receiver written against that convention verifies it unchanged.
+    # Stored in its own Secret (scm-monitor-api-notify), not the
+    # ConfigMap. Leave empty to send unsigned.
+    webhookSecret: ""
+    # Slack incoming webhook URL (https://hooks.slack.com/services/...).
+    # The URL is the whole credential -- no OAuth, no token refresh --
+    # so treat it as one: it is templated into the same Secret as
+    # webhookSecret rather than the ConfigMap.
+    slackURL: ""
+    # critical | high | medium | low. "high" by default: every image in
+    # this project's own load tests carries medium/low findings by the
+    # hundred, so a lower threshold is a pager that never stops.
+    # Compared case-insensitively -- scanners disagree on spelling
+    # (trivy HIGH, grype High, clamav critical).
+    minSeverity: "high"
   # Uncomment (and set enabled: true) for air-gapped operation -- see
   # cluster/seed-trivy-db.sh and README's "Air-gapped operation".
   trivyDB:

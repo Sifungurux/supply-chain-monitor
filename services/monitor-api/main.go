@@ -20,6 +20,7 @@ import (
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/api"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/k8sjob"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/notify"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/pipeline"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
 )
@@ -1260,7 +1261,36 @@ func runAPIServer() {
 		log.Printf("scan concurrency capped at %d concurrent scans (SCAN_CONCURRENCY)", scanConcurrency)
 	}
 
-	router := api.NewRouter(store, stageTracker, scanners, apiKey, rateLimitRPS, rateLimitBurst, digestResolver, fetchPlainHTTP, scanTimeout, requireDigest, api.ScanLimits{Concurrency: scanConcurrency})
+	// Outbound notifications -- off unless a destination is configured,
+	// so a deployment that sets none behaves exactly as before. See
+	// internal/notify and internal/api's notifyNewFindings for what
+	// counts as "new" (only findings this scan round introduced) and why
+	// a failing destination can never fail a scan.
+	notifyMinSeverity := getenv("NOTIFY_MIN_SEVERITY", notify.DefaultMinSeverity)
+	if !notify.ValidSeverity(notifyMinSeverity) {
+		// Fail loudly rather than silently notifying on everything (an
+		// unrecognized threshold ranks 0) -- a typo'd threshold that
+		// quietly pages on every low-severity finding is worse than a
+		// refused startup.
+		log.Fatalf("NOTIFY_MIN_SEVERITY=%q is not a known severity (critical, high, medium, low, negligible, unknown)", notifyMinSeverity)
+	}
+	var notifiers []notify.Notifier
+	if url := os.Getenv("NOTIFY_WEBHOOK_URL"); url != "" {
+		notifiers = append(notifiers, notify.NewWebhook(url, os.Getenv("NOTIFY_WEBHOOK_SECRET")))
+		signed := "unsigned"
+		if os.Getenv("NOTIFY_WEBHOOK_SECRET") != "" {
+			signed = "HMAC-SHA256 signed"
+		}
+		log.Printf("notifications: generic webhook enabled (%s), min severity %q", signed, notifyMinSeverity)
+	}
+	if url := os.Getenv("NOTIFY_SLACK_URL"); url != "" {
+		notifiers = append(notifiers, notify.NewSlack(url))
+		log.Printf("notifications: slack enabled, min severity %q", notifyMinSeverity)
+	}
+
+	router := api.NewRouter(store, stageTracker, scanners, apiKey, rateLimitRPS, rateLimitBurst, digestResolver, fetchPlainHTTP, scanTimeout, requireDigest,
+		api.ScanLimits{Concurrency: scanConcurrency},
+		api.Notifications{Notifiers: notifiers, MinSeverity: notifyMinSeverity})
 
 	srv := &http.Server{
 		Addr:         listenAddr,

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/notify"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
 )
 
@@ -319,7 +320,84 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 		return
 	}
 	log.Printf("scan finished for artifact %s (%s): status=%s, %d scan error(s)", id, updated.Ref, updated.Status, len(updated.LastScanErrors))
+
+	h.notifyNewFindings(updated, now)
 }
+
+// notifyNewFindings fires the configured notifiers when this scan round
+// introduced findings at or above the configured severity threshold.
+//
+// "New this round" is decided by FirstSeenAt == roundStamp, not by
+// anything recomputed here: MergeFindings (merge.go) is the single place
+// that decides whether a reported finding is brand new, still open, or
+// newly fixed, and it stamps genuinely-new findings with exactly the
+// timestamp passed to it. Comparing against that stamp reuses that one
+// decision instead of second-guessing it -- a finding carried over from
+// a previous scan keeps its original FirstSeenAt and so is correctly
+// ignored here, including one that went fixed and came back.
+//
+// Delivery is fire-and-forget on its own goroutine: notifications are
+// not part of a scan's result. A slow or broken receiver must not delay
+// the scan's own completion, and a panicking Notifier must not take the
+// process down -- runScan's recover covers its own goroutine, not the
+// ones spawned here.
+func (h *handler) notifyNewFindings(a *artifact.Artifact, roundStamp time.Time) {
+	if len(h.notifiers) == 0 {
+		return
+	}
+	threshold := h.notifyMinSeverity
+	if threshold == "" {
+		threshold = notify.DefaultMinSeverity
+	}
+
+	var newFindings []artifact.Finding
+	for _, bucket := range [][]artifact.Finding{
+		a.CVEFindings, a.MalwareFindings, a.MisconfigFindings, a.SecretFindings, a.OtherFindings,
+	} {
+		for _, f := range bucket {
+			if f.Status != artifact.FindingStatusOpen || !f.FirstSeenAt.Equal(roundStamp) {
+				continue
+			}
+			if notify.AtOrAbove(f.Severity, threshold) {
+				newFindings = append(newFindings, f)
+			}
+		}
+	}
+	if len(newFindings) == 0 {
+		return
+	}
+
+	event := notify.ScanEvent{
+		ArtifactID:  a.ID,
+		ArtifactRef: a.Ref,
+		NewFindings: newFindings,
+		Severity:    notify.Worst(newFindings),
+	}
+	log.Printf("scan for artifact %s introduced %d new finding(s) at or above %q -- notifying %d destination(s)",
+		a.ID, len(newFindings), threshold, len(h.notifiers))
+
+	for _, n := range h.notifiers {
+		go func(n notify.Notifier) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("notifier panicked for artifact %s: %v", a.ID, rec)
+				}
+			}()
+			// Its own context, not the scan's: the scan's is already
+			// cancelled by the time this runs (runScan defers cancel).
+			ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+			defer cancel()
+			// Error deliberately discarded -- notifiers log their own
+			// failures, and a failed notification is not a failed scan.
+			_ = n.Notify(ctx, event)
+		}(n)
+	}
+}
+
+// notifyTimeout bounds one notifier's whole attempt, including its
+// internal retry. Comfortably above the per-attempt HTTP timeout in
+// internal/notify so a retry isn't cut off mid-flight.
+const notifyTimeout = 30 * time.Second
 
 // classifyBucket decides which of the five finding buckets (cve,
 // malware, misconfiguration, secret, other) a scanner's finding

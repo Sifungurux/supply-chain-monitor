@@ -430,6 +430,67 @@ turn it off. See docs/architecture.md ("Sweeping registered-but-
 unscanned artifacts, and backfilling missing digests") for the full
 reasoning.
 
+### Notifications
+
+When a scan introduces **new** findings at or above a severity
+threshold, monitor-api can POST an event outbound. Off by default — with
+no URL configured nothing is sent, and nothing can fail.
+
+```yaml
+monitorApi:
+  notifications:
+    webhookURL: "https://example.internal/scm-hook"   # generic receiver
+    webhookSecret: "..."                              # optional HMAC-SHA256
+    slackURL: "https://hooks.slack.com/services/..."  # optional Slack
+    minSeverity: "high"                               # critical|high|medium|low
+```
+
+Env equivalents: `NOTIFY_WEBHOOK_URL`, `NOTIFY_WEBHOOK_SECRET`,
+`NOTIFY_SLACK_URL`, `NOTIFY_MIN_SEVERITY`.
+
+The generic webhook payload:
+
+```json
+{
+  "artifact_id": "8f14e45fceea167a",
+  "artifact_ref": "ghcr.io/acme/checkout:2.4.1",
+  "severity": "CRITICAL",
+  "new_findings": [
+    { "id": "CVE-2024-1234", "severity": "CRITICAL", "title": "openssl", "source": "trivy", "status": "open", "first_seen_at": "..." }
+  ]
+}
+```
+
+**"New" means new to this artifact in this scan round.** A re-scan
+reporting the same findings is silent, so a nightly sweep doesn't page
+about a CVE that has been known for weeks; a finding that was fixed and
+came back counts as new again. That decision isn't recomputed here — it
+reuses the `FirstSeenAt` stamp `MergeFindings` already assigns (see
+docs/architecture.md, "Tracking finding lifecycle").
+
+**Severity is compared case-insensitively**, because scanners disagree:
+trivy emits `HIGH`, grype emits `High`, ClamAV findings are written
+`critical`, and all three land in the same table. A finding a scanner
+couldn't rate (`UNKNOWN`, `Negligible`) never satisfies a real threshold
+on its own.
+
+**Signing.** With `webhookSecret` set, each request carries
+`X-Signature-256: sha256=<hex>` — HMAC-SHA256 over the exact request
+body, the same shape GitHub uses, so a receiver written against that
+convention verifies it unchanged. Compare with a constant-time helper
+(`hmac.Equal`, `crypto.timingSafeEqual`), not `==`.
+
+**Delivery is fire-and-forget.** Each destination gets its own
+goroutine with a 30s budget; the generic webhook retries once on a 5xx
+or transport error (never on a 4xx — the request itself is wrong).
+Failures are logged and dropped. A destination that is down, slow, or
+panicking can never fail a scan, change its result, or delay it —
+there's a test for each of those.
+
+`webhookSecret` and `slackURL` are templated into their own Secret
+(`scm-monitor-api-notify`), not the ConfigMap: the Slack incoming
+webhook URL *is* the credential.
+
 ### Scanning is asynchronous
 
 `POST /api/v1/artifacts/{id}/scan` returns **202** as soon as the scan
