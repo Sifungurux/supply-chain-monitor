@@ -15,6 +15,17 @@ spec:
       labels:
         app: scm-registry
     spec:
+      # Non-root: the registry writes only to its PVC, and this PVC is
+      # empty on a fresh install (verified: 0 bytes on the live cluster),
+      # so there is no root-owned data to migrate. fsGroup makes the
+      # volume group-writable for 65534 at mount time, which is what lets
+      # a non-root registry create its own directory tree under
+      # /var/lib/registry.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
       containers:
         - name: registry
           image: "{{ .Values.registry.image.repository }}:{{ .Values.registry.image.tag }}"
@@ -77,6 +88,10 @@ spec:
             initialDelaySeconds: 5
           resources:
             {{- toYaml .Values.registry.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
       volumes:
         - name: data
           persistentVolumeClaim:

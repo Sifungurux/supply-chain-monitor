@@ -61,6 +61,15 @@ spec:
           containers:
             - name: sweep-registered
               image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
+              # Deliberately no readOnlyRootFilesystem: these run trivy/grype/psql,
+              # which use TMPDIR and other rootfs paths that have not been verified
+              # here. Dropping capabilities and privilege escalation is safe
+              # regardless -- assuming a read-only rootfs is what crash-looped
+              # monitor-api when it was added without checking.
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
               args: ["sweep-registered"]
               env:
                 - name: SWEEP_API_BASE_URL

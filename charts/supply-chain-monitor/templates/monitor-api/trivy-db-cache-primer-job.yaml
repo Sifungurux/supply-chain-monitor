@@ -33,9 +33,27 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      # Mirrors the DB-refresh CronJob this primes (see
+      # grype-db-refresh-cronjob.yaml): same uid as the scan-worker that
+      # reads the cache, and fsGroup so a cache root created by an
+      # earlier root-run Job stays writable.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
       containers:
         - name: primer
           image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
+          # Deliberately no readOnlyRootFilesystem: these run trivy/grype/psql,
+          # which use TMPDIR and other rootfs paths that have not been verified
+          # here. Dropping capabilities and privilege escalation is safe
+          # regardless -- assuming a read-only rootfs is what crash-looped
+          # monitor-api when it was added without checking.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           command: ["sh", "-c"]
           args:
             - |
