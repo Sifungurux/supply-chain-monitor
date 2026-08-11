@@ -900,3 +900,157 @@ func TestListArtifacts_DefaultLimit(t *testing.T) {
 		t.Fatalf("default page has %d artifacts, want 50", len(page.Artifacts))
 	}
 }
+
+// The tests below cover duplicate detection when a digest CANNOT be
+// resolved -- a dead ref, a rate-limited registry, or a local path that
+// never had one. Before this, the dedup check was skipped entirely in
+// that case and every re-registration created a new artifact: a live
+// deployment accumulated 43 duplicate rows from 5 unresolvable refs.
+// newTestRouter passes no digest resolver, so every ref here resolves
+// to "" -- exactly the situation under test.
+
+func TestCreateArtifact_DuplicateRefWithNoDigestIsRejected(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+
+	first := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{"ref": "alpine:3.19", "type": "image"})
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first registration = %d, want 201", first.Code)
+	}
+	second := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{"ref": "alpine:3.19", "type": "image"})
+	if second.Code != http.StatusConflict {
+		t.Fatalf("second registration = %d, want 409, body=%s", second.Code, second.Body.String())
+	}
+	if !strings.Contains(second.Body.String(), "already registered") {
+		t.Fatalf("409 body should explain the duplicate: %s", second.Body.String())
+	}
+	all, _ := store.List()
+	if len(all) != 1 {
+		t.Fatalf("store holds %d artifacts, want 1 -- an unresolvable ref must not accumulate copies", len(all))
+	}
+}
+
+// A different ref must still register: the fallback keys on the exact
+// ref, not on anything fuzzier.
+func TestCreateArtifact_DifferentRefsWithNoDigestBothRegister(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+
+	for _, ref := range []string{"alpine:3.19", "alpine:3.20", "/tmp/report.sarif"} {
+		typ := "image"
+		if strings.HasPrefix(ref, "/") {
+			typ = "sarif"
+		}
+		if rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{"ref": ref, "type": typ}); rec.Code != http.StatusCreated {
+			t.Fatalf("registering %q = %d, want 201", ref, rec.Code)
+		}
+	}
+	all, _ := store.List()
+	if len(all) != 3 {
+		t.Fatalf("store holds %d artifacts, want 3", len(all))
+	}
+}
+
+// TestBulkCreateArtifacts_SameUnresolvableRefTwiceInOneBatch -- the
+// in-batch guard keyed only on digest, so one batch listing the same
+// unresolvable ref twice produced two artifacts in a single request.
+func TestBulkCreateArtifacts_SameUnresolvableRefTwiceInOneBatch(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", map[string]any{
+		"artifacts": []map[string]string{
+			{"ref": "ghcr.io/example/gone:v1", "type": "image"},
+			{"ref": "ghcr.io/example/gone:v1", "type": "image"},
+		},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Created, Failed, Duplicates int
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Created != 1 || resp.Duplicates != 1 || resp.Failed != 0 {
+		t.Fatalf("created=%d duplicates=%d failed=%d, want 1/1/0", resp.Created, resp.Duplicates, resp.Failed)
+	}
+	all, _ := store.List()
+	if len(all) != 1 {
+		t.Fatalf("store holds %d artifacts, want 1", len(all))
+	}
+}
+
+// TestBulkCreateArtifacts_ResubmittedBatchOfUnresolvableRefs is the
+// case that actually bit: the same batch re-submitted on every run.
+// It must stay a successful no-op reported as duplicates -- NOT 409s,
+// and not new artifacts.
+func TestBulkCreateArtifacts_ResubmittedBatchOfUnresolvableRefs(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	batch := map[string]any{
+		"artifacts": []map[string]string{
+			{"ref": "ghcr.io/example/gone:v1", "type": "image"},
+			{"ref": "public.ecr.aws/example/also-gone:v2", "type": "image"},
+		},
+	}
+
+	if rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", batch); rec.Code != http.StatusCreated {
+		t.Fatalf("first submission = %d, want 201", rec.Code)
+	}
+	// Re-submit three more times, as a scheduled load test would.
+	for i := 0; i < 3; i++ {
+		rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/bulk", batch)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("re-submission %d = %d, want 201 (a re-run is a no-op, not an error)", i+1, rec.Code)
+		}
+		var resp struct {
+			Created, Failed, Duplicates int
+			Results                     []struct {
+				Duplicate bool               `json:"duplicate"`
+				Artifact  *artifact.Artifact `json:"artifact"`
+			}
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp.Created != 0 || resp.Duplicates != 2 || resp.Failed != 0 {
+			t.Fatalf("re-submission %d: created=%d duplicates=%d failed=%d, want 0/2/0", i+1, resp.Created, resp.Duplicates, resp.Failed)
+		}
+		// Callers rely on getting a usable id back for every entry.
+		for _, r := range resp.Results {
+			if !r.Duplicate || r.Artifact == nil || r.Artifact.ID == "" {
+				t.Fatalf("re-submission %d: entry lacks a usable artifact id: %+v", i+1, r)
+			}
+		}
+	}
+
+	all, _ := store.List()
+	if len(all) != 2 {
+		t.Fatalf("store holds %d artifacts after 4 submissions of the same 2 refs, want 2 -- this is the 43-duplicate bug", len(all))
+	}
+}
+
+// TestCreateArtifact_ResolvedDigestStillWinsOverRef pins the priority:
+// when a digest resolves it is better evidence than the ref, and the
+// ref fallback must not interfere. Two different refs sharing a digest
+// (the same image under two tags) still dedup on the digest.
+func TestCreateArtifact_ResolvedDigestStillWinsOverRef(t *testing.T) {
+	resolver := &fakeDigestResolver{digests: map[string]string{
+		"alpine:3.19":  "sha256:same",
+		"alpine:sameo": "sha256:same",
+	}}
+	h, store := newTestRouterWithDigestResolver(resolver)
+
+	if rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{"ref": "alpine:3.19", "type": "image"}); rec.Code != http.StatusCreated {
+		t.Fatalf("first = %d, want 201", rec.Code)
+	}
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{"ref": "alpine:sameo", "type": "image"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("different ref, same digest = %d, want 409", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "digest") {
+		t.Fatalf("the 409 should cite the digest, not the ref: %s", rec.Body.String())
+	}
+	all, _ := store.List()
+	if len(all) != 1 {
+		t.Fatalf("store holds %d artifacts, want 1", len(all))
+	}
+}

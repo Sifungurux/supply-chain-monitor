@@ -735,3 +735,51 @@ func TestPostgresStore_ListPage(t *testing.T) {
 		t.Fatalf("offset past the end: len=%d total=%d, want 0 and 5", len(page), total)
 	}
 }
+
+// TestPostgresStore_FindByRef exercises the dedup fallback's SQL --
+// including the oldest-wins tie-break, which is what makes repeated
+// registrations converge on the original row rather than chaining off
+// the most recent one.
+func TestPostgresStore_FindByRef(t *testing.T) {
+	s := newTestPostgresStore(t)
+	ref := fmt.Sprintf("findbyref-test-%d:1.0", time.Now().UnixNano())
+
+	first, err := s.Create(ref, artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Delete(first.ID) })
+
+	// A second row with the same ref is exactly what this fallback
+	// exists to prevent, but the store must still answer deterministically
+	// if one is already there.
+	time.Sleep(10 * time.Millisecond) // ensure a distinct created_at
+	second, err := s.Create(ref, artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create (second): %v", err)
+	}
+	t.Cleanup(func() { _ = s.Delete(second.ID) })
+
+	got, err := s.FindByRef(ref)
+	if err != nil {
+		t.Fatalf("FindByRef: %v", err)
+	}
+	if got == nil {
+		t.Fatal("FindByRef returned nothing for a ref that exists")
+	}
+	if got.ID != first.ID {
+		t.Fatalf("FindByRef returned %s, want the OLDEST (%s) -- repeated registrations must converge on the original", got.ID, first.ID)
+	}
+
+	// Not found is (nil, nil), the same convention FindByDigest uses.
+	missing, err := s.FindByRef(ref + "-does-not-exist")
+	if err != nil {
+		t.Fatalf("FindByRef(missing): %v", err)
+	}
+	if missing != nil {
+		t.Fatalf("FindByRef(missing) = %+v, want nil", missing)
+	}
+	if empty, err := s.FindByRef(""); err != nil || empty != nil {
+		t.Fatalf(`FindByRef("") = %+v, %v -- an empty ref must never match`, empty, err)
+	}
+}

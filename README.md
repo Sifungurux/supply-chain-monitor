@@ -378,8 +378,8 @@ curl -s -X POST localhost:8080/api/v1/artifacts/bulk "${AUTH[@]}" \
 Both `POST /api/v1/artifacts` and the bulk endpoint above resolve each
 `image`/`sbom`/`sarif` ref's real OCI content digest (via `oras manifest
 fetch --descriptor`, best-effort -- an unreachable/rate-limited registry
-just means no dedup for that one entry, never a failed registration) and
-check it against every digest already on record. This catches the same
+never fails a registration) and check it against every digest already on
+record. This catches the same
 underlying image registered twice even under two different tags
 (`alpine:3.19` and `alpine:latest` resolving to the same digest), not
 just an exact repeated ref string.
@@ -393,6 +393,20 @@ curl -s -X POST localhost:8080/api/v1/artifacts "${AUTH[@]}" \
 # => {"error":"an artifact with this digest is already registered", "digest":"sha256:...",
 #     "existing_artifact_id":"...", "existing_artifact_ref":"alpine:3.19"}
 ```
+
+**When a digest can't be resolved, the ref is the fallback key.** An
+unresolvable digest is routine, not exceptional — a dead or moved ref, a
+rate-limited registry, or a `file`-type path that never had one. Dedup
+used to be skipped entirely in that case, so every re-registration
+created a *new* artifact: this deployment accumulated 43 duplicate rows
+from 5 unresolvable refs across ~9 runs, all with an empty digest. Now a
+registration with no resolved digest matches on the exact ref instead.
+
+A resolved digest always wins — it's strictly better evidence, and only
+a digest distinguishes "the same image twice" from "a mutable tag whose
+content changed". The ref fallback applies *only* when there's no digest
+to compare, where there is no evidence of a change either way and
+creating an unscannable second row is the worse outcome.
 
 The bulk endpoint treats a duplicate as its own outcome, not a failure --
 `duplicates` is a separate counter from `failed`, and a duplicate
