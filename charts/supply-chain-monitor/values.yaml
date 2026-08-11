@@ -680,7 +680,11 @@ monitorApi:
 
 dashboard:
   image:
-    repository: nginx
+    # nginx-unprivileged, not stock nginx: the stock image runs as root
+    # and binds port 80, both of which this chart's securityContext
+    # forbids. This variant listens on 8080 as uid 101 (see the
+    # dashboard Deployment and Service).
+    repository: nginxinc/nginx-unprivileged
     tag: 1.27-alpine
     pullPolicy: IfNotPresent
   # Left empty by default: the dashboard already self-derives the right

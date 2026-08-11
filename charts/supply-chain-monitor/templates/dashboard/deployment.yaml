@@ -25,6 +25,14 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/dashboard/configmap.yaml") . | sha256sum }}
     spec:
       automountServiceAccountToken: false
+      # uid 101 is nginx-unprivileged's own "nginx" user. fsGroup so the
+      # initContainer can write the rendered index.html/env.js into the
+      # shared emptyDir, and nginx can read them back.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
       # The dashboard used to require a person to paste the API key
       # into a browser field by hand -- fine for one person on one
       # laptop, annoying (and easy to get wrong) for anyone else who
@@ -88,7 +96,10 @@ spec:
         - name: nginx
           image: "{{ .Values.dashboard.image.repository }}:{{ .Values.dashboard.image.tag }}"
           ports:
-            - containerPort: 80
+            # 8080, not 80: a non-root process cannot bind a privileged
+            # port, which is the whole reason this image exists. The
+            # Service keeps port 80 externally and targets 8080 here.
+            - containerPort: 8080
           volumeMounts:
             # Serves the initContainer's rendered output (index.html +
             # env.js), not the ConfigMap directly -- nginx never sees
@@ -97,21 +108,39 @@ spec:
             - name: html
               mountPath: /usr/share/nginx/html
               readOnly: true
+            # readOnlyRootFilesystem needs these two: nginx writes its
+            # pid and client-body temp files under /tmp, and proxy/fastcgi
+            # caches under /var/cache/nginx. Without them the container
+            # starts and then fails on the first request rather than at
+            # boot, which is a worse failure to diagnose.
+            - name: nginx-tmp
+              mountPath: /tmp
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
           readinessProbe:
             httpGet:
               path: /
-              port: 80
+              port: 8080
             initialDelaySeconds: 2
           livenessProbe:
             httpGet:
               path: /
-              port: 80
+              port: 8080
             initialDelaySeconds: 5
           resources:
             {{- toYaml .Values.dashboard.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
       volumes:
         - name: dashboard-html
           configMap:
             name: scm-dashboard-html
         - name: html
+          emptyDir: {}
+        - name: nginx-tmp
+          emptyDir: {}
+        - name: nginx-cache
           emptyDir: {}
