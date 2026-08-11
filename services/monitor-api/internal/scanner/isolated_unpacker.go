@@ -261,33 +261,10 @@ func (s *IsolatedUnpackerScanner) Scan(ctx context.Context, ref string) ([]artif
 	return result.Findings, nil
 }
 
-// waitForCompletion polls JobStatus until the Job succeeds, fails, or
-// ctx is done. A "failed" Job (non-zero exit from the worker process
-// itself, e.g. it crashed before it could even print a WorkerResult --
-// see main.go's runScanWorker, which exits non-zero only for genuine
-// setup failures) is reported as an error directly, since there's no
-// WorkerResult JSON worth trying to parse in that case.
+// waitForCompletion delegates to the shared wait loop -- see waitForJob
+// in jobwait.go for the retry and backoff behaviour, and why polling
+// every Job at a flat interval was enough to saturate this project's
+// API server at SCAN_CONCURRENCY=8.
 func (s *IsolatedUnpackerScanner) waitForCompletion(ctx context.Context, name string) error {
-	ticker := time.NewTicker(s.cfg.PollInterval)
-	defer ticker.Stop()
-
-	for {
-		succeeded, failed, err := s.client.JobStatus(ctx, name)
-		if err != nil {
-			return fmt.Errorf("check job status: %w", err)
-		}
-		if failed {
-			return fmt.Errorf("scan job failed to run (crashed or was killed before producing a result)")
-		}
-		if succeeded {
-			return nil
-		}
-
-		select {
-		case <-ticker.C:
-			continue
-		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for scan job to complete: %w", ctx.Err())
-		}
-	}
+	return waitForJob(ctx, s.client, name, "scan job", s.cfg.PollInterval)
 }
