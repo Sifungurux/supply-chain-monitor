@@ -209,6 +209,16 @@ recorded.
   `/healthz`, `/swagger`, `/openapi.yaml`, and CORS preflight `OPTIONS`
   — checked with `crypto/subtle.ConstantTimeCompare`. `API_KEY` is
   read once at startup and `monitor-api` refuses to start without it.
+- Every write endpoint caps its request body with
+  `http.MaxBytesReader` and answers `413` rather than `400` when the cap
+  is hit (`internal/api/bodylimit.go`): 64KiB for the small JSON writes,
+  4MiB for bulk registration, 16MiB for findings submission, 64MiB for a
+  document upload. The pre-existing per-entry caps (`maxBulkArtifacts`,
+  the findings validation) don't cover this — they run *after*
+  `json.Decode` has already read the whole body into memory, so they
+  bound a request's logical size, not the bytes spent getting there.
+  `ReadTimeout` bounds how long a body may take to arrive, not how large
+  it may be.
 - Per-key token-bucket rate limiting (`internal/api/ratelimit.go`),
   applied inside the auth check so an unauthenticated caller can't grow
   the limiter's key map. Off by default (`RATE_LIMIT_RPS <= 0`).
