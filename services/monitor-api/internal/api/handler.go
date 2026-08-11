@@ -50,6 +50,14 @@ type handler struct {
 	// Compared case-insensitively -- scanners disagree on spelling, see
 	// notify.SeverityRank.
 	notifyMinSeverity string
+	// notifyOnFirstScan opts INTO notifying for an artifact's first ever
+	// scan. Phrased as the opt-in rather than the suppression so the
+	// zero value (false = suppress) is the safe default: a handler built
+	// without thinking about this behaves the way an operator would
+	// want, instead of paging once per artifact through a backlog. The
+	// chart exposes it the other way round (suppressFirstScan: true),
+	// which reads better as a setting.
+	notifyOnFirstScan bool
 	// scanSlots caps how many scans run at once across the whole
 	// process: one buffered slot per permitted concurrent scan, taken
 	// for the duration of a scan and released when it finishes. nil
@@ -163,4 +171,16 @@ type Notifications struct {
 	// MinSeverity is the threshold a NEW finding must meet before
 	// anything is sent. Empty means notify.DefaultMinSeverity.
 	MinSeverity string
+	// NotifyOnFirstScan sends notifications for an artifact's first ever
+	// scan as well. The zero value (false) suppresses them, which is the
+	// default and the reason this is expressed as an opt-in: on a first
+	// scan every finding is "new" only because nobody had looked before,
+	// so enabling notifications on an existing deployment would page
+	// once per already-registered artifact as the sweep drains the
+	// backlog.
+	//
+	// Set it when you do want that -- a deployment where every artifact
+	// is registered and scanned once at import time, where the first
+	// scan IS the interesting event.
+	NotifyOnFirstScan bool
 }

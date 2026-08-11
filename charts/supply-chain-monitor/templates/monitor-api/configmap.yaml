@@ -68,6 +68,11 @@ data:
   # notify-secret.yaml for why the Slack URL counts as a credential).
   NOTIFY_WEBHOOK_URL: {{ .Values.monitorApi.notifications.webhookURL | quote }}
   NOTIFY_MIN_SEVERITY: {{ .Values.monitorApi.notifications.minSeverity | quote }}
+  # Deliberately no `| default true`: Helm's default function treats
+  # false as empty, so it would silently override an explicit
+  # `suppressFirstScan: false` back to true. values.yaml supplies the
+  # default, and the binary falls back to true for an empty value.
+  NOTIFY_SUPPRESS_FIRST_SCAN: {{ .Values.monitorApi.notifications.suppressFirstScan | quote }}
   # file/sbom/sarif artifacts can be registered with an OCI registry
   # reference instead of a path already inside this pod -- oras pull
   # fetches them from scm-registry first (see internal/scanner/fetch.go).

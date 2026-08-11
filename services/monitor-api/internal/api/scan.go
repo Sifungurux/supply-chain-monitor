@@ -366,8 +366,8 @@ func (h *handler) notifyNewFindings(a *artifact.Artifact, roundStamp time.Time, 
 	// following successful scan is not treated as a first scan and does
 	// notify -- which is right: we did look, and this is the first time
 	// we have actually seen the contents.
-	if firstScan {
-		log.Printf("scan for artifact %s was its first -- notifications suppressed (every finding is new on a first look)", a.ID)
+	if firstScan && !h.notifyOnFirstScan {
+		log.Printf("scan for artifact %s was its first -- notifications suppressed (every finding is new on a first look; set notifications.suppressFirstScan=false to send these)", a.ID)
 		return
 	}
 	threshold := h.notifyMinSeverity
