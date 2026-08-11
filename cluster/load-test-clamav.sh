@@ -8,7 +8,18 @@
 # other route to monitor-api, e.g. NodePort 30300).
 #
 # What it does:
-#   1. Bulk-registers testdata/bulk-test-images.json (100 image refs,
+#   NOTE ON THE IMAGE CORPUS: testdata/bulk-test-images.json deliberately
+#   contains NO Docker Hub references. A 100-image burst exhausts Docker
+#   Hub's anonymous pull limit part-way through, and the resulting
+#   401/429 is classified as `registry_auth_failed` -- so a run reports a
+#   pile of "failures" for images that are perfectly healthy, and two
+#   runs are never comparable. Every entry is on a registry without that
+#   limit (public.ecr.aws, quay.io, ghcr.io, registry.k8s.io,
+#   mcr.microsoft.com, gcr.io). Keep it that way when adding images:
+#   official Docker images are mirrored at
+#   public.ecr.aws/docker/library/<name>.
+#
+#   1. Bulk-registers testdata/bulk-test-images.json (95 image refs,
 #      see README's "Registering many artifacts at once") via
 #      POST /api/v1/artifacts/bulk.
 #   2. Fires POST /api/v1/artifacts/{id}/scan for every artifact that

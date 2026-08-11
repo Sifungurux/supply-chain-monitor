@@ -354,9 +354,17 @@ artifact via plain `POST /api/v1/artifacts`. It's best-effort, not
 all-or-nothing: one bad entry (missing `ref`, invalid `type`) doesn't
 stop the rest of the batch from registering, and the response reports
 success/failure per entry. `testdata/bulk-test-images.json` is a ready-
-made batch of 100 real image refs spread across seven public registries
-(Docker Hub, ghcr.io, registry.k8s.io, quay.io, mcr.microsoft.com,
-gcr.io, public.ecr.aws) for exercising this in one call:
+made batch of 95 real image refs spread across six public registries
+(public.ecr.aws, quay.io, ghcr.io, registry.k8s.io, mcr.microsoft.com,
+gcr.io) for exercising this in one call:
+
+It deliberately contains **no Docker Hub references**: a 100-image burst
+exhausts Docker Hub's anonymous pull limit part-way through, and the
+resulting 401/429 is classified as `registry_auth_failed` — so a load
+test reports failures for perfectly healthy images and two runs are
+never comparable. Official images are mirrored at
+`public.ecr.aws/docker/library/<name>`; keep new entries off Docker Hub
+for the same reason.
 
 ```bash
 curl -s -X POST localhost:8080/api/v1/artifacts/bulk "${AUTH[@]}" \
