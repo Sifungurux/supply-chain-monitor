@@ -1288,9 +1288,19 @@ func runAPIServer() {
 		log.Printf("notifications: slack enabled, min severity %q", notifyMinSeverity)
 	}
 
+	// Default true: on an artifact's first scan every finding is "new"
+	// only because nobody had looked before, so leaving this on keeps
+	// enabling notifications from paging once per already-registered
+	// artifact. Turn it off where the first scan IS the interesting
+	// event -- e.g. artifacts registered and scanned once at import.
+	suppressFirstScan := getenvBool("NOTIFY_SUPPRESS_FIRST_SCAN", true)
+	if len(notifiers) > 0 && !suppressFirstScan {
+		log.Printf("notifications: first-scan suppression disabled -- an artifact's first scan will notify too")
+	}
+
 	router := api.NewRouter(store, stageTracker, scanners, apiKey, rateLimitRPS, rateLimitBurst, digestResolver, fetchPlainHTTP, scanTimeout, requireDigest,
 		api.ScanLimits{Concurrency: scanConcurrency},
-		api.Notifications{Notifiers: notifiers, MinSeverity: notifyMinSeverity})
+		api.Notifications{Notifiers: notifiers, MinSeverity: notifyMinSeverity, NotifyOnFirstScan: !suppressFirstScan})
 
 	srv := &http.Server{
 		Addr:         listenAddr,

@@ -483,12 +483,11 @@ monitorApi:
   # doesn't page about a CVE that has been known for weeks. A finding
   # that was fixed and has come back counts as new again.
   #
-  # An artifact's FIRST ever scan never notifies: everything is "new"
-  # there only because nobody had looked before. Without that, turning
-  # these on in an existing deployment pages once per already-registered
-  # artifact while the sweep drains the backlog. The cost, accepted
-  # deliberately: importing an image that already carries a critical CVE
-  # is quiet until a later scan changes something.
+  # suppressFirstScan (below) controls the other half: on an artifact's
+  # first ever scan everything is "new" only because nobody had looked
+  # before, so by default those are suppressed. Without that, turning
+  # notifications on in an existing deployment pages once per
+  # already-registered artifact while the sweep drains the backlog.
   #
   # Delivery is fire-and-forget: a destination that is down, slow, or
   # broken is logged and dropped, and can never fail a scan or delay its
@@ -509,6 +508,20 @@ monitorApi:
     # so treat it as one: it is templated into the same Secret as
     # webhookSecret rather than the ConfigMap.
     slackURL: ""
+    # true (default): an artifact's FIRST ever scan does not notify.
+    # Everything it finds is "new" only because nobody had looked
+    # before, which is not a change in the artifact -- and on an
+    # existing deployment that would page once per already-registered
+    # artifact as the backlog is scanned.
+    #
+    # Set false where the first scan IS the interesting event: a
+    # pipeline that registers and scans each artifact once at import
+    # time never gets a second scan to compare against, so leaving this
+    # true would mean it never notifies at all.
+    #
+    # Note a first scan that FAILED still counts as having looked, so
+    # the next successful scan notifies either way.
+    suppressFirstScan: true
     # critical | high | medium | low. "high" by default: every image in
     # this project's own load tests carries medium/low findings by the
     # hundred, so a lower threshold is a pager that never stops.

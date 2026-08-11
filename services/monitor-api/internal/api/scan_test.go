@@ -899,3 +899,38 @@ func TestScanArtifact_NoNotifiersConfiguredIsSilent(t *testing.T) {
 		t.Fatalf("scan status = %q, want scanned", final.Status)
 	}
 }
+
+// TestScanArtifact_NotifiesOnFirstScanWhenSuppressionDisabled is the
+// opt-out path: a deployment where artifacts are registered and scanned
+// once at import time wants that first scan to notify, since it IS the
+// interesting event.
+func TestScanArtifact_NotifiesOnFirstScanWhenSuppressionDisabled(t *testing.T) {
+	trivy := &fakeScanner{findings: []artifact.Finding{
+		{ID: "CVE-2024-CRIT", Severity: "CRITICAL", Title: "openssl", Source: "trivy"},
+	}}
+	n := newFakeNotifier()
+	store := artifact.NewMemStore()
+	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
+	h := api.NewRouter(store, tracker, scanner.Registry{artifact.TypeImage: {trivy}}, testAPIKey, 0, 0, nil, false, 0, false,
+		api.ScanLimits{},
+		api.Notifications{Notifiers: []notify.Notifier{n}, MinSeverity: "high", NotifyOnFirstScan: true})
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	scanAndWait(t, h, store, created.ID)
+	if !n.waitForNotify(t) {
+		t.Fatal("first scan should notify when NotifyOnFirstScan is set")
+	}
+	events := n.delivered()
+	if len(events) != 1 || len(events[0].NewFindings) != 1 || events[0].NewFindings[0].ID != "CVE-2024-CRIT" {
+		t.Fatalf("delivered %+v, want the one CRITICAL finding", events)
+	}
+}
+
+// TestNotifications_ZeroValueSuppressesFirstScan pins the default the
+// other way round: the field is an opt-IN precisely so a caller that
+// doesn't think about it gets suppression rather than a backlog pager.
+func TestNotifications_ZeroValueSuppressesFirstScan(t *testing.T) {
+	if (api.Notifications{}).NotifyOnFirstScan {
+		t.Fatal("the zero value must suppress first-scan notifications")
+	}
+}

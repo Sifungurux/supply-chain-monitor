@@ -443,10 +443,12 @@ monitorApi:
     webhookSecret: "..."                              # optional HMAC-SHA256
     slackURL: "https://hooks.slack.com/services/..."  # optional Slack
     minSeverity: "high"                               # critical|high|medium|low
+    suppressFirstScan: true                           # default; see below
 ```
 
 Env equivalents: `NOTIFY_WEBHOOK_URL`, `NOTIFY_WEBHOOK_SECRET`,
-`NOTIFY_SLACK_URL`, `NOTIFY_MIN_SEVERITY`.
+`NOTIFY_SLACK_URL`, `NOTIFY_MIN_SEVERITY`,
+`NOTIFY_SUPPRESS_FIRST_SCAN`.
 
 The generic webhook payload:
 
@@ -466,17 +468,22 @@ reporting the same findings is silent, so a nightly sweep doesn't page
 about a CVE that has been known for weeks; a finding that was fixed and
 came back counts as new again.
 
-**An artifact's first ever scan never notifies.** Every finding is "new"
-there only because nobody had looked before — that's not a change in the
-artifact, which is what this signal is for. Without the suppression,
-switching notifications on in an existing deployment pages once per
+**An artifact's first ever scan does not notify** —
+`suppressFirstScan: true`, the default. Every finding is "new" there
+only because nobody had looked before; that's not a change in the
+artifact, which is what this signal is for. Without it, switching
+notifications on in an existing deployment pages once per
 already-registered artifact as the sweep works through the backlog, and
-re-registering anything re-pages it. The trade-off, accepted
-deliberately: importing an image that already carries a critical CVE
-stays quiet until a later scan changes something — the findings are on
-the API and dashboard immediately either way. (A first scan that
-*failed* still counts as having looked, so the next successful scan
-does notify.) That decision isn't recomputed here — it
+re-registering anything re-pages it.
+
+Set `suppressFirstScan: false` (`NOTIFY_SUPPRESS_FIRST_SCAN=false`)
+where the first scan *is* the interesting event — a pipeline that
+registers and scans each artifact once at import never gets a second
+scan to compare against, so the default would mean it never notifies at
+all.
+
+A first scan that *failed* still counts as having looked, so the next
+successful scan notifies under either setting. That decision isn't recomputed here — it
 reuses the `FirstSeenAt` stamp `MergeFindings` already assigns (see
 docs/architecture.md, "Tracking finding lifecycle").
 

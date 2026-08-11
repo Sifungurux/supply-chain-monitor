@@ -234,8 +234,10 @@ recorded.
   incoming webhook receive the event. "New" reuses `MergeFindings`'
   `FirstSeenAt` stamp rather than recomputing it, so a re-scan reporting
   the same findings is silent, and an artifact's first ever scan is
-  suppressed outright (everything is new on a first look -- that's a
-  backlog pager, not a change signal). Delivery is fire-and-forget on its own
+  suppressed by default (everything is new on a first look -- that's a
+  backlog pager, not a change signal), overridable with
+  `suppressFirstScan: false` for pipelines where each artifact is only
+  ever scanned once. Delivery is fire-and-forget on its own
   goroutine: a destination that errors, hangs, or panics is logged and
   dropped, and cannot fail a scan — the one-way counterpart to the
   inbound webhooks CI/CD already uses to register artifacts.
