@@ -44,6 +44,10 @@ spec:
           labelSelector:
             matchLabels:
               app: scm-clamav
+      # fsGroup so the emptyDirs below are group-writable by the clamav
+      # user (uid 1000) that clamd and freshclam drop to.
+      securityContext:
+        fsGroup: 1000
       containers:
         - name: clamav
           image: "{{ .Values.clamav.image.repository }}:{{ .Values.clamav.image.tag }}"
@@ -52,6 +56,55 @@ spec:
             - containerPort: 3310
           resources:
             {{- toYaml .Values.clamav.resources | nindent 12 }}
+          # NOT runAsNonRoot, unlike every other workload in this chart,
+          # and the reason is worth stating so nobody "fixes" it:
+          #
+          # clamd and freshclam -- the processes that actually parse
+          # untrusted files -- ALREADY run as uid 1000. clamd.conf ships
+          # `User clamav` and the entrypoint starts freshclam with
+          # --user=clamav; verified in a running pod, where only PID 1
+          # (the init shell) is root.
+          #
+          # That entrypoint cannot run as non-root: it does an
+          # unconditional `chown -R clamav:clamav /var/lib/clamav`, which
+          # fails with "Operation not permitted" for any non-root uid and
+          # kills the container under `set -eu`. Making it work would
+          # mean replacing the image's maintained startup script --
+          # freshclam orchestration, socket wait, timeouts -- with a
+          # hand-rolled one, for a daemon whose job is to fetch and
+          # hot-reload virus databases. A bad trade.
+          #
+          # So instead: keep the root entrypoint, strip it to the five
+          # capabilities it demonstrably needs, and forbid escalation.
+          # Verified in a pod: dropping ALL without these fails, and with
+          # them clamd starts, loads 3.6M signatures and detects EICAR.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
+          volumeMounts:
+            # readOnlyRootFilesystem needs all four, each found by
+            # watching the container fail without it:
+            #   /run/clamav      clamd's socket. Mounting it also skips
+            #                    the entrypoint's `install -d -o clamav`
+            #                    branch, which fails even WITH CAP_CHOWN.
+            #   /var/lib/clamav  the virus DB freshclam downloads
+            #                    (~168Mi steady, ~260Mi peak -- this is
+            #                    what the ephemeral-storage sizing is for).
+            #   /var/lock        the entrypoint symlinks into it.
+            #   /var/log/clamav, /tmp  logs and scratch.
+            - name: clamav-run
+              mountPath: /run/clamav
+            - name: clamav-db
+              mountPath: /var/lib/clamav
+            - name: clamav-lock
+              mountPath: /var/lock
+            - name: clamav-logs
+              mountPath: /var/log/clamav
+            - name: clamav-tmp
+              mountPath: /tmp
           # first boot downloads the virus DB (freshclam) and can take a
           # few minutes -- see values.yaml's readiness/liveness comment.
           readinessProbe:
@@ -65,3 +118,14 @@ spec:
               port: 3310
             initialDelaySeconds: {{ .Values.clamav.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.clamav.liveness.periodSeconds }}
+      volumes:
+        - name: clamav-run
+          emptyDir: {}
+        - name: clamav-db
+          emptyDir: {}
+        - name: clamav-lock
+          emptyDir: {}
+        - name: clamav-logs
+          emptyDir: {}
+        - name: clamav-tmp
+          emptyDir: {}
