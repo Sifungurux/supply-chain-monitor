@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/notify"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/pipeline"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
 )
@@ -40,6 +41,15 @@ type handler struct {
 	// requireDigest is monitorApi.requireDigest / REQUIRE_DIGEST -- see
 	// NewRouter's own comment for the full behavior this gates.
 	requireDigest bool
+	// notifiers receive a ScanEvent when a scan introduces new findings
+	// at or above notifyMinSeverity. Empty (the default) means
+	// notifications are off entirely -- see internal/notify.
+	notifiers []notify.Notifier
+	// notifyMinSeverity is the threshold a new finding must meet to be
+	// worth notifying about ("critical" > "high" > "medium" > "low").
+	// Compared case-insensitively -- scanners disagree on spelling, see
+	// notify.SeverityRank.
+	notifyMinSeverity string
 	// scanSlots caps how many scans run at once across the whole
 	// process: one buffered slot per permitted concurrent scan, taken
 	// for the duration of a scan and released when it finishes. nil
@@ -142,4 +152,15 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 func (h *handler) healthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// Notifications configures outbound scan notifications. The zero value
+// disables them: no notifiers means scanArtifact's notify step is
+// skipped entirely, which is exactly how the service behaved before
+// this existed.
+type Notifications struct {
+	Notifiers []notify.Notifier
+	// MinSeverity is the threshold a NEW finding must meet before
+	// anything is sent. Empty means notify.DefaultMinSeverity.
+	MinSeverity string
 }
