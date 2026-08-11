@@ -9,6 +9,9 @@ spec:
   ports:
     - name: http
       port: 80
-      targetPort: 80
+      # 8080: the dashboard runs nginx-unprivileged, which cannot bind
+      # port 80. The Service's own port stays 80, so nothing referring to
+      # this Service by port needs to change.
+      targetPort: 8080
       nodePort: {{ .Values.dashboard.service.nodePort }}
   type: NodePort
