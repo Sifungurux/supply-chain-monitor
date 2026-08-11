@@ -466,9 +466,13 @@ per-Job limit stops one Job from filling a node; it does nothing about
 fifty scans' worth of Jobs at once, which an unbounded
 `POST /api/v1/artifacts/{id}/scan` allowed.
 
-`monitorApi.scanConcurrency` (`SCAN_CONCURRENCY`, **8** in the chart —
-so up to ~24 concurrent Jobs at the default `cveScanner`; multiply
+`monitorApi.scanConcurrency` (`SCAN_CONCURRENCY`, **6** in the chart —
+so up to ~18 concurrent Jobs at the default `cveScanner`; multiply
 before changing it) caps how many scans run at once across the process.
+It is bounded by node scratch disk, nothing else — `values.yaml`
+documents the measurements and what would let you raise it (bigger
+nodes, or moving per-Job `/tmp` onto a networked StorageClass such as
+Ceph RBD).
 Scanning is asynchronous, so nobody is blocked on the response: a
 request arriving with every slot busy is rejected immediately with a
 `429` and `Retry-After`, rather than queueing:
