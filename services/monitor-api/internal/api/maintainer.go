@@ -23,9 +23,10 @@ type updateMaintainerRequest struct {
 func (h *handler) updateMaintainer(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
+	limitBody(w, r, maxSmallJSONBytes)
 	var req updateMaintainerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err, "invalid request body")
 		return
 	}
 	if req.Team == "" || req.Email == "" {

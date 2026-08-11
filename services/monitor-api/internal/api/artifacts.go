@@ -78,9 +78,10 @@ func checkExpectedDigest(w http.ResponseWriter, ref, resolvedDigest, expectedDig
 }
 
 func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
+	limitBody(w, r, maxSmallJSONBytes)
 	var req createArtifactRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err, "invalid request body")
 		return
 	}
 	if req.Ref == "" {
@@ -225,9 +226,13 @@ const maxBulkArtifacts = 500
 // "one failure shouldn't block everything else" reasoning
 // scanArtifact's own per-scanner error handling already uses.
 func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
+	// maxBulkArtifacts (500) below bounds the number of entries, but
+	// only once the whole body is already decoded into memory -- this
+	// bounds the bytes it takes to get there.
+	limitBody(w, r, maxBulkArtifactsBytes)
 	var req bulkCreateArtifactsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err, "invalid request body")
 		return
 	}
 	if len(req.Artifacts) == 0 {

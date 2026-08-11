@@ -34,10 +34,13 @@ func (h *handler) uploadDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxDocumentUploadBytes)
+	limitBody(w, r, maxDocumentUploadBytes)
 	content, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "failed to read request body (too large, or connection dropped): "+err.Error())
+		// 413 for an oversized document, 400 for a dropped connection --
+		// this used to answer 400 for both, telling a caller that had
+		// simply sent too much that its request was malformed.
+		writeBodyError(w, err, "failed to read request body (connection dropped): "+err.Error())
 		return
 	}
 	if len(content) == 0 {

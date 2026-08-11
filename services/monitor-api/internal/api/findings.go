@@ -93,9 +93,10 @@ type submitFindingsRequest struct {
 func (h *handler) submitFindings(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
+	limitBody(w, r, maxFindingsBytes)
 	var req submitFindingsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err, "invalid request body")
 		return
 	}
 	if !validFindingsBucket(req.Bucket) {

@@ -20,9 +20,10 @@ type updateStageRequest struct {
 func (h *handler) updateStage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
+	limitBody(w, r, maxSmallJSONBytes)
 	var req updateStageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err, "invalid request body")
 		return
 	}
 

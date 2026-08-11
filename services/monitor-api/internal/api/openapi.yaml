@@ -118,6 +118,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Artifact" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "409":
           description: >-
             expected_digest didn't match the resolved digest, or an artifact
@@ -153,6 +154,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/BulkCreateArtifactsResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
 
   /api/v1/artifacts/{id}:
     parameters:
@@ -266,6 +268,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Artifact" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/artifacts/{id}/maintainer:
@@ -292,6 +295,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Artifact" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/artifacts/{id}/findings:
@@ -327,6 +331,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Artifact" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/findings/{findingID}/artifacts:
@@ -392,6 +397,7 @@ paths:
                   id: { type: string }
                   kind: { type: string }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "404": { $ref: "#/components/responses/NotFound" }
 
 components:
@@ -416,6 +422,14 @@ components:
       schema: { type: string, enum: [sbom, sarif] }
 
   responses:
+    PayloadTooLarge:
+      description: >-
+        Request body exceeded this endpoint's size limit (64KiB for small
+        JSON writes, 4MiB for bulk registration, 16MiB for findings
+        submission, 64MiB for a document upload).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     BadRequest:
       description: Invalid request body or parameters.
       content:
