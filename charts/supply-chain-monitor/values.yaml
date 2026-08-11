@@ -409,24 +409,36 @@ monitorApi:
   # before changing this: with cveScanner "trivy" the same 8 is ~16
   # Jobs, and a fourth registered scanner would make it 32.
   #
-  # WHY 6, AND WHAT WOULD LET YOU RAISE IT
+  # WHY 8, AND WHAT WOULD LET YOU RAISE IT FURTHER
   #
   # This number is limited by ONE THING: how much scratch disk the nodes
   # have. It is not a limit of the API, the scanners, or the design --
   # raise the disk and this can go up.
   #
-  # Measured on the local podman/k3d cluster (2026-08-11), 100 artifacts
-  # at PARALLELISM=20 with this set to 8:
+  # Both values were measured on the local podman/k3d cluster
+  # (2026-08-11), same instrument, PARALLELISM=20:
   #
-  #   peak concurrent scan Jobs   24   (= 8 x 3, exactly as predicted)
-  #   evictions                    0
-  #   peak node disk          39.0G of 39.4G   <-- ~1% headroom
-  #   wall clock              21 min (vs ~40 at 4)
+  #                        cap 8 (100 imgs)   cap 6 (95 imgs)
+  #   peak scan Jobs       24 (= 8 x 3)       18 (= 6 x 3)
+  #   peak node disk       39.0G of 39.4G     38.3G of 39.4G
+  #   transient over base  ~14.0G             ~13.8G
+  #   wall clock           1262s              1771s
+  #   evictions            0                  0
   #
-  # Nothing failed, but ~400MB of headroom is not a margin -- a bigger
-  # image set, a fuller disk at start, or an unluckier overlap of peaks
-  # and it becomes the DiskPressure eviction incident of 2026-08-10
-  # again. 6 (~18 Jobs) keeps most of the throughput win with real room.
+  # The headline: dropping to 6 bought 0.7G of peak headroom and cost
+  # ~40% throughput per image. Transient usage barely moved despite 25%
+  # fewer Jobs, because the peak is set by which LARGE images happen to
+  # overlap, not by how many Jobs run -- and it is brief (only 2 of 117
+  # samples above 37G, median 31.1G). So the cap is not an effective
+  # lever on disk; it was tried as one and measured as one, and 8 is
+  # back because it costs almost nothing in margin and buys back a third
+  # of the wall clock.
+  #
+  # 8 does leave ~400MB at the brief peak. Nothing has evicted across
+  # two full runs, but that is not a margin to rely on -- if the image
+  # set grows or the disk starts fuller, fix the disk rather than
+  # trimming this number, which the measurement above shows will not
+  # help much.
   #
   # To raise it, remove the disk constraint first -- any of:
   #   * bigger nodes: the podman VM is 40G total; growing it is the
@@ -461,7 +473,7 @@ monitorApi:
   # than this at once (the dashboard, cluster/load-test-clamav.sh's
   # PARALLELISM) should retry on 429. 0 disables the cap entirely, which
   # is the binary's own default when this isn't set.
-  scanConcurrency: 6
+  scanConcurrency: 8
   # Uncomment (and set enabled: true) for air-gapped operation -- see
   # cluster/seed-trivy-db.sh and README's "Air-gapped operation".
   trivyDB:
