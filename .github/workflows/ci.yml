@@ -118,3 +118,25 @@ jobs:
       - uses: actions/checkout@v5
       - name: make helm-template
         run: make helm-template
+
+  # Builds services/monitor-api's image and asserts the properties its
+  # Dockerfile exists to guarantee (non-root uid, static CGO_ENABLED=0
+  # binary, every bundled tool runnable, no downloader left in the
+  # runtime layer) -- see `make test-image`.
+  #
+  # Nothing built this image in CI before, so a Dockerfile regression
+  # only ever surfaced when a human next ran `make build`. It matters
+  # more now that the image verifies a sha256 for each tool it
+  # downloads: those checksums are per-architecture, and ubuntu-latest
+  # is the only place in this project's toolchain where the amd64 branch
+  # actually runs (an Apple Silicon dev machine can build the arm64 one
+  # natively, but qemu cannot emulate the Go toolchain well enough to
+  # build the amd64 image end to end -- `go mod download` dies with a
+  # register dump). A wrong amd64 checksum would otherwise be invisible
+  # until someone built on an amd64 host.
+  test-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: make test-image
+        run: make test-image

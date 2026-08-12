@@ -383,6 +383,32 @@ Traefik's `NodePort` Service on `30080`; the dashboard's direct
 NodePort (`30301`) still works unchanged. No TLS yet — `websecure` is
 disabled rather than half-wired.
 
+**Image supply chain.** `services/monitor-api/Dockerfile` bundles five
+third-party binaries (trivy, grype, oras, unpacker, umoci) plus the
+service itself, so how they get in is part of this project's own threat
+model rather than a build detail. Every base image is pinned by digest
+as well as tag; every downloaded tarball is checked against a per-arch
+sha256 pinned in the Dockerfile before it is unpacked; umoci is pinned
+to a commit, with a `rev-parse` assertion so the pin is verified rather
+than merely stated. Downloads happen in a dedicated `tools` stage, which
+keeps `curl` and GNU `tar` out of the shipped image entirely. The
+runtime stage ends with `USER 65534` — the same uid every workload in
+this chart already pins — so a bare `docker run` gets the same non-root
+posture the cluster enforces. (Note for derived images: switch to `USER
+root` for install steps and back afterwards, see README's pluggable-
+scanner example.)
+
+Alpine rather than distroless is a checked decision, not an omission:
+four of this chart's own workloads run `sh -c` from this image (the
+trivy/grype DB primer Jobs and refresh CronJobs), so a shell-less base
+would break the vulnerability-DB pipeline every scan depends on. The
+`monitor-api` binary itself is static (`CGO_ENABLED=0`) and would move
+to `distroless/static` unchanged the day those four stop needing a
+shell. `make test-image` asserts all of this and runs in CI, on an
+amd64 runner — the only place the amd64 half of the checksum table
+actually executes, since qemu can't emulate the Go toolchain well
+enough to build that image on an arm64 dev machine.
+
 **`make deploy`** builds the local `monitor-api:dev` image, commits and
 pushes, forces an immediate Flux reconcile (source, root Kustomization,
 both HelmReleases), then `kubectl rollout restart`s `monitor-api`/
