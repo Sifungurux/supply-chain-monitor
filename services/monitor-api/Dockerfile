@@ -113,6 +113,18 @@ ARG GRYPE_SHA256_AMD64=0122df7b655981abe547ad3d2190d65551dac6a2bfc80b4dc2a989b5d
 ARG GRYPE_SHA256_ARM64=a8d7504a149629324eb5f4ce3dc25dfd211bbfe047e64ee2bf7844b466c3d84d
 
 RUN apk add --no-cache curl tar
+# CURL_OPTS: -f so an HTTP error is a failed build rather than an error
+# page saved as a .tar.gz, and --retry so a connection that dies
+# mid-transfer is retried instead of failing the whole build. That is not
+# hypothetical -- this stage makes four release downloads in a row, and
+# CI hit `curl: (56) Connection died` on the third while the first two
+# had just succeeded from the same runner. --retry-all-errors is what
+# makes --retry cover a mid-transfer receive failure; without it curl
+# only retries a narrower set (timeouts, 5xx, 429).
+#
+# Retrying is safe precisely because of the sha256 check below: a
+# corrupt or truncated retry cannot pass unnoticed, it fails the build.
+ARG CURL_OPTS="-fsSL --retry 3 --retry-delay 2 --retry-all-errors"
 # Two guards inside the script below are worth naming, since neither is
 # obvious from the code:
 #
@@ -120,8 +132,7 @@ RUN apk add --no-cache curl tar
 #     checksum: busybox sha256sum can be talked into accepting a blank
 #     digest line, which would turn this entire stage into theatre. A
 #     missing per-arch ARG fails the build instead.
-#   - curl -f. Without it an HTTP error page is saved as a .tar.gz and
-#     the failure surfaces later, somewhere less obvious.
+#   - CURL_OPTS (see just above) -- -f and the retry flags.
 #
 # (Both live in the comment rather than inline: a comment line inside a
 # RUN continuation is stripped by BuildKit but is not portable across
@@ -142,16 +153,16 @@ RUN set -eux; \
       [ -n "$sum" ] || { echo "empty expected checksum for ${ARCH}" >&2; exit 1; }; \
     done; \
     mkdir -p /out; \
-    curl -fsSL -o /tmp/trivy.tar.gz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_${TRIVY_ASSET}.tar.gz"; \
+    curl ${CURL_OPTS} -o /tmp/trivy.tar.gz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_${TRIVY_ASSET}.tar.gz"; \
     echo "${TRIVY_SHA}  /tmp/trivy.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/trivy.tar.gz -C /out trivy; \
-    curl -fsSL -o /tmp/oras.tar.gz "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${ARCH}.tar.gz"; \
+    curl ${CURL_OPTS} -o /tmp/oras.tar.gz "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${ARCH}.tar.gz"; \
     echo "${ORAS_SHA}  /tmp/oras.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/oras.tar.gz -C /out oras; \
-    curl -fsSL -o /tmp/unpacker.tar.gz "https://github.com/Sifungurux/unpacker/releases/download/v${UNPACKER_VERSION}/unpacker_${UNPACKER_VERSION}_linux_${ARCH}.tar.gz"; \
+    curl ${CURL_OPTS} -o /tmp/unpacker.tar.gz "https://github.com/Sifungurux/unpacker/releases/download/v${UNPACKER_VERSION}/unpacker_${UNPACKER_VERSION}_linux_${ARCH}.tar.gz"; \
     echo "${UNPACKER_SHA}  /tmp/unpacker.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/unpacker.tar.gz -C /out unpacker; \
-    curl -fsSL -o /tmp/grype.tar.gz "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_${ARCH}.tar.gz"; \
+    curl ${CURL_OPTS} -o /tmp/grype.tar.gz "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_${ARCH}.tar.gz"; \
     echo "${GRYPE_SHA}  /tmp/grype.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/grype.tar.gz -C /out grype; \
     rm -f /tmp/*.tar.gz; \
