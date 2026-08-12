@@ -255,7 +255,7 @@ test: test-api test-dashboard check-dashboard-configmap
 # verb, a struct with a copied lock, unreachable code) from merging to
 # main between dependency updates. See docs/tech-debt-audit.md, #10.
 test-api:
-	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.22-alpine sh -c "go mod download && go vet ./... && go test ./..."
+	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.22-alpine sh -c "go mod download && if [ -n \"$$(gofmt -l .)\" ]; then echo 'gofmt drift in:'; gofmt -l .; echo 'run: gofmt -w <file>'; exit 1; fi && go vet ./... && go test ./..."
 
 # Integration test against a real, throwaway Percona Postgres container
 # (internal/artifact/postgres_store_integration_test.go, gated behind

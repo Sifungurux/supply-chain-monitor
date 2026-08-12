@@ -27,7 +27,7 @@ type fakeJobClient struct {
 	statusSequence []jobStatusResult
 	statusCalls    int32
 
-	podName string
+	podName    string
 	findPodErr error
 
 	logs    string
