@@ -993,6 +993,15 @@ func runAPIServer() {
 	fetchPlainHTTP := getenvBool("FETCH_PLAIN_HTTP", true)
 	fetcher := scanner.NewRegistryFetcher(fetchPlainHTTP, registryUsername, registryPassword)
 
+	// Announced at startup for the same reason DISABLE_SCAN_ISOLATION is
+	// (below): it re-enables a convention that is off by default because
+	// ungated it let any ref name any file this pod could read. Logged
+	// whichever way it's set, so "is this on?" is answerable from the
+	// pod's first few log lines rather than by reading its env.
+	if getenvBool("ALLOW_LOCAL_ARTIFACT_PATHS", false) {
+		log.Printf("ALLOW_LOCAL_ARTIFACT_PATHS=true: refs may name files under LOCAL_ARTIFACT_ROOT=%q (empty means local paths stay refused) -- see README, \"Local filesystem paths as refs\"", os.Getenv("LOCAL_ARTIFACT_ROOT"))
+	}
+
 	// Governs how much of trivy's/unpacker's own progress output ends up
 	// visible in scan-worker Job pod logs -- see scanner.VerboseScanLogs's
 	// own comment. Off by default: most of the time the only thing worth

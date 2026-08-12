@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
 )
 
 type createArtifactRequest struct {
@@ -147,6 +148,15 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.requireDigest && req.ExpectedDigest == "" {
 		writeError(w, http.StatusBadRequest, "expected_digest is required (REQUIRE_DIGEST is enabled)")
+		return
+	}
+	// Before resolveDigest, deliberately: that is the first thing to
+	// make an outbound request with this ref, and a ref pointing at
+	// link-local/RFC1918/in-cluster space must never get that far. See
+	// scanner.ValidateRef. bulkCreateArtifacts orders it the same way,
+	// in the phase that resolves digests.
+	if err := scanner.ValidateRef(r.Context(), req.Ref); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -323,12 +333,18 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Phase 1: resolve every entry's digest concurrently (bounded), so
-	// registering 100 artifacts doesn't mean 100 sequential registry
-	// round trips. Invalid entries (empty ref/bad type) are skipped here
-	// -- they're rejected in phase 2 below before their digest (still ""
-	// in that case) is ever looked at.
+	// Phase 1: validate every entry's ref and resolve its digest
+	// concurrently (bounded), so registering 100 artifacts doesn't mean
+	// 100 sequential registry round trips. Invalid entries (empty
+	// ref/bad type) are skipped here -- they're rejected in phase 2
+	// below before their digest (still "" in that case) is ever looked
+	// at. A ref that fails scanner.ValidateRef never reaches
+	// resolveDigest, which is the point: validation has to come before
+	// the first outbound request, exactly as in createArtifact. Its
+	// error is carried to phase 2 in refErrs and reported per entry
+	// there, alongside every other reason one entry can't register.
 	digests := make([]string, len(req.Artifacts))
+	refErrs := make([]error, len(req.Artifacts))
 	{
 		sem := make(chan struct{}, bulkDigestResolveConcurrency)
 		var wg sync.WaitGroup
@@ -342,6 +358,10 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 			go func(i int, ref string, t artifact.Type) {
 				defer wg.Done()
 				defer func() { <-sem }()
+				if err := scanner.ValidateRef(r.Context(), ref); err != nil {
+					refErrs[i] = err
+					return
+				}
 				digests[i] = h.resolveDigest(r.Context(), ref, t)
 			}(i, item.Ref, t)
 		}
@@ -386,6 +406,14 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 		t := artifact.Type(item.Type)
 		if !t.Valid() {
 			res.Error = "type must be one of image, file, sbom, sarif"
+			failed++
+			results = append(results, res)
+			continue
+		}
+		// Refused in phase 1 by scanner.ValidateRef -- nothing outbound
+		// ever happened for this entry.
+		if err := refErrs[i]; err != nil {
+			res.Error = err.Error()
 			failed++
 			results = append(results, res)
 			continue

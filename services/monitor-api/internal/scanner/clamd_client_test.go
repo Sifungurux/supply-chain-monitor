@@ -68,9 +68,15 @@ func startFakeClamd(t *testing.T, replyFor func(received []byte) string) string 
 	return ln.Addr().String()
 }
 
+// The temp dir doubles as the permitted artifact root for the calling
+// test -- ClamAVScanner.Scan refuses paths outside it now (see
+// ensureScannablePath). scanFileWithClamd itself is unaffected, since
+// UnpackerScanner feeds it paths from its own extraction dir.
 func writeTempFile(t *testing.T, content []byte) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "scan-target")
+	dir := t.TempDir()
+	enableLocalPaths(t, dir)
+	path := filepath.Join(dir, "scan-target")
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatalf("write temp file: %v", err)
 	}

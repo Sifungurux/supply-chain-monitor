@@ -49,7 +49,10 @@ func TestBulkCreateArtifacts_Success(t *testing.T) {
 	body := map[string]any{
 		"artifacts": []map[string]string{
 			{"ref": "alpine:3.19", "type": "image"},
-			{"ref": "/tmp/report.sarif", "type": "sarif"},
+			// A registry ref, not a local path: local paths are refused
+			// unless an operator opted in (see internal/scanner/localpath.go),
+			// and a registry ref is what a real sarif artifact looks like.
+			{"ref": "scm-registry.example/scans/app-sarif:1", "type": "sarif"},
 			{"ref": "ghcr.io/example/app:1.0", "type": "image"},
 		},
 	}
@@ -934,9 +937,9 @@ func TestCreateArtifact_DuplicateRefWithNoDigestIsRejected(t *testing.T) {
 func TestCreateArtifact_DifferentRefsWithNoDigestBothRegister(t *testing.T) {
 	h, store := newTestRouter(scanner.Registry{})
 
-	for _, ref := range []string{"alpine:3.19", "alpine:3.20", "/tmp/report.sarif"} {
+	for _, ref := range []string{"alpine:3.19", "alpine:3.20", "scm-registry.example/scans/app-sarif:1"} {
 		typ := "image"
-		if strings.HasPrefix(ref, "/") {
+		if strings.HasSuffix(ref, "-sarif:1") {
 			typ = "sarif"
 		}
 		if rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{"ref": ref, "type": typ}); rec.Code != http.StatusCreated {

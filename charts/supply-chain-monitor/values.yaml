@@ -272,6 +272,19 @@ monitorApi:
   registry:
     service: scm-registry
     port: "5000"
+  # Extra registry hosts an artifact ref is allowed to point at, comma
+  # separated (host or host:port -- the port is ignored). Artifact refs
+  # are validated before monitor-api makes any outbound request with
+  # them, and hosts resolving to loopback, link-local (including the
+  # cloud metadata address 169.254.169.254), RFC1918, or
+  # *.svc.cluster.local are refused -- see internal/scanner/refvalidate.go.
+  #
+  # Empty is the right default: this chart's own scm-registry (in all
+  # three forms a ref can name it by) is already allowed automatically
+  # by templates/monitor-api/configmap.yaml. Set this only for an
+  # additional registry that genuinely lives on a private address, e.g.
+  # "harbor.internal:5000".
+  refHostAllowlist: ""
   # password deliberately isn't set here -- it comes from
   # scm-postgres-credentials (templates/postgres/secret.yaml) via
   # templates/monitor-api/deployment.yaml's secretKeyRef, never a

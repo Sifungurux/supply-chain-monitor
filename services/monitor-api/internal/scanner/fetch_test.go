@@ -80,21 +80,11 @@ func TestSingleFileIn(t *testing.T) {
 	})
 }
 
-// TestRegistryFetcher_Fetch_LocalPathPassthrough exercises the one
-// branch of RegistryFetcher.Fetch that doesn't need the real `oras`
-// binary or a registry -- unlike Scan() in every other file in this
-// package, this can run in any Go environment.
-func TestRegistryFetcher_Fetch_LocalPathPassthrough(t *testing.T) {
-	f := NewRegistryFetcher(true, "", "")
-	path, cleanup, err := f.Fetch(context.Background(), "/tmp/suspicious.bin")
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-	if path != "/tmp/suspicious.bin" {
-		t.Fatalf("path = %q, want the ref returned unchanged", path)
-	}
-	cleanup() // must be safe to call even though nothing was downloaded
-}
+// The local-path branch of RegistryFetcher.Fetch -- the one branch that
+// needs neither the real `oras` binary nor a registry -- is no longer a
+// passthrough and is covered by TestRegistryFetcher_Fetch_LocalPath in
+// localpath_test.go, which asserts both directions (refused by default,
+// resolved when an operator has declared a root).
 
 type fakeFetcher struct {
 	path          string

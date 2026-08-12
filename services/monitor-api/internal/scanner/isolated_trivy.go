@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"time"
 
@@ -234,6 +235,14 @@ func (s *IsolatedTrivyScanner) ScanForArtifact(ctx context.Context, ref, artifac
 		"FETCH_PLAIN_HTTP": strconv.FormatBool(s.cfg.FetchPlainHTTP),
 		// See VerboseLogs's own comment.
 		"SCM_SCAN_VERBOSE": strconv.FormatBool(s.cfg.VerboseLogs),
+	}
+	// Forwarded, not plumbed through IsolatedTrivyConfig, so the Job and
+	// this process can't disagree about it: the worker's "sbom" branch
+	// calls the same RegistryFetcher.Fetch -> ValidateRef this process
+	// does, reading the same variable. Without it a Job would refuse the
+	// in-cluster registry it exists to pull the SBOM from.
+	if allow := os.Getenv(RefHostAllowlistEnv); allow != "" {
+		env[RefHostAllowlistEnv] = allow
 	}
 	var secretEnv []k8sjob.SecretEnvVar
 	if s.cfg.SubCommand == "image" && artifactID != "" && s.cfg.APIBaseURL != "" {

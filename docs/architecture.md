@@ -150,11 +150,17 @@ additive to the built-in scanners for that type. Command output is
 capped at 10MiB (`limitedBuffer`) since this is the one place the app
 runs something that could be arbitrarily buggy or compromised.
 
-**Fetching non-image artifacts.** `file`/`sbom`/`sarif` scanners assume
-`ref` is a local path already inside the pod. `FetchingScanner`
-(`internal/scanner/fetch.go`) wraps any of them, resolving `ref` to a
-local path first: a leading `/`, `.`, or `~` means it's already a local
-path (no-op passthrough); anything else is treated as an OCI registry
+**Fetching non-image artifacts.** `file`/`sbom`/`sarif` scanners take a
+local path to scan. `FetchingScanner` (`internal/scanner/fetch.go`)
+wraps any of them, resolving `ref` to one first: a leading `/`, `.`, or
+`~` means the ref names a path on this pod's own filesystem, which is
+refused unless an operator opted in via `ALLOW_LOCAL_ARTIFACT_PATHS` +
+`LOCAL_ARTIFACT_ROOT` and the path survives `filepath.Clean`,
+`EvalSymlinks`, and a regular-file check against that root
+(`internal/scanner/localpath.go`) — that convention predates registry
+fetching and, ungated, was an arbitrary-file-read primitive, since
+`file`/`sarif` artifacts scan in-process rather than in an isolated
+Job. Anything else is treated as an OCI registry
 reference and pulled via `oras pull` (`RegistryFetcher`) from
 `scm-registry`. `image`-type scanners are left unwrapped since they
 already fetch their own refs.
@@ -183,6 +189,26 @@ scan-worker pod: a shared, read-only `PersistentVolumeClaim` per tool
 at install/upgrade and a daily refresh `CronJob`, with the Job passing
 `--cache-backend memory`/equivalent so the scan's own analysis cache
 never touches shared disk.
+
+**Ref validation.** An artifact `ref` is caller-supplied input that
+`monitor-api` then makes outbound requests with (`oras`, trivy, grype,
+unpacker), which makes it an SSRF primitive unless something bounds
+where it may point. `scanner.ValidateRef`
+(`internal/scanner/refvalidate.go`) refuses a ref carrying a URL scheme,
+and refuses one whose registry host is `*.svc.cluster.local` (by name)
+or resolves to a loopback, link-local (`169.254.0.0/16`, including the
+cloud instance-metadata address), private (RFC1918, IPv6 ULA), or
+unspecified address. It runs at registration in both endpoints *before*
+digest resolution -- the first thing to make an outbound request -- and
+again inside `RegistryFetcher.Fetch`/`OrasDigestResolver.Resolve`, which
+is what covers the scan-worker Job (a process no handler check reaches).
+`REF_HOST_ALLOWLIST` (`monitorApi.refHostAllowlist`) exempts named
+hosts; the chart populates it with this deployment's own `scm-registry`,
+which would otherwise be refused twice over -- it is both a cluster-DNS
+name and a `ClusterIP` in RFC1918 space. A host that doesn't resolve at
+all is allowed through (there is no address to reach, and an unreachable
+registry at registration time is routine here); the fetch fails on its
+own later.
 
 **Digest resolution.** `createArtifact`/`bulkCreateArtifacts` resolve
 `Ref`'s OCI content digest at registration time (`oras manifest fetch

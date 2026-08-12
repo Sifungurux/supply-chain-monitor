@@ -414,10 +414,10 @@ entry's `artifact` field still points at the *existing* artifact rather
 than being empty, so re-submitting `testdata/bulk-test-images.json` a
 second time (e.g. re-running `make load-test-clamav`) still returns a
 usable artifact id per ref instead of erroring the whole batch. `file`-
-type artifacts still using the original "ref is a path already inside
-the pod" convention (see `looksLikeLocalPath`) never attempt digest
-resolution at all -- there's no registry to check a filesystem path
-against.
+type artifacts using the opt-in local-path convention (see
+`looksLikeLocalPath` and "Local filesystem paths as refs") never
+attempt digest resolution at all -- there's no registry to check a
+filesystem path against.
 
 A bare Docker Hub ref (`nginx:alpine`, `bitnami/redis:7.2.5` -- no
 explicit registry host) is qualified with `docker.io/` (and `library/`
@@ -659,6 +659,42 @@ on the detail page, for anything registered this way. Off by default --
 turning it on is a real policy change, not something a deployment should
 pick up silently.
 
+### Where an artifact ref may point
+
+A `ref` is caller-supplied, and monitor-api makes outbound requests with
+it (digest resolution, `oras pull`, trivy/grype/unpacker) -- so it is
+validated before any of that happens, on both `POST /api/v1/artifacts`
+and `/artifacts/bulk`, and again in the fetch/resolve code itself so the
+scan-worker Jobs are covered too. Refused with a `400`:
+
+- anything carrying a URL scheme (`https://...`, `file://...`) -- an OCI
+  ref is `host/repo:tag`, never a URL;
+- a host ending in `.svc.cluster.local`;
+- a host resolving to a loopback, link-local, RFC1918/IPv6-ULA, or
+  unspecified address.
+
+```bash
+curl -s -X POST localhost:8080/api/v1/artifacts "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d '{"ref":"169.254.169.254/latest/meta-data:1","type":"image"}'
+# {"error":"ref host \"169.254.169.254\" resolves to a link-local address -- refused (set REF_HOST_ALLOWLIST to permit it)"}
+```
+
+That link-local range is where every major cloud serves instance
+credentials, which is the whole point: without this, an artifact ref is
+a way to make monitor-api fetch from anything its pod can reach.
+
+`monitorApi.refHostAllowlist` (`REF_HOST_ALLOWLIST`, comma-separated
+`host` or `host:port`) exempts hosts you actually do run a registry on.
+This chart's own `scm-registry` is already exempt automatically -- it is
+both a cluster-DNS name and a `ClusterIP`, so it would otherwise be
+refused twice over. A ref whose host doesn't resolve at all is allowed
+through, unchanged from before: there is nothing to reach, and
+registering an artifact whose registry is temporarily unreachable is
+normal here. A ref that is already a filesystem path inside the pod
+(the `/path/to/file` convention) makes no outbound request and is left
+alone.
+
 ### Submitting findings from an external scanner
 
 `/scan` always has monitor-api run one of its own registered scanners
@@ -789,13 +825,43 @@ curl -s -X POST localhost:8080/api/v1/artifacts \
   -d '{"ref":"scm-registry.supply-chain-monitor.svc.cluster.local:5000/scans/app-sarif:1","type":"sarif"}'
 ```
 
-`ref` still works as a plain filesystem path too (e.g.
-`/tmp/results.sarif`) if you'd rather mount one directly — anything
-starting with `/`, `.`, or `~` is treated as a path already inside the
-pod and never fetched; anything else is treated as a registry
+Anything starting with `/`, `.`, or `~` is treated as a filesystem path
+rather than a registry reference — and **is refused by default**, see
+"Local filesystem paths as refs" below. Anything else is a registry
 reference, fetched plain-HTTP (`FETCH_PLAIN_HTTP` in the ConfigMap) and
 authenticated with the credentials in `REGISTRY_USERNAME`/
 `REGISTRY_PASSWORD` — see "Registry authentication" below.
+
+#### Local filesystem paths as refs
+
+`ref` used to accept any path the `monitor-api` pod could read, and
+`file`/`sarif` artifacts are scanned **in-process** (they have no
+isolated scan-worker Job), so that path was opened inside the API pod
+itself — the one holding `POSTGRES_PASSWORD` and `API_KEY` in its
+environment. `ref: "/proc/self/environ"`, the ServiceAccount token, or
+`/dev/zero` streamed to clamd until something gave out were all valid
+registrations. They are refused now, at registration and again at open
+time.
+
+Two environment variables bring the convention back, and both are
+required — either one alone is refused rather than guessed at:
+
+| Variable | Meaning |
+| --- | --- |
+| `ALLOW_LOCAL_ARTIFACT_PATHS` | `true` opts in. Default `false`: every ref is fetched from a registry. |
+| `LOCAL_ARTIFACT_ROOT` | Absolute path to the **one** directory such refs may live under. |
+
+A path must be absolute, must stay inside that root after
+`filepath.Clean` **and** after symlink resolution (a symlink inside the
+root pointing at `/etc/shadow` is refused), and must be a regular file.
+`SARIFScanner` and `ClamAVScanner` re-check this themselves before
+opening anything, rather than trusting their caller.
+
+Deliberately not a chart value: no chart-managed deployment mounts a
+volume of artifacts, so turning this on means editing the Deployment to
+mount one anyway. It is for running the binary outside a cluster (see
+"Running monitor-api outside a Kubernetes pod") or a deployment that
+really does mount artifacts and wants to scan them in place.
 
 ### Registry authentication
 
@@ -1663,10 +1729,11 @@ where a previous version of this list drifted out of sync with reality
 A few more specific to running this repo day to day, not covered there:
 
 - `file`/`sbom`/`sarif` artifacts can only be fetched from
-  `scm-registry` (via `oras pull`) or a path already inside the
-  `monitor-api` pod — no S3/HTTPS fetcher yet. `Fetcher` is an
-  interface specifically so another source is a small addition later,
-  not a rewrite.
+  `scm-registry` (via `oras pull`), or from a mounted directory an
+  operator has explicitly opted into (see "Local filesystem paths as
+  refs") — no S3/HTTPS fetcher yet. `Fetcher` is an interface
+  specifically so another source is a small addition later, not a
+  rewrite.
 - SARIF severity falls back to a rough three-level mapping
   (error/warning/note → high/medium/low) unless a rule carries a
   `security-severity` score, which not every SARIF producer sets.
