@@ -12,7 +12,7 @@
 # top-level digest it prints, not a per-platform one.
 
 # --- monitor-api build stage ---
-FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
+FROM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY . .
@@ -38,7 +38,7 @@ RUN CGO_ENABLED=0 go build -o /out/monitor-api .
 # because umoci's go.mod wants a newer toolchain, bump the golang tag
 # here. (v0.4.7 is old and still builds clean under Go 1.26 -- verified,
 # not assumed, when this was bumped off 1.22.)
-FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS umoci-build
+FROM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS umoci-build
 # Pinned to a COMMIT, not a tag. `--branch v0.4.7` (what this used to
 # do) looked exactly as pinned as this does while guaranteeing nothing:
 # a tag is a mutable ref the upstream repo can move, or anyone with push
@@ -74,7 +74,7 @@ RUN CGO_ENABLED=0 go build -o /out/umoci ./cmd/umoci
 #   curl -sSL https://github.com/<org>/<repo>/releases/download/v<ver>/<..>checksums.txt
 # so bumping a version means replacing the version AND its two digests
 # together.
-FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS tools
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS tools
 # TARGETARCH is set automatically by BuildKit (amd64/arm64) -- used below
 # to pick the right release tarball and the checksum that goes with it.
 ARG TARGETARCH
@@ -187,7 +187,7 @@ RUN set -eux; \
 # above and now live in the `tools` stage instead, so the shipped image
 # carries no downloader. busybox still provides sh, tar and wget --
 # that is alpine, and the shell is load-bearing per the paragraph above.
-FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 # ca-certificates is the one genuine runtime dependency: trivy, grype
 # and oras all make TLS calls to registries and DB mirrors.
 RUN apk add --no-cache ca-certificates

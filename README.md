@@ -1575,7 +1575,7 @@ make test-dashboard   # dashboard/index.html's Node+jsdom tests
 make test-postgres    # real Postgres round-trip against a throwaway container (not part of `make test`)
 ```
 
-These run in containers (`golang:1.26.5-alpine`, `node:22-alpine`,
+These run in containers (`golang:1.26-alpine`, `node:22-alpine`,
 `percona/percona-distribution-postgresql`) so there's nothing extra to
 install beyond Docker, which you already have via Colima or Podman. No
 CI workflow is wired up yet -- these `make`

@@ -162,7 +162,7 @@ test-image:
 # it needs network for the vulnerability database.
 GOVULNCHECK_VERSION ?= v1.1.4
 vulncheck:
-	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.26.5-alpine \
+	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.26-alpine \
 		sh -c "go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) && govulncheck ./..."
 
 # Misconfiguration scan of the two things this repo ships that describe
@@ -324,7 +324,7 @@ test: test-api test-dashboard check-dashboard-configmap
 # verb, a struct with a copied lock, unreachable code) from merging to
 # main between dependency updates. See docs/tech-debt-audit.md, #10.
 test-api:
-	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.26.5-alpine sh -c "go mod download && if [ -n \"$$(gofmt -l .)\" ]; then echo 'gofmt drift in:'; gofmt -l .; echo 'run: gofmt -w <file>'; exit 1; fi && go vet ./... && go test ./..."
+	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.26-alpine sh -c "go mod download && if [ -n \"$$(gofmt -l .)\" ]; then echo 'gofmt drift in:'; gofmt -l .; echo 'run: gofmt -w <file>'; exit 1; fi && go vet ./... && go test ./..."
 
 # Integration test against a real, throwaway Percona Postgres container
 # (internal/artifact/postgres_store_integration_test.go, gated behind
@@ -338,7 +338,7 @@ test-postgres:
 	docker run -d --rm --name scm-test-postgres -e POSTGRES_PASSWORD=test -p 55432:5432 percona/percona-distribution-postgresql:17.10 >/dev/null
 	docker run --rm --network host -v "$(CURDIR)/services/monitor-api":/src -w /src \
 		-e POSTGRES_TEST_DSN="postgres://postgres:test@localhost:55432/postgres?sslmode=disable" \
-		golang:1.26.5-alpine sh -c "go mod download && go test -tags=postgres_integration ./internal/artifact/..." ; \
+		golang:1.26-alpine sh -c "go mod download && go test -tags=postgres_integration ./internal/artifact/..." ; \
 	status=$$? ; docker stop scm-test-postgres >/dev/null 2>&1 ; exit $$status
 
 # Runs dashboard/index.html's Node+jsdom test suite via a containerized
@@ -359,7 +359,7 @@ test-swagger-docs:
 # Generates and commits services/monitor-api/go.sum for real, pinned,
 # reproducible builds -- see go.mod's own comment on why it isn't
 # committed yet. Needs nothing but Docker: runs `go mod tidy` inside
-# `golang:1.26.5-alpine` (which does have real internet access, unlike
+# `golang:1.26-alpine` (which does have real internet access, unlike
 # whatever sandbox/CI environment this repo's own tooling was written
 # in) and writes go.sum straight into your working tree.
 #
@@ -372,7 +372,7 @@ test-swagger-docs:
 # it'll just confirm the committed go.sum still matches go.mod rather
 # than fetching anything new.
 lock-deps:
-	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.26.5-alpine sh -c "go mod tidy && go vet ./... && go mod verify"
+	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.26-alpine sh -c "go mod tidy && go vet ./... && go mod verify"
 	@echo ""
 	@echo "go.sum written to services/monitor-api/go.sum -- review with 'git diff' and commit it."
 
