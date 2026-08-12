@@ -118,6 +118,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Artifact" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/ArtifactLimitReached" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "409":
           description: >-
@@ -422,6 +423,15 @@ components:
       schema: { type: string, enum: [sbom, sarif] }
 
   responses:
+    ArtifactLimitReached:
+      description: >-
+        The deployment's artifact limit (MAX_ARTIFACTS /
+        monitorApi.maxArtifacts) has been reached. Delete artifacts to
+        free capacity, or raise the limit. 403 rather than 429 because a
+        quota is not a rate limit -- retrying does not help.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     PayloadTooLarge:
       description: >-
         Request body exceeded this endpoint's size limit (64KiB for small

@@ -58,6 +58,10 @@ type handler struct {
 	// chart exposes it the other way round (suppressFirstScan: true),
 	// which reads better as a setting.
 	notifyOnFirstScan bool
+	// maxArtifacts caps how many artifacts may exist at once. <= 0 is
+	// unlimited (the behaviour before this existed). See
+	// RegistrationLimits.
+	maxArtifacts int
 	// scanSlots caps how many scans run at once across the whole
 	// process: one buffered slot per permitted concurrent scan, taken
 	// for the duration of a scan and released when it finishes. nil
@@ -183,4 +187,24 @@ type Notifications struct {
 	// is registered and scanned once at import time, where the first
 	// scan IS the interesting event.
 	NotifyOnFirstScan bool
+}
+
+// RegistrationLimits bounds how much a caller can put INTO this service,
+// as opposed to ScanLimits which bounds what it does with what is
+// already there. The zero value is unlimited, exactly the behaviour
+// before this existed.
+//
+// Nothing bounded registration before: maxBulkArtifacts caps one
+// request at 500 entries and the body limits cap bytes per request
+// (see bodylimit.go), but a caller could repeat either indefinitely.
+// Every artifact costs a row, findings, stage history, and a share of
+// every List/ListPage the dashboard polls -- so "unbounded rows" is a
+// slow resource leak with an authenticated client at the other end of
+// it. Note the API key is a single shared one, so this is a bound on
+// the deployment, not per-caller: there is no caller identity to meter.
+type RegistrationLimits struct {
+	// MaxArtifacts is the total number of artifacts allowed to exist.
+	// Registrations that would exceed it are refused; deleting
+	// artifacts frees the quota again. <= 0 means unlimited.
+	MaxArtifacts int
 }

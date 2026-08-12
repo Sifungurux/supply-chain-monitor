@@ -558,6 +558,45 @@ A scan interrupted by a pod restart leaves its artifact at `scanning`
 with nothing left to finish it; the `sweep-registered` CronJob reclaims
 those by re-scanning anything stuck there for over 20 minutes.
 
+### Capping how many artifacts can exist
+
+`monitorApi.maxArtifacts` (`MAX_ARTIFACTS`, **0 = unlimited** by
+default) bounds the total number of artifacts.
+
+Nothing else does: the bulk endpoint caps *one request* at 500 entries
+and the body limits cap bytes per request, but a caller can repeat
+either indefinitely — and every artifact costs a row, its findings, its
+stage history, and a share of every list the dashboard polls every 10s.
+
+```bash
+curl -s -X POST localhost:8080/api/v1/artifacts "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d '{"ref":"alpine:3.19","type":"image"}'
+# => 403 {"error":"artifact limit reached (500) -- delete artifacts to free
+#          capacity, or raise monitorApi.maxArtifacts", "max_artifacts":500}
+```
+
+**403, not 429** — a quota is not a rate limit. Retrying doesn't help;
+deleting artifacts does, and it frees the quota again. This matches
+Kubernetes' own `ResourceQuota` behaviour.
+
+The check is a `COUNT(*)` followed by an insert, not one transaction, so
+the bound is **approximate under concurrent registration**: N requests
+arriving at once with one slot left can all pass the gate. Overshoot is
+bounded by the number of in-flight registrations, which is what a
+deployment guardrail needs — but don't read `count > maxArtifacts` after
+a burst as a bug.
+
+A **bulk** request fills to the cap and reports the rest per entry, so a
+batch that half fits still registers the half that does — the same
+best-effort shape that endpoint already uses for bad refs. Duplicates
+create nothing and so never consume quota, which keeps re-submitting the
+same batch a safe no-op — and for the same reason **single registration
+of an existing artifact still answers 409 at the cap**, not 403.
+
+Note the API key is a single shared one, so this bounds the
+*deployment*, not a caller: there is no per-client identity to meter.
+
 ### Capping concurrent scans
 
 One scan fans out to a scan-worker Job **per registered scanner**, all

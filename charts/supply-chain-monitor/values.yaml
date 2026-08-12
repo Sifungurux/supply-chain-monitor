@@ -474,6 +474,23 @@ monitorApi:
   # PARALLELISM) should retry on 429. 0 disables the cap entirely, which
   # is the binary's own default when this isn't set.
   scanConcurrency: 8
+  # Maximum number of artifacts allowed to exist (MAX_ARTIFACTS).
+  # 0 = unlimited, which is the default and the behaviour before this
+  # existed.
+  #
+  # Nothing else bounds this: the bulk endpoint caps ONE request at 500
+  # entries and the body limits cap bytes per request, but a caller can
+  # repeat either indefinitely, and every artifact costs a row, its
+  # findings, its stage history, and a share of every list the dashboard
+  # polls every 10s. For reference, this project's own 95-image load
+  # test corpus produced 94 artifacts and ~45k findings.
+  #
+  # Registrations over the cap are refused with 403 (not 429): a quota
+  # is not a rate limit, and retrying does not help -- deleting
+  # artifacts does, which frees the quota again. A bulk request fills to
+  # the cap and reports the rest per entry, so a batch that half fits
+  # still registers the half that does.
+  maxArtifacts: 0
   # Outbound notifications when a scan introduces NEW findings at or
   # above minSeverity. Everything here is optional: with no URL set,
   # nothing is sent and nothing can fail. See README, "Notifications".

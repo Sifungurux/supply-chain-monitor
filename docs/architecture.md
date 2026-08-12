@@ -263,6 +263,19 @@ recorded.
   CronJob reclaims those by re-scanning anything stuck over 20 minutes
   (`staleScanningAfter`), which is why "re-scan" is the reclaim rather
   than a status-rewriting endpoint that doesn't exist.
+- **Registration is bounded** by `MAX_ARTIFACTS` /
+  `monitorApi.maxArtifacts` (0 = unlimited, the default). `Store.Count`
+  backs it, checked once per request -- a bulk registration asks once
+  and decrements locally rather than counting per entry. Over the cap,
+  single registration answers `403` (a quota is not a rate limit:
+  retrying cannot help, deleting can) and bulk reports it per entry so a
+  partially-fitting batch still registers what fits. Duplicates create
+  nothing and never consume quota -- in both endpoints the quota gate
+  sits *after* the dedup check, so re-registering an existing artifact
+  stays an idempotent 409 even at the cap. `Count` + `Create` is not one
+  transaction, so the bound is approximate under concurrent registration
+  (overshoot bounded by in-flight requests). The API key is shared, so this bounds
+  the deployment rather than any individual caller.
 - Concurrent scans are capped server-side (`SCAN_CONCURRENCY` /
   `monitorApi.scanConcurrency`, 4 in the chart, 0 = unlimited in the
   binary). A saturated cap answers `429` + `Retry-After` immediately —

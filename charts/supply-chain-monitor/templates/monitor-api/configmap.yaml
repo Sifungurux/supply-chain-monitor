@@ -62,6 +62,10 @@ data:
   # simultaneous scan-worker Jobs from exhausting a node's disk between
   # them. See monitorApi.scanConcurrency's own comment in values.yaml.
   SCAN_CONCURRENCY: {{ .Values.monitorApi.scanConcurrency | quote }}
+  # Total artifacts allowed to exist; 0 = unlimited. See
+  # monitorApi.maxArtifacts in values.yaml for why registration needed a
+  # bound of its own.
+  MAX_ARTIFACTS: {{ .Values.monitorApi.maxArtifacts | quote }}
   # Outbound scan notifications -- see monitorApi.notifications in
   # values.yaml. Only the non-secret settings live here; the HMAC secret
   # and the Slack URL come from the scm-monitor-api-notify Secret (see

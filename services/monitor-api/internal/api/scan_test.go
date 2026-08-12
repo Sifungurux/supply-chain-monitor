@@ -96,7 +96,7 @@ func TestScanArtifact_BackfillsMissingDigest(t *testing.T) {
 	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:backfilled"}}
 	h := api.NewRouter(store, tracker, scanner.Registry{
 		artifact.TypeImage: {&fakeScanner{}},
-	}, testAPIKey, 0, 0, resolver, false, 0, false, api.ScanLimits{}, api.Notifications{})
+	}, testAPIKey, 0, 0, resolver, false, 0, false, api.ScanLimits{}, api.Notifications{}, api.RegistrationLimits{})
 
 	// mustCreate goes straight through the store, bypassing
 	// createArtifact's own registration-time resolveDigest call --
@@ -127,7 +127,7 @@ func TestScanArtifact_DoesNotReResolveAnAlreadySetDigest(t *testing.T) {
 	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:should-never-be-fetched"}}
 	h := api.NewRouter(store, tracker, scanner.Registry{
 		artifact.TypeImage: {&fakeScanner{}},
-	}, testAPIKey, 0, 0, resolver, false, 0, false, api.ScanLimits{}, api.Notifications{})
+	}, testAPIKey, 0, 0, resolver, false, 0, false, api.ScanLimits{}, api.Notifications{}, api.RegistrationLimits{})
 
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 	if _, err := store.Update(created.ID, func(a *artifact.Artifact) { a.Digest = "sha256:already-set" }); err != nil {
@@ -583,7 +583,7 @@ func newScanCappedRouter(scanners scanner.Registry, concurrency int) (http.Handl
 	store := artifact.NewMemStore()
 	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
 	return api.NewRouter(store, tracker, scanners, testAPIKey, 0, 0, nil, false, 0, false,
-		api.ScanLimits{Concurrency: concurrency}, api.Notifications{}), store
+		api.ScanLimits{Concurrency: concurrency}, api.Notifications{}, api.RegistrationLimits{}), store
 }
 
 // TestScanArtifact_ConcurrencyCapRejectsWhenSaturated -- with scans
@@ -721,7 +721,7 @@ func newNotifyingRouter(t *testing.T, scanners scanner.Registry, n notify.Notifi
 	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
 	return api.NewRouter(store, tracker, scanners, testAPIKey, 0, 0, nil, false, 0, false,
 		api.ScanLimits{},
-		api.Notifications{Notifiers: []notify.Notifier{n}, MinSeverity: minSeverity}), store
+		api.Notifications{Notifiers: []notify.Notifier{n}, MinSeverity: minSeverity}, api.RegistrationLimits{}), store
 }
 
 // TestScanArtifact_SuppressesNotificationOnFirstScan -- every finding
@@ -913,7 +913,7 @@ func TestScanArtifact_NotifiesOnFirstScanWhenSuppressionDisabled(t *testing.T) {
 	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
 	h := api.NewRouter(store, tracker, scanner.Registry{artifact.TypeImage: {trivy}}, testAPIKey, 0, 0, nil, false, 0, false,
 		api.ScanLimits{},
-		api.Notifications{Notifiers: []notify.Notifier{n}, MinSeverity: "high", NotifyOnFirstScan: true})
+		api.Notifications{Notifiers: []notify.Notifier{n}, MinSeverity: "high", NotifyOnFirstScan: true}, api.RegistrationLimits{})
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 
 	scanAndWait(t, h, store, created.ID)
