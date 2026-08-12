@@ -431,7 +431,7 @@ components:
         quota is not a rate limit -- retrying does not help.
       content:
         application/json:
-          schema: { type: object }
+          schema: { $ref: "#/components/schemas/Error" }
     PayloadTooLarge:
       description: >-
         Request body exceeded this endpoint's size limit (64KiB for small

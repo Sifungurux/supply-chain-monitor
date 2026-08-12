@@ -152,3 +152,41 @@ func TestRegistrationLimits_ZeroValueIsUnlimited(t *testing.T) {
 		t.Fatalf("store holds %d artifacts, want 25", len(all))
 	}
 }
+
+// Re-registering something that already exists creates nothing, so it
+// consumes no quota and must stay the idempotent 409 it is below the
+// cap. This is the single-registration mirror of
+// TestBulkCreateArtifacts_DuplicatesDoNotConsumeQuota; without it the
+// quota gate can drift above the dedup check and silently turn a no-op
+// into a 403.
+func TestCreateArtifact_DuplicateAtTheLimitStillReturns409(t *testing.T) {
+	h, store := newCappedRouter(t, 1)
+
+	first := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{"ref": "a:1", "type": "image"})
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first registration = %d, want 201", first.Code)
+	}
+
+	// At the cap now. The same ref again is a duplicate, not a new
+	// artifact.
+	dup := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{"ref": "a:1", "type": "image"})
+	if dup.Code != http.StatusConflict {
+		t.Fatalf("duplicate at the cap = %d, want 409 -- a duplicate creates nothing and so consumes no quota, body=%s", dup.Code, dup.Body.String())
+	}
+	var body map[string]any
+	_ = json.Unmarshal(dup.Body.Bytes(), &body)
+	if body["existing_artifact_id"] == nil {
+		t.Fatalf("409 must still point at the existing artifact, got %v", body)
+	}
+
+	// A genuinely new ref is what the cap is for.
+	fresh := doJSON(t, h, http.MethodPost, "/api/v1/artifacts", map[string]string{"ref": "b:1", "type": "image"})
+	if fresh.Code != http.StatusForbidden {
+		t.Fatalf("new ref at the cap = %d, want 403", fresh.Code)
+	}
+
+	all, _ := store.List()
+	if len(all) != 1 {
+		t.Fatalf("store holds %d artifacts, want 1", len(all))
+	}
+}

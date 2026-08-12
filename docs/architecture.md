@@ -270,7 +270,11 @@ recorded.
   single registration answers `403` (a quota is not a rate limit:
   retrying cannot help, deleting can) and bulk reports it per entry so a
   partially-fitting batch still registers what fits. Duplicates create
-  nothing and never consume quota. The API key is shared, so this bounds
+  nothing and never consume quota -- in both endpoints the quota gate
+  sits *after* the dedup check, so re-registering an existing artifact
+  stays an idempotent 409 even at the cap. `Count` + `Create` is not one
+  transaction, so the bound is approximate under concurrent registration
+  (overshoot bounded by in-flight requests). The API key is shared, so this bounds
   the deployment rather than any individual caller.
 - Concurrent scans are capped server-side (`SCAN_CONCURRENCY` /
   `monitorApi.scanConcurrency`, 4 in the chart, 0 = unlimited in the

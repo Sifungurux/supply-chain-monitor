@@ -150,28 +150,6 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Quota check before the registry round trip below: refusing early
-	// costs the caller nothing, and resolving a digest for a
-	// registration that cannot proceed is wasted network I/O.
-	//
-	// 403, not 429: a quota is not a rate limit. Retrying later does not
-	// help -- only deleting artifacts does -- so answering 429 (with the
-	// Retry-After that implies) would tell a client to do the one thing
-	// that cannot work. This matches Kubernetes' own ResourceQuota
-	// behaviour, which is the convention operators here already know.
-	remaining, unlimited, qerr := h.artifactQuota()
-	if qerr != nil {
-		writeError(w, http.StatusInternalServerError, qerr.Error())
-		return
-	}
-	if !unlimited && remaining < 1 {
-		writeJSON(w, http.StatusForbidden, map[string]any{
-			"error":         fmt.Sprintf("artifact limit reached (%d) -- delete artifacts to free capacity, or raise monitorApi.maxArtifacts", h.maxArtifacts),
-			"max_artifacts": h.maxArtifacts,
-		})
-		return
-	}
-
 	// Best-effort digest resolution + duplicate check, before Create --
 	// see resolveDigest's own comment for why an empty digest here just
 	// means "proceed without dedup," not a failure.
@@ -210,6 +188,31 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 			"digest":                digest,
 			"existing_artifact_id":  existing.ID,
 			"existing_artifact_ref": existing.Ref,
+		})
+		return
+	}
+
+	// Quota check goes AFTER dedup, deliberately: a duplicate creates
+	// nothing and so consumes no quota, and re-registering something
+	// that already exists must stay the idempotent 409 it is today even
+	// at the cap. Gating earlier would save a registry round trip, but
+	// that round trip is precisely what proves the request is a no-op.
+	// bulkCreateArtifacts orders it the same way, inside its loop.
+	//
+	// 403, not 429: a quota is not a rate limit. Retrying later does not
+	// help -- only deleting artifacts does -- so answering 429 (with the
+	// Retry-After that implies) would tell a client to do the one thing
+	// that cannot work. This matches Kubernetes' own ResourceQuota
+	// behaviour, which is the convention operators here already know.
+	remaining, unlimited, qerr := h.artifactQuota()
+	if qerr != nil {
+		writeError(w, http.StatusInternalServerError, qerr.Error())
+		return
+	}
+	if !unlimited && remaining < 1 {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error":         fmt.Sprintf("artifact limit reached (%d) -- delete artifacts to free capacity, or raise monitorApi.maxArtifacts", h.maxArtifacts),
+			"max_artifacts": h.maxArtifacts,
 		})
 		return
 	}
