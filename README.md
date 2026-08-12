@@ -857,11 +857,31 @@ root pointing at `/etc/shadow` is refused), and must be a regular file.
 `SARIFScanner` and `ClamAVScanner` re-check this themselves before
 opening anything, rather than trusting their caller.
 
-Deliberately not a chart value: no chart-managed deployment mounts a
-volume of artifacts, so turning this on means editing the Deployment to
-mount one anyway. It is for running the binary outside a cluster (see
-"Running monitor-api outside a Kubernetes pod") or a deployment that
-really does mount artifacts and wants to scan them in place.
+Both are chart values — `monitorApi.localArtifacts.enabled` and
+`.root` — alongside `monitorApi.extraVolumes`/`extraVolumeMounts`,
+which is how you give the pod the directory to read in the first place:
+
+```yaml
+monitorApi:
+  localArtifacts:
+    enabled: "true"
+    root: /artifacts
+  extraVolumes:
+    - name: artifacts
+      persistentVolumeClaim:
+        claimName: scm-artifacts
+  extraVolumeMounts:
+    - name: artifacts
+      mountPath: /artifacts
+      readOnly: true
+```
+
+One caveat: a local path is only reachable by a scanner running
+**in-process**. That is always the case for `file` and `sarif`, and for
+`sbom`/`image` only under `DISABLE_SCAN_ISOLATION` — an isolated
+scan-worker Job runs in its own pod with its own filesystem, which is
+why registry refs exist. Nothing new in this release; it has always been
+true of the path convention.
 
 ### Registry authentication
 

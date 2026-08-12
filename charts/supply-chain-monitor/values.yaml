@@ -295,6 +295,18 @@ monitorApi:
     user: "monitor_api"
     db: "monitor_api"
     sslmode: "disable"
+    # Escape hatch for an external/managed database: the name of a
+    # Secret holding a complete "postgres://..." connection string under
+    # dsnSecretKey. Set, it is injected as POSTGRES_DSN and wins
+    # outright over every field above (see main.go's buildPostgresDSN) --
+    # for a DSN carrying query params this chart doesn't model.
+    #
+    # A Secret rather than a plain value on purpose: a DSN contains the
+    # password, and this chart never puts a credential in a ConfigMap --
+    # the same reasoning as postgres.credentials.password and apiKey.
+    # Empty (the default) leaves the fields above in charge.
+    dsnExistingSecret: ""
+    dsnSecretKey: "POSTGRES_DSN"
     # pgxpool connection pool sizing (see main.go's buildPostgresDSN and
     # docs/architecture.md's Postgres pool tuning fix). Left unset (0,
     # meaning "don't override") by default when running the binary
@@ -336,6 +348,11 @@ monitorApi:
     insecure: "true"
     public: "true"
     maxFileMB: "100"
+    # The unpacker executable itself. Bare name = found on PATH, which
+    # is how it is baked into the monitor-api image (see Dockerfile);
+    # override with an absolute path only if you build an image that
+    # puts it somewhere else.
+    bin: "unpacker"
   # Almost always the same image monitor-api itself runs from, since
   # `monitor-api scan-worker` is the same binary in a different mode.
   # Left unset here so the template defaults it to
@@ -566,6 +583,50 @@ monitorApi:
     javaRepository: ""
     skipUpdate: "true"
     skipJavaUpdate: "true"
+  # grype's counterpart to trivyDB's skip flags, governing the
+  # IN-PROCESS grype fallback only (DISABLE_SCAN_ISOLATION, or running
+  # this binary outside a cluster) -- an isolated grype scan-worker Job
+  # always skips both regardless, since it reads the shared read-only
+  # cache PVC and DB freshness is the primer/refresh Job's business, not
+  # the worker's. Both default off, matching the binary's own defaults.
+  #
+  # skipAgeValidation stops grype refusing to run against a DB it
+  # considers stale, which is what an air-gapped mirror looks like from
+  # grype's point of view.
+  grypeDB:
+    skipUpdate: "false"
+    skipAgeValidation: "false"
+  # Artifact refs naming a file on monitor-api's own filesystem, rather
+  # than something in a registry. Off by default, and deliberately so:
+  # `file` and `sarif` artifacts are the two types with no isolated
+  # scan-worker Job, so an ungated path here is read inside the API pod
+  # itself -- see internal/scanner/localpath.go and README's "Local
+  # filesystem paths as refs".
+  #
+  # Both are required together: enabled without a root refuses local
+  # paths anyway rather than inventing one. root must be absolute, and a
+  # ref is refused unless it stays inside it after symlink resolution.
+  #
+  # Using this also means giving the pod the directory to read --
+  # extraVolumes/extraVolumeMounts below are how, e.g. a PVC of SBOMs
+  # mounted read-only at the same path set as root.
+  localArtifacts:
+    enabled: "false"
+    root: ""
+  # Extra volumes/mounts for the monitor-api Deployment, appended to the
+  # ones it always has (the "scratch" emptyDir at /tmp). Standard
+  # Kubernetes volume/volumeMount syntax, passed through as written --
+  # this exists so a deployment that mounts artifacts to scan (see
+  # localArtifacts above) can be configured entirely from here rather
+  # than by hand-editing the rendered Deployment.
+  extraVolumes: []
+  # - name: artifacts
+  #   persistentVolumeClaim:
+  #     claimName: scm-artifacts
+  extraVolumeMounts: []
+  # - name: artifacts
+  #   mountPath: /artifacts
+  #   readOnly: true
   # Selects which CVE scanner(s) actually run for `image`/`sbom`
   # artifacts: "trivy" (default -- identical behavior to every
   # deployment before this key existed), "grype", or "both" (findings

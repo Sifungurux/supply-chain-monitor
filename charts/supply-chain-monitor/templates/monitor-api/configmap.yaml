@@ -33,6 +33,7 @@ data:
   UNPACKER_INSECURE: {{ .Values.monitorApi.unpacker.insecure | quote }}
   UNPACKER_PUBLIC: {{ .Values.monitorApi.unpacker.public | quote }}
   UNPACKER_MAX_FILE_MB: {{ .Values.monitorApi.unpacker.maxFileMB | quote }}
+  UNPACKER_BIN: {{ .Values.monitorApi.unpacker.bin | quote }}
   # Almost always the same image monitor-api itself runs from, since
   # `monitor-api scan-worker` is the same binary in a different mode --
   # defaults to monitorApi.image.repository:monitorApi.image.tag unless
@@ -99,6 +100,14 @@ data:
   {{- $refHosts = concat $refHosts (splitList "," .Values.monitorApi.refHostAllowlist) }}
   {{- end }}
   REF_HOST_ALLOWLIST: {{ join "," $refHosts | quote }}
+  # A ref naming a file on this pod's own filesystem instead of a
+  # registry -- refused unless BOTH of these are set, since `file` and
+  # `sarif` artifacts scan in-process and would otherwise let any ref
+  # read anything this pod can. See internal/scanner/localpath.go and
+  # monitorApi.localArtifacts, which also explains the volume you need
+  # to mount (monitorApi.extraVolumes) for the root to contain anything.
+  ALLOW_LOCAL_ARTIFACT_PATHS: {{ .Values.monitorApi.localArtifacts.enabled | quote }}
+  LOCAL_ARTIFACT_ROOT: {{ .Values.monitorApi.localArtifacts.root | quote }}
   # Makes expected_digest required on every registration and turns a
   # mismatch into Artifact.Unsafe = true instead of a 409 refusal -- see
   # this value's own comment above and NewRouter's in internal/api/router.go.
@@ -136,6 +145,13 @@ data:
   TRIVY_SKIP_DB_UPDATE: {{ .Values.monitorApi.trivyDB.skipUpdate | quote }}
   TRIVY_SKIP_JAVA_DB_UPDATE: {{ .Values.monitorApi.trivyDB.skipJavaUpdate | quote }}
   {{- end }}
+  # grype's equivalents. Unconditional, unlike trivy's above: those are
+  # rendered only under trivyDB.enabled because they come with a DB
+  # repository to point at, whereas these two just govern whether the
+  # in-process grype fallback updates and age-checks its own DB, which
+  # is a question with or without an air-gapped mirror.
+  GRYPE_SKIP_DB_UPDATE: {{ .Values.monitorApi.grypeDB.skipUpdate | quote }}
+  GRYPE_SKIP_AGE_VALIDATION: {{ .Values.monitorApi.grypeDB.skipAgeValidation | quote }}
   # Operator-configured pluggable scanners (a different CVE scanner than
   # trivy, a different SBOM tool, ...) -- see
   # internal/scanner/pluggable.go, docs/architecture.md ("Pluggable
