@@ -208,10 +208,10 @@ func TestSARIFScanner_Scan_Category(t *testing.T) {
 		}
 		want := map[string]string{
 			"CVE-2023-1234": "cve",
-			"python-pkg":     "cve",
-			"AVD-AWS-0001":   "misconfiguration",
-			"aws-secret":     "secret",
-			"gpl-3.0":        "other", // license findings stay in the generic catch-all
+			"python-pkg":    "cve",
+			"AVD-AWS-0001":  "misconfiguration",
+			"aws-secret":    "secret",
+			"gpl-3.0":       "other", // license findings stay in the generic catch-all
 		}
 		if len(findings) != len(want) {
 			t.Fatalf("expected %d findings, got %+v", len(want), findings)
@@ -261,10 +261,10 @@ func TestSARIFScanner_Scan_Category(t *testing.T) {
 			t.Fatalf("Scan: %v", err)
 		}
 		want := map[string]string{
-			"generic-leak":  "secret",
-			"generic-iac":   "misconfiguration",
-			"generic-vuln":  "cve",
-			"generic-sast":  "other", // no tag keyword matches -> generic catch-all
+			"generic-leak": "secret",
+			"generic-iac":  "misconfiguration",
+			"generic-vuln": "cve",
+			"generic-sast": "other", // no tag keyword matches -> generic catch-all
 		}
 		if len(findings) != len(want) {
 			t.Fatalf("expected %d findings, got %+v", len(want), findings)
@@ -295,11 +295,11 @@ func TestSARIFScanner_Scan_Category(t *testing.T) {
 
 func TestClassifySarifCategory(t *testing.T) {
 	cases := []struct {
-		name    string
-		ruleID  string
+		name     string
+		ruleID   string
 		ruleName string
-		tags    []string
-		want    string
+		tags     []string
+		want     string
 	}{
 		{"os package vuln by name", "CVE-2023-1", "OsPackageVulnerability", nil, "cve"},
 		{"lang package vuln by name", "SOME-ID", "LanguageSpecificPackageVulnerability", nil, "cve"},
@@ -347,9 +347,9 @@ func TestSarifLevelToSeverity(t *testing.T) {
 
 func TestSeverityFromSecuritySeverity(t *testing.T) {
 	cases := []struct {
-		raw      string
-		wantSev  string
-		wantOK   bool
+		raw     string
+		wantSev string
+		wantOK  bool
 	}{
 		{"9.8", "critical", true},
 		{"9.0", "critical", true},

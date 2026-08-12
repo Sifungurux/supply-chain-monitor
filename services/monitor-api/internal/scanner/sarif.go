@@ -50,7 +50,7 @@ type sarifLog struct {
 		Tool struct {
 			Driver struct {
 				Rules []struct {
-					ID               string `json:"id"`
+					ID string `json:"id"`
 					// Name is a rule's short symbolic name, distinct
 					// from ID. Trivy's own SARIF output (see
 					// pkg/report/sarif.go's toSarifRuleName) sets this
