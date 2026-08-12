@@ -22,13 +22,28 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege for every job below. GITHUB_TOKEN defaults to whatever
+# the repository's own Actions setting says -- historically
+# read-and-write, and still write for many repos -- which means a
+# compromised or merely careless step in ANY job could push commits,
+# move tags, or edit releases. Nothing in this workflow needs to write
+# anything: every job checks the code out and runs a `make` target.
+#
+# Declared here so it applies to jobs added later too. A job that
+# genuinely needs more (publishing an image, attesting provenance,
+# commenting on a PR) should widen it with its own `permissions:` block
+# rather than loosening this one -- that keeps the extra scope visible
+# in the diff that introduces it, and confined to the one job.
+permissions:
+  contents: read
+
 jobs:
   # go test ./... against MemStore -- no database needed. See `make
   # test-api` in the Makefile.
   test-api:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: make test-api
         run: make test-api
 
@@ -45,7 +60,7 @@ jobs:
   test-postgres:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: make test-postgres
         run: make test-postgres
 
@@ -59,7 +74,7 @@ jobs:
   test-swagger-docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: make test-swagger-docs
         run: make test-swagger-docs
 
@@ -68,7 +83,7 @@ jobs:
   test-dashboard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: make test-dashboard
         run: make test-dashboard
 
@@ -79,7 +94,7 @@ jobs:
   check-dashboard-configmap:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: make check-dashboard-configmap
         run: make check-dashboard-configmap
 
@@ -94,7 +109,7 @@ jobs:
   shellcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Run shellcheck against cluster/*.sh
         run: |
           shopt -s globstar
@@ -106,7 +121,7 @@ jobs:
   helm-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: make helm-lint
         run: make helm-lint
 
@@ -115,7 +130,7 @@ jobs:
   helm-template:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: make helm-template
         run: make helm-template
 
@@ -134,9 +149,60 @@ jobs:
   # build the amd64 image end to end -- `go mod download` dies with a
   # register dump). A wrong amd64 checksum would otherwise be invisible
   # until someone built on an amd64 host.
+  # NOTE ON BUILD PROVENANCE (actions/attest-build-provenance):
+  # deliberately not wired up here, even though this job does build an
+  # image. Attestation binds a signed statement to a specific artifact
+  # DIGEST that a consumer can later verify -- and this job pushes
+  # nothing. It builds the image, asserts properties, and throws it
+  # away; monitor-api:dev is built locally by `make build` and imported
+  # straight into k3d, never pulled from a registry by anyone.
+  #
+  # Attesting an image nobody can fetch would be ceremony, and it is not
+  # free: it needs `id-token: write` and `attestations: write`, widening
+  # exactly the permissions this workflow just narrowed. Add it in the
+  # same change that introduces a job which PUSHES a tagged image, where
+  # the digest and the audience both exist.
   test-image:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: make test-image
         run: make test-image
+
+  # Misconfiguration scan of this repo's own Helm chart and Dockerfile
+  # -- `trivy config`, the same tool this project points at other
+  # people's artifacts, aimed at what it ships itself. Gating: both are
+  # clean today, so a finding here is a regression, not backlog. The two
+  # known exceptions are written down with reasons in .trivyignore.
+  trivy-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: make trivy-config
+        run: make trivy-config
+
+  # govulncheck: Go vulnerabilities this code actually REACHES, by call
+  # graph, rather than everything present in the dependency tree.
+  #
+  # Advisory (continue-on-error), and that is a deliberate, uncomfortable
+  # choice rather than an oversight. At the time of writing it reports 12
+  # findings, of which 10 are standard-library advisories that track the
+  # pinned Go toolchain -- fixable only by moving off go1.22, which is a
+  # real change (go.mod, the Dockerfile, the test images) with its own
+  # compatibility risk, not something to smuggle into a CI commit. The
+  # remaining 2 are module-level (github.com/jackc/pgx/v5, and
+  # golang.org/x/text indirectly) and are worth a deliberate bump.
+  #
+  # A gating job that is red on day one gets muted, disabled, or routed
+  # around within a week; an advisory one that prints the list every run
+  # keeps the number visible. FLIP THIS TO GATING (drop
+  # continue-on-error) once the toolchain moves and the count reaches
+  # zero -- that is the point of the comment, so the temporary state does
+  # not quietly become permanent.
+  govulncheck:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: make vulncheck
+        run: make vulncheck

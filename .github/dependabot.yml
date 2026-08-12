@@ -1,0 +1,60 @@
+# Dependabot keeps the things this repo pins from going stale.
+#
+# Pinning and updating are the same problem seen from two ends: every
+# pin in this repo (go.sum, action SHAs, base-image digests, tool
+# release checksums) buys reproducibility at the cost of freezing a
+# version that will eventually carry a CVE. Without something opening
+# the update PRs, "pinned" quietly becomes "abandoned at whatever was
+# current the day it was written".
+version: 2
+updates:
+  # The monitor-api Go module. Note the non-default directory: the
+  # module lives at services/monitor-api, not the repo root, and
+  # Dependabot silently does nothing if pointed at a directory with no
+  # go.mod in it.
+  - package-ecosystem: gomod
+    directory: /services/monitor-api
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # One PR for the whole graph rather than one per module. This
+      # module has a single direct dependency (pgx) and a handful of
+      # indirect ones, so separate PRs would be noise -- and they get
+      # verified together by CI anyway.
+      go-dependencies:
+        patterns: ["*"]
+
+  # The workflow's own actions, now pinned to commit SHAs
+  # (.github/workflows/ci.yml). SHA pins are exactly the kind that rot
+  # invisibly: a tag like v5 keeps moving on its own, a SHA never does,
+  # so this is what turns that pin from "frozen" into "deliberately
+  # current". Dependabot understands the `# v5.1.0` comment convention
+  # and rewrites both the SHA and the comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # The Dockerfile's base images, which are pinned by digest
+  # (services/monitor-api/Dockerfile). Same reasoning as the actions
+  # above: a digest pin is only as good as the process that revisits it.
+  #
+  # This does NOT cover the four tool tarballs that Dockerfile
+  # downloads (trivy, oras, unpacker, grype) -- those are ARGs with
+  # hand-maintained sha256 checksums, which no ecosystem parser
+  # understands. Bumping those stays a manual step: change the version
+  # and both digests together, from the release's own checksums.txt.
+  - package-ecosystem: docker
+    directory: /services/monitor-api
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(docker)"

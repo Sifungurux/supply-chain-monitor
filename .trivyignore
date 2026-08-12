@@ -1,0 +1,36 @@
+# Findings `make trivy-config` is allowed to skip, each with the reason
+# it is skipped. This file exists so that scan can be a BLOCKING check
+# rather than an advisory one: with the two known findings written down,
+# anything new is a real failure instead of noise somebody learns to
+# scroll past.
+#
+# Adding an entry here is a decision, not a formality -- it needs a
+# reason a reviewer can disagree with. Delete an entry to see the
+# finding again.
+
+# KSV-0014: "Root file system is not read-only", on the trivy/grype DB
+# primer Jobs and refresh CronJobs.
+#
+# Deliberate, and already documented at each site: those pods run
+# trivy/grype/psql, which write to TMPDIR and other rootfs paths that
+# have never been enumerated here. This is not an oversight -- assuming
+# a read-only rootfs is exactly what crash-looped monitor-api the last
+# time it was added without checking (see the securityContext comments
+# in templates/postgres/backup-cronjob.yaml and its neighbours).
+#
+# The real fix is per-Job: readOnlyRootFilesystem: true plus an emptyDir
+# at every path the tool actually writes to, verified by running it.
+# That is a chart change with a real chance of breaking the
+# vulnerability-DB pipeline, so it is not being smuggled into a CI
+# hardening change.
+KSV-0014
+
+# KSV-0109: "ConfigMap with secrets", on monitor-api-config.
+#
+# False positive. It matches the KEY NAME
+# REGISTRY_CREDENTIALS_SECRET, whose value is the NAME of a Secret
+# ("scm-registry-credentials") that monitor-api then reads -- it is a
+# pointer to a credential, not a credential. Every actual secret in this
+# chart lives in a Secret and is injected via secretKeyRef; see
+# templates/monitor-api/deployment.yaml.
+KSV-0109
