@@ -31,10 +31,12 @@ import (
 // into OtherFindings. See docs/architecture.md ("Classifying SARIF
 // findings into their own buckets").
 //
-// v1 stub: ref is assumed to already be a filesystem path reachable
-// inside the monitor-api pod -- the same simplification `file`-type
-// artifacts already make (see ClamAVScanner and docs/architecture.md's
-// Roadmap).
+// ref here is a path, not a registry reference -- FetchingScanner has
+// already turned one into the other -- and Scan checks it is a path it
+// is permitted to open before reading it, the same as ClamAVScanner.
+// Both matter more than for the other scanners: sarif and file
+// artifacts are the two types with no isolated scan-worker Job, so this
+// read happens inside monitor-api's own pod.
 type SARIFScanner struct{}
 
 func NewSARIFScanner() *SARIFScanner {
@@ -194,6 +196,14 @@ func sarifLevelToSeverity(level string) string {
 }
 
 func (s *SARIFScanner) Scan(_ context.Context, ref string) ([]artifact.Finding, error) {
+	// This scanner runs IN-PROCESS -- there is no isolated Job for
+	// sarif artifacts -- so this os.ReadFile happens inside monitor-api's
+	// own pod, and it checks its own input rather than trusting the
+	// FetchingScanner that normally wraps it to have done so. See
+	// ensureScannablePath.
+	if err := ensureScannablePath(ref); err != nil {
+		return nil, err
+	}
 	raw, err := os.ReadFile(ref)
 	if err != nil {
 		return nil, fmt.Errorf("read sarif file %q: %w", ref, err)

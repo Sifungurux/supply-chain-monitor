@@ -10,9 +10,17 @@ import (
 // writeSARIFFile is a small test helper: writes content to a temp file
 // and returns its path, the same shape SARIFScanner.Scan expects for
 // ref (a filesystem path).
+//
+// The temp dir doubles as the permitted artifact root for the calling
+// test, because SARIFScanner now refuses to open a path that is neither
+// a fetched artifact nor inside that root (see ensureScannablePath) --
+// a fixture on disk is exactly the "operator mounted a volume of
+// artifacts" case the root exists for.
 func writeSARIFFile(t *testing.T, content string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "results.sarif")
+	dir := t.TempDir()
+	enableLocalPaths(t, dir)
+	path := filepath.Join(dir, "results.sarif")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write sarif fixture: %v", err)
 	}
@@ -162,7 +170,14 @@ func TestSARIFScanner_Scan(t *testing.T) {
 	})
 
 	t.Run("missing file is an error", func(t *testing.T) {
-		if _, err := s.Scan(context.Background(), "/does/not/exist.sarif"); err == nil {
+		// Deliberately a permitted-but-absent path: an arbitrary
+		// "/does/not/exist.sarif" is now refused by ensureScannablePath
+		// before Scan ever opens anything, which would make this pass
+		// without testing what its name says. (That refusal has its own
+		// test -- TestScannersRefuseToOpenPathsOutsideTheRoot.)
+		root := t.TempDir()
+		enableLocalPaths(t, root)
+		if _, err := s.Scan(context.Background(), filepath.Join(root, "does-not-exist.sarif")); err == nil {
 			t.Fatal("expected an error for a missing file")
 		}
 	})

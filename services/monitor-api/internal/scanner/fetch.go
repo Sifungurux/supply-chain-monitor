@@ -49,20 +49,42 @@ func NewRegistryFetcher(plainHTTP bool, username, password string) *RegistryFetc
 	return &RegistryFetcher{PlainHTTP: plainHTTP, Username: username, Password: password}
 }
 
-// looksLikeLocalPath distinguishes "ref is already a path inside the
+// looksLikeLocalPath distinguishes "ref is meant as a path inside the
 // pod" (the original v1 convention) from "ref is an OCI registry
-// reference to fetch" (the new capability). Registry refs
-// (scm-registry:5000/sboms/app:1.0, ghcr.io/org/app-sbom:latest) never
-// start with /, ., or ~ the way a real filesystem path handed to this
-// API would.
+// reference to fetch". Registry refs (scm-registry:5000/sboms/app:1.0,
+// ghcr.io/org/app-sbom:latest) never start with /, ., or ~ the way a
+// real filesystem path handed to this API would.
+//
+// This only classifies intent. Whether such a path may be opened at all
+// is localpath.go's question, and the answer is no unless an operator
+// has explicitly said otherwise -- it used to be an unconditional yes,
+// which made any readable file on the pod a valid artifact.
 func looksLikeLocalPath(ref string) bool {
 	return strings.HasPrefix(ref, "/") || strings.HasPrefix(ref, ".") || strings.HasPrefix(ref, "~")
+}
+
+// fetchScratchDir is the one directory Fetch downloads into, so that
+// "this path came out of a fetch" is a property a scanner can check
+// (see ensureScannablePath) instead of a claim it has to take on faith.
+// A fixed subdirectory of TMPDIR rather than TMPDIR itself, which is
+// world-writable in a container and shared with the unpacker's own
+// extraction dirs.
+func fetchScratchDir() string {
+	return filepath.Join(os.TempDir(), "scm-fetch")
 }
 
 func (f *RegistryFetcher) Fetch(ctx context.Context, ref string) (string, func(), error) {
 	noop := func() {}
 	if looksLikeLocalPath(ref) {
-		return ref, noop, nil
+		// No longer a passthrough: the path is checked against the
+		// operator-declared root (off by default) and the RESOLVED path
+		// is what gets returned, so the file that was validated is the
+		// file the scanner opens. See localpath.go.
+		path, err := resolveLocalArtifactPath(ref)
+		if err != nil {
+			return "", noop, err
+		}
+		return path, noop, nil
 	}
 	// Defense in depth, same reasoning as OrasDigestResolver.Resolve's
 	// own call: this runs in the scan-worker Job too (see main.go's
@@ -73,7 +95,10 @@ func (f *RegistryFetcher) Fetch(ctx context.Context, ref string) (string, func()
 		return "", noop, err
 	}
 
-	dir, err := os.MkdirTemp("", "scm-fetch-*")
+	if err := os.MkdirAll(fetchScratchDir(), 0o700); err != nil {
+		return "", noop, fmt.Errorf("create fetch scratch dir: %w", err)
+	}
+	dir, err := os.MkdirTemp(fetchScratchDir(), "artifact-*")
 	if err != nil {
 		return "", noop, fmt.Errorf("create fetch temp dir: %w", err)
 	}

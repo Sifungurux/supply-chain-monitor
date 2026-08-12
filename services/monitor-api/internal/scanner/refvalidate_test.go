@@ -48,11 +48,14 @@ func TestValidateRef_RefusesRefsPointingInward(t *testing.T) {
 		// exact string that gets used.
 		{name: "leading whitespace", ref: " 169.254.169.254/latest/meta-data:1", wantErr: "whitespace"},
 
-		// Accepted: a local path makes no outbound request (the original
-		// v1 convention, see looksLikeLocalPath), and a public address
-		// is exactly what this is meant to let through.
-		{name: "local path", ref: "/tmp/report.sarif"},
-		{name: "relative local path", ref: "./report.sarif"},
+		// A local path has no host to judge, so it is held to
+		// localpath.go's policy instead -- off by default, hence
+		// refused here. See TestValidateRef_LocalPathsFollowTheSamePolicy.
+		{name: "local path", ref: "/tmp/report.sarif", wantErr: "not an accepted artifact ref"},
+		{name: "relative local path", ref: "./report.sarif", wantErr: "not an accepted artifact ref"},
+
+		// Accepted: a public address is exactly what this is meant to
+		// let through.
 		{name: "public IP literal", ref: "8.8.8.8:5000/app:1.0"},
 	}
 

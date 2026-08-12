@@ -46,10 +46,10 @@ const refResolveTimeout = 5 * time.Second
 //
 //   - a scheme ("https://...", "file://...") is not a registry
 //     reference at all -- an OCI ref is host/repo:tag, never a URL;
-//   - a local filesystem path is left alone: it makes no outbound
-//     request, and refs that are already paths inside the pod are the
-//     original v1 convention this service still supports (see
-//     looksLikeLocalPath);
+//   - a local filesystem path makes no outbound request, so there is no
+//     host to judge -- it is held to localpath.go's policy instead,
+//     which refuses it outright unless an operator enabled local paths
+//     and it falls inside their declared root;
 //   - a host in REF_HOST_ALLOWLIST passes everything below it;
 //   - *.svc.cluster.local is refused by NAME, before any lookup, since
 //     that suffix means "in-cluster service" whatever it resolves to;
@@ -82,7 +82,14 @@ func ValidateRef(ctx context.Context, ref string) error {
 		return fmt.Errorf("ref must not have leading or trailing whitespace")
 	}
 	if looksLikeLocalPath(ref) {
-		return nil
+		// A local path has no host to check -- but it does have a policy
+		// to satisfy, and refusing it here means an artifact nothing
+		// could ever legally open is refused at registration instead of
+		// failing every scan forever. Lexical only (see
+		// checkLocalArtifactPath): requiring the file to exist would
+		// break registering an artifact before it lands in the volume.
+		_, _, err := checkLocalArtifactPath(ref)
+		return err
 	}
 
 	hosts := refHosts(ref)

@@ -150,11 +150,17 @@ additive to the built-in scanners for that type. Command output is
 capped at 10MiB (`limitedBuffer`) since this is the one place the app
 runs something that could be arbitrarily buggy or compromised.
 
-**Fetching non-image artifacts.** `file`/`sbom`/`sarif` scanners assume
-`ref` is a local path already inside the pod. `FetchingScanner`
-(`internal/scanner/fetch.go`) wraps any of them, resolving `ref` to a
-local path first: a leading `/`, `.`, or `~` means it's already a local
-path (no-op passthrough); anything else is treated as an OCI registry
+**Fetching non-image artifacts.** `file`/`sbom`/`sarif` scanners take a
+local path to scan. `FetchingScanner` (`internal/scanner/fetch.go`)
+wraps any of them, resolving `ref` to one first: a leading `/`, `.`, or
+`~` means the ref names a path on this pod's own filesystem, which is
+refused unless an operator opted in via `ALLOW_LOCAL_ARTIFACT_PATHS` +
+`LOCAL_ARTIFACT_ROOT` and the path survives `filepath.Clean`,
+`EvalSymlinks`, and a regular-file check against that root
+(`internal/scanner/localpath.go`) — that convention predates registry
+fetching and, ungated, was an arbitrary-file-read primitive, since
+`file`/`sarif` artifacts scan in-process rather than in an isolated
+Job. Anything else is treated as an OCI registry
 reference and pulled via `oras pull` (`RegistryFetcher`) from
 `scm-registry`. `image`-type scanners are left unwrapped since they
 already fetch their own refs.
