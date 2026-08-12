@@ -67,6 +67,17 @@ spec:
                 secretKeyRef:
                   name: scm-postgres-credentials
                   key: POSTGRES_PASSWORD
+            {{- if .Values.monitorApi.postgres.dsnExistingSecret }}
+            # A complete connection string, which main.go's
+            # buildPostgresDSN prefers over every POSTGRES_* field in the
+            # ConfigMap -- see monitorApi.postgres.dsnExistingSecret.
+            # From a Secret because a DSN carries the password.
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.monitorApi.postgres.dsnExistingSecret | quote }}
+                  key: {{ .Values.monitorApi.postgres.dsnSecretKey | quote }}
+            {{- end }}
             - name: API_KEY
               valueFrom:
                 secretKeyRef:
@@ -138,6 +149,12 @@ spec:
             # for exactly this reason.
             - name: scratch
               mountPath: /tmp
+            {{- with .Values.monitorApi.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: scratch
           emptyDir: {}
+        {{- with .Values.monitorApi.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
