@@ -383,6 +383,39 @@ Traefik's `NodePort` Service on `30080`; the dashboard's direct
 NodePort (`30301`) still works unchanged. No TLS yet — `websecure` is
 disabled rather than half-wired.
 
+**Network policy.** Three `NetworkPolicy` objects
+(`templates/networkpolicy/`, gated on `networkPolicy.enabled`, default
+true) put an L3 floor under the application-layer ref validation above.
+
+The important one is a **default-deny egress** policy on scan-worker Job
+pods (`app: scm-scan-worker`, set by `k8sjob.NewScanJob`). Those pods run
+trivy/grype/unpacker against a caller-supplied ref, so they are where a
+confused-deputy request would originate. They may reach exactly: DNS,
+clamd, the in-cluster registry, that registry's token-auth service, and
+monitor-api — plus the public internet on 80/443 with RFC1918 and
+`169.254.0.0/16` carved out. That last exception is the security
+content: it denies the cloud metadata service and the kube-apiserver
+(ClusterIP and node addresses alike) while still allowing the public
+registry pulls every `image` scan depends on. Note `NetworkPolicy` has
+no deny primitive — an `except` narrows the rule it appears in, and
+rules are OR'd, so the in-cluster `podSelector` allows still work.
+
+Postgres gets ingress from monitor-api and backup Jobs only (its probes
+are `exec`, so no kubelet allowance is needed). monitor-api gets ingress
+from the ingress controller, in-namespace pods, and the node CIDRs —
+that last one is required, since its probes are `httpGet` and kubelet
+traffic comes from the node, not a pod. Its egress is deliberately left
+open except the metadata range: it legitimately talks to the apiserver
+(it creates the scan Jobs), Postgres, registries, and arbitrary
+notification webhooks, so a default-deny there would be a long allow-list
+that breaks the first time someone configures a new webhook.
+
+**These enforce nothing on a CNI that ignores NetworkPolicy** — the
+objects are accepted and enforce zero, which is worse than absent
+because it looks like protection. k3s/k3d enforce them via an embedded
+kube-router; see `networkPolicy` in values.yaml for a probe that
+verifies enforcement on your own cluster.
+
 **Image supply chain.** `services/monitor-api/Dockerfile` bundles five
 third-party binaries (trivy, grype, oras, unpacker, umoci) plus the
 service itself, so how they get in is part of this project's own threat

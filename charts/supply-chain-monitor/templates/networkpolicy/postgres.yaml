@@ -1,0 +1,39 @@
+{{- if .Values.networkPolicy.enabled }}
+# Postgres holds every artifact, finding and stage-history row in this
+# deployment, and nothing else in the namespace has any business
+# connecting to it. Ingress-only: what postgres itself may reach is not
+# interesting (it initiates nothing), but who may reach postgres is.
+#
+# Deliberately NOT allowing kubelet ingress the way monitor-api's policy
+# has to: postgres's probes are `exec` (pg_isready inside the
+# container), so they generate no network traffic and are unaffected by
+# this. Checked, not assumed -- an httpGet/tcpSocket probe here would
+# have been dropped and crash-looped the database.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scm-postgres-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Values.monitorApi.postgres.service }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ .Values.monitorApi.postgres.service }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        # The application itself.
+        - podSelector:
+            matchLabels:
+              app: monitor-api
+        # The backup CronJob (pg_dump | gzip into the backups PVC) and
+        # any one-off backup Job created from the same template -- both
+        # carry this label. Restores run through the same path.
+        - podSelector:
+            matchLabels:
+              app: scm-postgres-backup
+      ports:
+        - protocol: TCP
+          port: {{ .Values.monitorApi.postgres.port | int }}
+{{- end }}

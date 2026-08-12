@@ -1,0 +1,66 @@
+{{- if .Values.networkPolicy.enabled }}
+# monitor-api: ingress restricted to the things that legitimately call
+# it, egress left broad except for the metadata service.
+#
+# The asymmetry is deliberate. Unlike a scan-worker, monitor-api has a
+# genuinely wide and moving egress surface -- the kube-apiserver (it
+# CREATES the scan Jobs), Postgres, clamd, the registry, public
+# registries for digest resolution, and operator-configured notification
+# webhooks pointing anywhere at all. A default-deny egress here would be
+# a long allow-list that silently breaks a feature the first time
+# someone configures a new webhook host. So this blocks the one
+# destination that is never legitimate and leaves the rest to
+# ValidateRef at the application layer (see internal/scanner/refvalidate.go).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scm-monitor-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: monitor-api
+spec:
+  podSelector:
+    matchLabels:
+      app: monitor-api
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        # The ingress controller, which fronts every browser/CLI call.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+        # In-namespace callers: scan-worker Jobs uploading generated
+        # SBOM/SARIF documents, the sweep CronJob, and the dashboard.
+        - podSelector: {}
+        # Kubelet probe traffic. This one is load-bearing and easy to
+        # get wrong: monitor-api's readiness/liveness probes are
+        # httpGet, and probe packets come FROM THE NODE, not from any
+        # pod -- so an ingress policy without this drops them, the pod
+        # goes NotReady, liveness then kills it, and the API
+        # crash-loops. (Postgres needs no equivalent: its probes are
+        # exec.) Narrow networkPolicy.nodeCIDRs to your real node subnet
+        # if you want this tighter.
+        {{- range .Values.networkPolicy.nodeCIDRs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        # Fixed in templates/monitor-api/service.yaml, not a value.
+        - protocol: TCP
+          port: 8080
+  egress:
+    # Everything except the instance-metadata range. Expressed as one
+    # allow with an `except` rather than a deny, because NetworkPolicy
+    # has no deny primitive -- see the scan-worker policy's own comment.
+    # No `ports:` restriction: this has to cover DNS (53/udp), Postgres
+    # (5432), clamd (3310), the registry (5000), the apiserver (443),
+    # and arbitrary notification webhooks, which is every port worth
+    # naming.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range .Values.networkPolicy.metadataCIDRs }}
+              - {{ . | quote }}
+              {{- end }}
+{{- end }}
