@@ -194,6 +194,15 @@ func (t *TrivyScanner) ScanWithRaw(ctx context.Context, ref string) ([]artifact.
 // and just discards the raw bytes after parsing, the same as before
 // this was split out.
 func (t *TrivyScanner) ScanRaw(ctx context.Context, ref string) ([]byte, error) {
+	// Validated HERE rather than in Scan, because Scan is not the only
+	// way in: ScanWithRaw calls this too, and that is the path the
+	// scan-worker Job uses (main.go's runScanWorker) -- a process the
+	// API handler's own check never runs in. This is the one function
+	// that turns the ref into a trivy argument, so it is the one that
+	// has to be sure of it. Same reasoning as Fetch/Resolve.
+	if err := ValidateRef(ctx, ref); err != nil {
+		return nil, err
+	}
 	// Confirmed on a real cluster: without this, trivy's local
 	// per-image analysis cache grows by roughly one entry per distinct
 	// image scanned, forever (trivy has no automatic eviction for it),

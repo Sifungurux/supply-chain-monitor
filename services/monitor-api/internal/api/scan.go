@@ -39,6 +39,33 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Re-validate the ref at scan time, not just at registration.
+	//
+	// Registration has refused inward-pointing refs since ValidateRef
+	// landed, but rows created BEFORE that are still in the database
+	// with whatever ref they were registered with -- and an `image`
+	// artifact never goes through Fetch or Resolve, the two places that
+	// carry their own check. trivy/grype/unpacker pull the image
+	// themselves, straight from wherever the ref points, so without this
+	// a pre-existing row is still a way to make this service connect
+	// somewhere it should not.
+	//
+	// Refused here, before the status flips to "scanning", so the
+	// artifact keeps whatever status it already had and its findings are
+	// left completely alone. That matters more than it looks: the
+	// alternative (fail inside runScan) would run MergeFindings with no
+	// scanner results, and a bucket that is not blocked would mark every
+	// existing finding "fixed" -- turning a refused scan into silent
+	// data loss.
+	//
+	// 400 rather than a quieter status: the ref is the problem, the
+	// caller supplied it, and re-registering or deleting the artifact is
+	// the fix. A scan that cannot legally run should say so out loud.
+	if err := scanner.ValidateRef(r.Context(), a.Ref); err != nil {
+		writeError(w, http.StatusBadRequest, "refusing to scan: "+err.Error())
+		return
+	}
+
 	scanners, ok := h.scanners.For(a.Type)
 	if !ok || len(scanners) == 0 {
 		writeError(w, http.StatusNotImplemented, "no scanner registered for type "+string(a.Type))
