@@ -64,7 +64,10 @@ spec:
               echo "downloading grype vulnerability DB into ${GRYPE_DB_CACHE_DIR}"
               grype db update
               # grype creates its own schema-versioned subdirectory
-              # (e.g. .../6/) mode 0700, owned by this Job's root user.
+              # (e.g. .../6/) mode 0700, owned by whatever uid this Job
+              # runs as -- 65534, per this pod's own securityContext
+              # above (it was never root: the comment here used to say
+              # so, from before that securityContext existed).
               # The scan-worker Jobs that read this PVC run as uid 65534
               # (see k8sjob.NewScanJob's securityContext), so without
               # this they can't even traverse into it -- grype exits 1

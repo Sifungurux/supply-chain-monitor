@@ -1148,10 +1148,36 @@ instead:
 
 ```dockerfile
 FROM monitor-api:dev
-RUN apk add --no-cache curl jq && \
-    curl -sSL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+# The base image ends with USER 65534, so any build step that writes
+# outside /tmp needs root back for the duration -- and must hand it
+# back, or the derived image runs as root in a cluster whose manifests
+# all expect 65534. Without this you get "Unable to lock database:
+# Permission denied" from apk, or a permission error from COPY targets.
+USER root
+# curl is installed here because the base image deliberately ships
+# without it (it lives in the Dockerfile's `tools` stage only). busybox
+# wget is present and looks like it would do, but it fails on GitHub
+# release URLs specifically -- those redirect to
+# objects.githubusercontent.com, and it gives up with "error getting
+# response: Resource temporarily unavailable".
+RUN apk add --no-cache curl jq
+
+# Pin the version AND verify a checksum, the way this project's own
+# Dockerfile installs its tools. `curl ... | sh` from a project's main
+# branch runs whatever that file says on the day you happen to build,
+# which is precisely the class of thing a supply-chain scanner exists to
+# catch. SCANNER_SHA256 comes from the release's own checksums.txt.
+ARG SCANNER_VERSION=1.2.3
+ARG SCANNER_SHA256=""
+RUN curl -fsSL -o /tmp/scanner.tar.gz \
+      "https://example.com/scanner/releases/download/v${SCANNER_VERSION}/scanner_linux_amd64.tar.gz" \
+    && echo "${SCANNER_SHA256}  /tmp/scanner.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/scanner.tar.gz -C /usr/local/bin scanner \
+    && rm -f /tmp/scanner.tar.gz
+
 COPY grype-to-findings.sh /usr/local/bin/grype-to-findings.sh
 RUN chmod +x /usr/local/bin/grype-to-findings.sh
+USER 65534:65534
 ```
 
 ...then point `monitorApi.image.repository`/`tag` (and, if scanning

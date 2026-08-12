@@ -27,7 +27,7 @@ ifeq ($(SCM_RUNTIME),podman)
 export DOCKER_HOST := $(shell (podman system connection ls --format json | jq -r '.[] | select(.Default==true) | .URI') 2>/dev/null)
 endif
 
-.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap helm-lint helm-template db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
+.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build test-image deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap helm-lint helm-template db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -113,6 +113,38 @@ ifeq ($(SCM_RUNTIME),podman)
 	@echo "SCM_RUNTIME=podman -- importing docker.io/library/$(IMAGE) into k3d cluster '$(SCM_CLUSTER_NAME)' (see comment above)..."
 	k3d image import docker.io/library/$(IMAGE) -c $(SCM_CLUSTER_NAME)
 endif
+
+# Builds the image and asserts the properties its Dockerfile is written
+# to guarantee -- separate from `build` above because that one also
+# imports into a running k3d cluster, which CI has no business doing.
+#
+# Nothing built this image in CI before, so a broken Dockerfile was only
+# ever caught by a human running `make build`. It also covers the one
+# thing that cannot be checked on an Apple Silicon dev machine: the
+# amd64 half of the Dockerfile's per-architecture checksum table. qemu
+# cannot emulate the Go toolchain well enough to run the build stage
+# (`go mod download` dies with a register dump under --platform
+# linux/amd64), so a native amd64 runner is the only place the amd64
+# branch actually executes end to end.
+test-image:
+	docker build -t $(IMAGE)-verify services/monitor-api
+	@echo "== runs as non-root (uid 65534) =="
+	@id="$$(docker run --rm --entrypoint id $(IMAGE)-verify -u)"; \
+		[ "$$id" = "65534" ] || { echo "image runs as uid $$id, want 65534" >&2; exit 1; }
+	@echo "== monitor-api is a static binary (CGO_ENABLED=0) =="
+	@docker run --rm --entrypoint sh $(IMAGE)-verify -c \
+		'ldd /usr/local/bin/monitor-api 2>&1 | grep -q "Not a valid dynamic program"' \
+		|| { echo "monitor-api is dynamically linked -- CGO_ENABLED=0 build broken" >&2; exit 1; }
+	@echo "== the binary actually starts (fails closed on missing API_KEY) =="
+	@docker run --rm $(IMAGE)-verify 2>&1 | grep -q "API_KEY is required" \
+		|| { echo "monitor-api did not reach its own startup checks" >&2; exit 1; }
+	@echo "== every bundled tool runs =="
+	@docker run --rm --entrypoint sh $(IMAGE)-verify -c \
+		'set -e; trivy --version >/dev/null; grype version >/dev/null; oras version >/dev/null; unpacker --version >/dev/null; umoci --version >/dev/null'
+	@echo "== no downloader left in the runtime image =="
+	@docker run --rm --entrypoint sh $(IMAGE)-verify -c 'command -v curl >/dev/null' \
+		&& { echo "curl is present in the runtime image -- it belongs to the tools stage only" >&2; exit 1; } || true
+	@echo "image checks passed"
 
 # The whole application is a single Helm chart via Flux now (see
 # charts/supply-chain-monitor/, k8s/releases/supply-chain-monitor-helmrelease.yaml,
