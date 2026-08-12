@@ -47,6 +47,8 @@ spec:
       # fsGroup so the emptyDirs below are group-writable by the clamav
       # user (uid 1000) that clamd and freshclam drop to.
       securityContext:
+        seccompProfile:
+          type: RuntimeDefault
         fsGroup: 1000
       containers:
         - name: clamav

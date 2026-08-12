@@ -39,6 +39,8 @@ spec:
       # reads the cache, and fsGroup so a cache root created by an
       # earlier root-run Job stays writable.
       securityContext:
+        seccompProfile:
+          type: RuntimeDefault
         runAsNonRoot: true
         runAsUser: 65534
         runAsGroup: 65534

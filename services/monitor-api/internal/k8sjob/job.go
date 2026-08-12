@@ -67,11 +67,22 @@ type PodSpec struct {
 	Volumes                      []Volume            `json:"volumes,omitempty"`
 }
 
+// SeccompProfile pins the pod's seccomp filter. Kubernetes' Pod
+// Security "restricted" profile requires type RuntimeDefault or
+// Localhost, and omitting it is what fails an otherwise-compliant pod --
+// it was the single blocker for 12 of 13 workloads in this project's
+// chart, all of which already dropped every capability and ran
+// non-root.
+type SeccompProfile struct {
+	Type string `json:"type"`
+}
+
 type PodSecurityContext struct {
-	RunAsNonRoot *bool  `json:"runAsNonRoot,omitempty"`
-	RunAsUser    *int64 `json:"runAsUser,omitempty"`
-	RunAsGroup   *int64 `json:"runAsGroup,omitempty"`
-	FSGroup      *int64 `json:"fsGroup,omitempty"`
+	RunAsNonRoot   *bool           `json:"runAsNonRoot,omitempty"`
+	RunAsUser      *int64          `json:"runAsUser,omitempty"`
+	SeccompProfile *SeccompProfile `json:"seccompProfile,omitempty"`
+	RunAsGroup     *int64          `json:"runAsGroup,omitempty"`
+	FSGroup        *int64          `json:"fsGroup,omitempty"`
 }
 
 type Container struct {
@@ -255,10 +266,11 @@ func NewScanJob(cfg ScanJobConfig) *Job {
 					ServiceAccountName:           cfg.ServiceAccount,
 					AutomountServiceAccountToken: boolPtr(false),
 					SecurityContext: &PodSecurityContext{
-						RunAsNonRoot: boolPtr(true),
-						RunAsUser:    int64Ptr(scanWorkerUID),
-						RunAsGroup:   int64Ptr(scanWorkerUID),
-						FSGroup:      int64Ptr(scanWorkerUID),
+						RunAsNonRoot:   boolPtr(true),
+						SeccompProfile: &SeccompProfile{Type: "RuntimeDefault"},
+						RunAsUser:      int64Ptr(scanWorkerUID),
+						RunAsGroup:     int64Ptr(scanWorkerUID),
+						FSGroup:        int64Ptr(scanWorkerUID),
 					},
 					Containers: []Container{
 						{

@@ -32,6 +32,8 @@ spec:
       # Nothing to write and nothing to own: this Job exists only to
       # bind the PVC so it is provisioned before anything needs it.
       securityContext:
+        seccompProfile:
+          type: RuntimeDefault
         runAsNonRoot: true
         runAsUser: 65534
         runAsGroup: 65534

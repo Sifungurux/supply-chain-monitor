@@ -45,6 +45,8 @@ spec:
           # the database itself runs as, and the one that owns anything this
           # writes to the backups PVC.
           securityContext:
+            seccompProfile:
+              type: RuntimeDefault
             runAsNonRoot: true
             runAsUser: 26
             runAsGroup: 26

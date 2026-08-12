@@ -38,6 +38,8 @@ spec:
       # internal/k8sjob/job.go's NewScanJob): the API server has no more
       # need for root or for a writable image than a scan worker does.
       securityContext:
+        seccompProfile:
+          type: RuntimeDefault
         runAsNonRoot: true
         runAsUser: 65534
         runAsGroup: 65534

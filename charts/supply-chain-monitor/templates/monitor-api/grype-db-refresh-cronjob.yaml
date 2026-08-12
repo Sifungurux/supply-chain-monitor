@@ -51,6 +51,8 @@ spec:
           # write at mount time, which is what lets the non-root refresh
           # keep updating a cache root created earlier by root.
           securityContext:
+            seccompProfile:
+              type: RuntimeDefault
             runAsNonRoot: true
             runAsUser: 65534
             runAsGroup: 65534
