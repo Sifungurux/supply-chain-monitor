@@ -659,6 +659,42 @@ on the detail page, for anything registered this way. Off by default --
 turning it on is a real policy change, not something a deployment should
 pick up silently.
 
+### Where an artifact ref may point
+
+A `ref` is caller-supplied, and monitor-api makes outbound requests with
+it (digest resolution, `oras pull`, trivy/grype/unpacker) -- so it is
+validated before any of that happens, on both `POST /api/v1/artifacts`
+and `/artifacts/bulk`, and again in the fetch/resolve code itself so the
+scan-worker Jobs are covered too. Refused with a `400`:
+
+- anything carrying a URL scheme (`https://...`, `file://...`) -- an OCI
+  ref is `host/repo:tag`, never a URL;
+- a host ending in `.svc.cluster.local`;
+- a host resolving to a loopback, link-local, RFC1918/IPv6-ULA, or
+  unspecified address.
+
+```bash
+curl -s -X POST localhost:8080/api/v1/artifacts "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d '{"ref":"169.254.169.254/latest/meta-data:1","type":"image"}'
+# {"error":"ref host \"169.254.169.254\" resolves to a link-local address -- refused (set REF_HOST_ALLOWLIST to permit it)"}
+```
+
+That link-local range is where every major cloud serves instance
+credentials, which is the whole point: without this, an artifact ref is
+a way to make monitor-api fetch from anything its pod can reach.
+
+`monitorApi.refHostAllowlist` (`REF_HOST_ALLOWLIST`, comma-separated
+`host` or `host:port`) exempts hosts you actually do run a registry on.
+This chart's own `scm-registry` is already exempt automatically -- it is
+both a cluster-DNS name and a `ClusterIP`, so it would otherwise be
+refused twice over. A ref whose host doesn't resolve at all is allowed
+through, unchanged from before: there is nothing to reach, and
+registering an artifact whose registry is temporarily unreachable is
+normal here. A ref that is already a filesystem path inside the pod
+(the `/path/to/file` convention) makes no outbound request and is left
+alone.
+
 ### Submitting findings from an external scanner
 
 `/scan` always has monitor-api run one of its own registered scanners

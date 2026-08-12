@@ -184,6 +184,26 @@ at install/upgrade and a daily refresh `CronJob`, with the Job passing
 `--cache-backend memory`/equivalent so the scan's own analysis cache
 never touches shared disk.
 
+**Ref validation.** An artifact `ref` is caller-supplied input that
+`monitor-api` then makes outbound requests with (`oras`, trivy, grype,
+unpacker), which makes it an SSRF primitive unless something bounds
+where it may point. `scanner.ValidateRef`
+(`internal/scanner/refvalidate.go`) refuses a ref carrying a URL scheme,
+and refuses one whose registry host is `*.svc.cluster.local` (by name)
+or resolves to a loopback, link-local (`169.254.0.0/16`, including the
+cloud instance-metadata address), private (RFC1918, IPv6 ULA), or
+unspecified address. It runs at registration in both endpoints *before*
+digest resolution -- the first thing to make an outbound request -- and
+again inside `RegistryFetcher.Fetch`/`OrasDigestResolver.Resolve`, which
+is what covers the scan-worker Job (a process no handler check reaches).
+`REF_HOST_ALLOWLIST` (`monitorApi.refHostAllowlist`) exempts named
+hosts; the chart populates it with this deployment's own `scm-registry`,
+which would otherwise be refused twice over -- it is both a cluster-DNS
+name and a `ClusterIP` in RFC1918 space. A host that doesn't resolve at
+all is allowed through (there is no address to reach, and an unreachable
+registry at registration time is routine here); the fetch fails on its
+own later.
+
 **Digest resolution.** `createArtifact`/`bulkCreateArtifacts` resolve
 `Ref`'s OCI content digest at registration time (`oras manifest fetch
 --descriptor`, 8s timeout, best-effort) and use it to reject exact

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 )
@@ -89,6 +90,14 @@ func (r *OrasDigestResolver) Resolve(ctx context.Context, ref string, plainHTTP 
 	if looksLikeLocalPath(ref) {
 		return "", nil
 	}
+	// Defense in depth: internal/api/artifacts.go already validates the
+	// ref before it ever gets here, but this is the function that turns
+	// a ref into an outbound request, so it validates its own input
+	// rather than trusting every present and future caller to have done
+	// it (scan.go's digest backfill is already a second caller).
+	if err := ValidateRef(ctx, ref); err != nil {
+		return "", err
+	}
 
 	args := []string{"manifest", "fetch", "--descriptor"}
 	if plainHTTP {
@@ -101,7 +110,16 @@ func (r *OrasDigestResolver) Resolve(ctx context.Context, ref string, plainHTTP 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("oras manifest fetch --descriptor %q failed: %w (%s)", ref, err, stderr.String())
+		// oras's stderr is logged, never returned: it is raw CLI output
+		// (resolved registry URLs, auth/token hints, whatever internal
+		// hostname the ref pointed at) and the errors this returns can
+		// reach an API response -- LastScanErrors classifies scan errors
+		// into safe messages today, but that is one function away from
+		// this one, and "the raw text simply never leaves the process"
+		// is the version that stays true. An operator loses nothing:
+		// the full stderr is in this pod's logs.
+		log.Printf("oras manifest fetch --descriptor %q failed: %v (%s)", ref, err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("oras manifest fetch --descriptor %q failed: %w", ref, err)
 	}
 
 	var desc orasDescriptor

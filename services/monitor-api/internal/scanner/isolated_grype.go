@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"time"
 
@@ -183,6 +184,11 @@ func (s *IsolatedGrypeScanner) Scan(ctx context.Context, ref string) ([]artifact
 	}
 	if s.cfg.RegistryAddr != "" {
 		env["REGISTRY_ADDR"] = s.cfg.RegistryAddr
+	}
+	// Same forwarding IsolatedTrivyScanner does, for the same reason --
+	// see that Job's own comment on this variable.
+	if allow := os.Getenv(RefHostAllowlistEnv); allow != "" {
+		env[RefHostAllowlistEnv] = allow
 	}
 	var secretEnv []k8sjob.SecretEnvVar
 	if s.cfg.RegistryCredentialsSecretName != "" {

@@ -478,7 +478,12 @@ components:
       properties:
         ref:
           type: string
-          description: OCI ref, file path/URI, or SBOM/SARIF location.
+          description: >-
+            OCI ref, file path/URI, or SBOM/SARIF location. Validated
+            before anything is fetched with it: a URL scheme, a
+            *.svc.cluster.local host, or a host resolving to a
+            loopback/link-local/private address is refused with a 400
+            (REF_HOST_ALLOWLIST exempts named hosts).
           example: "ghcr.io/acme/checkout-service:2.4.1"
         type:
           type: string

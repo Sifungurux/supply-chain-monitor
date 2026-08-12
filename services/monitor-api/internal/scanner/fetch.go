@@ -64,6 +64,14 @@ func (f *RegistryFetcher) Fetch(ctx context.Context, ref string) (string, func()
 	if looksLikeLocalPath(ref) {
 		return ref, noop, nil
 	}
+	// Defense in depth, same reasoning as OrasDigestResolver.Resolve's
+	// own call: this runs in the scan-worker Job too (see main.go's
+	// "sbom" branches), a process the API's registration-time check
+	// never touched -- REF_HOST_ALLOWLIST is forwarded into that Job's
+	// env for exactly this call.
+	if err := ValidateRef(ctx, ref); err != nil {
+		return "", noop, err
+	}
 
 	dir, err := os.MkdirTemp("", "scm-fetch-*")
 	if err != nil {

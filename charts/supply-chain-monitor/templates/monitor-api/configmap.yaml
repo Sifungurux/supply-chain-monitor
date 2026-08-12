@@ -81,6 +81,24 @@ data:
   # reference instead of a path already inside this pod -- oras pull
   # fetches them from scm-registry first (see internal/scanner/fetch.go).
   FETCH_PLAIN_HTTP: {{ .Values.monitorApi.fetchPlainHTTP | quote }}
+  # Registry hosts exempt from ref validation (internal/scanner's
+  # ValidateRef), which otherwise refuses any ref whose host is
+  # loopback, link-local (169.254.0.0/16, the cloud metadata address),
+  # RFC1918, or *.svc.cluster.local -- an artifact ref is caller-supplied
+  # input that monitor-api then makes outbound requests with, so it is
+  # an SSRF primitive without this.
+  #
+  # scm-registry itself is BOTH a cluster-DNS name and a ClusterIP in
+  # RFC1918 space, so this deployment's own registry has to be named
+  # here or nothing file/sbom/sarif-shaped could ever be fetched. All
+  # three forms a ref can name it by are listed; monitorApi.refHostAllowlist
+  # appends anything else an operator runs on a private address.
+  {{- $reg := .Values.monitorApi.registry.service }}
+  {{- $refHosts := list $reg (printf "%s.%s" $reg .Release.Namespace) (printf "%s.%s.svc.cluster.local" $reg .Release.Namespace) }}
+  {{- if .Values.monitorApi.refHostAllowlist }}
+  {{- $refHosts = concat $refHosts (splitList "," .Values.monitorApi.refHostAllowlist) }}
+  {{- end }}
+  REF_HOST_ALLOWLIST: {{ join "," $refHosts | quote }}
   # Makes expected_digest required on every registration and turns a
   # mismatch into Artifact.Unsafe = true instead of a 409 refusal -- see
   # this value's own comment above and NewRouter's in internal/api/router.go.
