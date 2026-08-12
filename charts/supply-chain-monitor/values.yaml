@@ -10,6 +10,72 @@
 # can override any of these via its own spec.values; a plain `helm
 # install -f my-values.yaml` works the same way outside Flux.
 
+# NetworkPolicies (templates/networkpolicy/). Three of them: a
+# default-deny egress policy for scan-worker Job pods, an ingress
+# restriction on Postgres, and an ingress restriction plus
+# metadata-service egress block on monitor-api.
+#
+# REQUIRES A CNI THAT ENFORCES NETWORKPOLICY. This is not decoration:
+# a NetworkPolicy on a cluster whose CNI ignores them is accepted by the
+# API server, shows up in `kubectl get netpol`, and enforces NOTHING --
+# which is worse than not having one, because it looks like protection.
+# k3s/k3d (this project's own cluster) enforce them out of the box via
+# an embedded kube-router, as do Calico and Cilium; plain Flannel with
+# no policy controller does NOT. Verify on your own cluster rather than
+# assuming:
+#
+#   kubectl run np-probe --image=alpine --restart=Never --labels=app=np-probe -- sleep 300
+#   kubectl create -f - <<'EOF'
+#   apiVersion: networking.k8s.io/v1
+#   kind: NetworkPolicy
+#   metadata: {name: np-probe-deny}
+#   spec: {podSelector: {matchLabels: {app: np-probe}}, policyTypes: [Egress], egress: []}
+#   EOF
+#   kubectl exec np-probe -- wget -q -T5 -O /dev/null https://example.com && echo "NOT ENFORCED" || echo "enforced"
+#
+# Set enabled: false if your CNI can't enforce them -- an honest "off"
+# beats a policy that quietly does nothing.
+networkPolicy:
+  enabled: true
+  # Namespace of the ingress controller allowed to reach monitor-api.
+  # Matched on the kubernetes.io/metadata.name label every namespace
+  # carries automatically. This project runs Traefik in its own
+  # namespace (see k8s/releases/traefik-helmrelease.yaml); set this to
+  # "kube-system" for a stock k3s Traefik, or your own controller's
+  # namespace.
+  ingressControllerNamespace: traefik
+  # Source ranges allowed to reach monitor-api's port regardless of pod
+  # selector -- in practice, the kubelet's httpGet readiness/liveness
+  # probes, which originate from the NODE address and not from any pod.
+  # Omitting this drops probe traffic and crash-loops monitor-api, so
+  # the default is deliberately wide enough to cover any normal cluster's
+  # node addressing. Narrow it to your actual node subnet to tighten.
+  nodeCIDRs:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+  # Carved out of the scan-worker's "reach any public registry" egress
+  # rule. This is the security content of that policy: 169.254.0.0/16
+  # covers the cloud instance-metadata service (169.254.169.254), and
+  # the three RFC1918 ranges cover the kube-apiserver (both its ClusterIP
+  # and the node addresses), every other pod, and any neighbouring
+  # private infrastructure. What remains is the public internet, which
+  # is all a scanner legitimately needs -- the in-cluster destinations it
+  # DOES need (clamd, the registry, monitor-api) are separate podSelector
+  # allows, and NetworkPolicy rules are OR'd, so those still work.
+  blockedEgressCIDRs:
+    - 169.254.0.0/16
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+  # The narrower list used for monitor-api's egress. Only the metadata
+  # range: monitor-api legitimately talks to the kube-apiserver (it
+  # creates the scan Jobs), Postgres, clamd, the registry, public
+  # registries, and operator-configured notification webhooks -- so
+  # blocking RFC1918 here would break the application, not harden it.
+  metadataCIDRs:
+    - 169.254.0.0/16
+
 registry:
   image:
     repository: registry

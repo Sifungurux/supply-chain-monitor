@@ -1,0 +1,122 @@
+{{- if .Values.networkPolicy.enabled }}
+# Default-deny egress for scan-worker Job pods -- the most hostile
+# workload in this deployment. Each one runs trivy/grype/unpacker
+# against an artifact ref a client supplied, unpacking a whole container
+# image to disk and parsing it with third-party binaries. If anything
+# here is going to be talked into making a request on someone else's
+# behalf, it is this pod.
+#
+# internal/scanner's ValidateRef already bounds where a ref may point,
+# but that is an application-layer check on a string. This is the
+# network refusing to carry the packet regardless of what any binary
+# decided to do with that string -- including the parts of a scan this
+# service never sees, like trivy resolving a manifest's own references.
+#
+# NetworkPolicy has NO deny primitive: an empty rule set denies, and
+# everything below is an allow. "Denying the metadata IP" is therefore
+# expressed as an `except` carved out of the internet allow, not as a
+# rule. Note that `except` NARROWS THE RULE IT IS IN, it does not
+# override other rules -- the podSelector allows below still permit
+# in-cluster pod IPs (10.42.x here) even though 10.0.0.0/8 is excepted
+# from the internet rule, because egress rules are OR'd.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scm-scan-worker-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: scm-scan-worker
+spec:
+  # Set by internal/k8sjob/job.go's NewScanJob on both the Job and its
+  # pod template -- no code change was needed for this policy, the label
+  # was already there.
+  podSelector:
+    matchLabels:
+      app: scm-scan-worker
+  policyTypes: [Egress]
+  egress:
+    # DNS. First, and non-optional: without it every destination below
+    # is unreachable by name, and the failure looks like "bad address"
+    # rather than anything network-policy-shaped.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+
+    # clamd, for malware scanning (UnpackerScanner streams every
+    # unpacked file to it over INSTREAM).
+    - to:
+        - podSelector:
+            matchLabels:
+              app: {{ .Values.monitorApi.clamav.service }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.monitorApi.clamav.port | int }}
+
+    # The in-cluster registry, for file/sbom/sarif artifacts fetched by
+    # `oras pull` inside the Job (see internal/scanner/fetch.go).
+    - to:
+        - podSelector:
+            matchLabels:
+              app: {{ .Values.monitorApi.registry.service }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.monitorApi.registry.port | int }}
+
+    # The registry's token-auth service. Easy to miss and unpleasant
+    # when missed: scm-registry sets REGISTRY_AUTH_TOKEN_REALM to this
+    # service, so a client must fetch a token from here BEFORE it can
+    # pull anything. Without this rule, public-registry image scans keep
+    # passing while every sbom/file/sarif fetch fails -- a partial
+    # failure that reads like an artifact problem, not a policy one.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: scm-docker-auth
+      ports:
+        - protocol: TCP
+          port: {{ .Values.dockerAuth.service.port | int }}
+
+    # monitor-api, for uploading a generated SBOM/SARIF document back
+    # (see documents.go / SCAN_WORKER_API_BASE_URL). 8080 is fixed in
+    # templates/monitor-api/service.yaml, not a value.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: monitor-api
+      ports:
+        - protocol: TCP
+          port: 8080
+
+    # Public registries. This rule is why the policy is not simply
+    # "clamd + the in-cluster registry + monitor-api": an `image`
+    # artifact is pulled by trivy/grype/unpacker THEMSELVES, directly
+    # from wherever its ref points. This deployment's artifacts come
+    # from eight public registries (public.ecr.aws, quay.io, ghcr.io,
+    # mcr.microsoft.com, registry.k8s.io, gcr.io, mirror.gcr.io,
+    # cgr.dev), so an egress policy without this would fail every scan
+    # it has.
+    #
+    # The `except` list is the actual security content: it denies the
+    # cloud instance-metadata service (169.254.169.254, inside
+    # 169.254.0.0/16), the kube-apiserver (ClusterIP 10.43.0.1 and the
+    # node IPs, both inside 10.0.0.0/8), and every other RFC1918
+    # neighbour this pod has no business reaching. What is left is the
+    # public internet, which is all a scanner legitimately needs.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range .Values.networkPolicy.blockedEgressCIDRs }}
+              - {{ . | quote }}
+              {{- end }}
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 80 }
+{{- end }}

@@ -41,3 +41,36 @@ check_render "localArtifacts + extraVolumes/Mounts" \
 	--set 'monitorApi.extraVolumeMounts[0].mountPath=/artifacts' \
 	--set 'monitorApi.extraVolumeMounts[0].readOnly=true'
 check_render "postgres.dsnExistingSecret" --set monitorApi.postgres.dsnExistingSecret=scm-external-db
+
+# NetworkPolicies, asserted by NAME in both directions.
+#
+# check_render above only proves every emitted document has an
+# apiVersion -- which a chart emitting ZERO NetworkPolicies passes
+# trivially. That is exactly the failure worth catching here: a typo in
+# the `if .Values.networkPolicy.enabled` guard, or a values key renamed
+# out from under it, silently produces a cluster with no policies and a
+# chart that still renders green. So this checks the policies are
+# actually there when enabled, and actually gone when not.
+expect_policies() {
+	label="$1"
+	shift
+	expected="$1"
+	shift
+	echo "== networkpolicy ($label) =="
+	got=$(helm template scm-ci charts/supply-chain-monitor "$@" | grep -c '^kind: NetworkPolicy' || true)
+	if [ "$got" != "$expected" ]; then
+		echo "ERROR: expected $expected NetworkPolicy documents, got $got" >&2
+		exit 1
+	fi
+	if [ "$expected" != "0" ]; then
+		for name in scm-scan-worker-egress scm-postgres-ingress scm-monitor-api; do
+			helm template scm-ci charts/supply-chain-monitor "$@" | grep -q "name: $name" || {
+				echo "ERROR: NetworkPolicy $name did not render" >&2
+				exit 1
+			}
+		done
+	fi
+}
+
+expect_policies "enabled by default" 3
+expect_policies "networkPolicy.enabled=false" 0 --set networkPolicy.enabled=false
