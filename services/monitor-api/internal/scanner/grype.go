@@ -207,6 +207,11 @@ func (g *GrypeScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding
 // ScanRaw runs the grype CLI invocation, returning grype's raw JSON
 // report bytes before any parsing.
 func (g *GrypeScanner) ScanRaw(ctx context.Context, ref string) ([]byte, error) {
+	// See TrivyScanner.ScanRaw's comment: this is the function that
+	// hands the ref to grype, so this is where it gets checked.
+	if err := ValidateRef(ctx, ref); err != nil {
+		return nil, err
+	}
 	cmd := exec.CommandContext(ctx, "grype", g.args(ref)...)
 	// Start from the process's own environment, then layer the DB and
 	// registry overrides on top -- dropping to just db.env()/registryEnv()

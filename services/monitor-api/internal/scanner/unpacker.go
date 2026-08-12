@@ -76,6 +76,12 @@ func NewUnpackerScanner(clamAddr, unpackerBin string, insecure, public bool, max
 func (u *UnpackerScanner) Bucket() string { return "malware" }
 
 func (u *UnpackerScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding, error) {
+	// unpacker pulls the image itself (oras-go, falling back to crane),
+	// so this is an outbound request made from a ref -- checked here for
+	// the same reason Fetch and the CVE scanners check their own.
+	if err := ValidateRef(ctx, ref); err != nil {
+		return nil, err
+	}
 	tmpDir, err := os.MkdirTemp("", "scm-unpack-*")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create scratch dir: %w", err)

@@ -163,6 +163,13 @@ func (e *PluggableScanner) timeout() time.Duration {
 }
 
 func (e *PluggableScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding, error) {
+	// An operator-configured binary gets this ref on its command line
+	// and may do anything at all with it, so it is checked before the
+	// handoff -- this is the one ref consumer whose behaviour this
+	// codebase cannot inspect.
+	if err := ValidateRef(ctx, ref); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, e.timeout())
 	defer cancel()
 

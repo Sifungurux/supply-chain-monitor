@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -157,7 +158,7 @@ func TestScanArtifact_SARIFFindingsGoToOtherBucket(t *testing.T) {
 	h, store := newTestRouter(scanner.Registry{
 		artifact.TypeSARIF: {sarifLike},
 	})
-	created := mustCreate(t, store, "/tmp/results.sarif", artifact.TypeSARIF)
+	created := mustCreate(t, store, "scm-registry.example/scans/app-sarif:1", artifact.TypeSARIF)
 
 	rec, scanned := scanAndWait(t, h, store, created.ID)
 	if rec.Code != http.StatusAccepted {
@@ -188,7 +189,7 @@ func TestScanArtifact_CategoryRoutesToMisconfigAndSecretBuckets(t *testing.T) {
 	h, store := newTestRouter(scanner.Registry{
 		artifact.TypeSARIF: {sarifLike},
 	})
-	created := mustCreate(t, store, "/tmp/results.sarif", artifact.TypeSARIF)
+	created := mustCreate(t, store, "scm-registry.example/scans/app-sarif:1", artifact.TypeSARIF)
 
 	rec, scanned := scanAndWait(t, h, store, created.ID)
 	if rec.Code != http.StatusAccepted {
@@ -932,5 +933,113 @@ func TestScanArtifact_NotifiesOnFirstScanWhenSuppressionDisabled(t *testing.T) {
 func TestNotifications_ZeroValueSuppressesFirstScan(t *testing.T) {
 	if (api.Notifications{}).NotifyOnFirstScan {
 		t.Fatal("the zero value must suppress first-scan notifications")
+	}
+}
+
+// countingScanner records whether it ever ran. The point of the tests
+// below is not just that a refused scan answers 400 -- it is that
+// nothing downstream of the check executed.
+type countingScanner struct {
+	calls atomic.Int64
+}
+
+func (c *countingScanner) Scan(_ context.Context, _ string) ([]artifact.Finding, error) {
+	c.calls.Add(1)
+	return nil, nil
+}
+
+// A ref that was registered before ValidateRef existed is still in the
+// database, and an `image` artifact never passes through Fetch or
+// Resolve -- trivy/grype/unpacker pull it themselves. So the scan path
+// has to re-check rather than trusting registration to have done it.
+func TestScanArtifact_RefusesRefsPointingInward(t *testing.T) {
+	t.Setenv("REF_HOST_ALLOWLIST", "")
+
+	for _, tc := range []struct{ name, ref string }{
+		{"cloud metadata IP", "169.254.169.254/latest/meta-data:1"},
+		{"in-cluster service", "scm-registry.supply-chain-monitor.svc.cluster.local:5000/app:1"},
+		{"RFC1918 address", "10.0.0.5:5000/app:1.0"},
+		{"local filesystem path", "/proc/self/environ"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := &countingScanner{}
+			h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {sc}})
+			// Written straight to the store, exactly as a row registered
+			// before the guard existed would be -- registering through
+			// the API would (correctly) refuse it and prove nothing.
+			created := mustCreate(t, store, tc.ref, artifact.TypeImage)
+
+			rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+			}
+			if n := sc.calls.Load(); n != 0 {
+				t.Fatalf("scanner ran %d time(s) for a refused ref -- the check must come before dispatch", n)
+			}
+
+			// Status untouched: the artifact was never marked scanning,
+			// so nothing has to reclaim it later.
+			after, err := store.Get(created.ID)
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			if after.Status != artifact.StatusRegistered {
+				t.Fatalf("status = %q, want it left at %q", after.Status, artifact.StatusRegistered)
+			}
+		})
+	}
+}
+
+// The subtle half. Failing INSIDE runScan instead would call
+// MergeFindings with no scanner results, and any bucket not marked
+// blocked would mark every existing finding "fixed" -- a refused scan
+// silently destroying history. Refusing before the dispatch is what
+// keeps that from being possible, so it gets its own test.
+func TestScanArtifact_RefusedScanLeavesFindingsIntact(t *testing.T) {
+	t.Setenv("REF_HOST_ALLOWLIST", "")
+	sc := &countingScanner{}
+	h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {sc}})
+	created := mustCreate(t, store, "169.254.169.254/latest/meta-data:1", artifact.TypeImage)
+
+	if _, err := store.Update(created.ID, func(art *artifact.Artifact) {
+		art.Status = artifact.StatusScanned
+		art.CVEFindings = []artifact.Finding{{ID: "CVE-2024-0001", Severity: "high", Status: "open"}}
+	}); err != nil {
+		t.Fatalf("seed findings: %v", err)
+	}
+
+	if rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan", nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+
+	after, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(after.CVEFindings) != 1 {
+		t.Fatalf("findings = %+v, want the existing one untouched", after.CVEFindings)
+	}
+	if after.CVEFindings[0].Status != "open" {
+		t.Fatalf("finding status = %q, want it still open -- a refused scan must not mark anything fixed", after.CVEFindings[0].Status)
+	}
+	if after.Status != artifact.StatusScanned {
+		t.Fatalf("artifact status = %q, want it unchanged at %q", after.Status, artifact.StatusScanned)
+	}
+}
+
+// An ordinary public ref still scans -- the guard must not cost the
+// normal path anything.
+func TestScanArtifact_OrdinaryRefStillScans(t *testing.T) {
+	t.Setenv("REF_HOST_ALLOWLIST", "")
+	sc := &countingScanner{}
+	h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {sc}})
+	created := mustCreate(t, store, "ghcr.io/example/app:1.0", artifact.TypeImage)
+
+	rec, _ := scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202, body=%s", rec.Code, rec.Body.String())
+	}
+	if n := sc.calls.Load(); n != 1 {
+		t.Fatalf("scanner ran %d time(s), want 1", n)
 	}
 }

@@ -200,8 +200,19 @@ or resolves to a loopback, link-local (`169.254.0.0/16`, including the
 cloud instance-metadata address), private (RFC1918, IPv6 ULA), or
 unspecified address. It runs at registration in both endpoints *before*
 digest resolution -- the first thing to make an outbound request -- and
-again inside `RegistryFetcher.Fetch`/`OrasDigestResolver.Resolve`, which
-is what covers the scan-worker Job (a process no handler check reaches).
+again at every point the ref becomes an outbound request:
+`RegistryFetcher.Fetch` and `OrasDigestResolver.Resolve` for the
+fetch/digest paths, and `TrivyScanner.ScanRaw`, `GrypeScanner.ScanRaw`,
+`UnpackerScanner.Scan` and `PluggableScanner.Scan` for `image` artifacts,
+which are pulled by those tools themselves and so never touch Fetch or
+Resolve at all. `scanArtifact` also re-checks before dispatching
+anything, which is what catches a row registered before this existed --
+refused with a 400 *before* the status flips, so the artifact keeps its
+findings (failing inside `runScan` would hand `MergeFindings` an empty
+result set and mark every existing finding "fixed"). The per-scanner
+checks are what cover the scan-worker Job, a process no handler check
+reaches; note trivy is validated in `ScanRaw` rather than `Scan`,
+because the worker's image mode arrives via `ScanWithRaw`.
 `REF_HOST_ALLOWLIST` (`monitorApi.refHostAllowlist`) exempts named
 hosts; the chart populates it with this deployment's own `scm-registry`,
 which would otherwise be refused twice over -- it is both a cluster-DNS

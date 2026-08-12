@@ -176,3 +176,60 @@ func TestFetchAndResolve_ValidateRefThemselves(t *testing.T) {
 		t.Fatalf("Resolve(%q) = (%q, %v), want it refused before oras ever ran", metadataRef, digest, err)
 	}
 }
+
+// The scan-worker Job runs these in its own process, reached through
+// main.go's runScanWorker rather than through any HTTP handler -- so
+// the API's scan-time check never executes for them and they have to
+// refuse a bad ref themselves. Asserted for the exact entry point each
+// one is actually called through, which is not always Scan:
+// TrivyScanner is reached via ScanWithRaw in image mode, and both it
+// and Scan funnel into ScanRaw, so ScanRaw is what must hold the line.
+func TestImageScannersRefuseRefsPointingInward(t *testing.T) {
+	const metadataRef = "169.254.169.254/latest/meta-data:1"
+	ctx := context.Background()
+
+	t.Run("trivy ScanRaw", func(t *testing.T) {
+		_, err := NewTrivyScanner("", TrivyDBConfig{}).ScanRaw(ctx, metadataRef)
+		requireLinkLocalRefusal(t, err)
+	})
+	// The path the scan-worker actually uses for image mode. Separate
+	// case on purpose: validating in Scan alone would leave this one
+	// open, since it does not call Scan.
+	t.Run("trivy ScanWithRaw (the worker's entry point)", func(t *testing.T) {
+		_, _, err := NewTrivyScanner("", TrivyDBConfig{}).ScanWithRaw(ctx, metadataRef)
+		requireLinkLocalRefusal(t, err)
+	})
+	t.Run("trivy Scan", func(t *testing.T) {
+		_, err := NewTrivyScanner("", TrivyDBConfig{}).Scan(ctx, metadataRef)
+		requireLinkLocalRefusal(t, err)
+	})
+	t.Run("grype ScanRaw", func(t *testing.T) {
+		_, err := NewGrypeScanner(GrypeDBConfig{}, false, "").ScanRaw(ctx, metadataRef)
+		requireLinkLocalRefusal(t, err)
+	})
+	t.Run("unpacker Scan", func(t *testing.T) {
+		_, err := NewUnpackerScanner("127.0.0.1:1", "unpacker", true, true, 1024, "").Scan(ctx, metadataRef)
+		requireLinkLocalRefusal(t, err)
+	})
+	t.Run("pluggable Scan", func(t *testing.T) {
+		s := NewPluggableScanner(PluggableScannerConfig{
+			Name: "probe", Command: "/bin/false", ArtifactTypes: []string{"image"},
+		})
+		_, err := s.Scan(ctx, metadataRef)
+		requireLinkLocalRefusal(t, err)
+	})
+}
+
+// requireLinkLocalRefusal insists the error is the ref check firing,
+// not the tool being absent or a connection failing. Without this the
+// tests above would pass on any machine with no trivy binary installed
+// -- proving nothing at all.
+func requireLinkLocalRefusal(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected the ref to be refused, got nil")
+	}
+	if !strings.Contains(err.Error(), "link-local") {
+		t.Fatalf("refused for the wrong reason: %v -- want the ValidateRef link-local refusal, not a missing binary or a failed connection", err)
+	}
+}
