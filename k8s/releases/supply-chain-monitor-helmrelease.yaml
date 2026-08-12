@@ -100,3 +100,23 @@ spec:
       # from this cluster's dashboard -- chart default stays true so no
       # other deployment silently loses them.
       showConnectionSettings: false
+    monitorApi:
+      # Cap how many artifacts may exist at once. Set here rather than in
+      # the chart, same reasoning as the two dashboard values above: the
+      # chart default stays 0 (unlimited), which is what every other
+      # deployment of this chart had before the cap existed, so nobody
+      # silently gains a quota they didn't ask for.
+      #
+      # 500 is sized off what this cluster actually does. It holds 94
+      # artifacts today, and the load test re-registers a ~95-image
+      # corpus on every run -- which is a no-op at the cap, since
+      # duplicates are refused before they consume quota, but the
+      # headroom needs to cover a genuinely new batch on top of what is
+      # already there. 500 is also exactly what one maximum-size bulk
+      # request can carry (maxBulkArtifacts), so a single such request
+      # against an empty store fits precisely.
+      #
+      # Over the cap is a 403, not a 429: retrying cannot help, only
+      # deleting artifacts can. Raise this value or delete artifacts if
+      # the dashboard starts reporting refused registrations.
+      maxArtifacts: 500
