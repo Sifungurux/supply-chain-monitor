@@ -27,7 +27,7 @@ ifeq ($(SCM_RUNTIME),podman)
 export DOCKER_HOST := $(shell (podman system connection ls --format json | jq -r '.[] | select(.Default==true) | .URI') 2>/dev/null)
 endif
 
-.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build test-image deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap helm-lint helm-template db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
+.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build test-image vulncheck trivy-config deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap helm-lint helm-template db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -145,6 +145,42 @@ test-image:
 	@docker run --rm --entrypoint sh $(IMAGE)-verify -c 'command -v curl >/dev/null' \
 		&& { echo "curl is present in the runtime image -- it belongs to the tools stage only" >&2; exit 1; } || true
 	@echo "image checks passed"
+
+# govulncheck against the module's own source. Reports only the
+# vulnerabilities whose vulnerable SYMBOLS this code actually reaches,
+# not everything in the dependency tree -- that call-graph filtering is
+# the whole reason to use this rather than a generic dependency scanner.
+#
+# Analyzed with a NEWER toolchain than the module targets (go.mod says
+# 1.22): the toolchain doing the analysis has to know about recent
+# standard-library advisories to report them, and it does not have to
+# match the one that ships the binary.
+#
+# Advisory, not gating, and CI runs it the same way -- see the
+# govulncheck job in .github/workflows/ci.yml for the reasoning. Run it
+# by hand any time; it needs network for the vulnerability database.
+GOVULNCHECK_VERSION ?= v1.1.4
+vulncheck:
+	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.24-alpine \
+		sh -c "go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) && govulncheck ./..."
+
+# Misconfiguration scan of the two things this repo ships that describe
+# infrastructure: its Helm chart and the monitor-api Dockerfile.
+#
+# Gating, unlike vulncheck: both are clean today (the Dockerfile with no
+# exceptions at all, the chart with the two documented entries in
+# .trivyignore), so anything new here is a real regression rather than
+# pre-existing noise. Chart and Dockerfile are scanned as separate
+# invocations because trivy picks a different parser per target type,
+# and a directory scan of the repo root would also drag in
+# cluster/*.template.yaml -- bare manifests that are not what this
+# project deploys.
+TRIVY_IMAGE ?= aquasec/trivy:0.73.0
+trivy-config:
+	docker run --rm -v "$(CURDIR)":/src -w /src $(TRIVY_IMAGE) config charts/supply-chain-monitor \
+		--severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore
+	docker run --rm -v "$(CURDIR)":/src -w /src $(TRIVY_IMAGE) config services/monitor-api/Dockerfile \
+		--severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore
 
 # The whole application is a single Helm chart via Flux now (see
 # charts/supply-chain-monitor/, k8s/releases/supply-chain-monitor-helmrelease.yaml,
