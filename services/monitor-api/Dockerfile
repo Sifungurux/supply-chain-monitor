@@ -118,14 +118,18 @@ RUN apk add --no-cache curl tar
 # page saved as a .tar.gz, and --retry so a connection that dies
 # mid-transfer is retried instead of failing the whole build. That is not
 # hypothetical -- this stage makes four release downloads in a row, and
-# CI hit `curl: (56) Connection died` on the third while the first two
-# had just succeeded from the same runner. --retry-all-errors is what
+# CI has now hit two different transient failures on these downloads on
+# two separate days -- `curl: (56) Connection died` mid-transfer, and a
+# straight `503` from GitHub's release CDN that outlasted a 3x2s retry
+# budget. Hence 5 retries at 5s rather than 3 at 2s: the failure mode is
+# GitHub being briefly unavailable, which lasts longer than a couple of
+# seconds. --retry-all-errors is what
 # makes --retry cover a mid-transfer receive failure; without it curl
 # only retries a narrower set (timeouts, 5xx, 429).
 #
 # Retrying is safe precisely because of the sha256 check below: a
 # corrupt or truncated retry cannot pass unnoticed, it fails the build.
-ARG CURL_OPTS="-fsSL --retry 3 --retry-delay 2 --retry-all-errors"
+ARG CURL_OPTS="-fsSL --retry 5 --retry-delay 5 --retry-all-errors"
 # Two guards inside the script below are worth naming, since neither is
 # obvious from the code:
 #
