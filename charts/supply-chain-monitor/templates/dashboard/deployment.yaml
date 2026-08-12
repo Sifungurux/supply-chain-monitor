@@ -47,6 +47,16 @@ spec:
       initContainers:
         - name: render-config
           image: "{{ .Values.dashboard.image.repository }}:{{ .Values.dashboard.image.tag }}"
+          # initContainers are judged by Pod Security Admission exactly
+          # like regular containers -- this one had no securityContext
+          # at all and was the only thing (besides clamav, deliberately)
+          # keeping this chart off the restricted profile. It writes
+          # only into the /html emptyDir, so a read-only rootfs is fine.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           command: ["sh", "-c"]
           args:
             - |
