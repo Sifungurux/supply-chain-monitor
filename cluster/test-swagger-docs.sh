@@ -12,7 +12,7 @@
 #
 # Needs nothing but Docker: starts a throwaway Postgres (same image
 # test-postgres in the Makefile uses) plus monitor-api itself via `go run`
-# in a golang:1.22-alpine container, both on --network host so monitor-api
+# in a golang:1.26.5-alpine container, both on --network host so monitor-api
 # can reach Postgres via localhost -- see the Makefile's test-postgres
 # target for why that means this doesn't work on Docker Desktop for macOS
 # (only a real Linux host, e.g. Colima or a GitHub Actions runner).
@@ -50,7 +50,7 @@ docker run -d --rm --network host --name "$API_CONTAINER" \
 	-e POSTGRES_HOST=localhost -e POSTGRES_PORT="${PG_PORT}" \
 	-e POSTGRES_USER=postgres -e POSTGRES_DB=postgres -e POSTGRES_PASSWORD=test \
 	-e DISABLE_SCAN_ISOLATION=true \
-	golang:1.22-alpine sh -c "go mod download && go run ." >/dev/null
+	golang:1.26.5-alpine sh -c "go mod download && go run ." >/dev/null
 
 echo "==> waiting for /healthz (Postgres startup + Go build can take a while on a cold cache)"
 ready=false
