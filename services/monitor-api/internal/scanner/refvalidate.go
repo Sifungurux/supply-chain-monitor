@@ -71,18 +71,34 @@ const refResolveTimeout = 5 * time.Second
 // the window rather than closing it; pin the dial if the registry
 // client ever moves in-process.
 func ValidateRef(ctx context.Context, ref string) error {
-	ref = strings.TrimSpace(ref)
 	if scheme, _, ok := strings.Cut(ref, "://"); ok {
 		return fmt.Errorf("ref must be an OCI registry reference (host/repo:tag), not a %q URL", scheme)
+	}
+	// Not trimmed, refused: this has to judge the exact string the
+	// callers below hand to oras, and a ref that only passes because
+	// validation quietly normalized it first is the same parse-versus-use
+	// gap refHosts exists to close.
+	if strings.TrimSpace(ref) != ref {
+		return fmt.Errorf("ref must not have leading or trailing whitespace")
 	}
 	if looksLikeLocalPath(ref) {
 		return nil
 	}
 
-	host := refHost(ref)
-	if host == "" {
+	hosts := refHosts(ref)
+	if len(hosts) == 0 {
 		return fmt.Errorf("ref %q has no registry host", ref)
 	}
+	for _, host := range hosts {
+		if err := validateRefHost(ctx, ref, host); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateRefHost applies the rules to one candidate host.
+func validateRefHost(ctx context.Context, ref, host string) error {
 	if refHostAllowed(host) {
 		return nil
 	}
@@ -113,22 +129,60 @@ func ValidateRef(ctx context.Context, ref string) error {
 	return nil
 }
 
-// refHost extracts the registry host from a ref, port stripped and
-// lower-cased. Runs the ref through qualifyDockerHubRef first so an
-// unqualified Docker Hub name is judged on the host it will ACTUALLY be
-// fetched from ("nginx:alpine" -> docker.io), not on its first path
-// segment -- the same normalization OrasDigestResolver.Resolve applies
-// before handing the ref to oras, so both agree on what the host is.
-func refHost(ref string) string {
-	first, _, _ := strings.Cut(qualifyDockerHubRef(ref), "/")
-	first = strings.ToLower(first)
+// refHosts returns every host this ref could actually be fetched from,
+// because this package's two consumers of a ref do NOT agree on which
+// token is the host:
+//
+//   - OrasDigestResolver.Resolve qualifies first, so
+//     "vault/sboms/app:1.0" is docker.io/vault/sboms/app:1.0 to it;
+//   - RegistryFetcher.Fetch hands the ref to `oras pull` raw, and oras
+//     parses the first segment as the registry host -- the behaviour
+//     qualifyDockerHubRef's own comment documents for "bitnami".
+//
+// So that one ref means docker.io to one caller and a single-label host
+// "vault" to the other -- and a single-label host inside a pod is
+// exactly what the resolver's search domains turn into
+// vault.<ns>.svc.cluster.local, a ClusterIP, an in-cluster service.
+// Validating only the qualified host would leave the fetch path open
+// through the very case this exists to refuse, so both are checked and
+// each must pass on its own.
+//
+// The cost is that a Docker Hub org name colliding with a Service name
+// in this namespace ("postgres/foo:1" where a postgres Service exists)
+// is refused. That collision is genuinely ambiguous -- oras would pull
+// from the Service -- so refusing is the right answer, and
+// REF_HOST_ALLOWLIST is there for an operator who means the org.
+func refHosts(ref string) []string {
+	qualified := hostOf(firstSegment(qualifyDockerHubRef(ref)))
+	hosts := []string{qualified}
+	// Only a ref WITH a path separator has a first segment oras would
+	// treat as a host at all; a bare "alpine:3.19" is not a reference
+	// oras pulls from anywhere, so there's no second candidate to check
+	// (and no pointless second DNS lookup on the common path).
+	if first, _, ok := strings.Cut(ref, "/"); ok {
+		if h := hostOf(first); h != "" && h != qualified {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts
+}
+
+func firstSegment(ref string) string {
+	first, _, _ := strings.Cut(ref, "/")
+	return first
+}
+
+// hostOf normalizes one host[:port] token: lower-cased, port stripped,
+// IPv6 brackets removed.
+func hostOf(hostPort string) string {
+	hostPort = strings.ToLower(hostPort)
 	// SplitHostPort also unwraps the brackets around an IPv6 literal
 	// ("[::1]:5000" -> "::1"); it errors when there's no port at all,
 	// which leaves the bracket-stripping below to handle a bare "[::1]".
-	if h, _, err := net.SplitHostPort(first); err == nil {
+	if h, _, err := net.SplitHostPort(hostPort); err == nil {
 		return h
 	}
-	return strings.Trim(first, "[]")
+	return strings.Trim(hostPort, "[]")
 }
 
 // refHostAllowed reports whether host is exempted by

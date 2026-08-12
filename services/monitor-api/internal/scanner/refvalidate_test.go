@@ -44,6 +44,10 @@ func TestValidateRef_RefusesRefsPointingInward(t *testing.T) {
 		{name: "https URL", ref: "https://169.254.169.254/latest/meta-data", wantErr: "not a"},
 		{name: "file URL", ref: "file:///etc/shadow", wantErr: "not a"},
 
+		// Refused rather than trimmed: what gets validated has to be the
+		// exact string that gets used.
+		{name: "leading whitespace", ref: " 169.254.169.254/latest/meta-data:1", wantErr: "whitespace"},
+
 		// Accepted: a local path makes no outbound request (the original
 		// v1 convention, see looksLikeLocalPath), and a public address
 		// is exactly what this is meant to let through.
@@ -73,6 +77,34 @@ func TestValidateRef_RefusesRefsPointingInward(t *testing.T) {
 				t.Fatalf("error leaks a resolved address: %q", err)
 			}
 		})
+	}
+}
+
+// The two consumers of a ref in this package disagree about which
+// token is the registry host -- Resolve qualifies first and sees
+// docker.io, Fetch hands the ref to `oras pull` raw and oras reads the
+// first segment. Validating only one of them leaves the other open: a
+// single-label host like "vault" is docker.io to the first and, inside
+// a pod whose resolver appends search domains, an in-cluster Service to
+// the second.
+//
+// Asserted on refHosts directly rather than through ValidateRef,
+// because whether "vault" resolves to anything at all depends on being
+// inside a cluster -- which is exactly the environment a unit test
+// isn't, and exactly the environment the attack needs.
+func TestRefHosts_CoversWhatEitherConsumerWouldFetchFrom(t *testing.T) {
+	for ref, want := range map[string][]string{
+		"vault/sboms/app:1.0":             {"docker.io", "vault"},
+		"bitnami/redis:7.2.5":             {"docker.io", "bitnami"},
+		"alpine:3.19":                     {"docker.io"},
+		"ghcr.io/org/app:1.0":             {"ghcr.io"},
+		"scm-registry:5000/sboms/app:1.0": {"scm-registry"},
+		"[::1]:5000/app:1.0":              {"::1"},
+		"GHCR.IO/Org/App:1.0":             {"ghcr.io"},
+	} {
+		if got := refHosts(ref); strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("refHosts(%q) = %v, want %v", ref, got, want)
+		}
 	}
 }
 
