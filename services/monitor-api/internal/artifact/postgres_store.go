@@ -968,6 +968,17 @@ func (s *PostgresStore) FindByDigest(digest string) (*Artifact, error) {
 	return a, nil
 }
 
+// Count returns how many artifacts exist -- a bare COUNT(*), since its
+// only caller (the registration quota) needs the number and nothing
+// else. See the Store interface's comment.
+func (s *PostgresStore) Count() (int, error) {
+	var n int
+	if err := s.pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM artifacts`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count artifacts: %w", err)
+	}
+	return n, nil
+}
+
 // FindByRef returns the first-registered artifact with this exact ref --
 // the dedup fallback used only when a digest could not be resolved. See
 // the Store interface's comment for why that fallback exists.

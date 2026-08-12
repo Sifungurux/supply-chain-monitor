@@ -52,8 +52,14 @@ import (
 // notifications is optional: a zero value (no notifiers) leaves the
 // service behaving exactly as it did before outbound notifications
 // existed -- nothing is sent, and nothing can fail.
-func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner.Registry, apiKey string, rateLimitRPS float64, rateLimitBurst float64, digestResolver scanner.DigestResolver, fetchPlainHTTP bool, scanTimeout time.Duration, requireDigest bool, scanLimits ScanLimits, notifications Notifications) http.Handler {
-	h := &handler{store: store, tracker: tracker, scanners: scanners, digestResolver: digestResolver, fetchPlainHTTP: fetchPlainHTTP, scanTimeout: scanTimeout, requireDigest: requireDigest, notifiers: notifications.Notifiers, notifyMinSeverity: notifications.MinSeverity, notifyOnFirstScan: notifications.NotifyOnFirstScan}
+// regLimits bounds how many artifacts may exist at all -- the zero
+// value is unlimited (see RegistrationLimits).
+//
+// This signature has grown to thirteen parameters. The next knob should
+// consolidate ScanLimits/Notifications/RegistrationLimits into one
+// Config struct rather than adding a fourteenth.
+func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner.Registry, apiKey string, rateLimitRPS float64, rateLimitBurst float64, digestResolver scanner.DigestResolver, fetchPlainHTTP bool, scanTimeout time.Duration, requireDigest bool, scanLimits ScanLimits, notifications Notifications, regLimits RegistrationLimits) http.Handler {
+	h := &handler{store: store, tracker: tracker, scanners: scanners, digestResolver: digestResolver, fetchPlainHTTP: fetchPlainHTTP, scanTimeout: scanTimeout, requireDigest: requireDigest, notifiers: notifications.Notifiers, notifyMinSeverity: notifications.MinSeverity, notifyOnFirstScan: notifications.NotifyOnFirstScan, maxArtifacts: regLimits.MaxArtifacts}
 	if scanLimits.Concurrency > 0 {
 		h.scanSlots = make(chan struct{}, scanLimits.Concurrency)
 	}

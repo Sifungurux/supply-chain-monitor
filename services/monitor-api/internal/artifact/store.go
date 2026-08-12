@@ -68,6 +68,13 @@ type Store interface {
 	// back empty -- see internal/api/artifacts.go. When a digest DOES
 	// resolve it is strictly better evidence and wins outright.
 	FindByRef(ref string) (*Artifact, error)
+	// Count returns how many artifacts exist. Deliberately not
+	// List()/ListPage(): the one caller is a quota check on the
+	// registration path (see internal/api's MaxArtifacts), which runs
+	// on every registration and needs a number, not rows -- ListPage
+	// would fetch an artifact and batch-load its findings and stage
+	// history to answer it.
+	Count() (int, error)
 	// Delete permanently removes an artifact and everything recorded
 	// against it (stage history, findings, scan errors) -- there is no
 	// undo and no soft-delete/archive semantics (see
@@ -311,6 +318,12 @@ func findingIDMatches(findings []Finding, findingID string) bool {
 // FindByRef scans for the earliest artifact with this exact ref. Same
 // oldest-wins tie-break as FindByDigest, so repeated registrations
 // converge on the original rather than the most recent.
+func (s *MemStore) Count() (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.data), nil
+}
+
 func (s *MemStore) FindByRef(ref string) (*Artifact, error) {
 	if ref == "" {
 		return nil, nil

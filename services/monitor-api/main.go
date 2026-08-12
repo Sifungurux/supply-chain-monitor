@@ -1298,9 +1298,22 @@ func runAPIServer() {
 		log.Printf("notifications: first-scan suppression disabled -- an artifact's first scan will notify too")
 	}
 
+	// MAX_ARTIFACTS bounds how many artifacts may exist at all. Nothing
+	// bounded this before: maxBulkArtifacts caps one request at 500 and
+	// the body limits cap bytes per request, but a caller could repeat
+	// either indefinitely, and every artifact costs a row, its findings,
+	// its stage history, and a share of every List the dashboard polls.
+	// 0 (the default) is unlimited, the same "zero reads as off"
+	// convention RATE_LIMIT_RPS and SCAN_CONCURRENCY already use.
+	maxArtifacts := getenvInt("MAX_ARTIFACTS", 0)
+	if maxArtifacts > 0 {
+		log.Printf("registration capped at %d artifacts (MAX_ARTIFACTS)", maxArtifacts)
+	}
+
 	router := api.NewRouter(store, stageTracker, scanners, apiKey, rateLimitRPS, rateLimitBurst, digestResolver, fetchPlainHTTP, scanTimeout, requireDigest,
 		api.ScanLimits{Concurrency: scanConcurrency},
-		api.Notifications{Notifiers: notifiers, MinSeverity: notifyMinSeverity, NotifyOnFirstScan: !suppressFirstScan})
+		api.Notifications{Notifiers: notifiers, MinSeverity: notifyMinSeverity, NotifyOnFirstScan: !suppressFirstScan},
+		api.RegistrationLimits{MaxArtifacts: maxArtifacts})
 
 	srv := &http.Server{
 		Addr:         listenAddr,

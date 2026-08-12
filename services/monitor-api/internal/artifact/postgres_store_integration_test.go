@@ -783,3 +783,42 @@ func TestPostgresStore_FindByRef(t *testing.T) {
 		t.Fatalf(`FindByRef("") = %+v, %v -- an empty ref must never match`, empty, err)
 	}
 }
+
+func TestPostgresStore_Count(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	// Asserted as a DELTA, not an absolute: this database is shared with
+	// every other test in the file, so the only stable claim is that
+	// Count moves by exactly what this test creates and deletes.
+	before, err := s.Count()
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+
+	ref := fmt.Sprintf("count-test-%d:1.0", time.Now().UnixNano())
+	a, err := s.Create(ref, artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	after, err := s.Count()
+	if err != nil {
+		t.Fatalf("Count (after create): %v", err)
+	}
+	if after != before+1 {
+		t.Fatalf("Count = %d after creating one artifact, want %d", after, before+1)
+	}
+
+	// Deleting must free the quota again -- that is the whole reason the
+	// registration limit answers 403 rather than 429.
+	if err := s.Delete(a.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	freed, err := s.Count()
+	if err != nil {
+		t.Fatalf("Count (after delete): %v", err)
+	}
+	if freed != before {
+		t.Fatalf("Count = %d after deleting the artifact, want %d -- deletion must free quota", freed, before)
+	}
+}

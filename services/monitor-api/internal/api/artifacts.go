@@ -102,6 +102,28 @@ func (h *handler) findDuplicate(ref, digest string) (*artifact.Artifact, error) 
 	return h.store.FindByRef(ref)
 }
 
+// artifactQuota reports how many more artifacts may be created before
+// the configured cap is reached. remaining is only meaningful when
+// unlimited is false.
+//
+// Counted per REQUEST, not per entry: a bulk registration of 500 asks
+// once and then decrements locally, so the quota check costs one
+// COUNT(*) rather than five hundred.
+func (h *handler) artifactQuota() (remaining int, unlimited bool, err error) {
+	if h.maxArtifacts <= 0 {
+		return 0, true, nil
+	}
+	existing, err := h.store.Count()
+	if err != nil {
+		return 0, false, err
+	}
+	r := h.maxArtifacts - existing
+	if r < 0 {
+		r = 0
+	}
+	return r, false, nil
+}
+
 func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 	limitBody(w, r, maxSmallJSONBytes)
 	var req createArtifactRequest
@@ -125,6 +147,28 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.requireDigest && req.ExpectedDigest == "" {
 		writeError(w, http.StatusBadRequest, "expected_digest is required (REQUIRE_DIGEST is enabled)")
+		return
+	}
+
+	// Quota check before the registry round trip below: refusing early
+	// costs the caller nothing, and resolving a digest for a
+	// registration that cannot proceed is wasted network I/O.
+	//
+	// 403, not 429: a quota is not a rate limit. Retrying later does not
+	// help -- only deleting artifacts does -- so answering 429 (with the
+	// Retry-After that implies) would tell a client to do the one thing
+	// that cannot work. This matches Kubernetes' own ResourceQuota
+	// behaviour, which is the convention operators here already know.
+	remaining, unlimited, qerr := h.artifactQuota()
+	if qerr != nil {
+		writeError(w, http.StatusInternalServerError, qerr.Error())
+		return
+	}
+	if !unlimited && remaining < 1 {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error":         fmt.Sprintf("artifact limit reached (%d) -- delete artifacts to free capacity, or raise monitorApi.maxArtifacts", h.maxArtifacts),
+			"max_artifacts": h.maxArtifacts,
+		})
 		return
 	}
 
@@ -316,6 +360,16 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 	seenInBatch := make(map[string]*artifact.Artifact)     // digest -> artifact created earlier in this batch
 	seenRefsInBatch := make(map[string]*artifact.Artifact) // ref    -> ditto, for entries with no digest
 	results := make([]bulkCreateArtifactsResult, 0, len(req.Artifacts))
+
+	// One quota check for the whole batch, decremented locally as
+	// entries are created below -- see artifactQuota. Entries that turn
+	// out to be duplicates never consume quota, because they create
+	// nothing.
+	remaining, unlimited, qerr := h.artifactQuota()
+	if qerr != nil {
+		writeError(w, http.StatusInternalServerError, qerr.Error())
+		return
+	}
 	created, failed, duplicates := 0, 0, 0
 	for i, item := range req.Artifacts {
 		res := bulkCreateArtifactsResult{Ref: item.Ref, Type: item.Type}
@@ -401,6 +455,17 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// Out of quota: reported per entry like every other reason an
+		// entry cannot be registered, so a batch that half fits still
+		// registers the half that does -- the same best-effort shape
+		// this endpoint already uses for bad refs and invalid types.
+		if !unlimited && remaining < 1 {
+			res.Error = fmt.Sprintf("artifact limit reached (%d) -- delete artifacts to free capacity", h.maxArtifacts)
+			failed++
+			results = append(results, res)
+			continue
+		}
+
 		a, err := h.store.Create(item.Ref, t)
 		if err != nil {
 			res.Error = err.Error()
@@ -408,6 +473,7 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 			results = append(results, res)
 			continue
 		}
+		remaining--
 		if digest != "" || unsafe {
 			if updated, err := h.store.Update(a.ID, func(art *artifact.Artifact) {
 				art.Digest = digest
