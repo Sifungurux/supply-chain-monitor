@@ -151,17 +151,18 @@ test-image:
 # not everything in the dependency tree -- that call-graph filtering is
 # the whole reason to use this rather than a generic dependency scanner.
 #
-# Analyzed with a NEWER toolchain than the module targets (go.mod says
-# 1.22): the toolchain doing the analysis has to know about recent
-# standard-library advisories to report them, and it does not have to
-# match the one that ships the binary.
+# Analyzed with the SAME toolchain the Dockerfile builds with, on
+# purpose: standard-library findings are a property of the compiler that
+# produces the binary, so analyzing with a different Go version reports
+# vulnerabilities the shipped binary does not have, or misses ones it
+# does. Keep this image and the Dockerfile's in step.
 #
-# Advisory, not gating, and CI runs it the same way -- see the
-# govulncheck job in .github/workflows/ci.yml for the reasoning. Run it
-# by hand any time; it needs network for the vulnerability database.
+# Gating in CI, and clean as of the Go 1.26 / pgx v5.10 bump -- see the
+# govulncheck job in .github/workflows/ci.yml. Run it by hand any time;
+# it needs network for the vulnerability database.
 GOVULNCHECK_VERSION ?= v1.1.4
 vulncheck:
-	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.24-alpine \
+	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.26.5-alpine \
 		sh -c "go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) && govulncheck ./..."
 
 # Misconfiguration scan of the two things this repo ships that describe
@@ -323,7 +324,7 @@ test: test-api test-dashboard check-dashboard-configmap
 # verb, a struct with a copied lock, unreachable code) from merging to
 # main between dependency updates. See docs/tech-debt-audit.md, #10.
 test-api:
-	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.22-alpine sh -c "go mod download && if [ -n \"$$(gofmt -l .)\" ]; then echo 'gofmt drift in:'; gofmt -l .; echo 'run: gofmt -w <file>'; exit 1; fi && go vet ./... && go test ./..."
+	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.26.5-alpine sh -c "go mod download && if [ -n \"$$(gofmt -l .)\" ]; then echo 'gofmt drift in:'; gofmt -l .; echo 'run: gofmt -w <file>'; exit 1; fi && go vet ./... && go test ./..."
 
 # Integration test against a real, throwaway Percona Postgres container
 # (internal/artifact/postgres_store_integration_test.go, gated behind
@@ -337,7 +338,7 @@ test-postgres:
 	docker run -d --rm --name scm-test-postgres -e POSTGRES_PASSWORD=test -p 55432:5432 percona/percona-distribution-postgresql:17.10 >/dev/null
 	docker run --rm --network host -v "$(CURDIR)/services/monitor-api":/src -w /src \
 		-e POSTGRES_TEST_DSN="postgres://postgres:test@localhost:55432/postgres?sslmode=disable" \
-		golang:1.22-alpine sh -c "go mod download && go test -tags=postgres_integration ./internal/artifact/..." ; \
+		golang:1.26.5-alpine sh -c "go mod download && go test -tags=postgres_integration ./internal/artifact/..." ; \
 	status=$$? ; docker stop scm-test-postgres >/dev/null 2>&1 ; exit $$status
 
 # Runs dashboard/index.html's Node+jsdom test suite via a containerized
@@ -358,7 +359,7 @@ test-swagger-docs:
 # Generates and commits services/monitor-api/go.sum for real, pinned,
 # reproducible builds -- see go.mod's own comment on why it isn't
 # committed yet. Needs nothing but Docker: runs `go mod tidy` inside
-# `golang:1.22-alpine` (which does have real internet access, unlike
+# `golang:1.26.5-alpine` (which does have real internet access, unlike
 # whatever sandbox/CI environment this repo's own tooling was written
 # in) and writes go.sum straight into your working tree.
 #
@@ -371,7 +372,7 @@ test-swagger-docs:
 # it'll just confirm the committed go.sum still matches go.mod rather
 # than fetching anything new.
 lock-deps:
-	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.22-alpine sh -c "go mod tidy && go vet ./... && go mod verify"
+	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.26.5-alpine sh -c "go mod tidy && go vet ./... && go mod verify"
 	@echo ""
 	@echo "go.sum written to services/monitor-api/go.sum -- review with 'git diff' and commit it."
 

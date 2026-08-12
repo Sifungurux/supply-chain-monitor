@@ -42,7 +42,7 @@ Makefile                cluster-up/down/destroy, build, deploy, port-forward, te
 Install on your Mac (this runs against your local machine, not a sandbox):
 
 - kubectl
-- Go 1.22+ (only if you want to build/run `monitor-api` outside a container)
+- Go 1.25+ (only if you want to build/run `monitor-api` outside a container)
 - **Either** [Colima](https://github.com/abiosoft/colima) (default runtime — `brew install colima docker`)
   **or** [Podman](https://podman.io/) + [k3d](https://k3d.io/#installation) (optional alternate runtime — `brew install podman k3d`)
 
@@ -1575,7 +1575,7 @@ make test-dashboard   # dashboard/index.html's Node+jsdom tests
 make test-postgres    # real Postgres round-trip against a throwaway container (not part of `make test`)
 ```
 
-These run in containers (`golang:1.22-alpine`, `node:22-alpine`,
+These run in containers (`golang:1.26.5-alpine`, `node:22-alpine`,
 `percona/percona-distribution-postgresql`) so there's nothing extra to
 install beyond Docker, which you already have via Colima or Podman. No
 CI workflow is wired up yet -- these `make`

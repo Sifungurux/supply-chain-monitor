@@ -182,44 +182,24 @@ jobs:
         run: make trivy-config
 
   # govulncheck: Go vulnerabilities this code actually REACHES, by call
-  # graph, rather than everything present in the dependency tree.
+  # graph, rather than everything present in the dependency tree. That
+  # call-graph filtering is the point -- it is the difference between
+  # "a CVE exists somewhere in your module graph" and "your code calls
+  # the vulnerable function".
   #
-  # Advisory (continue-on-error), and that is a deliberate, uncomfortable
-  # choice rather than an oversight. At the time of writing it reports 12
-  # findings, of which 10 are standard-library advisories that track the
-  # pinned Go toolchain -- fixable only by moving off go1.22, which is a
-  # real change (go.mod, the Dockerfile, the test images) with its own
-  # compatibility risk, not something to smuggle into a CI commit. The
-  # remaining 2 are module-level (github.com/jackc/pgx/v5, and
-  # golang.org/x/text indirectly) and are worth a deliberate bump.
+  # GATING. It reports zero today, so a finding here is a real
+  # regression: either a dependency picked one up, or new code started
+  # calling a vulnerable symbol that was already present and unreached.
   #
-  # A gating job that is red on day one gets muted, disabled, or routed
-  # around within a week, so this one stays green and writes the count to
-  # the run summary instead. FLIP IT TO GATING -- drop the trailing
-  # `exit 0` below -- once the toolchain moves and the count reaches
-  # zero, so this temporary state does not quietly become permanent.
+  # Getting to zero took the two bumps in this same change -- the Go
+  # toolchain (10 standard-library advisories, which are a property of
+  # the compiler that builds the binary, not of any dependency) and
+  # pgx/x/text (2 module-level, one of them a SQL injection). Keep
+  # `make vulncheck` and the Dockerfile on the same Go version, or this
+  # job starts reporting on a toolchain the shipped binary does not use.
   govulncheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: make vulncheck
-        # Findings go to the run summary and the job stays green, rather
-        # than the job going permanently red. A red check on every single
-        # PR is how people learn to ignore red checks -- the exact
-        # failure this job's own comment warns about. Green-with-a-count
-        # keeps the number in front of whoever opens the run without
-        # spending the signal that red is supposed to carry.
-        run: |
-          set -o pipefail
-          make vulncheck 2>&1 | tee /tmp/vuln.txt && rc=0 || rc=$?
-          {
-            echo "### govulncheck (advisory -- see the job comment in ci.yml)"
-            echo ""
-            echo '```'
-            grep -E '^Your code is affected|^This scan also found' /tmp/vuln.txt || echo "no vulnerabilities reported"
-            echo '```'
-            echo ""
-            echo "Full output is in this job's log. Flip this job to gating"
-            echo "once the Go toolchain moves and the count reaches zero."
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit 0
+        run: make vulncheck
