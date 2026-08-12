@@ -29,6 +29,8 @@ spec:
       # initContainer can write the rendered index.html/env.js into the
       # shared emptyDir, and nginx can read them back.
       securityContext:
+        seccompProfile:
+          type: RuntimeDefault
         runAsNonRoot: true
         runAsUser: 101
         runAsGroup: 101

@@ -26,6 +26,8 @@ spec:
       # Non-root: docker_auth reads its config and certs from two
       # Secrets and writes nothing, so it needs no writable path at all.
       securityContext:
+        seccompProfile:
+          type: RuntimeDefault
         runAsNonRoot: true
         runAsUser: 65534
         runAsGroup: 65534

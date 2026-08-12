@@ -30,6 +30,8 @@ spec:
       # outside the data PVC, so a read-only rootfs would break it. The
       # data directory is a PVC and unaffected either way.
       securityContext:
+        seccompProfile:
+          type: RuntimeDefault
         runAsNonRoot: true
         runAsUser: 26
         runAsGroup: 26

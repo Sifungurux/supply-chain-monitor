@@ -4,3 +4,22 @@ metadata:
   name: supply-chain-monitor
   labels:
     app.kubernetes.io/part-of: supply-chain-monitor
+    # Pod Security Admission. ENFORCE is baseline, not restricted, for
+    # exactly one reason: scm-clamav. Its image entrypoint does an
+    # unconditional `chown -R` that cannot run as non-root, and it needs
+    # five capabilities back after dropping ALL -- both of which
+    # restricted forbids (see the clamav Deployment for why replacing
+    # that entrypoint would be a worse trade). Every other workload in
+    # the chart, and the scan-worker Jobs monitor-api creates at
+    # runtime, satisfy restricted today.
+    #
+    # audit + warn are set to restricted anyway, so that gap stays
+    # visible in API responses and audit logs rather than being
+    # forgotten -- and so a NEW workload that regresses below restricted
+    # is noticed even though baseline would let it through.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

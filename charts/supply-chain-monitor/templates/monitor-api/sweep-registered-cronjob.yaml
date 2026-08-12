@@ -55,6 +55,8 @@ spec:
           # reached, and does nothing but HTTP calls to monitor-api's own
           # Service (see runSweepRegistered).
           securityContext:
+            seccompProfile:
+              type: RuntimeDefault
             runAsNonRoot: true
             runAsUser: 65534
             runAsGroup: 65534
