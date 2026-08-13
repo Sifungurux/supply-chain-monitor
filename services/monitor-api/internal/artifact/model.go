@@ -266,6 +266,24 @@ type Component struct {
 	Version string `json:"version,omitempty"`
 }
 
+// ComponentMatch is one distinct package found by a component search
+// (Store.SearchComponents), with how many artifacts contain it --
+// deliberately not a Component, which is a per-artifact row and has no
+// business carrying a fleet-wide count. This is the discovery half of
+// component search: "openssl" finds the handful of purls that exist,
+// each with the weight to judge which one you meant, and the purl you
+// pick then goes to FindByComponentPURL for the exact answer.
+type ComponentMatch struct {
+	PURL    string `json:"purl"`
+	Name    string `json:"name,omitempty"`
+	Version string `json:"version,omitempty"`
+	// Artifacts is the number of DISTINCT artifacts containing this
+	// purl. The same purl has one row per artifact, so this is a count
+	// of rows only by coincidence of the unique constraint -- counted
+	// distinctly anyway, so it stays correct if that ever changes.
+	Artifacts int `json:"artifacts"`
+}
+
 // VEXStatement is one VEX statement reduced to what merging a finding
 // needs: which vulnerability it speaks about, what it asserts, and why.
 // Lives here rather than in internal/scanner (which does the actual

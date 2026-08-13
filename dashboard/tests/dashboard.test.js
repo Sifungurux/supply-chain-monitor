@@ -928,6 +928,165 @@ test('the component box queries /api/v1/components and lists every artifact cont
   dom.window.close();
 });
 
+// The two-stage flow: type what you know ("openssl"), pick from the
+// packages that actually exist, land on the artifacts containing
+// exactly that one.
+test('typing a package name shows a picker of matching packages, and choosing one narrows to its artifacts', async () => {
+  const PURL = 'pkg:apk/alpine/openssl@3.1.4-r5';
+  const requests = [];
+  const packages = {
+    total: 2,
+    packages: [
+      { purl: PURL, name: 'openssl', version: '3.1.4-r5', artifacts: 2 },
+      { purl: 'pkg:deb/debian/openssl@3.0.11-1', name: 'openssl', version: '3.0.11-1', artifacts: 1 }
+    ]
+  };
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.indexOf('/api/v1/components') !== -1) {
+        requests.push(url);
+        if (url.indexOf('q=') !== -1) return jsonResponse(packages);
+        return jsonResponse([SAMPLE_ARTIFACTS[0], SAMPLE_ARTIFACTS[2]]);
+      }
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  const box = doc.getElementById('component-input');
+  box.value = 'openssl';
+  box.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await tick(20);
+
+  // Stage 1: packages, not artifacts.
+  assert.match(requests[0], /\/api\/v1\/components\?q=openssl/);
+  assert.equal(doc.getElementById('component-picker').hidden, false);
+  assert.equal(doc.getElementById('artifact-table').hidden, true, 'the artifact table is the wrong answer to "which packages match?"');
+  assert.equal(doc.getElementById('pager').hidden, true);
+
+  const rows = [...doc.querySelectorAll('.pkg-row')];
+  assert.equal(rows.length, 2);
+  assert.match(rows[0].textContent, /openssl/);
+  assert.match(rows[0].textContent, /3\.1\.4-r5/);
+  assert.match(rows[0].textContent, /2 artifacts/);
+  assert.match(rows[1].textContent, /1 artifact\b/, 'singular for one');
+
+  // Stage 2: picking one narrows to the exact purl.
+  rows[0].click();
+  await tick(20);
+
+  const exact = requests[requests.length - 1];
+  assert.match(exact, /purl=/);
+  assert.match(exact, new RegExp(encodeURIComponent(PURL).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.equal(doc.getElementById('component-picker').hidden, true);
+  assert.equal(doc.getElementById('artifact-table').hidden, false);
+  assert.deepEqual([...doc.querySelectorAll('#artifact-rows tr')].map((tr) => tr.dataset.id).sort(), ['a1', 'a3']);
+
+  // ...and back to the matches, without retyping the search.
+  const back = doc.querySelector('[data-action="back-to-matches"]');
+  assert.ok(back, 'a search-derived selection must offer a way back to the other matches');
+  back.click();
+  await tick(20);
+  assert.equal(doc.querySelectorAll('.pkg-row').length, 2, 'back returns to the picker, not to the full artifact list');
+
+  dom.window.close();
+});
+
+// A pasted purl is an exact request and must skip the picker entirely --
+// otherwise someone who already knows what they want pays for a search
+// they didn't need.
+test('pasting a full purl goes straight to the artifacts, skipping the picker', async () => {
+  const requests = [];
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.indexOf('/api/v1/components') !== -1) {
+        requests.push(url);
+        return jsonResponse([SAMPLE_ARTIFACTS[0]]);
+      }
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  const box = doc.getElementById('component-input');
+  box.value = 'pkg:apk/alpine/openssl@3.1.4-r5';
+  box.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await tick(20);
+
+  assert.equal(requests.length, 1);
+  assert.match(requests[0], /purl=/);
+  assert.doesNotMatch(requests[0], /[?&]q=/, 'a pkg: value is an exact request, not a search');
+  assert.equal(doc.getElementById('component-picker').hidden, true);
+  assert.equal(doc.querySelectorAll('#artifact-rows tr').length, 1);
+
+  dom.window.close();
+});
+
+// A capped list that looks complete is worse than no list.
+test('a truncated package search says how many it is not showing', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.indexOf('/api/v1/components?q=') !== -1) {
+        return jsonResponse({
+          total: 4312,
+          packages: [{ purl: 'pkg:golang/x/y@1.0', name: 'y', version: '1.0', artifacts: 9 }]
+        });
+      }
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  const box = doc.getElementById('component-input');
+  box.value = 'go';
+  box.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await tick(20);
+
+  assert.match(doc.getElementById('component-picker').textContent, /of 4312 matching packages/);
+
+  dom.window.close();
+});
+
+test('a package search that matches nothing suggests what to try, without claiming there are no artifacts', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.indexOf('/api/v1/components?q=') !== -1) return jsonResponse({ total: 0, packages: [] });
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  const box = doc.getElementById('component-input');
+  box.value = 'nothing-like-this';
+  box.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await tick(20);
+
+  const picker = doc.getElementById('component-picker').textContent;
+  assert.match(picker, /No package matches/);
+  assert.match(picker, /nothing-like-this/);
+  assert.doesNotMatch(picker, /No artifacts yet/);
+
+  dom.window.close();
+});
+
 test('a component search that matches nothing says so, rather than "no artifacts yet"', async () => {
   const dom = buildDom({
     url: 'http://localhost:30301/',

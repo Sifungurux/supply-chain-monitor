@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -114,6 +115,20 @@ type Store interface {
 	// answers. Returns an empty slice (not an error) when nothing
 	// matches, exactly like FindByFindingID.
 	FindByComponentPURL(purl string) ([]*Artifact, error)
+	// SearchComponents finds DISTINCT packages whose name or purl
+	// contains query (case-insensitive substring), each with the number
+	// of artifacts containing it -- the discovery step that makes
+	// FindByComponentPURL's exact matching usable by a human, who knows
+	// "openssl" and not
+	// "pkg:apk/alpine/openssl@3.1.4-r6?arch=x86_64&distro=3.19.1".
+	//
+	// Returns at most limit matches plus the TOTAL number that matched,
+	// so a caller can say "showing 200 of 4,312" rather than silently
+	// truncating. Ordered by artifact count descending then purl
+	// ascending: the package in the most artifacts is the one most
+	// likely meant, and the tie-break keeps the order stable between
+	// backends and between calls.
+	SearchComponents(query string, limit int) ([]ComponentMatch, int, error)
 }
 
 // MemStore is a thread-safe, in-memory Store implementation.
@@ -299,6 +314,54 @@ func (s *MemStore) SaveComponents(artifactID string, components []Component) err
 	// Replaces, never appends -- see the Store interface's comment.
 	s.components[artifactID] = append([]Component(nil), components...)
 	return nil
+}
+
+// SearchComponents scans and groups in Go, matching PostgresStore's
+// GROUP BY. Same ordering (artifacts DESC, purl ASC) so the two
+// backends can't disagree on what the picker shows.
+func (s *MemStore) SearchComponents(query string, limit int) ([]ComponentMatch, int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return []ComponentMatch{}, 0, nil
+	}
+
+	byPURL := make(map[string]*ComponentMatch)
+	for id, components := range s.components {
+		if _, ok := s.data[id]; !ok {
+			continue
+		}
+		for _, c := range components {
+			if !strings.Contains(strings.ToLower(c.Name), q) && !strings.Contains(strings.ToLower(c.PURL), q) {
+				continue
+			}
+			m, ok := byPURL[c.PURL]
+			if !ok {
+				m = &ComponentMatch{PURL: c.PURL, Name: c.Name, Version: c.Version}
+				byPURL[c.PURL] = m
+			}
+			m.Artifacts++
+		}
+	}
+
+	out := make([]ComponentMatch, 0, len(byPURL))
+	for _, m := range byPURL {
+		out = append(out, *m)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Artifacts != out[j].Artifacts {
+			return out[i].Artifacts > out[j].Artifacts
+		}
+		return out[i].PURL < out[j].PURL
+	})
+
+	total := len(out)
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, total, nil
 }
 
 // FindByComponentPURL answers with a linear scan, the same way

@@ -1135,6 +1135,83 @@ func (s *PostgresStore) FindByComponentPURL(purl string) ([]*Artifact, error) {
 	return out, nil
 }
 
+// SearchComponents finds distinct packages matching a substring of
+// their name or purl. See the Store interface for why this exists at
+// all: exact purl matching is the right contract for an answer and a
+// hopeless one for a human typing a search box.
+//
+// The count is count(DISTINCT artifact_id), not count(*): one purl has
+// a row per artifact containing it, so counting rows would report
+// "openssl is in 41 artifacts" as 41 separate matches of 1. Grouping by
+// (purl, name, version) rather than purl alone keeps name/version in the
+// result without an aggregate over them -- two rows sharing a purl but
+// disagreeing on name would be a parser bug, and splitting them here
+// would surface it rather than hide it behind a min().
+//
+// ponytail: ILIKE '%q%' cannot use the components_purl_idx B-tree, so
+// this is a sequential scan -- measured at 19,497 rows on a real
+// deployment, which is single-digit milliseconds. A pg_trgm GIN index
+// on (name, purl) is the upgrade path if an inventory ever grows to
+// where that stops being true.
+func (s *PostgresStore) SearchComponents(query string, limit int) ([]ComponentMatch, int, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return []ComponentMatch{}, 0, nil
+	}
+	ctx := context.Background()
+	// A literal substring: escape LIKE's own wildcards so a query
+	// containing % or _ (a real purl qualifier can) matches those
+	// characters instead of acting as a pattern.
+	pattern := "%" + likeEscape(query) + "%"
+
+	var total int
+	if err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM (
+			SELECT 1 FROM components
+			WHERE name ILIKE $1 ESCAPE '\' OR purl ILIKE $1 ESCAPE '\'
+			GROUP BY purl, name, version
+		) matches
+	`, pattern).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count component matches: %w", err)
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT purl, name, version, count(DISTINCT artifact_id) AS artifacts
+		FROM components
+		WHERE name ILIKE $1 ESCAPE '\' OR purl ILIKE $1 ESCAPE '\'
+		GROUP BY purl, name, version
+		ORDER BY artifacts DESC, purl ASC
+		LIMIT $2
+	`, pattern, limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("search components: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]ComponentMatch, 0)
+	for rows.Next() {
+		var m ComponentMatch
+		if err := rows.Scan(&m.PURL, &m.Name, &m.Version, &m.Artifacts); err != nil {
+			return nil, 0, fmt.Errorf("scan component match: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("search components: %w", err)
+	}
+	return out, total, nil
+}
+
+// likeEscape neutralizes LIKE/ILIKE's wildcards in a user-supplied
+// substring, so searching for "openssl_dev" or a purl qualifier
+// containing % looks for those characters rather than matching any
+// character / any run of characters. Paired with ESCAPE '\' at every
+// call site.
+func likeEscape(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
+}
+
 // GetDocument returns (nil, nil) if no document of that kind has been
 // captured yet -- see the Store interface's own comment on this
 // "not found is the expected, common case" convention.

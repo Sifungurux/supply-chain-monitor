@@ -358,28 +358,67 @@ paths:
   /api/v1/components:
     get:
       tags: [findings]
-      summary: Find every artifact containing one component
+      summary: Search the component inventory, or list every artifact containing one component
       description: >-
         Queries the component inventory parsed out of each artifact's
         ingested SBOM (see POST /api/v1/artifacts/{id}/documents/sbom).
-        The purl is matched exactly, qualifiers included -- "any version
-        of this package" is a different question than this answers. A
-        query parameter rather than a path segment because a purl
-        contains slashes, "@" and often a query string of its own.
+        Two modes, which are the two steps of one task:
+
+
+        `?q=openssl` searches: it returns the DISTINCT packages whose
+        name or purl contains that substring (case-insensitive), each
+        with the number of artifacts containing it, most widespread
+        first. This exists because nobody knows they want
+        `pkg:apk/alpine/openssl@3.1.4-r5?arch=x86_64` -- they know
+        "openssl". Capped at 200 packages, with the true total always
+        reported alongside.
+
+
+        `?purl=…` answers: it returns every artifact containing exactly
+        that purl, qualifiers included. Matching stays exact here on
+        purpose -- "any version of this package" is a different
+        question, and softening this one would quietly include packages
+        you didn't ask about.
+
+
+        Supply one or the other; `purl` wins if both are given, being
+        the more specific request. Query parameters rather than path
+        segments because a purl contains slashes, "@" and often a query
+        string of its own.
       parameters:
         - name: purl
           in: query
-          required: true
+          required: false
+          description: Exact purl. Returns artifacts.
           schema: { type: string }
           example: pkg:apk/alpine/openssl@3.1.4-r5
+        - name: q
+          in: query
+          required: false
+          description: Substring of a package name or purl. Returns matching packages.
+          schema: { type: string }
+          example: openssl
       responses:
         "200":
-          description: Artifacts containing this component (empty array if none).
+          description: >-
+            With `purl`: the artifacts containing that component (empty
+            array if none). With `q`: the matching packages plus how
+            many matched in total.
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: "#/components/schemas/Artifact" }
+                oneOf:
+                  - type: array
+                    items: { $ref: "#/components/schemas/Artifact" }
+                  - type: object
+                    properties:
+                      total:
+                        type: integer
+                        description: Packages matching before the 200-package cap.
+                        example: 3
+                      packages:
+                        type: array
+                        items: { $ref: "#/components/schemas/ComponentMatch" }
         "400": { $ref: "#/components/responses/BadRequest" }
 
   /api/v1/artifacts/{id}/documents/{kind}:
@@ -629,6 +668,27 @@ components:
           description: Why a VEX statement suppressed this finding. Empty otherwise.
           example: vulnerable_code_not_in_execute_path
           readOnly: true
+
+    ComponentMatch:
+      type: object
+      description: >-
+        One distinct package found by a `?q=` search, with how many
+        artifacts contain it. Not a component row -- this is an
+        aggregate across artifacts.
+      properties:
+        purl:
+          type: string
+          example: pkg:apk/alpine/openssl@3.1.4-r5
+        name:
+          type: string
+          example: openssl
+        version:
+          type: string
+          example: 3.1.4-r5
+        artifacts:
+          type: integer
+          description: Number of distinct artifacts containing this purl.
+          example: 41
 
     StageEvent:
       type: object

@@ -147,14 +147,123 @@ func TestUploadSARIF_DoesNotIndexComponents(t *testing.T) {
 	}
 }
 
-func TestComponentSearch_RequiresAPurl(t *testing.T) {
+func TestComponentSearch_RequiresAPurlOrQuery(t *testing.T) {
 	h, _ := newTestRouter(scanner.Registry{})
 
-	for _, path := range []string{"/api/v1/components", "/api/v1/components?purl="} {
+	for _, path := range []string{"/api/v1/components", "/api/v1/components?purl=", "/api/v1/components?q="} {
 		rec := doJSON(t, h, http.MethodGet, path, nil)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("GET %s = %d, want 400, body=%s", path, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+type packageSearchResponse struct {
+	Total    int                       `json:"total"`
+	Packages []artifact.ComponentMatch `json:"packages"`
+}
+
+func packageSearch(t *testing.T, h http.Handler, q string) packageSearchResponse {
+	t.Helper()
+	rec := doJSON(t, h, http.MethodGet, "/api/v1/components?q="+url.QueryEscape(q), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("q=%q status = %d, want 200, body=%s", q, rec.Code, rec.Body.String())
+	}
+	var out packageSearchResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode package search: %v (body=%s)", err, rec.Body.String())
+	}
+	return out
+}
+
+// The two-stage flow this endpoint exists for: nobody knows they want
+// "pkg:apk/alpine/openssl@3.1.4-r5" -- they know "openssl". So a
+// substring finds the packages that exist, and the purl picked from
+// that goes back through the exact query.
+func TestComponentSearch_DiscoverByNameThenNarrowToOnePurl(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	alpine := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	slim := mustCreate(t, store, "alpine:3.19-slim", artifact.TypeImage)
+	debian := mustCreate(t, store, "debian:12", artifact.TypeImage)
+
+	const alpineSBOM = `{"bomFormat":"CycloneDX","components":[
+	  {"name":"openssl","version":"3.1.4-r5","purl":"pkg:apk/alpine/openssl@3.1.4-r5"},
+	  {"name":"busybox","version":"1.36.1-r15","purl":"pkg:apk/alpine/busybox@1.36.1-r15"}]}`
+	const debianSBOM = `{"bomFormat":"CycloneDX","components":[
+	  {"name":"openssl","version":"3.0.11-1","purl":"pkg:deb/debian/openssl@3.0.11-1"}]}`
+
+	for _, up := range []struct {
+		id, body string
+	}{{alpine.ID, alpineSBOM}, {slim.ID, alpineSBOM}, {debian.ID, debianSBOM}} {
+		if rec := doRaw(t, h, http.MethodPost, "/api/v1/artifacts/"+up.id+"/documents/sbom", "application/json", []byte(up.body)); rec.Code != http.StatusOK {
+			t.Fatalf("upload status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+	}
+
+	// Stage 1: the search a person actually types.
+	found := packageSearch(t, h, "openssl")
+	if found.Total != 2 || len(found.Packages) != 2 {
+		t.Fatalf("packages = %+v (total %d), want the 2 distinct openssl purls -- not one entry per artifact", found.Packages, found.Total)
+	}
+	if found.Packages[0].PURL != "pkg:apk/alpine/openssl@3.1.4-r5" || found.Packages[0].Artifacts != 2 {
+		t.Fatalf("packages[0] = %+v, want the alpine purl (2 artifacts) ranked first", found.Packages[0])
+	}
+	if found.Packages[1].Artifacts != 1 {
+		t.Fatalf("packages[1] = %+v, want 1 artifact", found.Packages[1])
+	}
+
+	// Stage 2: narrowing to one of them is still the exact query, so the
+	// debian openssl doesn't come along.
+	narrowed := decodeArtifacts(t, componentSearch(t, h, found.Packages[0].PURL))
+	if len(narrowed) != 2 {
+		t.Fatalf("artifacts = %+v, want the 2 alpine images", narrowed)
+	}
+	for _, a := range narrowed {
+		if a.ID == debian.ID {
+			t.Fatalf("narrowing to the alpine purl returned the debian artifact -- the second stage must stay exact")
+		}
+	}
+}
+
+func TestComponentSearch_QueryMatchesPurlAndIsCaseInsensitive(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	if rec := doRaw(t, h, http.MethodPost, "/api/v1/artifacts/"+a.ID+"/documents/sbom", "application/json", []byte(cycloneDXUpload)); rec.Code != http.StatusOK {
+		t.Fatalf("upload status = %d", rec.Code)
+	}
+
+	// By ecosystem/namespace rather than package name -- the other way
+	// people look ("what apk packages do we ship").
+	if got := packageSearch(t, h, "pkg:apk/alpine/"); got.Total != 2 {
+		t.Fatalf("q=pkg:apk/alpine/ total = %d, want both components", got.Total)
+	}
+	if got := packageSearch(t, h, "OPENSSL"); got.Total != 1 {
+		t.Fatalf("q=OPENSSL total = %d, want 1 (case-insensitive)", got.Total)
+	}
+	if got := packageSearch(t, h, "nothing-like-this"); got.Total != 0 || len(got.Packages) != 0 {
+		t.Fatalf("no-match search = %+v, want an empty list and total 0", got)
+	}
+}
+
+// A caller sending both has already made its choice: purl is the more
+// specific request and wins, rather than the answer depending on
+// parameter order.
+func TestComponentSearch_PurlWinsOverQuery(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	if rec := doRaw(t, h, http.MethodPost, "/api/v1/artifacts/"+a.ID+"/documents/sbom", "application/json", []byte(cycloneDXUpload)); rec.Code != http.StatusOK {
+		t.Fatalf("upload status = %d", rec.Code)
+	}
+
+	rec := doJSON(t, h, http.MethodGet,
+		"/api/v1/components?purl="+url.QueryEscape("pkg:apk/alpine/openssl@3.1.4-r5")+"&q=busybox", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	// An artifact list (the purl answer), not a {total, packages} object.
+	got := decodeArtifacts(t, rec)
+	if len(got) != 1 || got[0].ID != a.ID {
+		t.Fatalf("got %+v, want the exact-purl answer", got)
 	}
 }
 
