@@ -44,6 +44,15 @@ const (
 	// that most needs room. 16MiB is well above any real submission and
 	// well below what would threaten the pod.
 	maxFindingsBytes = 16 << 20
+
+	// maxVEXBytes covers POST /artifacts/{id}/vex. A VEX document is a
+	// list of human-written assessments, not scanner output -- one
+	// statement per vulnerability somebody actually triaged -- so real
+	// documents are KB, not MB. 4MiB is thousands of statements, far
+	// past any document a person maintains, and deliberately much
+	// smaller than the 64MiB SBOM/SARIF ceiling: those carry a whole
+	// image's component inventory, this carries opinions about it.
+	maxVEXBytes = 4 << 20
 )
 
 // limitBody caps how much of a request body will be read, and reports

@@ -70,7 +70,9 @@ An `Artifact` (`internal/artifact/model.go`) has:
   `StageHistory` (append-only list of pipeline-stage reports)
 - Five finding buckets — `CVEFindings`, `MalwareFindings`,
   `MisconfigFindings`, `SecretFindings`, `OtherFindings` — each entry
-  carrying `Status` (`open`/`fixed`), `FirstSeenAt`, `ResolvedAt`
+  carrying `Status` (`open`/`fixed`/`not_affected`), `FirstSeenAt`,
+  `ResolvedAt`, and `Justification` (see "Suppressing findings with
+  VEX" below)
 - `HasSBOM`/`HasSARIF` flags pointing at generated documents (see
   "Generated SBOM/SARIF documents" below)
 
@@ -98,6 +100,54 @@ statically declares it only ever produces one bucket (Trivy, Grype,
 ClamAV, the Unpacker scanners) only blocks fix-detection for that bucket
 if it errors; a scanner that can't make that promise (SARIF, pluggable)
 still conservatively blocks all five.
+
+**Suppressing findings with VEX.** A scanner reports what a component
+*contains*; whether a vulnerability is actually exploitable in this
+artifact is a judgement it can't make. VEX is how that judgement gets
+recorded: `POST /api/v1/artifacts/{id}/vex` (`internal/api/vex.go`)
+takes an OpenVEX or CycloneDX-VEX document, parses it
+(`internal/scanner/vex.go` — both formats, told apart by whether the
+document has a `statements` or a `vulnerabilities` array), and applies
+every `not_affected`/`fixed` statement to the artifact's findings
+immediately. `under_investigation` changes nothing, and neither does any
+status string the parser doesn't recognize — the failure direction is
+showing a real vulnerability, never hiding one. `affected` is the one
+non-suppressing status that still does something: it revokes an earlier
+`not_affected` on the same vulnerability, so a wrong assessment can be
+retracted by re-uploading a corrected document rather than by editing
+the database.
+
+Three properties are worth spelling out, because each one is a way this
+could have been built wrong:
+
+- **Suppression is stored on the finding, not derived from the
+  document.** A finding already carrying `not_affected` keeps that
+  status and its `Justification` when a scanner reports it again — which
+  it always will, since VEX asserts something about reachability, not
+  about the image's contents. Nothing has to re-read the document for
+  suppression to hold, so a scan that can't load it doesn't reopen work
+  somebody already assessed.
+- **The document is still re-read on every scan and findings
+  submission** (`handler.vexFor`), so a vulnerability *discovered after*
+  the document was uploaded lands suppressed instead of being open until
+  something else merges it.
+- **Suppressed is not deleted.** `not_affected` findings stay in their
+  bucket with the justification attached, out of every count on the
+  dashboard (`openFindings`) but visible on the detail page with a
+  "VEX: not affected" badge — the same "keep history, don't overwrite
+  it" treatment `fixed` gets.
+
+`Justification` is lifecycle metadata like `Status`/`FirstSeenAt`:
+`MergeFindings` always recomputes it, so a `POST .../findings` caller
+can't invent a justification for a finding nobody assessed. VEX
+documents are stored through the same `artifact_documents` table as
+SBOM/SARIF (kind `vex`) but deliberately aren't accepted by the generic
+`POST .../documents/{kind}` endpoint — that one stores bytes, and a VEX
+document that stored but suppressed nothing would be worse than a
+rejection. OpenVEX `products[]` is ignored: the document was uploaded to
+one artifact, so the operator has already scoped it (matching purls
+would be the change needed if VEX ever arrives fleet-wide rather than
+per-artifact).
 
 ## Scanning pipeline
 
@@ -249,8 +299,8 @@ recorded.
 - Every write endpoint caps its request body with
   `http.MaxBytesReader` and answers `413` rather than `400` when the cap
   is hit (`internal/api/bodylimit.go`): 64KiB for the small JSON writes,
-  4MiB for bulk registration, 16MiB for findings submission, 64MiB for a
-  document upload. The pre-existing per-entry caps (`maxBulkArtifacts`,
+  4MiB for bulk registration and for a VEX document, 16MiB for findings
+  submission, 64MiB for a document upload. The pre-existing per-entry caps (`maxBulkArtifacts`,
   the findings validation) don't cover this — they run *after*
   `json.Decode` has already read the whole body into memory, so they
   bound a request's logical size, not the bytes spent getting there.

@@ -121,6 +121,41 @@ else
 	check "GET /api/v1/artifacts/{id}" "$get_status" "200"
 	grep -q '"ref":"alpine:3.19"' /tmp/get.json || { echo "FAIL: fetched artifact doesn't have the ref it was registered with: $(cat /tmp/get.json)" >&2; fail=1; }
 
+	# README's "Suppressing findings with VEX" example, end to end:
+	# record a finding, upload the document from that section verbatim,
+	# and check the finding actually comes back suppressed. The Go tests
+	# cover the same path, but only this one proves the documented
+	# --data-binary curl (raw body, not a JSON wrapper) is the shape the
+	# endpoint really accepts.
+	findings_status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${AUTH[@]}" \
+		-H 'Content-Type: application/json' \
+		-d '{"bucket":"cve","findings":[{"id":"CVE-2024-1234","severity":"critical","source":"external"}]}' \
+		"${BASE}/api/v1/artifacts/${artifact_id}/findings")
+	check "POST /api/v1/artifacts/{id}/findings (README's example)" "$findings_status" "200"
+
+	cat >/tmp/vex.json <<-'VEXDOC'
+		{
+		  "@context": "https://openvex.dev/ns/v0.2.0",
+		  "statements": [
+		    {
+		      "vulnerability": { "name": "CVE-2024-1234" },
+		      "status": "not_affected",
+		      "justification": "vulnerable_code_not_in_execute_path"
+		    }
+		  ]
+		}
+	VEXDOC
+	vex_status=$(curl -s -o /tmp/vex-response.json -w '%{http_code}' -X POST "${AUTH[@]}" \
+		-H 'Content-Type: application/json' \
+		--data-binary @/tmp/vex.json \
+		"${BASE}/api/v1/artifacts/${artifact_id}/vex")
+	check "POST /api/v1/artifacts/{id}/vex (README's example)" "$vex_status" "200"
+	grep -q '"statements":1' /tmp/vex-response.json || { echo "FAIL: VEX upload didn't report 1 understood statement: $(cat /tmp/vex-response.json)" >&2; fail=1; }
+
+	curl -s -o /tmp/get-vex.json "${AUTH[@]}" "${BASE}/api/v1/artifacts/${artifact_id}"
+	grep -q '"status":"not_affected"' /tmp/get-vex.json || { echo "FAIL: finding not suppressed after the documented VEX upload: $(cat /tmp/get-vex.json)" >&2; fail=1; }
+	grep -q '"justification":"vulnerable_code_not_in_execute_path"' /tmp/get-vex.json || { echo "FAIL: VEX justification didn't persist: $(cat /tmp/get-vex.json)" >&2; fail=1; }
+
 	delete_status=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "${AUTH[@]}" "${BASE}/api/v1/artifacts/${artifact_id}")
 	check "DELETE /api/v1/artifacts/{id}" "$delete_status" "200"
 fi

@@ -327,14 +327,21 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 	// first's Source. Malware/misconfig/secret/other buckets only ever
 	// have one scanner each today, so they don't need this.
 	cveFindings = artifact.CoalesceSameIDSources(cveFindings)
+	// A finding this scan is seeing for the first time can already be
+	// covered by a VEX document uploaded earlier -- read it here so it
+	// lands suppressed rather than paging somebody about a vulnerability
+	// that was assessed weeks ago. Findings suppressed on a previous
+	// round stay suppressed with or without this (see MergeFindings), so
+	// a missing or unreadable document costs nothing already decided.
+	vex := h.vexFor(id)
 	updated, updErr := h.store.Update(id, func(art *artifact.Artifact) {
 		art.Status = status
 		art.Digest = digest
-		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, cveFindings, now, detectFixedFor("cve"))
-		art.MalwareFindings = artifact.MergeFindings(art.MalwareFindings, malwareFindings, now, detectFixedFor("malware"))
-		art.MisconfigFindings = artifact.MergeFindings(art.MisconfigFindings, misconfigFindings, now, detectFixedFor("misconfiguration"))
-		art.SecretFindings = artifact.MergeFindings(art.SecretFindings, secretFindings, now, detectFixedFor("secret"))
-		art.OtherFindings = artifact.MergeFindings(art.OtherFindings, otherFindings, now, detectFixedFor("other"))
+		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, cveFindings, now, detectFixedFor("cve"), vex)
+		art.MalwareFindings = artifact.MergeFindings(art.MalwareFindings, malwareFindings, now, detectFixedFor("malware"), vex)
+		art.MisconfigFindings = artifact.MergeFindings(art.MisconfigFindings, misconfigFindings, now, detectFixedFor("misconfiguration"), vex)
+		art.SecretFindings = artifact.MergeFindings(art.SecretFindings, secretFindings, now, detectFixedFor("secret"), vex)
+		art.OtherFindings = artifact.MergeFindings(art.OtherFindings, otherFindings, now, detectFixedFor("other"), vex)
 		art.LastScanErrors = scanErrors
 		art.LastScanFailureReason = failureReason
 		art.LastScanAt = &now

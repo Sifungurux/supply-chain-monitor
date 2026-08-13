@@ -45,7 +45,25 @@ import (
 // external submitFindings call always passes true: the caller is
 // asserting a complete current result for the one bucket it named, by
 // definition of what that endpoint is for.
-func MergeFindings(existing, reported []Finding, now time.Time, detectFixed bool) []Finding {
+//
+// vex (nil when the artifact has no VEX document, which is the common
+// case) overrides all of the above for the vulnerability IDs it speaks
+// about, and is consulted on every path -- a finding still reported, a
+// finding that just vanished, one already on record, one brand new this
+// round. A statement of "not_affected" or "fixed" wins over what the
+// scanner reported: the whole point of VEX is that a human assessed a
+// finding a scanner cannot assess for itself, so a scanner that keeps
+// reporting it is not new information. "affected" and
+// "under_investigation" deliberately change nothing (see
+// VEXStatement.Status).
+//
+// Suppression also survives without vex being passed at all: a finding
+// already carrying "not_affected" keeps that status and its
+// Justification when it's reported again, instead of being reopened.
+// That's what makes this stick across scans rather than depending on
+// every caller remembering to re-read the document -- see
+// docs/architecture.md ("Suppressing findings with VEX").
+func MergeFindings(existing, reported []Finding, now time.Time, detectFixed bool, vex map[string]VEXStatement) []Finding {
 	reportedByID := make(map[string]Finding, len(reported))
 	for _, f := range reported {
 		reportedByID[f.ID] = f
@@ -58,11 +76,64 @@ func MergeFindings(existing, reported []Finding, now time.Time, detectFixed bool
 	// finding's position doesn't reshuffle every scan for no reason.
 	for _, old := range existing {
 		seen[old.ID] = true
+		stillReported, isReported := reportedByID[old.ID]
 
-		if stillReported, ok := reportedByID[old.ID]; ok {
-			stillReported.Status = FindingStatusOpen
+		// An explicit "affected" statement revokes an earlier
+		// suppression: an assessment that turned out to be wrong has to
+		// be retractable, and re-uploading a corrected document is how.
+		// Only an explicit statement does this -- a document that simply
+		// stops mentioning the vulnerability leaves it suppressed, since
+		// "absent from a document" is not an assertion about anything.
+		revoked := vex[old.ID].Status == VEXStatusAffected
+
+		// VEX is checked before any scan-derived transition, and before
+		// the !detectFixed early return below: an operator uploading a
+		// VEX document is asserting something about this artifact that
+		// doesn't depend on a scan having run at all, so it has to apply
+		// on a merge with nothing reported (which is exactly how
+		// uploadVEX applies a freshly uploaded document -- see
+		// internal/api/vex.go).
+		if v, ok := vex[old.ID]; ok && vexSuppresses(v) {
+			next := old
+			if isReported {
+				// Still reported: take the fresh severity/title/source
+				// the way the still-reported branch below does, then let
+				// VEX decide the lifecycle fields.
+				next = stillReported
+				next.FirstSeenAt = old.FirstSeenAt
+				// Carried for the same reason FirstSeenAt is: a scanner's
+				// Finding has no ResolvedAt, and applyVEX only stamps one
+				// when it finds none -- so without this a VEX "fixed"
+				// finding would be re-resolved with a fresh timestamp on
+				// every single scan that keeps reporting it, and the
+				// dashboard's "Fixed <time ago>" would reset each round.
+				next.ResolvedAt = old.ResolvedAt
+			}
+			applyVEX(&next, v, now)
+			merged = append(merged, next)
+			continue
+		}
+
+		if isReported {
 			stillReported.FirstSeenAt = old.FirstSeenAt
 			stillReported.ResolvedAt = nil
+			if old.Status == FindingStatusNotAffected && !revoked {
+				// Suppressed by a VEX document at some point in the past.
+				// A scanner reporting it again is not news -- that's the
+				// whole premise of VEX -- so it must not reopen, and the
+				// justification stays attached as the record of why.
+				// This is what makes suppression survive without every
+				// merge caller having to re-read the document first.
+				stillReported.Status = FindingStatusNotAffected
+				stillReported.Justification = old.Justification
+			} else {
+				stillReported.Status = FindingStatusOpen
+				// Never carried from the reported finding: Justification is
+				// only ever written by a VEX statement (see Finding's own
+				// comment), and submitFindings decodes reported findings
+				// straight from caller JSON.
+				stillReported.Justification = ""
+			}
 			merged = append(merged, stillReported)
 			continue
 		}
@@ -76,15 +147,23 @@ func MergeFindings(existing, reported []Finding, now time.Time, detectFixed bool
 			continue
 		}
 
-		if old.Status == FindingStatusFixed {
+		if old.Status == FindingStatusFixed || (old.Status == FindingStatusNotAffected && !revoked) {
 			// Already fixed from an earlier round; don't touch
-			// ResolvedAt again just because it's still gone.
+			// ResolvedAt again just because it's still gone. A
+			// VEX-suppressed finding is left alone for the same reason
+			// plus one more: overwriting "not affected" with "fixed"
+			// would replace a human's assessment with a guess, and both
+			// statuses are already out of every count anyway.
 			merged = append(merged, old)
 			continue
 		}
 
 		fixed := old
 		fixed.Status = FindingStatusFixed
+		// Only reachable with a justification attached when a suppression
+		// was just revoked (above) on something no scanner reports any
+		// more -- the old reason doesn't describe this new status.
+		fixed.Justification = ""
 		resolvedAt := now
 		fixed.ResolvedAt = &resolvedAt
 		merged = append(merged, fixed)
@@ -98,10 +177,49 @@ func MergeFindings(existing, reported []Finding, now time.Time, detectFixed bool
 		f.Status = FindingStatusOpen
 		f.FirstSeenAt = now
 		f.ResolvedAt = nil
+		f.Justification = ""
+		// A VEX document can speak about a vulnerability before any scan
+		// ever reports it -- the first scan that does find it comes in
+		// already suppressed, rather than being open until the next
+		// merge notices.
+		if v, ok := vex[f.ID]; ok && vexSuppresses(v) {
+			applyVEX(&f, v, now)
+		}
 		merged = append(merged, f)
 	}
 
 	return merged
+}
+
+// vexSuppresses reports whether a statement is one of the two that
+// actually change a finding. Anything else -- "affected",
+// "under_investigation", a status this service doesn't recognize at all,
+// or an empty one from a document that omitted the field -- is treated
+// as "no opinion" and leaves the finding exactly as the scan found it.
+// That's the safe direction: a spelling this parser doesn't know shows a
+// real vulnerability rather than silently hiding one.
+func vexSuppresses(v VEXStatement) bool {
+	return v.Status == FindingStatusNotAffected || v.Status == FindingStatusFixed
+}
+
+// applyVEX stamps a suppressing statement onto a finding. ResolvedAt
+// tracks the two statuses' different meanings: "fixed" means this
+// stopped being a problem at some point (so it gets a resolution
+// timestamp, the same as scan-detected fixes -- kept if one is already
+// there, since re-uploading a document shouldn't move the date), while
+// "not affected" means it was never a problem here in the first place,
+// so there's nothing to have resolved.
+func applyVEX(f *Finding, v VEXStatement, now time.Time) {
+	f.Status = v.Status
+	f.Justification = v.Justification
+	if v.Status == FindingStatusFixed {
+		if f.ResolvedAt == nil {
+			resolvedAt := now
+			f.ResolvedAt = &resolvedAt
+		}
+		return
+	}
+	f.ResolvedAt = nil
 }
 
 // CoalesceSameIDSources collapses a single scan round's freshly reported

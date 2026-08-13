@@ -437,7 +437,7 @@ func TestPostgresStore_FindingLifecycleRoundTrips(t *testing.T) {
 	_, err = s.Update(a.ID, func(art *artifact.Artifact) {
 		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, []artifact.Finding{
 			{ID: "CVE-lifecycle-1", Severity: "high", Source: "trivy"},
-		}, firstScan, true)
+		}, firstScan, true, nil)
 	})
 	if err != nil {
 		t.Fatalf("Update (first scan): %v", err)
@@ -468,7 +468,7 @@ func TestPostgresStore_FindingLifecycleRoundTrips(t *testing.T) {
 	// Second scan, later: CVE-lifecycle-1 no longer reported -> fixed.
 	secondScan := firstScan.Add(1 * time.Hour)
 	_, err = s.Update(a.ID, func(art *artifact.Artifact) {
-		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, nil, secondScan, true)
+		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, nil, secondScan, true, nil)
 	})
 	if err != nil {
 		t.Fatalf("Update (second scan): %v", err)
@@ -494,6 +494,77 @@ func TestPostgresStore_FindingLifecycleRoundTrips(t *testing.T) {
 	if diff := f.FirstSeenAt.Sub(originalFirstSeen); diff < -time.Second || diff > time.Second {
 		t.Fatalf("first_seen_at changed across the second scan: got %v, want unchanged %v", f.FirstSeenAt, originalFirstSeen)
 	}
+}
+
+// TestPostgresStore_VEXSuppressionRoundTrips is the same argument as
+// TestPostgresStore_FindingLifecycleRoundTrips, for the justification
+// column: a suppressed finding has to come back suppressed *with its
+// reason* through BOTH read paths. Get uses loadFindings, List/ListPage
+// use fillChildrenBatch's own separate SELECT -- miss the column in the
+// second and the justification is present on the detail page and empty
+// in the list the dashboard actually polls.
+func TestPostgresStore_VEXSuppressionRoundTrips(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	a, err := s.Create("alpine:3.19-vex", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	now := time.Now().UTC()
+	vex := artifact.VEXByID([]artifact.VEXStatement{{
+		VulnID:        "CVE-vex-1",
+		Status:        artifact.FindingStatusNotAffected,
+		Justification: "vulnerable_code_not_in_execute_path",
+	}})
+	_, err = s.Update(a.ID, func(art *artifact.Artifact) {
+		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, []artifact.Finding{
+			{ID: "CVE-vex-1", Severity: "critical", Source: "trivy"},
+		}, now, true, vex)
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	assertSuppressed := func(where string, findings []artifact.Finding) {
+		t.Helper()
+		if len(findings) != 1 {
+			t.Fatalf("%s: cve findings = %+v, want 1", where, findings)
+		}
+		f := findings[0]
+		if f.Status != artifact.FindingStatusNotAffected {
+			t.Errorf("%s: status = %q, want %q", where, f.Status, artifact.FindingStatusNotAffected)
+		}
+		if f.Justification != "vulnerable_code_not_in_execute_path" {
+			t.Errorf("%s: justification = %q, want it persisted", where, f.Justification)
+		}
+		if f.ResolvedAt != nil {
+			t.Errorf("%s: resolved_at = %v, want nil for not_affected", where, f.ResolvedAt)
+		}
+	}
+
+	got, err := s.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	assertSuppressed("Get (loadFindings)", got.CVEFindings)
+
+	// ListPage, not List: it's the batch loader the dashboard's own poll
+	// goes through.
+	page, _, err := s.ListPage(100, 0, "", "")
+	if err != nil {
+		t.Fatalf("ListPage: %v", err)
+	}
+	var listed *artifact.Artifact
+	for _, art := range page {
+		if art.ID == a.ID {
+			listed = art
+		}
+	}
+	if listed == nil {
+		t.Fatalf("artifact %s not in the first page of ListPage", a.ID)
+	}
+	assertSuppressed("ListPage (fillChildrenBatch)", listed.CVEFindings)
 }
 
 // dsnWithSearchPath points a DSN at a specific Postgres schema via the
