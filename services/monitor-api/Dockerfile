@@ -192,6 +192,19 @@ FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec4
 # and oras all make TLS calls to registries and DB mirrors.
 RUN apk add --no-cache ca-certificates
 
+# malcontent (the optional second malware scanner, MALWARE_SCANNER) is
+# deliberately NOT installed here, and that is worth writing down so the
+# next person does not spend the afternoon I did: upstream publishes no
+# release binaries, and the binary inside cgr.dev/chainguard/malcontent
+# is glibc-linked (`/lib/ld-linux-aarch64.so.1`, GLIBC_2.29). Copying it
+# into this musl/alpine image builds fine and then fails at run time with
+# "exec container process (missing dynamic library?)".
+#
+# So the malcontent scan-worker Job runs Chainguard's own image directly
+# instead of this one -- see internal/scanner/isolated_malcontent.go. The
+# in-process path (DISABLE_SCAN_ISOLATION) therefore needs a `mal` you
+# provide yourself, on PATH, in an image derived from this one.
+
 COPY --from=tools       /out/trivy       /usr/local/bin/trivy
 COPY --from=tools       /out/oras        /usr/local/bin/oras
 COPY --from=tools       /out/unpacker    /usr/local/bin/unpacker

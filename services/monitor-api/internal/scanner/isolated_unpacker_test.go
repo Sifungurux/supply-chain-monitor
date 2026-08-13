@@ -34,6 +34,12 @@ type fakeJobClient struct {
 	logsErr error
 
 	deleteCalled int32
+
+	// created records the last Job handed to CreateJob, so a test can
+	// assert what the scanner actually asked Kubernetes for (env,
+	// resources) and not just that it asked for something. Ignored by
+	// the tests that predate it.
+	created *k8sjob.Job
 }
 
 type jobStatusResult struct {
@@ -43,7 +49,10 @@ type jobStatusResult struct {
 
 func (f *fakeJobClient) Namespace() string { return f.namespace }
 
-func (f *fakeJobClient) CreateJob(_ context.Context, _ *k8sjob.Job) error { return f.createErr }
+func (f *fakeJobClient) CreateJob(_ context.Context, job *k8sjob.Job) error {
+	f.created = job
+	return f.createErr
+}
 
 func (f *fakeJobClient) JobStatus(_ context.Context, _ string) (bool, bool, error) {
 	i := atomic.AddInt32(&f.statusCalls, 1) - 1

@@ -1386,6 +1386,51 @@ fetches its own copy first (the same `oras pull`-backed fetch
 `FetchingScanner` already does in-process). See docs/architecture.md's
 "Scanning pipeline" section for the full reasoning.
 
+### A second malware scanner: malcontent (prototype)
+
+ClamAV answers "is this a *known* threat". It cannot answer "does this
+image behave like a compromised package" — and that second question is
+the one a supply-chain attack actually trips. `monitorApi.malwareScanner`
+adds [malcontent](https://github.com/chainguard-dev/malcontent) alongside
+it, the same way `cveScanner` adds Grype alongside Trivy:
+
+```yaml
+monitorApi:
+  malwareScanner: "both"   # "clamav" (default) | "malcontent" | "both"
+  malcontent:
+    minRisk: "critical"
+```
+
+Both land in `malware_findings`, each finding sourced to the tool that
+produced it. malcontent matches YARA rules describing *capabilities*, so
+a finding reads "runs atypical busybox programs" or "userland rootkit
+designed to hide files" rather than a signature name, keyed on the rule
+id (`exec/shell/busybox_exec`) so it stays stable across scans.
+
+**Why `minRisk` defaults to `critical`.** Measured, not guessed: a stock
+`alpine:3.19` at `--min-risk medium` reports **four HIGH behaviours** —
+busybox exec patterns, a `/dev/shm` reference, a route lookup. Nothing
+about that image is compromised. At `high` most of a normal fleet grows
+malware findings and notifications page on them, so the default sits one
+notch above and you lower it deliberately.
+
+Two things worth knowing before enabling it:
+
+- **The scan Job runs Chainguard's image, not monitor-api's.** malcontent
+  publishes no release binaries, and the binary in its container is
+  glibc-linked — copying it into this project's musl/alpine image builds
+  fine and then fails with `missing dynamic library`. So the Job runs
+  `cgr.dev/chainguard/malcontent` directly, pinned by digest
+  (`monitorApi.malcontent.image`). Nodes need to pull that image once.
+- **`DISABLE_SCAN_ISOLATION` can't use it** for the same reason — there
+  is no `mal` in the API image. monitor-api says so loudly at startup;
+  provide one on `PATH` in a derived image if you need that path.
+
+Nothing to mirror or refresh: malcontent embeds its rules, so there is no
+DB cache PVC and no refresh CronJob, and the air-gapped story is simpler
+than Trivy's or Grype's. Private-registry pulls are not wired up yet —
+public images work today; see `IsolatedMalcontentConfig`'s note.
+
 ### Choosing a CVE scanner: Trivy, Grype, or both
 
 Trivy is the default CVE scanner for `image`/`sbom` artifacts, but

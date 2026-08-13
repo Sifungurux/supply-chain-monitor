@@ -702,6 +702,38 @@ monitorApi:
   # grype-db-refresh-cronjob.yaml below, since grype then actually
   # needs a warm DB to read.
   cveScanner: "both"
+  # Which malware scanner(s) run for `image` artifacts: "clamav"
+  # (default), "malcontent", or "both". The counterpart to cveScanner
+  # above, and inert at the default -- "clamav" produces byte-for-byte
+  # the scanner list this chart produced before malcontent existed.
+  #
+  # They answer different questions and are worth running together
+  # rather than instead of one another. ClamAV matches signatures of
+  # known malware: a hit means "this IS a known threat". malcontent
+  # (github.com/chainguard-dev/malcontent) matches YARA rules describing
+  # *capabilities* -- "reads /proc/net/route", "hides files like a
+  # userspace rootkit" -- so a hit means "this CAN do what a compromised
+  # package would do", which is the signal a supply-chain attack leaves
+  # and also the signal a legitimate system utility leaves.
+  #
+  # Nothing to mirror or refresh: malcontent embeds its rules, so unlike
+  # trivy/grype there is no DB cache PVC and no refresh CronJob.
+  malwareScanner: "clamav"
+  malcontent:
+    # Upstream's image, pinned by multi-arch index digest. The scan Job
+    # runs THIS image rather than monitor-api's own -- malcontent
+    # publishes no release binaries and its binary is glibc-linked, so
+    # it cannot be copied into monitor-api's musl/alpine image (the
+    # Dockerfile carries the full note). Bump when the digest stops
+    # being pullable; Chainguard's free tier keeps only :latest.
+    image: "cgr.dev/chainguard/malcontent@sha256:c71f2ff27243efb52494a468379a0182bfb304716b7139daf331d3b5db0416a6"
+    # --min-risk. Deliberately "critical", not the tool's own "low":
+    # measured against a stock alpine:3.19, malcontent reports four HIGH
+    # behaviours (busybox exec patterns, /dev/shm references, route
+    # lookups) on an image nobody would call compromised. At "high" most
+    # of a normal fleet grows malware findings, and notifications page on
+    # them. Lower it deliberately, knowing that.
+    minRisk: "critical"
   # Operator-configured pluggable scanners -- plug in a different CVE
   # scanner (Grype, OSV-Scanner, ...) or SBOM tool alongside (never
   # instead of -- registration is additive) the built-in trivy/ClamAV
