@@ -74,6 +74,7 @@ func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner
 	mux.HandleFunc("GET /api/v1/artifacts", h.listArtifacts)
 	mux.HandleFunc("GET /api/v1/artifacts/{id}", h.getArtifact)
 	mux.HandleFunc("DELETE /api/v1/artifacts/{id}", h.deleteArtifact)
+	mux.HandleFunc("GET /api/v1/findings", h.searchFindings)
 	mux.HandleFunc("GET /api/v1/findings/{findingID}/artifacts", h.findByFindingID)
 	mux.HandleFunc("GET /api/v1/components", h.listByComponent)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/scan", h.scanArtifact)

@@ -3,6 +3,7 @@ package api_test
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -216,5 +217,116 @@ func TestSubmitFindings_UnknownArtifact(t *testing.T) {
 	})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+type findingSearchResult struct {
+	Total    int                     `json:"total"`
+	Findings []artifact.FindingMatch `json:"findings"`
+}
+
+func searchFindings(t *testing.T, h http.Handler, q string) findingSearchResult {
+	t.Helper()
+	rec := doJSON(t, h, http.MethodGet, "/api/v1/findings?q="+url.QueryEscape(q), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("q=%q status = %d, want 200, body=%s", q, rec.Code, rec.Body.String())
+	}
+	var out findingSearchResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode finding search: %v (body=%s)", err, rec.Body.String())
+	}
+	return out
+}
+
+// The two-stage flow, mirroring the component one: search what you
+// remember, pick the id that exists, get the artifacts.
+func TestSearchFindings_DiscoverThenNarrow(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	a := mustCreate(t, store, "app:1.0", artifact.TypeImage)
+	b := mustCreate(t, store, "app:1.1", artifact.TypeImage)
+
+	for _, id := range []string{a.ID, b.ID} {
+		rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+id+"/findings", map[string]any{
+			"bucket": "cve",
+			"findings": []map[string]string{
+				{"id": "CVE-2021-44228", "severity": "critical", "title": "log4j RCE via JNDI", "source": "trivy"},
+				{"id": "CVE-2024-0001", "severity": "low", "title": "something else", "source": "trivy"},
+			},
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("submit status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+	}
+
+	// Stage 1: by title, which is what someone remembers.
+	found := searchFindings(t, h, "log4j")
+	if found.Total != 1 || len(found.Findings) != 1 {
+		t.Fatalf("findings = %+v (total %d), want the one id", found.Findings, found.Total)
+	}
+	m := found.Findings[0]
+	if m.ID != "CVE-2021-44228" || m.Artifacts != 2 || m.Severity != "critical" {
+		t.Fatalf("match = %+v, want the CVE in 2 artifacts at critical", m)
+	}
+
+	// Stage 2: the id goes to the existing exact endpoint, and the count
+	// it promised is the number of artifacts that come back.
+	rec := doJSON(t, h, http.MethodGet, "/api/v1/findings/"+m.ID+"/artifacts", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var artifacts []artifact.Artifact
+	if err := json.Unmarshal(rec.Body.Bytes(), &artifacts); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(artifacts) != m.Artifacts {
+		t.Fatalf("search promised %d artifacts, the exact lookup returned %d", m.Artifacts, len(artifacts))
+	}
+}
+
+// A VEX-suppressed finding drops out of both halves together. If it
+// left only one of them, the picker's count and its click-through would
+// disagree -- which is worse than either being wrong alone, because
+// nothing tells you which to believe.
+func TestSearchFindings_SuppressedDropsOutOfBothHalves(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	a := mustCreate(t, store, "app:1.0", artifact.TypeImage)
+
+	if rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+a.ID+"/findings", map[string]any{
+		"bucket":   "cve",
+		"findings": []map[string]string{{"id": "CVE-2024-1", "severity": "critical", "title": "openssl overflow", "source": "trivy"}},
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("submit status = %d", rec.Code)
+	}
+	if got := searchFindings(t, h, "openssl"); got.Total != 1 || got.Findings[0].Artifacts != 1 {
+		t.Fatalf("before suppression = %+v, want 1 artifact", got)
+	}
+
+	if rec := doRaw(t, h, http.MethodPost, "/api/v1/artifacts/"+a.ID+"/vex", "application/json", []byte(notAffectedVEX)); rec.Code != http.StatusOK {
+		t.Fatalf("vex status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	if got := searchFindings(t, h, "openssl"); got.Total != 0 {
+		t.Fatalf("after suppression = %+v, want it gone from search -- it is not something we are still affected by", got)
+	}
+	rec := doJSON(t, h, http.MethodGet, "/api/v1/findings/CVE-2024-1/artifacts", nil)
+	var artifacts []artifact.Artifact
+	if err := json.Unmarshal(rec.Body.Bytes(), &artifacts); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(artifacts) != 0 {
+		t.Fatalf("exact lookup returned %+v, want nothing -- both halves must agree", artifacts)
+	}
+}
+
+func TestSearchFindings_RequiresAQuery(t *testing.T) {
+	h, _ := newTestRouter(scanner.Registry{})
+
+	for _, path := range []string{"/api/v1/findings", "/api/v1/findings?q="} {
+		if rec := doJSON(t, h, http.MethodGet, path, nil); rec.Code != http.StatusBadRequest {
+			t.Fatalf("GET %s = %d, want 400", path, rec.Code)
+		}
+	}
+	if got := searchFindings(t, h, "nothing-like-this"); got.Total != 0 || len(got.Findings) != 0 {
+		t.Fatalf("no-match search = %+v, want an empty list and total 0", got)
 	}
 }

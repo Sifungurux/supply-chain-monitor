@@ -1113,6 +1113,115 @@ test('a component search that matches nothing says so, rather than "no artifacts
   dom.window.close();
 });
 
+test('typing a finding name shows matching ids, and choosing one lists the artifacts still affected', async () => {
+  const requests = [];
+  const matches = {
+    total: 2,
+    findings: [
+      { id: 'CVE-2021-44228', title: 'log4j RCE via JNDI', severity: 'critical', artifacts: 2 },
+      { id: 'CVE-2021-45046', title: 'log4j incomplete fix', severity: 'high', artifacts: 1 }
+    ]
+  };
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.indexOf('/api/v1/findings?q=') !== -1) {
+        requests.push(url);
+        return jsonResponse(matches);
+      }
+      if (url.indexOf('/api/v1/findings/') !== -1) {
+        requests.push(url);
+        return jsonResponse([SAMPLE_ARTIFACTS[0], SAMPLE_ARTIFACTS[2]]);
+      }
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  const box = doc.getElementById('finding-input');
+  box.value = 'log4j';
+  box.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await tick(20);
+
+  assert.match(requests[0], /\/api\/v1\/findings\?q=log4j/);
+  assert.equal(doc.getElementById('artifact-table').hidden, true);
+  const rows = [...doc.querySelectorAll('.pkg-row')];
+  assert.equal(rows.length, 2);
+  assert.match(rows[0].textContent, /CVE-2021-44228/);
+  assert.match(rows[0].textContent, /log4j RCE via JNDI/);
+  assert.match(rows[0].textContent, /critical/i, 'severity is what ranks one CVE above another');
+  assert.match(rows[0].textContent, /2 artifacts/);
+
+  rows[0].click();
+  await tick(20);
+
+  assert.match(requests[requests.length - 1], /\/api\/v1\/findings\/CVE-2021-44228\/artifacts/);
+  assert.equal(doc.getElementById('artifact-table').hidden, false);
+  assert.deepEqual([...doc.querySelectorAll('#artifact-rows tr')].map((tr) => tr.dataset.id).sort(), ['a1', 'a3']);
+  assert.match(doc.getElementById('page-range').textContent, /2 artifacts are affected/);
+  assert.match(doc.getElementById('search-note').textContent, /still affected/);
+  // The fleet-total card is not the match count -- same rule the
+  // component search follows.
+  assert.equal(doc.querySelector('#cards .n').textContent, '3');
+
+  doc.querySelector('[data-action="back-to-matches"]').click();
+  await tick(20);
+  assert.equal(doc.querySelectorAll('.pkg-row').length, 2, 'back returns to the id list');
+
+  dom.window.close();
+});
+
+test('an exact CVE id skips the picker, and starting one search clears the other', async () => {
+  const requests = [];
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.indexOf('/api/v1/components') !== -1) {
+        requests.push(url);
+        return jsonResponse({ total: 1, packages: [{ purl: 'pkg:apk/alpine/openssl@3.1.4-r5', name: 'openssl', version: '3.1.4-r5', artifacts: 1 }] });
+      }
+      if (url.indexOf('/api/v1/findings') !== -1) {
+        requests.push(url);
+        return jsonResponse([SAMPLE_ARTIFACTS[0]]);
+      }
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  // A component search first...
+  const componentBox = doc.getElementById('component-input');
+  componentBox.value = 'openssl';
+  componentBox.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await tick(20);
+  assert.equal(doc.querySelectorAll('.pkg-row').length, 1);
+
+  // ...then a finding one. Two active searches would mean two sources
+  // of truth for one picker area.
+  const findingBox = doc.getElementById('finding-input');
+  findingBox.value = 'CVE-2021-44228';
+  findingBox.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await tick(20);
+
+  const last = requests[requests.length - 1];
+  assert.match(last, /\/api\/v1\/findings\/CVE-2021-44228\/artifacts/, 'an exact id goes straight to the artifacts');
+  assert.doesNotMatch(last, /[?&]q=/);
+  assert.equal(componentBox.value, '', 'the other search box is cleared, not left showing a query that no longer applies');
+  assert.equal(doc.getElementById('component-picker').hidden, true);
+  assert.equal(doc.querySelectorAll('#artifact-rows tr').length, 1);
+
+  dom.window.close();
+});
+
 test('an artifact registered unsafe (REQUIRE_DIGEST mismatch) shows an Unsafe badge in the row and on the detail page', async () => {
   const withUnsafe = [
     { ...SAMPLE_ARTIFACTS[0], id: 'a8', ref: 'unsafe-image:1.0', unsafe: true },

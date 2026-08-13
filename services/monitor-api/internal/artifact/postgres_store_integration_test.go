@@ -1087,3 +1087,80 @@ func TestPostgresStore_Count(t *testing.T) {
 		t.Fatalf("Count = %d after deleting the artifact, want %d -- deletion must free quota", freed, before)
 	}
 }
+
+// TestPostgresStore_SearchFindings mirrors the MemStore search test
+// against real SQL, where the aggregation risk is: the GROUP BY, the
+// severity CASE, count(DISTINCT artifact_id), and -- most importantly --
+// that the count agrees with what FindByFindingID actually returns.
+func TestPostgresStore_SearchFindings(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	// Unique to this test: the database is shared with every other test
+	// in this file, so a substring search would otherwise match their
+	// leftovers.
+	const cve = "CVE-2021-SEARCHTEST"
+	const title = "log4jsearchtest RCE via JNDI"
+
+	mk := func(ref string, f artifact.Finding) string {
+		t.Helper()
+		a, err := s.Create(ref, artifact.TypeImage)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if _, err := s.Update(a.ID, func(art *artifact.Artifact) {
+			art.CVEFindings = append(art.CVEFindings, f)
+		}); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		return a.ID
+	}
+
+	mk("app:1.0-searchtest", artifact.Finding{ID: cve, Title: title, Severity: "high", Status: artifact.FindingStatusOpen})
+	mk("app:1.1-searchtest", artifact.Finding{ID: cve, Title: title, Severity: "critical", Status: artifact.FindingStatusOpen})
+	mk("app:2.0-searchtest", artifact.Finding{ID: cve, Title: title, Severity: "critical", Status: artifact.FindingStatusNotAffected, Justification: "not reachable"})
+	mk("app:3.0-searchtest", artifact.Finding{ID: cve, Title: title, Severity: "critical", Status: artifact.FindingStatusFixed})
+
+	matches, total, err := s.SearchFindings("log4jsearchtest", 50)
+	if err != nil {
+		t.Fatalf("SearchFindings: %v", err)
+	}
+	if total != 1 || len(matches) != 1 {
+		t.Fatalf("matches = %+v (total %d), want one distinct id, not one row per artifact", matches, total)
+	}
+	if matches[0].ID != cve {
+		t.Fatalf("id = %q, want %q", matches[0].ID, cve)
+	}
+	if matches[0].Artifacts != 2 {
+		t.Fatalf("artifacts = %d, want 2 -- suppressed and fixed are not still affected", matches[0].Artifacts)
+	}
+	if matches[0].Severity != "critical" {
+		t.Fatalf("severity = %q, want the worst seen (the two open rows are high and critical)", matches[0].Severity)
+	}
+	if matches[0].Title != title {
+		t.Fatalf("title = %q, want %q", matches[0].Title, title)
+	}
+
+	list, err := s.FindByFindingID(cve)
+	if err != nil {
+		t.Fatalf("FindByFindingID: %v", err)
+	}
+	if len(list) != matches[0].Artifacts {
+		t.Fatalf("search counted %d artifacts, FindByFindingID returned %d -- both halves must count the same population",
+			matches[0].Artifacts, len(list))
+	}
+
+	// Searching the id itself, case-insensitively, and LIKE wildcards
+	// treated as literal text.
+	if m, _, err := s.SearchFindings("cve-2021-searchtest", 50); err != nil || len(m) != 1 {
+		t.Fatalf("id search = %+v, %v", m, err)
+	}
+	if m, _, err := s.SearchFindings("log4jsearchtest%RCE", 50); err != nil || len(m) != 0 {
+		t.Fatalf("wildcard-containing query = %+v, %v, want it treated literally (no match)", m, err)
+	}
+	if m, total, err := s.SearchFindings("log4jsearchtest", 0); err != nil || len(m) != 0 || total != 1 {
+		t.Fatalf("limit 0 = %+v (total %d), %v, want the total still reported", m, total, err)
+	}
+	if m, total, err := s.SearchFindings("  ", 50); err != nil || len(m) != 0 || total != 0 {
+		t.Fatalf("blank query = %+v (total %d), %v", m, total, err)
+	}
+}

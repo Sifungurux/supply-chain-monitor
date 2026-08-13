@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/notify"
 )
 
 func TestStoreCreateGetListUpdate(t *testing.T) {
@@ -349,5 +350,119 @@ func TestTypeValid(t *testing.T) {
 	}
 	if artifact.Type("binary").Valid() {
 		t.Error(`"binary" should not be a valid type`)
+	}
+}
+
+// The picker's count and the list you get by clicking it must describe
+// the same set. They're computed by two different queries, so nothing
+// but a test keeps them honest -- and the failure mode is quiet: a
+// search saying "3 artifacts" that opens onto 4 rows.
+func TestMemStore_SearchFindingsCountMatchesFindByFindingID(t *testing.T) {
+	s := artifact.NewMemStore()
+
+	const cve = "CVE-2021-44228"
+	affected, err := s.Create("app:1.0", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	alsoAffected, err := s.Create("app:1.1", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	suppressed, err := s.Create("app:2.0", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	patched, err := s.Create("app:3.0", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	set := func(id string, f artifact.Finding) {
+		t.Helper()
+		if _, err := s.Update(id, func(a *artifact.Artifact) {
+			a.CVEFindings = append(a.CVEFindings, f)
+		}); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+	}
+	set(affected.ID, artifact.Finding{ID: cve, Title: "log4j RCE", Severity: "critical", Status: artifact.FindingStatusOpen})
+	set(alsoAffected.ID, artifact.Finding{ID: cve, Title: "log4j RCE", Severity: "high", Status: artifact.FindingStatusOpen})
+	set(suppressed.ID, artifact.Finding{ID: cve, Title: "log4j RCE", Severity: "critical", Status: artifact.FindingStatusNotAffected, Justification: "not reachable"})
+	set(patched.ID, artifact.Finding{ID: cve, Title: "log4j RCE", Severity: "critical", Status: artifact.FindingStatusFixed})
+
+	matches, total, err := s.SearchFindings("log4j", 50)
+	if err != nil {
+		t.Fatalf("SearchFindings: %v", err)
+	}
+	if total != 1 || len(matches) != 1 {
+		t.Fatalf("matches = %+v (total %d), want the one distinct id", matches, total)
+	}
+	if matches[0].Artifacts != 2 {
+		t.Fatalf("artifacts = %d, want 2 -- the suppressed and the fixed one are not still affected", matches[0].Artifacts)
+	}
+	// Worst severity seen, not whichever artifact was scanned last.
+	if matches[0].Severity != "critical" {
+		t.Fatalf("severity = %q, want the worst seen across artifacts", matches[0].Severity)
+	}
+
+	list, err := s.FindByFindingID(cve)
+	if err != nil {
+		t.Fatalf("FindByFindingID: %v", err)
+	}
+	if len(list) != matches[0].Artifacts {
+		t.Fatalf("search counted %d artifacts but FindByFindingID returned %d -- the two halves must count the same population",
+			matches[0].Artifacts, len(list))
+	}
+
+	// By id as well as title, and case-insensitively.
+	if m, _, err := s.SearchFindings("cve-2021", 50); err != nil || len(m) != 1 || m[0].ID != cve {
+		t.Fatalf("id-substring search = %+v, %v", m, err)
+	}
+	if m, total, err := s.SearchFindings("nothing-like-this", 50); err != nil || len(m) != 0 || total != 0 {
+		t.Fatalf("no-match search = %+v (total %d), %v", m, total, err)
+	}
+	if m, total, err := s.SearchFindings("  ", 50); err != nil || len(m) != 0 || total != 0 {
+		t.Fatalf("blank search = %+v (total %d), %v, want nothing -- blank is not a wildcard", m, total, err)
+	}
+}
+
+// A finding in the misconfiguration or secret bucket is as real as a
+// CVE. MemStore's lookup used to scan three of the five buckets while
+// Postgres queried one table covering all of them -- so the two
+// disagreed about whether an artifact was affected, which is exactly
+// the kind of difference that only shows up in production.
+func TestMemStore_FindByFindingIDCoversEveryBucket(t *testing.T) {
+	s := artifact.NewMemStore()
+	a, err := s.Create("app:1.0", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := s.Update(a.ID, func(art *artifact.Artifact) {
+		art.MisconfigFindings = append(art.MisconfigFindings, artifact.Finding{ID: "AVD-KSV-0001", Title: "runs as root", Status: artifact.FindingStatusOpen})
+		art.SecretFindings = append(art.SecretFindings, artifact.Finding{ID: "gitleaks-aws-key", Title: "AWS key", Status: artifact.FindingStatusOpen})
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	for _, id := range []string{"AVD-KSV-0001", "gitleaks-aws-key"} {
+		got, err := s.FindByFindingID(id)
+		if err != nil || len(got) != 1 {
+			t.Fatalf("FindByFindingID(%q) = %+v, %v, want the artifact", id, got, err)
+		}
+	}
+	if m, _, err := s.SearchFindings("gitleaks", 50); err != nil || len(m) != 1 {
+		t.Fatalf("search across buckets = %+v, %v", m, err)
+	}
+}
+
+// artifact.SeverityRank is a deliberate duplicate of notify's table (an
+// import back into artifact would be a cycle). If they drift, the
+// picker calls something "high" that notifications treat as critical.
+func TestSeverityRankMatchesNotify(t *testing.T) {
+	for _, s := range []string{"critical", "high", "medium", "low", "negligible", "unknown", "CRITICAL", " High ", "", "not-a-severity"} {
+		if got, want := artifact.SeverityRank(s), notify.SeverityRank(s); got != want {
+			t.Errorf("SeverityRank(%q) = %d, notify says %d", s, got, want)
+		}
 	}
 }

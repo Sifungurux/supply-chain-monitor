@@ -15,6 +15,45 @@ import (
 // (not a 404) when nothing matches, since "no artifacts affected" is a
 // perfectly valid, non-error answer -- unlike getArtifact, this isn't
 // asking about one specific ID that either exists or doesn't.
+// maxFindingMatches bounds one finding-search response, for the same
+// reason maxComponentMatches does: "cve" or "2024" legitimately matches
+// thousands of ids, and the total is always reported alongside so a
+// capped answer says so.
+const maxFindingMatches = 200
+
+// findingSearchResponse is the ?q= answer: distinct finding ids, not
+// artifacts.
+type findingSearchResponse struct {
+	Total    int                     `json:"total"`
+	Findings []artifact.FindingMatch `json:"findings"`
+}
+
+// searchFindings is the discovery step in front of findByFindingID,
+// and the direct mirror of the component search (components.go): you
+// know "log4j" or "that spring thing", not "CVE-2021-44228", so this
+// answers with the finding ids that actually exist -- each with its
+// worst-seen severity, a title, and how many artifacts are affected --
+// and the id picked from that goes to
+// GET /api/v1/findings/{findingID}/artifacts for the exact list.
+//
+// Both halves count the same population: findings that are neither
+// fixed nor VEX-suppressed. A search that said "41 artifacts" and a
+// click-through that returned 45 would be worse than no count at all.
+func (h *handler) searchFindings(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	if q == "" {
+		writeError(w, http.StatusBadRequest, `q query parameter is required, e.g. ?q=log4j`)
+		return
+	}
+
+	matches, total, err := h.store.SearchFindings(q, maxFindingMatches)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, findingSearchResponse{Total: total, Findings: matches})
+}
+
 func (h *handler) findByFindingID(w http.ResponseWriter, r *http.Request) {
 	findingID := r.PathValue("findingID")
 	if findingID == "" {

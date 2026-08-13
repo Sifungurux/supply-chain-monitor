@@ -334,6 +334,8 @@
       <div class="search-row">
         <input type="search" id="component-input" aria-label="Find artifacts containing a component"
                placeholder="Find a package: openssl, or a full pkg: purl — press Enter" />
+        <input type="search" id="finding-input" aria-label="Find artifacts affected by a finding"
+               placeholder="Find a finding: log4j, or an exact CVE id — press Enter" />
       </div>
       <div class="filter-row">
         <select id="filter-status" aria-label="Filter by status">
@@ -466,10 +468,22 @@
     // table would be wiped within ten seconds.
     componentQuery: '',
     componentPURL: '',
-    // Last picker result: packages plus how many matched in total, so a
-    // capped list can say so instead of looking complete.
-    componentMatches: [],
-    componentTotal: 0
+    // Findings work exactly the same way, one step removed: type
+    // "log4j", pick the id that exists, get the artifacts still
+    // affected. Kept as its own pair rather than a shared "picker mode"
+    // -- two parallel pairs read plainly, where one generalized pair
+    // plus a kind flag has to be decoded at every use.
+    //
+    // Only one search can be active: setting either query clears the
+    // other pair (see the input handlers), the client-side twin of the
+    // server's "purl wins over q" precedence.
+    findingQuery: '',
+    findingID: '',
+    // Last picker result: matches plus how many matched in total, so a
+    // capped list can say so instead of looking complete. Shared by
+    // both searches, since only one is ever on screen.
+    pickerMatches: [],
+    pickerTotal: 0
   };
   var lastDetailId = null;
   // Cache for an artifact opened by URL (#/artifacts/<id>) that isn't on
@@ -509,6 +523,7 @@
     rows: document.getElementById('artifact-rows'),
     search: document.getElementById('search-input'),
     component: document.getElementById('component-input'),
+    finding: document.getElementById('finding-input'),
     componentPicker: document.getElementById('component-picker'),
     artifactTable: document.getElementById('artifact-table'),
     pager: document.getElementById('pager'),
@@ -830,8 +845,31 @@
       // search ran.
       if (state.componentQuery && !state.componentPURL) {
         var found = await fetchJSON('/api/v1/components?q=' + encodeURIComponent(state.componentQuery));
-        state.componentMatches = (found && found.packages) || [];
-        state.componentTotal = (found && found.total) || 0;
+        state.pickerMatches = (found && found.packages) || [];
+        state.pickerTotal = (found && found.total) || 0;
+        setStatus('Connected to ' + state.apiBase, false);
+        render();
+        return;
+      }
+
+      // The same two stages for findings: a substring picks the id, the
+      // id picks the artifacts.
+      if (state.findingQuery && !state.findingID) {
+        var hits = await fetchJSON('/api/v1/findings?q=' + encodeURIComponent(state.findingQuery));
+        state.pickerMatches = (hits && hits.findings) || [];
+        state.pickerTotal = (hits && hits.total) || 0;
+        setStatus('Connected to ' + state.apiBase, false);
+        render();
+        return;
+      }
+
+      if (state.findingID) {
+        // A bare array, like the exact component query -- and like it,
+        // state.total is deliberately left alone so the "Artifacts" card
+        // keeps showing the fleet, not the match count.
+        var affected = await fetchJSON('/api/v1/findings/' + encodeURIComponent(state.findingID) + '/artifacts');
+        state.artifacts = affected || [];
+        state.offset = 0;
         setStatus('Connected to ' + state.apiBase, false);
         render();
         return;
@@ -890,12 +928,13 @@
     // artifacts contain this one?"), so exactly one is on screen at a
     // time rather than the picker being squeezed into columns built for
     // artifacts.
-    var picking = !!state.componentQuery && !state.componentPURL;
+    var picking = (!!state.componentQuery && !state.componentPURL) ||
+                  (!!state.findingQuery && !state.findingID);
     els.componentPicker.hidden = !picking;
     els.artifactTable.hidden = picking;
     els.pager.hidden = picking;
     if (picking) {
-      renderComponentPicker();
+      renderPicker();
     } else {
       renderRows();
       renderPager();
@@ -903,19 +942,38 @@
     renderSearchNote();
   }
 
-  // renderComponentPicker lists the packages a substring matched, one
-  // per row, sorted by how many artifacts contain each (the server
-  // decides that order -- the package in the most artifacts is usually
-  // the one meant). Clicking a row narrows to that exact purl, which is
-  // the whole point: the search is forgiving, the answer stays exact.
-  function renderComponentPicker() {
-    if (!state.componentMatches.length) {
-      els.componentPicker.innerHTML = '<p class="empty">No package matches &quot;' + esc(state.componentQuery) +
-        '&quot;. Try a shorter term, or part of the purl (e.g. <code>pkg:apk/</code>) — and note only artifacts with an uploaded SBOM have components at all.</p>';
+  // renderPicker lists whatever a substring matched -- packages or
+  // finding ids -- one per row, in the order the server decided (most
+  // widespread first: the thing in the most artifacts is usually the
+  // one meant). Clicking a row narrows to that exact key, which is the
+  // whole point of both searches: forgiving to type, exact to answer.
+  //
+  // One function for both because the row is the same shape either way
+  // (a label, a detail, a count) and only the fields differ. A second
+  // near-identical renderer would be the place the two drift.
+  function renderPicker() {
+    var isFinding = !!state.findingQuery;
+    var term = isFinding ? state.findingQuery : state.componentQuery;
+
+    if (!state.pickerMatches.length) {
+      var hint = isFinding
+        ? 'Try part of a CVE id (<code>CVE-2021</code>) or of the title (<code>openssl</code>). Findings already fixed or VEX-suppressed are deliberately not searched — they are not something you are still affected by.'
+        : 'Try a shorter term, or part of the purl (e.g. <code>pkg:apk/</code>) — and note only artifacts with an uploaded SBOM have components at all.';
+      els.componentPicker.innerHTML = '<p class="empty">No ' + (isFinding ? 'finding' : 'package') +
+        ' matches &quot;' + esc(term) + '&quot;. ' + hint + '</p>';
       return;
     }
-    var rows = state.componentMatches.map(function (m) {
+
+    var rows = state.pickerMatches.map(function (m) {
       var artifacts = m.artifacts === 1 ? '1 artifact' : m.artifacts + ' artifacts';
+      if (isFinding) {
+        return '<button type="button" class="pkg-row" data-action="pick-finding" data-id="' + esc(m.id) + '">' +
+          severityBadge(m.severity) +
+          '<span class="pkg-name">' + esc(m.id) + '</span>' +
+          '<span class="pkg-purl" title="' + esc(m.title || '') + '">' + esc(m.title || '') + '</span>' +
+          '<span class="pkg-count">' + artifacts + '</span>' +
+        '</button>';
+      }
       return '<button type="button" class="pkg-row" data-action="pick-component" data-purl="' + esc(m.purl) + '">' +
         '<span class="pkg-name">' + esc(m.name || m.purl) + '</span>' +
         (m.version ? '<span class="pkg-version">' + esc(m.version) + '</span>' : '') +
@@ -923,30 +981,28 @@
         '<span class="pkg-count">' + artifacts + '</span>' +
       '</button>';
     });
+
     // A capped list says so. Silently showing the first 200 of 4,000
     // reads as "these are all of them", which is the one thing a search
     // result must never imply.
-    if (state.componentTotal > state.componentMatches.length) {
-      rows.push('<p class="search-note">Showing the ' + state.componentMatches.length +
-        ' most widespread of ' + state.componentTotal + ' matching packages — narrow the term to see the rest.</p>');
+    if (state.pickerTotal > state.pickerMatches.length) {
+      rows.push('<p class="search-note">Showing the ' + state.pickerMatches.length +
+        ' most widespread of ' + state.pickerTotal + ' matching ' + (isFinding ? 'findings' : 'packages') +
+        ' — narrow the term to see the rest.</p>');
     }
     els.componentPicker.innerHTML = rows.join('');
   }
 
-  // renderPager shows which slice of the (server-side) result set is on
-  // screen and enables/disables prev/next accordingly. The dashboard
-  // doesn't parse the API's Link header for this -- it has limit,
-  // offset and total already, and arithmetic on those is less machinery
-  // than a header parser for the same two buttons.
   function renderPager() {
     // A component search returns its whole answer at once, so paging
     // through it would be paging through a single page -- both buttons
     // stay disabled and the range reads as a count, not a slice.
-    if (state.componentPURL) {
+    if (state.componentPURL || state.findingID) {
       var matches = state.artifacts.length;
-      els.pageRange.textContent = matches === 1
-        ? '1 artifact contains this component'
-        : matches + ' artifacts contain this component';
+      var noun = state.findingID
+        ? (matches === 1 ? '1 artifact is affected' : matches + ' artifacts are affected')
+        : (matches === 1 ? '1 artifact contains this component' : matches + ' artifacts contain this component');
+      els.pageRange.textContent = noun;
       els.pagePrev.disabled = true;
       els.pageNext.disabled = true;
       return;
@@ -970,9 +1026,10 @@
     // takes no filters, so a select that still looks usable but changes
     // nothing (while displaying a stale selection) reads as a bug. This
     // is the one place that state is visible, so it's set here.
-    var componentMode = !!(state.componentPURL || state.componentQuery);
-    els.filterStatus.disabled = componentMode;
-    els.filterType.disabled = componentMode;
+    var searchMode = !!(state.componentPURL || state.componentQuery ||
+                        state.findingID || state.findingQuery);
+    els.filterStatus.disabled = searchMode;
+    els.filterType.disabled = searchMode;
 
     if (state.componentPURL) {
       // Reached through a search rather than by pasting a purl? Offer
@@ -988,6 +1045,19 @@
     if (state.componentQuery) {
       els.searchNote.innerHTML = 'Packages matching <code>' + esc(state.componentQuery) +
         '</code> — pick one to see every artifact containing exactly that version. Paste a full <code>pkg:…</code> purl to skip this step.';
+      return;
+    }
+    if (state.findingID) {
+      var backToFindings = state.findingQuery
+        ? ' <button type="button" class="link-btn" data-action="back-to-matches">← back to matches for “' + esc(state.findingQuery) + '”</button>'
+        : '';
+      els.searchNote.innerHTML = 'Showing every artifact still affected by <code>' + esc(state.findingID) +
+        '</code> — fixed and VEX-suppressed findings are excluded, so this is what is actually outstanding. Clear the box to go back to the full list.' + backToFindings;
+      return;
+    }
+    if (state.findingQuery) {
+      els.searchNote.innerHTML = 'Findings matching <code>' + esc(state.findingQuery) +
+        '</code> — pick one to see every artifact still affected by it. Enter an exact id (<code>CVE-2021-44228</code>) to skip this step.';
       return;
     }
     els.searchNote.textContent = 'Search only looks at the artifacts on this page — narrow the set with the status/type filters, which are applied by the server.';
@@ -1102,6 +1172,10 @@
       // there are artifacts, none of them ship this package (or none has
       // had an SBOM uploaded yet, which is the other reason a purl finds
       // nothing and is worth saying out loud).
+      if (state.findingID) {
+        emptyMsg = 'No artifact is still affected by ' + esc(state.findingID) +
+          '. It may have been fixed everywhere, or suppressed by a VEX document.';
+      }
       if (state.componentPURL) {
         emptyMsg = 'No artifact’s SBOM lists ' + esc(state.componentPURL) +
           '. Check the purl (it must match exactly, qualifiers included), or whether these artifacts have SBOMs uploaded at all.';
@@ -1559,34 +1633,73 @@
   // long. A search input also fires "change" when its native clear (×)
   // is used, so emptying it returns to the normal list with no extra
   // wiring.
+  // Starting either search clears the other pair and both inputs: one
+  // picker area, so one query at a time. This is the client-side twin
+  // of the server's "purl wins over q" precedence -- two active
+  // searches would mean two sources of truth for what is on screen.
+  function resetSearches() {
+    state.offset = 0;
+    state.pickerMatches = [];
+    state.pickerTotal = 0;
+    state.componentQuery = '';
+    state.componentPURL = '';
+    state.findingQuery = '';
+    state.findingID = '';
+  }
+
   els.component.addEventListener('change', function () {
     var value = els.component.value.trim();
-    state.offset = 0;
-    state.componentMatches = [];
-    state.componentTotal = 0;
+    resetSearches();
+    els.finding.value = '';
+    // A full purl is an exact request and skips the picker; anything
+    // else is a search.
     if (value.indexOf('pkg:') === 0) {
       state.componentPURL = value;
-      state.componentQuery = '';
     } else {
       state.componentQuery = value;
-      state.componentPURL = '';
+    }
+    loadAll();
+  });
+
+  els.finding.addEventListener('change', function () {
+    var value = els.finding.value.trim();
+    resetSearches();
+    els.component.value = '';
+    // An exact finding id skips the picker the way a full purl does.
+    // Recognized by shape rather than by a second input: a CVE id is
+    // the overwhelmingly common case, and anything else a scanner emits
+    // (an AVD rule, a ClamAV signature) is still reachable by searching
+    // for it and picking.
+    if (/^CVE-\d{4}-\d+$/i.test(value)) {
+      state.findingID = value;
+    } else {
+      state.findingQuery = value;
     }
     loadAll();
   });
 
   els.componentPicker.addEventListener('click', function (ev) {
-    var btn = ev.target.closest('[data-action="pick-component"]');
-    if (!btn) return;
-    // componentQuery is kept, not cleared: it's what "back to matches"
-    // returns to, and what the note names.
-    state.componentPURL = btn.getAttribute('data-purl');
-    state.offset = 0;
-    loadAll();
+    var component = ev.target.closest('[data-action="pick-component"]');
+    if (component) {
+      // The query is kept, not cleared: it's what "back to matches"
+      // returns to, and what the note names.
+      state.componentPURL = component.getAttribute('data-purl');
+      state.offset = 0;
+      loadAll();
+      return;
+    }
+    var finding = ev.target.closest('[data-action="pick-finding"]');
+    if (finding) {
+      state.findingID = finding.getAttribute('data-id');
+      state.offset = 0;
+      loadAll();
+    }
   });
 
   els.searchNote.addEventListener('click', function (ev) {
     if (!ev.target.closest('[data-action="back-to-matches"]')) return;
     state.componentPURL = '';
+    state.findingID = '';
     loadAll();
   });
 
