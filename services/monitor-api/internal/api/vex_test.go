@@ -146,6 +146,52 @@ func TestSubmitFindings_RespectsVEX(t *testing.T) {
 	}
 }
 
+// Retracting through the endpoint, which is the only way anyone
+// actually retracts. The merge-level test covers the same rule, but
+// this is the round trip that was broken in practice: uploading an
+// "affected" document returned 200 with "1 statement understood" and
+// left the finding suppressed, because nothing is reported on the
+// upload path.
+func TestUploadVEX_AffectedRetractsAnEarlierSuppression(t *testing.T) {
+	trivyLike := &fakeScanner{findings: []artifact.Finding{
+		{ID: "CVE-2024-1", Severity: "critical", Source: "trivy"},
+	}}
+	h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {trivyLike}})
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	scanAndWait(t, h, store, created.ID)
+
+	if rec := doRaw(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/vex", "application/json", []byte(notAffectedVEX)); rec.Code != http.StatusOK {
+		t.Fatalf("suppress status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	const affectedVEX = `{"statements":[{"vulnerability":{"name":"CVE-2024-1"},"status":"affected"}]}`
+	rec := doRaw(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/vex", "application/json", []byte(affectedVEX))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retract status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	got := decodeVEXResponse(t, rec).Artifact
+	if len(got.CVEFindings) != 1 {
+		t.Fatalf("cve findings = %+v, want 1", got.CVEFindings)
+	}
+	f := got.CVEFindings[0]
+	if f.Status != artifact.FindingStatusOpen {
+		t.Fatalf("status = %q, want %q immediately after the retraction -- not at some later scan", f.Status, artifact.FindingStatusOpen)
+	}
+	if f.Justification != "" {
+		t.Fatalf("justification = %q, want cleared along with the suppression", f.Justification)
+	}
+
+	// And it's actually persisted, not just reflected in the response.
+	persisted, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if persisted.CVEFindings[0].Status != artifact.FindingStatusOpen {
+		t.Fatalf("persisted status = %q, want open", persisted.CVEFindings[0].Status)
+	}
+}
+
 func TestUploadVEX_RejectsUnparseableDocument(t *testing.T) {
 	h, store := newTestRouter(scanner.Registry{})
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)

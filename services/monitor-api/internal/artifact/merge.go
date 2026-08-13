@@ -114,10 +114,32 @@ func MergeFindings(existing, reported []Finding, now time.Time, detectFixed bool
 			continue
 		}
 
+		// A retraction has to take effect on the same path an
+		// application does -- uploadVEX merges with NOTHING reported and
+		// detectFixed false, so handling this only in the still-reported
+		// branch below meant uploading an "affected" statement appeared
+		// to do nothing until the next scan happened to report the
+		// finding again, while uploading a "not_affected" one applied
+		// instantly. Reopened rather than left to the scan to decide:
+		// "affected" is an assertion that this artifact IS affected, and
+		// the next scan reclassifies it normally from there.
+		if revoked && old.Status == FindingStatusNotAffected {
+			next := old
+			if isReported {
+				next = stillReported
+				next.FirstSeenAt = old.FirstSeenAt
+			}
+			next.Status = FindingStatusOpen
+			next.Justification = ""
+			next.ResolvedAt = nil
+			merged = append(merged, next)
+			continue
+		}
+
 		if isReported {
 			stillReported.FirstSeenAt = old.FirstSeenAt
 			stillReported.ResolvedAt = nil
-			if old.Status == FindingStatusNotAffected && !revoked {
+			if old.Status == FindingStatusNotAffected {
 				// Suppressed by a VEX document at some point in the past.
 				// A scanner reporting it again is not news -- that's the
 				// whole premise of VEX -- so it must not reopen, and the
@@ -147,22 +169,26 @@ func MergeFindings(existing, reported []Finding, now time.Time, detectFixed bool
 			continue
 		}
 
-		if old.Status == FindingStatusFixed || (old.Status == FindingStatusNotAffected && !revoked) {
+		if old.Status == FindingStatusFixed || old.Status == FindingStatusNotAffected {
 			// Already fixed from an earlier round; don't touch
 			// ResolvedAt again just because it's still gone. A
 			// VEX-suppressed finding is left alone for the same reason
 			// plus one more: overwriting "not affected" with "fixed"
 			// would replace a human's assessment with a guess, and both
-			// statuses are already out of every count anyway.
+			// statuses are already out of every count anyway. (A
+			// retracted suppression never reaches here -- it was reopened
+			// above -- so anything still carrying "not_affected" at this
+			// point is one nobody has retracted.)
 			merged = append(merged, old)
 			continue
 		}
 
 		fixed := old
 		fixed.Status = FindingStatusFixed
-		// Only reachable with a justification attached when a suppression
-		// was just revoked (above) on something no scanner reports any
-		// more -- the old reason doesn't describe this new status.
+		// Defensive: a finding reaching here should never carry one (a
+		// justification only ever accompanies a suppression, and those
+		// are handled above), and a stale reason would misdescribe the
+		// status it is now paired with.
 		fixed.Justification = ""
 		resolvedAt := now
 		fixed.ResolvedAt = &resolvedAt
