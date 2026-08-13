@@ -1,6 +1,9 @@
 package artifact
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Type identifies what kind of thing an artifact is. Anything that can be
 // packed into an OCI artifact is representable here: container images,
@@ -363,4 +366,61 @@ type Document struct {
 	ContentType string
 	Content     []byte
 	CreatedAt   time.Time
+}
+
+// FindingMatch is one distinct finding id found by a search
+// (Store.SearchFindings), with how many artifacts currently carry it --
+// the discovery half of finding lookup, exactly as ComponentMatch is for
+// packages. "log4j" or "CVE-2024" finds the ids that actually exist,
+// each with the weight to judge which matters, and the id picked then
+// goes to FindByFindingID for the artifact list.
+type FindingMatch struct {
+	ID string `json:"id"`
+	// Title and Severity describe the finding as most recently recorded.
+	// One id can legitimately carry different severities across artifacts
+	// (a CVE's rating gets revised upstream between scans -- see
+	// MergeFindings, which refreshes both from every report), so Severity
+	// is the WORST seen: a search that showed "medium" while one artifact
+	// rated it critical would rank the wrong thing first.
+	Title    string `json:"title,omitempty"`
+	Severity string `json:"severity,omitempty"`
+	// Artifacts is the number of DISTINCT artifacts where this finding is
+	// active -- neither fixed nor VEX-suppressed, the same population
+	// FindByFindingID returns and the same one every count on the
+	// dashboard uses.
+	Artifacts int `json:"artifacts"`
+}
+
+// severityRank orders severities for "worst seen" aggregation. A
+// deliberate duplicate of internal/notify's identical table: notify
+// imports this package (ScanEvent carries []Finding), so importing it
+// back would be a cycle. TestSeverityRankMatchesNotify (store_test.go)
+// asserts the two stay in agreement, which is the part that actually
+// matters -- a picker calling something "high" that notifications treat
+// as critical would be worse than having no severity at all.
+var severityRank = map[string]int{
+	"critical":   5,
+	"high":       4,
+	"medium":     3,
+	"low":        2,
+	"negligible": 1,
+	"unknown":    0,
+}
+
+// SeverityRank is exported so the SQL CASE in PostgresStore.SearchFindings
+// can be checked against it in a test rather than drifting silently.
+func SeverityRank(severity string) int {
+	return severityRank[strings.ToLower(strings.TrimSpace(severity))]
+}
+
+// IsActive reports whether a finding still counts as a live problem:
+// anything that is not fixed and not VEX-suppressed. Written as an
+// exclusion rather than `== FindingStatusOpen` because a finding
+// persisted before the lifecycle columns existed (or submitted by a
+// caller that never set one) has an empty status, and the dashboard has
+// always treated those as open -- see openFindings in
+// dashboard/index.html. Failing toward "still a problem" is the safe
+// direction.
+func (f Finding) IsActive() bool {
+	return f.Status != FindingStatusFixed && f.Status != FindingStatusNotAffected
 }

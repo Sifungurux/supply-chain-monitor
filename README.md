@@ -319,7 +319,8 @@ request/response shapes.
 | POST   | `/api/v1/artifacts/{id}/findings`  | record findings an external system already computed `{bucket, findings}` |
 | POST   | `/api/v1/artifacts/{id}/vex`       | upload an OpenVEX/CycloneDX-VEX document and suppress the findings it clears |
 | POST   | `/api/v1/artifacts/{id}/stage`     | record a pipeline-stage transition         |
-| GET    | `/api/v1/findings/{findingID}/artifacts` | every artifact affected by a given finding ID (e.g. a CVE) |
+| GET    | `/api/v1/findings?q=...`           | search finding ids/titles ("log4j") — returns matching ids with artifact counts |
+| GET    | `/api/v1/findings/{findingID}/artifacts` | every artifact still affected by a given finding ID (e.g. a CVE) |
 | GET    | `/api/v1/components?purl=...`      | every artifact whose ingested SBOM lists that component |
 
 `type` is one of `image`, `file`, `sbom`, `sarif`.
@@ -354,6 +355,9 @@ curl -s -X POST localhost:8080/api/v1/artifacts/<id>/scan "${AUTH[@]}"
 # misconfiguration_findings/secret_findings/other_findings from parsed
 # SARIF, classified per-result (see "SBOM and SARIF scanning" below)
 curl -s localhost:8080/api/v1/artifacts/<id> "${AUTH[@]}"
+
+# search findings by id or title when you don't have the exact id
+curl -s "${AUTH[@]}" --get --data-urlencode 'q=log4j' localhost:8080/api/v1/findings
 
 # find every artifact still affected by a given finding (e.g. after a
 # fix ships, confirm nothing registered still carries this CVE)
@@ -953,6 +957,52 @@ Some details worth knowing:
   re-read it — but it is deliberately *not* reachable through
   `POST /documents/{kind}`, which stores bytes and would let a document
   land without ever being applied.
+
+### Searching findings: which images still have this CVE?
+
+Exact ids are the right thing to *answer* with and a poor thing to
+*search* with — you remember "log4j" or "that Spring RCE", not
+`CVE-2021-44228`. So finding lookup works in the same two steps
+component search does:
+
+```bash
+# 1. which ids exist, and where's the weight?
+curl -s "${AUTH[@]}" --get --data-urlencode 'q=log4j' \
+  localhost:8080/api/v1/findings
+```
+```json
+{ "total": 2, "findings": [
+  { "id": "CVE-2021-44228", "title": "log4j: RCE via JNDI lookup",
+    "severity": "critical", "artifacts": 12 },
+  { "id": "CVE-2021-45046", "title": "log4j: incomplete fix for CVE-2021-44228",
+    "severity": "high", "artifacts": 9 } ] }
+```
+```bash
+# 2. exactly which artifacts are still affected by the one you meant
+curl -s "${AUTH[@]}" localhost:8080/api/v1/findings/CVE-2021-44228/artifacts
+```
+
+`q` matches a substring of the finding id *or* its title,
+case-insensitively, so `log4j`, `CVE-2021`, and `jndi` all get there.
+Results are distinct ids (not one row per artifact), most widespread
+first, capped at 200 with the true total reported alongside. `severity`
+is the **worst** recorded for that id across artifacts — a scanner
+revising a rating between scans shouldn't let a search rank a critical
+as medium.
+
+**Both steps count the same population: findings that are neither fixed
+nor VEX-suppressed.** A search promising "12 artifacts" that opens onto
+15 would be worse than no count at all, so the exact lookup applies the
+same filter — it has always described itself as "still affected", and an
+artifact that patched the CVE or formally assessed it as not applying is
+not still affected. If you need the historical view ("who *ever* had
+this"), query the `findings` table via `make db-shell`; the API answers
+the operational question.
+
+The dashboard's second search box is this endpoint: type `log4j`, get
+the matching ids with severity and artifact counts, click one to see the
+artifacts, with a link back to the other matches. An exact `CVE-…` id
+skips the picker.
 
 ### SBOM and SARIF scanning
 

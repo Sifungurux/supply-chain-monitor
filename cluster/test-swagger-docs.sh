@@ -202,6 +202,25 @@ else
 	subject_json=$(curl -s "${AUTH[@]}" --get --data-urlencode 'purl=pkg:oci/alpine@sha256:abc' "${BASE}/api/v1/components")
 	[ "$subject_json" = "[]" ] || { echo "FAIL: the SBOM's own subject was indexed as a component of itself: $subject_json" >&2; fail=1; }
 
+	# The finding search, same two-stage shape: a substring somebody
+	# remembers, answered with ids rather than artifacts, and a count
+	# that has to match what the exact lookup then returns. That
+	# agreement is the whole contract, and only a live run checks it
+	# across two separate queries.
+	finding_search=$(curl -s "${AUTH[@]}" --get --data-urlencode 'q=CVE-2024' "${BASE}/api/v1/findings")
+	echo "$finding_search" | grep -q '"findings"' || { echo "FAIL: finding search response has no \"findings\" key: $finding_search" >&2; fail=1; }
+	echo "$finding_search" | grep -q 'CVE-2024-1234' || { echo "FAIL: finding search didn't find the submitted finding: $finding_search" >&2; fail=1; }
+	search_count=$(echo "$finding_search" | grep -o '"artifacts":[0-9]*' | head -1 | cut -d: -f2)
+	# Counted on "ref", not "id": an artifact's JSON carries an id for
+	# the artifact AND one per finding, so counting ids reports two
+	# artifacts for one artifact with one finding. Every artifact has
+	# exactly one ref; findings have none.
+	exact_count=$(curl -s "${AUTH[@]}" "${BASE}/api/v1/findings/CVE-2024-1234/artifacts" | grep -o '"ref":"' | wc -l | tr -d ' ')
+	check "GET /api/v1/findings?q=... count agrees with the exact lookup" "$search_count" "$exact_count"
+
+	missing_q_status=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" "${BASE}/api/v1/findings")
+	check "GET /api/v1/findings (no q)" "$missing_q_status" "400"
+
 	# The discovery half of the same endpoint: a substring somebody
 	# types, answered with packages rather than artifacts. Worth running
 	# for real -- `q` is free text that arrives through the same URL

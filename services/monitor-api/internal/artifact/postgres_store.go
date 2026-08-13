@@ -962,13 +962,124 @@ func (s *PostgresStore) Delete(id string) error {
 // stage history into their own tables."
 func (s *PostgresStore) FindByFindingID(findingID string) ([]*Artifact, error) {
 	out, err := s.queryArtifacts(context.Background(), selectArtifactColumns+`
-		WHERE id IN (SELECT DISTINCT artifact_id FROM findings WHERE finding_id = $1)
+		WHERE id IN (
+			SELECT DISTINCT artifact_id FROM findings
+			WHERE finding_id = $1 AND `+activeFindingSQL+`
+		)
 		ORDER BY created_at DESC
 	`, findingID)
 	if err != nil {
 		return nil, fmt.Errorf("find artifacts by finding id: %w", err)
 	}
 	return out, nil
+}
+
+// activeFindingSQL is Finding.IsActive as a predicate: not fixed, not
+// VEX-suppressed. NOT IN rather than `= 'open'` for the same reason
+// IsActive is written as an exclusion -- a row persisted before the
+// status column existed carries whatever the migration defaulted it to,
+// and anything unrecognized should count as still-a-problem.
+const activeFindingSQL = `status NOT IN ('fixed', 'not_affected')`
+
+// severityRankSQL mirrors artifact.severityRank (model.go) so "worst
+// severity seen" means the same thing in the database as it does in
+// MemStore and in internal/notify. Case-insensitive, and anything
+// unrecognized ranks 0 -- the same treatment notify.SeverityRank gives
+// a severity no scanner could rate.
+const severityRankSQL = `CASE lower(severity)
+	WHEN 'critical' THEN 5
+	WHEN 'high' THEN 4
+	WHEN 'medium' THEN 3
+	WHEN 'low' THEN 2
+	WHEN 'negligible' THEN 1
+	ELSE 0 END`
+
+// SearchFindings finds distinct finding ids matching a substring of the
+// id or the title -- the discovery step in front of FindByFindingID's
+// exact lookup, and the direct counterpart of SearchComponents.
+//
+// GROUP BY finding_id alone, unlike SearchComponents' (purl, name,
+// version): one CVE legitimately carries different severities and
+// titles across artifacts, because MergeFindings refreshes both from
+// every report and upstream revises ratings. Grouping by those too
+// would split one CVE into several picker rows that differ only in how
+// recently each artifact was scanned. So severity is aggregated as the
+// worst seen (see severityRankSQL) and the title is taken from the
+// worst-rated row, which is the one a reader is most likely acting on.
+//
+// ponytail: ILIKE '%q%' can't use findings_finding_id_idx, so this is a
+// sequential scan over the findings table -- 45k rows on a real
+// deployment, single-digit milliseconds. pg_trgm is the upgrade path,
+// same as for components.
+func (s *PostgresStore) SearchFindings(query string, limit int) ([]FindingMatch, int, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return []FindingMatch{}, 0, nil
+	}
+	ctx := context.Background()
+	pattern := "%" + likeEscape(query) + "%"
+
+	var total int
+	if err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM (
+			SELECT 1 FROM findings
+			WHERE `+activeFindingSQL+`
+			  AND (finding_id ILIKE $1 ESCAPE '\' OR title ILIKE $1 ESCAPE '\')
+			GROUP BY finding_id
+		) matches
+	`, pattern).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count finding matches: %w", err)
+	}
+
+	// Two aggregations over the same matched rows, joined: the count
+	// per id, and the worst-rated row per id (DISTINCT ON), which is
+	// where both severity and title come from -- so they describe one
+	// real row rather than being assembled from two different artifacts'
+	// reports.
+	//
+	// Deliberately not one pass with a window function: Postgres has no
+	// `count(DISTINCT ...) OVER (...)` ("DISTINCT is not implemented for
+	// window functions"), and counting rows instead of distinct
+	// artifacts would inflate every id that appears in more than one
+	// bucket of the same artifact.
+	rows, err := s.pool.Query(ctx, `
+		WITH matched AS (
+			SELECT finding_id, artifact_id, title, severity
+			FROM findings
+			WHERE `+activeFindingSQL+`
+			  AND (finding_id ILIKE $1 ESCAPE '\' OR title ILIKE $1 ESCAPE '\')
+		),
+		counts AS (
+			SELECT finding_id, count(DISTINCT artifact_id) AS artifacts
+			FROM matched GROUP BY finding_id
+		),
+		worst AS (
+			SELECT DISTINCT ON (finding_id) finding_id, title, severity
+			FROM matched
+			ORDER BY finding_id, `+severityRankSQL+` DESC, title
+		)
+		SELECT c.finding_id, w.title, w.severity, c.artifacts
+		FROM counts c JOIN worst w USING (finding_id)
+		ORDER BY c.artifacts DESC, c.finding_id ASC
+		LIMIT $2
+	`, pattern, limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("search findings: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]FindingMatch, 0)
+	for rows.Next() {
+		var m FindingMatch
+		if err := rows.Scan(&m.ID, &m.Title, &m.Severity, &m.Artifacts); err != nil {
+			return nil, 0, fmt.Errorf("scan finding match: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("search findings: %w", err)
+	}
+	return out, total, nil
 }
 
 // FindByDigest returns the first-registered artifact with this exact

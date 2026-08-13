@@ -33,13 +33,29 @@ type Store interface {
 	// something each Store re-implements.
 	ListPage(limit, offset int, statusFilter, typeFilter string) ([]*Artifact, int, error)
 	Update(id string, mutate func(*Artifact)) (*Artifact, error)
-	// FindByFindingID returns every artifact with a CVE/malware/other
-	// finding matching findingID (e.g. "CVE-2024-1234") in any bucket --
-	// the concrete payoff of normalizing findings into their own table
-	// (see docs/architecture.md, "Normalizing findings and stage
-	// history into their own tables"). MemStore answers this with a
-	// linear scan; PostgresStore uses the findings.finding_id index.
+	// FindByFindingID returns every artifact where findingID (e.g.
+	// "CVE-2024-1234") is ACTIVE, in any of the five buckets -- the
+	// concrete payoff of normalizing findings into their own table (see
+	// docs/architecture.md, "Normalizing findings and stage history into
+	// their own tables"). MemStore answers this with a linear scan;
+	// PostgresStore uses the findings.finding_id index.
+	//
+	// "Active" means neither fixed nor VEX-suppressed (Finding.IsActive)
+	// -- this endpoint has always described itself as "every artifact
+	// still affected", and an artifact that patched the CVE last month,
+	// or formally assessed it as not applying, is not still affected.
+	// It's also the population SearchFindings counts, so the number a
+	// search shows and the list a caller gets are the same set rather
+	// than differing by however many were suppressed.
 	FindByFindingID(findingID string) ([]*Artifact, error)
+	// SearchFindings finds DISTINCT finding ids whose id or title
+	// contains query (case-insensitive substring), each with the number
+	// of artifacts where it's active -- the discovery step that makes
+	// FindByFindingID usable by someone who knows "log4j" but not
+	// "CVE-2021-44228". Same contract as SearchComponents: at most limit
+	// matches plus the true total, ordered by artifact count descending
+	// then id ascending.
+	SearchFindings(query string, limit int) ([]FindingMatch, int, error)
 	// FindByDigest returns the first-registered artifact matching
 	// digest, or (nil, nil) if none exists yet -- "not found" is the
 	// expected, common case (most registrations are the first time
@@ -439,22 +455,101 @@ func (s *MemStore) FindByFindingID(findingID string) ([]*Artifact, error) {
 
 	out := make([]*Artifact, 0)
 	for _, a := range s.data {
-		if findingIDMatches(a.CVEFindings, findingID) ||
-			findingIDMatches(a.MalwareFindings, findingID) ||
-			findingIDMatches(a.OtherFindings, findingID) {
-			out = append(out, copyArtifact(a))
+		for _, bucket := range allBuckets(a) {
+			if findingIDMatches(bucket, findingID) {
+				out = append(out, copyArtifact(a))
+				break
+			}
 		}
 	}
 	return out, nil
 }
 
+// allBuckets is every finding slice on an artifact. Written once so a
+// whole-artifact scan can't miss a bucket: this used to check CVE,
+// malware and other only, so a misconfiguration or secret finding --
+// both real buckets since SARIF classification landed -- was invisible
+// to FindByFindingID here while PostgresStore (which queries one table
+// with a bucket column) found it. Two backends disagreeing about
+// whether an artifact is affected is the kind of difference that only
+// shows up in production.
+func allBuckets(a *Artifact) [][]Finding {
+	return [][]Finding{a.CVEFindings, a.MalwareFindings, a.MisconfigFindings, a.SecretFindings, a.OtherFindings}
+}
+
+// findingIDMatches reports whether this bucket has findingID ACTIVE --
+// a fixed or VEX-suppressed finding is on record but is not something
+// the artifact is still affected by. See the Store interface.
 func findingIDMatches(findings []Finding, findingID string) bool {
 	for _, f := range findings {
-		if f.ID == findingID {
+		if f.ID == findingID && f.IsActive() {
 			return true
 		}
 	}
 	return false
+}
+
+// SearchFindings scans and groups in Go, matching PostgresStore's GROUP
+// BY, with the same ordering so the two backends can't show a picker in
+// different orders.
+func (s *MemStore) SearchFindings(query string, limit int) ([]FindingMatch, int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return []FindingMatch{}, 0, nil
+	}
+
+	type agg struct {
+		match     FindingMatch
+		artifacts map[string]bool
+	}
+	byID := make(map[string]*agg)
+	for _, a := range s.data {
+		for _, bucket := range allBuckets(a) {
+			for _, f := range bucket {
+				if !f.IsActive() {
+					continue
+				}
+				if !strings.Contains(strings.ToLower(f.ID), q) && !strings.Contains(strings.ToLower(f.Title), q) {
+					continue
+				}
+				g, ok := byID[f.ID]
+				if !ok {
+					g = &agg{match: FindingMatch{ID: f.ID}, artifacts: map[string]bool{}}
+					byID[f.ID] = g
+				}
+				g.artifacts[a.ID] = true
+				if g.match.Title == "" {
+					g.match.Title = f.Title
+				}
+				// Worst severity seen, not the last one scanned -- see
+				// FindingMatch.Severity.
+				if SeverityRank(f.Severity) >= SeverityRank(g.match.Severity) && f.Severity != "" {
+					g.match.Severity = f.Severity
+				}
+			}
+		}
+	}
+
+	out := make([]FindingMatch, 0, len(byID))
+	for _, g := range byID {
+		g.match.Artifacts = len(g.artifacts)
+		out = append(out, g.match)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Artifacts != out[j].Artifacts {
+			return out[i].Artifacts > out[j].Artifacts
+		}
+		return out[i].ID < out[j].ID
+	})
+
+	total := len(out)
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, total, nil
 }
 
 // FindByRef scans for the earliest artifact with this exact ref. Same

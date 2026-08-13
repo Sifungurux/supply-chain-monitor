@@ -335,6 +335,46 @@ paths:
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/findings:
+    get:
+      tags: [findings]
+      summary: Search finding ids by substring
+      description: >-
+        The discovery step in front of
+        /api/v1/findings/{findingID}/artifacts, mirroring
+        /api/v1/components?q=: you know "log4j", not "CVE-2021-44228".
+        Returns the DISTINCT finding ids whose id or title contains the
+        substring (case-insensitive), each with its worst-seen severity,
+        a title, and how many artifacts are affected -- most widespread
+        first, capped at 200 with the true total reported alongside.
+
+
+        Counts only findings that are neither fixed nor VEX-suppressed,
+        which is the same population the artifact lookup returns, so the
+        number here and the list you get by clicking through agree.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+          example: log4j
+      responses:
+        "200":
+          description: Matching finding ids (empty list if none).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                    description: Finding ids matching before the 200-id cap.
+                    example: 3
+                  findings:
+                    type: array
+                    items: { $ref: "#/components/schemas/FindingMatch" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
   /api/v1/findings/{findingID}/artifacts:
     get:
       tags: [findings]
@@ -347,7 +387,9 @@ paths:
           example: CVE-2024-1234
       responses:
         "200":
-          description: Artifacts affected by this finding (empty array if none).
+          description: >-
+            Artifacts where this finding is still active -- neither
+            fixed nor VEX-suppressed (empty array if none).
           content:
             application/json:
               schema:
@@ -668,6 +710,28 @@ components:
           description: Why a VEX statement suppressed this finding. Empty otherwise.
           example: vulnerable_code_not_in_execute_path
           readOnly: true
+
+    FindingMatch:
+      type: object
+      description: >-
+        One distinct finding id found by a `?q=` search, with how many
+        artifacts it is active in. Not a finding -- this is an aggregate
+        across artifacts.
+      properties:
+        id:
+          type: string
+          example: CVE-2021-44228
+        title:
+          type: string
+          example: "log4j: Remote code execution via JNDI lookup"
+        severity:
+          type: string
+          description: The worst severity recorded for this id across artifacts.
+          example: critical
+        artifacts:
+          type: integer
+          description: Number of distinct artifacts where it is active.
+          example: 12
 
     ComponentMatch:
       type: object
