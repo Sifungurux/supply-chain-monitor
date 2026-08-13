@@ -1031,31 +1031,45 @@ func (s *PostgresStore) SearchFindings(query string, limit int) ([]FindingMatch,
 		return nil, 0, fmt.Errorf("count finding matches: %w", err)
 	}
 
-	// Two aggregations over the same matched rows, joined: the count
-	// per id, and the worst-rated row per id (DISTINCT ON), which is
-	// where both severity and title come from -- so they describe one
-	// real row rather than being assembled from two different artifacts'
-	// reports.
+	// Aggregate over every active row of the MATCHED IDS, not over the
+	// rows that matched. Those differ: one CVE is recorded with
+	// whichever package title each scanner reported, so
+	// CVE-2024-5535 appears as "openssl: SSL_select_next_proto buffer
+	// overread" in most artifacts and as "libcrypto3 3.1.4-r5" or
+	// "libssl1.0.0 ..." in others. Counting matched rows made q=openssl
+	// report 21 artifacts for a CVE that 23 artifacts actually carry --
+	// the picker undercounting what its own click-through returns, which
+	// is the exact mismatch this feature exists to avoid. Found on live
+	// data, not by a test.
+	//
+	// It also makes severity and title "worst across every artifact that
+	// has this id", rather than "worst among the rows whose text
+	// happened to contain the search term".
 	//
 	// Deliberately not one pass with a window function: Postgres has no
 	// `count(DISTINCT ...) OVER (...)` ("DISTINCT is not implemented for
-	// window functions"), and counting rows instead of distinct
-	// artifacts would inflate every id that appears in more than one
-	// bucket of the same artifact.
+	// window functions"), and counting plain rows would inflate any id
+	// appearing in two buckets of the same artifact.
 	rows, err := s.pool.Query(ctx, `
-		WITH matched AS (
-			SELECT finding_id, artifact_id, title, severity
+		WITH matched_ids AS (
+			SELECT DISTINCT finding_id
 			FROM findings
 			WHERE `+activeFindingSQL+`
 			  AND (finding_id ILIKE $1 ESCAPE '\' OR title ILIKE $1 ESCAPE '\')
 		),
+		every_row AS (
+			SELECT f.finding_id, f.artifact_id, f.title, f.severity
+			FROM findings f
+			JOIN matched_ids m ON m.finding_id = f.finding_id
+			WHERE `+activeFindingSQL+`
+		),
 		counts AS (
 			SELECT finding_id, count(DISTINCT artifact_id) AS artifacts
-			FROM matched GROUP BY finding_id
+			FROM every_row GROUP BY finding_id
 		),
 		worst AS (
 			SELECT DISTINCT ON (finding_id) finding_id, title, severity
-			FROM matched
+			FROM every_row
 			ORDER BY finding_id, `+severityRankSQL+` DESC, title
 		)
 		SELECT c.finding_id, w.title, w.severity, c.artifacts
@@ -1286,12 +1300,38 @@ func (s *PostgresStore) SearchComponents(query string, limit int) ([]ComponentMa
 		return nil, 0, fmt.Errorf("count component matches: %w", err)
 	}
 
+	// Same shape as SearchFindings, and for the same reason: aggregate
+	// over every row of the matched PURLS, not over the rows that
+	// matched. A name-substring query would otherwise miss rows where
+	// one artifact's SBOM spells the package differently for the same
+	// purl, and undercount by exactly those artifacts. Less likely here
+	// than for findings (a purl match already covers every row of that
+	// purl) but it is the same bug, so it gets the same fix.
 	rows, err := s.pool.Query(ctx, `
-		SELECT purl, name, version, count(DISTINCT artifact_id) AS artifacts
-		FROM components
-		WHERE name ILIKE $1 ESCAPE '\' OR purl ILIKE $1 ESCAPE '\'
-		GROUP BY purl, name, version
-		ORDER BY artifacts DESC, purl ASC
+		WITH matched_purls AS (
+			SELECT DISTINCT purl FROM components
+			WHERE name ILIKE $1 ESCAPE '\' OR purl ILIKE $1 ESCAPE '\'
+		),
+		counts AS (
+			SELECT c.purl, count(DISTINCT c.artifact_id) AS artifacts
+			FROM components c JOIN matched_purls m ON m.purl = c.purl
+			GROUP BY c.purl
+		),
+		display AS (
+			-- One name/version per purl, chosen deterministically rather
+			-- than by grouping on them: the same purl can carry different
+			-- names across artifacts (one SBOM says "openssl", another
+			-- "libcrypto3" for the identical package), and grouping by
+			-- name would split one package into several rows of 1 instead
+			-- of one row of 3. Alphabetically first is arbitrary but
+			-- stable, and matches MemStore.
+			SELECT DISTINCT ON (c.purl) c.purl, c.name, c.version
+			FROM components c JOIN matched_purls m ON m.purl = c.purl
+			ORDER BY c.purl, c.name, c.version
+		)
+		SELECT d.purl, d.name, d.version, c.artifacts
+		FROM counts c JOIN display d USING (purl)
+		ORDER BY c.artifacts DESC, d.purl ASC
 		LIMIT $2
 	`, pattern, limit)
 	if err != nil {

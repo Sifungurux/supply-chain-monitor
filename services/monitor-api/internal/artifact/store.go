@@ -344,19 +344,43 @@ func (s *MemStore) SearchComponents(query string, limit int) ([]ComponentMatch, 
 		return []ComponentMatch{}, 0, nil
 	}
 
+	// Same two passes as SearchFindings, for the same reason: match
+	// purls first, then count every artifact carrying them, so a
+	// name-substring query can't undercount an artifact whose SBOM
+	// spells the package differently for the same purl.
+	matchedPURLs := make(map[string]bool)
+	for id, components := range s.components {
+		if _, ok := s.data[id]; !ok {
+			continue
+		}
+		for _, c := range components {
+			if strings.Contains(strings.ToLower(c.Name), q) || strings.Contains(strings.ToLower(c.PURL), q) {
+				matchedPURLs[c.PURL] = true
+			}
+		}
+	}
+
 	byPURL := make(map[string]*ComponentMatch)
 	for id, components := range s.components {
 		if _, ok := s.data[id]; !ok {
 			continue
 		}
 		for _, c := range components {
-			if !strings.Contains(strings.ToLower(c.Name), q) && !strings.Contains(strings.ToLower(c.PURL), q) {
+			if !matchedPURLs[c.PURL] {
 				continue
 			}
 			m, ok := byPURL[c.PURL]
 			if !ok {
 				m = &ComponentMatch{PURL: c.PURL, Name: c.Name, Version: c.Version}
 				byPURL[c.PURL] = m
+			}
+			// Alphabetically first name/version wins, matching the
+			// DISTINCT ON in PostgresStore: the same purl can carry
+			// different names across artifacts, and "whichever the map
+			// happened to reach first" would differ between two calls on
+			// the same data.
+			if c.Name < m.Name {
+				m.Name, m.Version = c.Name, c.Version
 			}
 			m.Artifacts++
 		}
@@ -501,6 +525,27 @@ func (s *MemStore) SearchFindings(query string, limit int) ([]FindingMatch, int,
 		return []FindingMatch{}, 0, nil
 	}
 
+	// Two passes: find which ids match, then aggregate over EVERY active
+	// row of those ids. Aggregating the matched rows instead undercounts
+	// -- one CVE is recorded with whichever package title each scanner
+	// reported ("openssl: ...", "libcrypto3 3.1.4-r5"), so a q=openssl
+	// search would count only the artifacts whose title happened to say
+	// openssl, while the click-through returns all of them. Mirrors the
+	// matched_ids CTE in PostgresStore.SearchFindings.
+	matchedIDs := make(map[string]bool)
+	for _, a := range s.data {
+		for _, bucket := range allBuckets(a) {
+			for _, f := range bucket {
+				if !f.IsActive() {
+					continue
+				}
+				if strings.Contains(strings.ToLower(f.ID), q) || strings.Contains(strings.ToLower(f.Title), q) {
+					matchedIDs[f.ID] = true
+				}
+			}
+		}
+	}
+
 	type agg struct {
 		match     FindingMatch
 		artifacts map[string]bool
@@ -509,10 +554,7 @@ func (s *MemStore) SearchFindings(query string, limit int) ([]FindingMatch, int,
 	for _, a := range s.data {
 		for _, bucket := range allBuckets(a) {
 			for _, f := range bucket {
-				if !f.IsActive() {
-					continue
-				}
-				if !strings.Contains(strings.ToLower(f.ID), q) && !strings.Contains(strings.ToLower(f.Title), q) {
+				if !f.IsActive() || !matchedIDs[f.ID] {
 					continue
 				}
 				g, ok := byID[f.ID]
@@ -521,12 +563,13 @@ func (s *MemStore) SearchFindings(query string, limit int) ([]FindingMatch, int,
 					byID[f.ID] = g
 				}
 				g.artifacts[a.ID] = true
-				if g.match.Title == "" {
+				// Worst severity seen across every artifact carrying this
+				// id, with the title from that same worst row -- see
+				// FindingMatch.Severity.
+				if g.match.Title == "" || (f.Severity != "" && SeverityRank(f.Severity) > SeverityRank(g.match.Severity)) {
 					g.match.Title = f.Title
 				}
-				// Worst severity seen, not the last one scanned -- see
-				// FindingMatch.Severity.
-				if SeverityRank(f.Severity) >= SeverityRank(g.match.Severity) && f.Severity != "" {
+				if f.Severity != "" && SeverityRank(f.Severity) >= SeverityRank(g.match.Severity) {
 					g.match.Severity = f.Severity
 				}
 			}
