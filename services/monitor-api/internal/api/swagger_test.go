@@ -60,6 +60,7 @@ func TestOpenAPISpec_DescribesEveryRegisteredRoute(t *testing.T) {
 		"/api/v1/artifacts/{id}/maintainer",
 		"/api/v1/artifacts/{id}/documents/{kind}",
 		"/api/v1/artifacts/{id}/findings",
+		"/api/v1/artifacts/{id}/vex",
 	}
 	for _, p := range wantPaths {
 		if !strings.Contains(spec, p) {

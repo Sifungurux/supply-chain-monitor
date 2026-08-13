@@ -108,18 +108,23 @@ func (h *handler) submitFindings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
+	// Same VEX overlay scanArtifact applies (see vexFor): an external
+	// system submitting findings has no idea what this artifact's
+	// operator has already assessed, so a submission must not be a way
+	// around a VEX document.
+	vex := h.vexFor(id)
 	updated, err := h.store.Update(id, func(art *artifact.Artifact) {
 		switch req.Bucket {
 		case "cve":
-			art.CVEFindings = artifact.MergeFindings(art.CVEFindings, req.Findings, now, true)
+			art.CVEFindings = artifact.MergeFindings(art.CVEFindings, req.Findings, now, true, vex)
 		case "malware":
-			art.MalwareFindings = artifact.MergeFindings(art.MalwareFindings, req.Findings, now, true)
+			art.MalwareFindings = artifact.MergeFindings(art.MalwareFindings, req.Findings, now, true, vex)
 		case "misconfiguration":
-			art.MisconfigFindings = artifact.MergeFindings(art.MisconfigFindings, req.Findings, now, true)
+			art.MisconfigFindings = artifact.MergeFindings(art.MisconfigFindings, req.Findings, now, true, vex)
 		case "secret":
-			art.SecretFindings = artifact.MergeFindings(art.SecretFindings, req.Findings, now, true)
+			art.SecretFindings = artifact.MergeFindings(art.SecretFindings, req.Findings, now, true, vex)
 		case "other":
-			art.OtherFindings = artifact.MergeFindings(art.OtherFindings, req.Findings, now, true)
+			art.OtherFindings = artifact.MergeFindings(art.OtherFindings, req.Findings, now, true, vex)
 		}
 		// A registered-but-never-scanned artifact submitting findings
 		// this way has meaningfully been scanned now, even though

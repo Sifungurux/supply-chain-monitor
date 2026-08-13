@@ -586,8 +586,19 @@
   // second window comfortably absorbs that slack without ever mistaking
   // an old, still-open finding for a new one on some later, unrelated
   // update.
+  // findingIsSuppressed: on record, but not an active problem. Either a
+  // scan stopped reporting it ('fixed') or a VEX document uploaded for
+  // this artifact asserts it doesn't apply here ('not_affected' -- see
+  // the API's POST /artifacts/{id}/vex). Both keep their row on the
+  // detail page with a badge saying which; neither is counted anywhere.
+  // Treats every other value -- including missing/unset -- as active, so
+  // this fails toward showing a finding rather than hiding it.
+  function findingIsSuppressed(f) {
+    return f.status === 'fixed' || f.status === 'not_affected';
+  }
+
   function findingIsNew(f, a) {
-    if (!f.first_seen_at || !a.updated_at || f.status === 'fixed') return false;
+    if (!f.first_seen_at || !a.updated_at || findingIsSuppressed(f)) return false;
     var diffMs = Math.abs(new Date(f.first_seen_at).getTime() - new Date(a.updated_at).getTime());
     return diffMs < 5000;
   }
@@ -625,6 +636,15 @@
     var lifecycleBadge = '';
     if (f.status === 'fixed') {
       lifecycleBadge = ' <span class="badge badge-success">Fixed ' + esc(timeAgo(f.resolved_at)) + '</span>';
+    } else if (f.status === 'not_affected') {
+      // The justification (why the assessment says this doesn't apply)
+      // rides in the tooltip rather than the badge: it's free text from
+      // the VEX document and can run long, and the badge sits inline on
+      // a single truncated row. An empty justification is legal in
+      // OpenVEX, so the tooltip falls back to naming the mechanism.
+      lifecycleBadge = ' <span class="badge badge-success" title="' +
+        esc(f.justification || 'Suppressed by a VEX document uploaded for this artifact') +
+        '">VEX: not affected</span>';
     } else if (findingIsNew(f, a)) {
       lifecycleBadge = ' <span class="badge badge-accent">New</span>';
     }
@@ -634,7 +654,7 @@
         '" target="_blank" rel="noopener noreferrer">Read more</a>'
       : '';
 
-    var rowCls = 'finding badge-neutral' + (f.status === 'fixed' ? ' finding-fixed' : '');
+    var rowCls = 'finding badge-neutral' + (findingIsSuppressed(f) ? ' finding-fixed' : '');
     return '<div class="' + rowCls + '">' + severityBadge(f.severity) +
       '<span class="finding-label" title="' + esc(fullText) + '">' + label + '</span>' +
       lifecycleBadge + readMore + '</div>';
@@ -645,15 +665,19 @@
   }
 
   // openFindings is what every "how many CVEs does this have" count
-  // (the summary cards, the per-artifact table columns) should be
-  // counting -- a "fixed" finding stays in the array as a permanent
-  // record (see MergeFindings/renderFinding above), so counting the raw
-  // array length would make every resolved CVE or cleaned-up malware
-  // match look like it's still an active problem. Treats a missing/
-  // unset status as open rather than excluding it, so this fails safe
-  // toward showing a finding rather than silently hiding it.
+  // (the summary cards, the per-artifact table columns, the risk
+  // spectrum, the tab counts) should be counting -- a "fixed" or
+  // VEX-suppressed finding stays in the array as a permanent record
+  // (see MergeFindings/renderFinding above), so counting the raw array
+  // length would make every resolved CVE, cleaned-up malware match, or
+  // formally-assessed non-issue look like it's still an active problem.
+  //
+  // Note this filters the COUNTS, not the detail page's finding list
+  // (renderFindingsTabs renders the raw bucket) -- a suppressed finding
+  // is meant to be visible with its badge and invisible in the numbers,
+  // which is exactly that split.
   function openFindings(list) {
-    return (list || []).filter(function (f) { return f.status !== 'fixed'; });
+    return (list || []).filter(function (f) { return !findingIsSuppressed(f); });
   }
 
   var FINDING_BUCKETS = [

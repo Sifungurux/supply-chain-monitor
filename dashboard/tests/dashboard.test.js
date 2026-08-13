@@ -799,6 +799,64 @@ test('a fixed finding shows a Fixed badge, dims, and drops out of open-finding c
   dom.window.close();
 });
 
+test('a VEX-suppressed finding shows a "VEX: not affected" badge, dims, and drops out of open-finding counts', async () => {
+  const withSuppressed = [{
+    id: 'a11',
+    ref: 'alpine:3.19',
+    type: 'image',
+    status: 'scanned',
+    current_stage: 'scan',
+    stage_history: [],
+    cve_findings: [
+      {
+        id: 'CVE-2024-6666',
+        severity: 'critical',
+        title: 'openssl overflow',
+        source: 'trivy',
+        status: 'not_affected',
+        justification: 'vulnerable_code_not_in_execute_path',
+        first_seen_at: '2026-07-01T00:00:00Z'
+      }
+    ],
+    malware_findings: [],
+    last_scan_errors: [],
+    created_at: '2026-07-01T00:00:00Z',
+    updated_at: '2026-07-19T10:00:00Z'
+  }];
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (isArtifactsList(url)) return artifactsPage(withSuppressed);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  // The whole point of VEX: a finding somebody has formally assessed as
+  // not applying here stops inflating the numbers.
+  const cardNumbers = [...doc.querySelectorAll('#cards .n')].map((n) => n.textContent);
+  assert.equal(cardNumbers[2], '0', 'a VEX-suppressed CVE should not count toward "With CVEs"');
+
+  const cveCountCell = doc.querySelector('#artifact-rows tr[data-id="a11"] td:nth-child(5)');
+  assert.equal(cveCountCell.textContent.trim(), '0');
+
+  // ...but it stays visible on the detail page, badged and dimmed, with
+  // the justification available as a tooltip.
+  doc.querySelector('button[data-action="toggle"][data-id="a11"]').click();
+  const detailHtml = doc.getElementById('detail-body').innerHTML;
+  assert.match(detailHtml, /openssl overflow/);
+  assert.match(detailHtml, /VEX: not affected/);
+  assert.match(detailHtml, /finding-fixed/);
+  assert.match(detailHtml, /vulnerable_code_not_in_execute_path/);
+  assert.doesNotMatch(detailHtml, /badge-accent">New/, 'a suppressed finding is never "New"');
+
+  dom.window.close();
+});
+
 test('an artifact registered unsafe (REQUIRE_DIGEST mismatch) shows an Unsafe badge in the row and on the detail page', async () => {
   const withUnsafe = [
     { ...SAMPLE_ARTIFACTS[0], id: 'a8', ref: 'unsafe-image:1.0', unsafe: true },

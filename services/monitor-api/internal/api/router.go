@@ -81,6 +81,7 @@ func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/documents/{kind}", h.uploadDocument)
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/documents/{kind}", h.downloadDocument)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/findings", h.submitFindings)
+	mux.HandleFunc("POST /api/v1/artifacts/{id}/vex", h.uploadVEX)
 
 	var top http.Handler = mux
 	if rateLimitRPS > 0 {

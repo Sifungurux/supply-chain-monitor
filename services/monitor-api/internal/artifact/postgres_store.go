@@ -152,6 +152,12 @@ var schemaStatements = []string{
 	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'open'`,
 	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
 	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ`,
+	// Added for VEX suppression (see merge.go's MergeFindings and
+	// internal/api/vex.go) -- why a finding carries status
+	// 'not_affected'. Idempotent for exactly the same reason the three
+	// above are; pre-existing rows get '', which is also what every
+	// finding no VEX document has spoken about carries.
+	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS justification TEXT NOT NULL DEFAULT ''`,
 	// Powers FindByFindingID -- "every artifact still affected by
 	// CVE-2024-X" -- without scanning every artifact's findings, which
 	// is exactly the query the old JSONB-blob schema couldn't answer
@@ -398,8 +404,8 @@ func insertFinding(ctx context.Context, q pgxIface, artifactID, bucket string, f
 	if firstSeenAt.IsZero() {
 		firstSeenAt = time.Now().UTC()
 	}
-	_, err := q.Exec(ctx, `INSERT INTO findings (artifact_id, bucket, finding_id, severity, title, source, status, first_seen_at, resolved_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		artifactID, bucket, f.ID, f.Severity, f.Title, f.Source, status, firstSeenAt, f.ResolvedAt)
+	_, err := q.Exec(ctx, `INSERT INTO findings (artifact_id, bucket, finding_id, severity, title, source, status, first_seen_at, resolved_at, justification) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		artifactID, bucket, f.ID, f.Severity, f.Title, f.Source, status, firstSeenAt, f.ResolvedAt, f.Justification)
 	return err
 }
 
@@ -526,7 +532,7 @@ func loadStageHistory(ctx context.Context, q pgxIface, artifactID string) ([]Sta
 }
 
 func loadFindings(ctx context.Context, q pgxIface, artifactID, bucket string) ([]Finding, error) {
-	rows, err := q.Query(ctx, `SELECT finding_id, severity, title, source, status, first_seen_at, resolved_at FROM findings WHERE artifact_id = $1 AND bucket = $2 ORDER BY id`, artifactID, bucket)
+	rows, err := q.Query(ctx, `SELECT finding_id, severity, title, source, status, first_seen_at, resolved_at, justification FROM findings WHERE artifact_id = $1 AND bucket = $2 ORDER BY id`, artifactID, bucket)
 	if err != nil {
 		return nil, err
 	}
@@ -535,7 +541,7 @@ func loadFindings(ctx context.Context, q pgxIface, artifactID, bucket string) ([
 	out := make([]Finding, 0)
 	for rows.Next() {
 		var f Finding
-		if err := rows.Scan(&f.ID, &f.Severity, &f.Title, &f.Source, &f.Status, &f.FirstSeenAt, &f.ResolvedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.Severity, &f.Title, &f.Source, &f.Status, &f.FirstSeenAt, &f.ResolvedAt, &f.Justification); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
@@ -704,14 +710,14 @@ func (s *PostgresStore) fillChildrenBatch(ctx context.Context, ids []string, byI
 	}
 	stageRows.Close()
 
-	findingRows, err := s.pool.Query(ctx, `SELECT artifact_id, bucket, finding_id, severity, title, source, status, first_seen_at, resolved_at FROM findings WHERE artifact_id = ANY($1) ORDER BY artifact_id, id`, ids)
+	findingRows, err := s.pool.Query(ctx, `SELECT artifact_id, bucket, finding_id, severity, title, source, status, first_seen_at, resolved_at, justification FROM findings WHERE artifact_id = ANY($1) ORDER BY artifact_id, id`, ids)
 	if err != nil {
 		return fmt.Errorf("batch load findings: %w", err)
 	}
 	for findingRows.Next() {
 		var artifactID, bucket string
 		var f Finding
-		if err := findingRows.Scan(&artifactID, &bucket, &f.ID, &f.Severity, &f.Title, &f.Source, &f.Status, &f.FirstSeenAt, &f.ResolvedAt); err != nil {
+		if err := findingRows.Scan(&artifactID, &bucket, &f.ID, &f.Severity, &f.Title, &f.Source, &f.Status, &f.FirstSeenAt, &f.ResolvedAt, &f.Justification); err != nil {
 			findingRows.Close()
 			return fmt.Errorf("scan findings row: %w", err)
 		}

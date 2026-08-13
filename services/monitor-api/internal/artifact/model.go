@@ -41,9 +41,19 @@ const (
 // ResolvedAt set, as a visible record of what used to be there and got
 // fixed -- the same "keep history, don't overwrite it" instinct as
 // StageHistory, just applied to findings.
+// FindingStatusNotAffected is the third value, and the only one a
+// scan never produces on its own: it means a human (or a build system
+// speaking for one) asserted via a VEX document that this artifact is
+// not affected by this vulnerability even though a scanner keeps
+// reporting it -- the vulnerable code path isn't reachable, the
+// component isn't actually included, and so on. Suppressed rather than
+// deleted, exactly like "fixed": the finding stays in its bucket with
+// the VEX justification attached, out of the counts but still visible
+// with a badge on the detail page.
 const (
-	FindingStatusOpen  = "open"
-	FindingStatusFixed = "fixed"
+	FindingStatusOpen        = "open"
+	FindingStatusFixed       = "fixed"
+	FindingStatusNotAffected = "not_affected"
 )
 
 // Finding is a single result from a scanner (a CVE, a malware signature
@@ -53,10 +63,10 @@ type Finding struct {
 	Severity string `json:"severity"`
 	Title    string `json:"title"`
 	Source   string `json:"source"` // e.g. "trivy", "clamav"
-	// Status, FirstSeenAt, and ResolvedAt are lifecycle metadata managed
-	// entirely by MergeFindings (merge.go) -- never set directly by a
-	// Scanner implementation or trusted from an external submitFindings
-	// caller (MergeFindings always recomputes these three fields itself
+	// Status, FirstSeenAt, ResolvedAt, and Justification are lifecycle
+	// metadata managed entirely by MergeFindings (merge.go) -- never set
+	// directly by a Scanner implementation or trusted from an external
+	// submitFindings caller (MergeFindings always recomputes these four fields itself
 	// before a finding is persisted, ignoring whatever a caller supplied
 	// for them). A Scanner or external system only ever reports "here's
 	// what I see right now"; whether that's brand new, still open, or
@@ -75,6 +85,16 @@ type Finding struct {
 	// MergeFindings first observed this finding stop being reported
 	// while Status is "fixed".
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
+	// Justification is the VEX statement's own reason for suppressing
+	// this finding (e.g. "vulnerable_code_not_in_execute_path") --
+	// empty on every finding no VEX document has spoken about, which is
+	// most of them. Managed by MergeFindings alongside the three
+	// lifecycle fields above and never trusted from a caller for the
+	// same reason: it's the *record* of why something was suppressed,
+	// so letting a submitFindings caller write it directly would let
+	// anything invent a justification for a finding nobody ever
+	// assessed.
+	Justification string `json:"justification,omitempty"`
 
 	// Category is a transient bucket-routing hint a Scanner may set on
 	// a finding it returns -- "cve", "malware", "misconfiguration",
@@ -216,7 +236,76 @@ type Artifact struct {
 const (
 	DocumentKindSBOM  = "sbom"
 	DocumentKindSARIF = "sarif"
+	// DocumentKindVEX is stored through the same Store.SaveDocument call
+	// as the other two, but is deliberately NOT accepted by the generic
+	// documents endpoint (validDocumentKind still lists only sbom/sarif)
+	// -- a VEX document is parsed and applied to this artifact's findings
+	// when it's uploaded, so it has its own endpoint that does that (see
+	// internal/api/vex.go) rather than a second way in that would store
+	// the bytes and silently change nothing.
+	DocumentKindVEX = "vex"
 )
+
+// VEXStatement is one VEX statement reduced to what merging a finding
+// needs: which vulnerability it speaks about, what it asserts, and why.
+// Lives here rather than in internal/scanner (which does the actual
+// OpenVEX/CycloneDX parsing, see scanner.ParseVEX) because MergeFindings
+// consumes it and internal/scanner already imports this package -- the
+// other direction would be an import cycle.
+type VEXStatement struct {
+	// VulnID matches Finding.ID (e.g. "CVE-2024-1234"). A statement
+	// about a vulnerability this artifact has no finding for is simply
+	// never consulted.
+	VulnID string
+	// Status is the VEX status verbatim: "not_affected", "affected",
+	// "fixed", or "under_investigation". Only not_affected and fixed
+	// change a finding (see MergeFindings) -- "affected" is what a
+	// reported finding already means, and "under_investigation" is an
+	// explicit statement that nobody has decided yet, which is not a
+	// reason to hide anything.
+	Status string
+	// Justification is free text from the document (OpenVEX's
+	// `justification`/`impact_statement`, CycloneDX's
+	// `analysis.justification`/`detail`). Empty is normal and fine --
+	// OpenVEX only requires a justification for not_affected, and
+	// plenty of real documents omit it anyway.
+	Justification string
+}
+
+// The two VEX statuses that aren't also finding statuses. Constants
+// because both this package (MergeFindings) and internal/scanner
+// (ParseVEX's normalizeVEXStatus) compare against them, and a typo in
+// one of the two would silently mean "unrecognized status, no opinion"
+// rather than failing anywhere.
+const (
+	// VEXStatusAffected is the one non-suppressing status that still
+	// does something: it revokes an earlier not_affected on the same
+	// vulnerability (see MergeFindings). Without that, a corrected
+	// assessment would be a silent no-op -- suppression could be applied
+	// but never taken back.
+	VEXStatusAffected = "affected"
+	// VEXStatusUnderInvestigation changes nothing at all: "nobody has
+	// decided yet" is not a reason to hide a finding, nor to un-hide one
+	// somebody already assessed.
+	VEXStatusUnderInvestigation = "under_investigation"
+)
+
+// VEXByID indexes statements by vulnerability ID for MergeFindings.
+// Last statement wins on a duplicate ID: a document that says two
+// things about one vulnerability is self-contradictory, and picking the
+// later one matches how every other "current state" field in this
+// service behaves (a re-uploaded document replaces the previous one
+// wholesale).
+func VEXByID(statements []VEXStatement) map[string]VEXStatement {
+	if len(statements) == 0 {
+		return nil
+	}
+	byID := make(map[string]VEXStatement, len(statements))
+	for _, s := range statements {
+		byID[s.VulnID] = s
+	}
+	return byID
+}
 
 // Document is a generated artifact document -- a CycloneDX SBOM or
 // SARIF report derived from an image scan (see

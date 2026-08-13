@@ -401,6 +401,48 @@ paths:
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/artifacts/{id}/vex:
+    parameters:
+      - $ref: "#/components/parameters/ArtifactID"
+    post:
+      tags: [findings]
+      summary: Upload a VEX document and suppress the findings it clears
+      description: >-
+        Accepts an OpenVEX or CycloneDX-VEX document (raw bytes, max
+        4MiB) asserting what this artifact is and isn't affected by.
+        Statements with status `not_affected` or `fixed` are applied to
+        the artifact's existing findings immediately -- the matching
+        finding's status becomes `not_affected`/`fixed` with the
+        statement's justification attached, which drops it out of every
+        count while keeping it visible on the artifact. `affected` and
+        `under_investigation` change nothing. Suppression persists
+        across later scans: a scanner reporting the vulnerability again
+        does not reopen it. The document is also stored (document kind
+        `vex`) and re-read on every scan, so a finding discovered later
+        is suppressed the moment it appears.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Applied.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: applied }
+                  statements:
+                    type: integer
+                    description: How many statements were understood.
+                    example: 3
+                  artifact: { $ref: "#/components/schemas/Artifact" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -540,7 +582,12 @@ components:
           example: trivy
         status:
           type: string
-          enum: [open, fixed]
+          enum: [open, fixed, not_affected]
+          description: >-
+            `not_affected` means a VEX document uploaded for this
+            artifact asserts the vulnerability does not apply here (see
+            POST /api/v1/artifacts/{id}/vex). Like `fixed`, it is
+            excluded from every count but kept on the artifact.
           readOnly: true
         first_seen_at:
           type: string
@@ -549,6 +596,11 @@ components:
         resolved_at:
           type: string
           format: date-time
+          readOnly: true
+        justification:
+          type: string
+          description: Why a VEX statement suppressed this finding. Empty otherwise.
+          example: vulnerable_code_not_in_execute_path
           readOnly: true
 
     StageEvent:

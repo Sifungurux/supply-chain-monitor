@@ -305,6 +305,7 @@ request/response shapes.
 | DELETE | `/api/v1/artifacts/{id}`           | permanently delete an artifact and everything recorded against it (no undo) |
 | POST   | `/api/v1/artifacts/{id}/scan`      | run the scanner appropriate for its type   |
 | POST   | `/api/v1/artifacts/{id}/findings`  | record findings an external system already computed `{bucket, findings}` |
+| POST   | `/api/v1/artifacts/{id}/vex`       | upload an OpenVEX/CycloneDX-VEX document and suppress the findings it clears |
 | POST   | `/api/v1/artifacts/{id}/stage`     | record a pipeline-stage transition         |
 | GET    | `/api/v1/findings/{findingID}/artifacts` | every artifact affected by a given finding ID (e.g. a CVE) |
 
@@ -761,6 +762,71 @@ count columns and summary cards only count `open` findings (a fixed CVE
 doesn't inflate "With CVEs"), and the detail view shows a `Fixed`
 badge with how long ago, or a `New` badge for anything discovered on
 the most recent update.
+
+### Suppressing findings with VEX
+
+A scanner can tell you a vulnerable component is *present*. It can't
+tell you whether the vulnerable code is reachable in your image — that's
+a human judgement, and VEX is the format for recording it. Upload one
+against an artifact:
+
+```bash
+curl -s -X POST localhost:8080/api/v1/artifacts/<id>/vex "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  --data-binary @vex.json
+```
+
+Both formats are accepted, sniffed by shape rather than by version
+string — OpenVEX (`{"statements": [...]}`, either the 0.0.1 bare-string
+or the 0.2.0 object form of `vulnerability`) and CycloneDX VEX
+(`{"vulnerabilities": [{"id": ..., "analysis": {"state": ...}}]}`):
+
+```json
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "statements": [
+    {
+      "vulnerability": { "name": "CVE-2024-1234" },
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path"
+    }
+  ]
+}
+```
+
+The response reports how many statements were understood, plus the
+updated artifact:
+
+```json
+{ "status": "applied", "statements": 1, "artifact": { ... } }
+```
+
+What each status does:
+
+| VEX status | effect on a matching finding |
+|------------|------------------------------|
+| `not_affected` (CycloneDX `not_affected`, `false_positive`) | `status` becomes `"not_affected"`, `justification` attached, dropped from every count |
+| `fixed` (CycloneDX `resolved`, `resolved_with_pedigree`) | `status` becomes `"fixed"` with `resolved_at` set, same as a scan-detected fix |
+| `affected` (CycloneDX `exploitable`) | revokes an earlier `not_affected` on that vulnerability — this is how a wrong assessment is retracted. Nothing otherwise: a reported finding already means "affected" |
+| `under_investigation` (`in_triage`) | nothing — "nobody's decided yet" is not a reason to hide a finding, or to un-hide one somebody already assessed |
+| anything unrecognized | nothing — a status this parser doesn't know shows the vulnerability rather than hiding it |
+
+Suppression **sticks across scans**: the next scan will report
+`CVE-2024-1234` again (VEX doesn't change the image), and it stays
+`not_affected` rather than reopening. It also applies to findings
+discovered *later* — the document is re-read on every scan and every
+`/findings` submission, so a vulnerability first seen next month lands
+already suppressed. Suppressed findings aren't deleted: they stay on the
+artifact with a `VEX: not affected` badge on the detail page and out of
+every count, the same treatment `fixed` gets.
+
+`justification` is server-managed — only a VEX document can set it, so a
+`/findings` caller can't invent one. Re-uploading a document replaces the
+previous one; a document that fails to parse is a `400` and leaves
+whatever was already applied in place. To retract a suppression, upload a
+document that states `affected` for that vulnerability — a document that
+merely stops mentioning it leaves the suppression alone, since silence
+isn't an assertion.
 
 ### SBOM and SARIF scanning
 
