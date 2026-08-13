@@ -475,3 +475,41 @@ func TestCoalesceSameIDSources(t *testing.T) {
 		})
 	}
 }
+
+// Revoking has to work through the SAME path suppressing works through:
+// uploadVEX merges with nothing reported and detectFixed=false (see
+// internal/api/vex.go). The original revocation only took effect when a
+// scanner happened to report the finding in the same round, so the
+// upload that was supposed to retract an assessment silently did
+// nothing until the next scan -- while the upload that APPLIED one took
+// effect immediately. Same asymmetry the suppression path was
+// deliberately built to avoid.
+func TestMergeFindings_VEXAffectedRevokesOnUploadWithNothingReported(t *testing.T) {
+	firstSeen := mergeNow.Add(-72 * time.Hour)
+	suppressed := artifact.MergeFindings([]artifact.Finding{
+		{ID: "CVE-2024-1", Severity: "high", Source: "trivy", Status: artifact.FindingStatusOpen, FirstSeenAt: firstSeen},
+	}, nil, mergeNow, false, notAffected("CVE-2024-1", "assessed in error"))
+	if suppressed[0].Status != artifact.FindingStatusNotAffected {
+		t.Fatalf("setup: status = %q, want it suppressed first", suppressed[0].Status)
+	}
+
+	corrected := artifact.VEXByID([]artifact.VEXStatement{
+		{VulnID: "CVE-2024-1", Status: artifact.VEXStatusAffected},
+	})
+	// Exactly what uploadVEX does: nothing reported, detectFixed false.
+	reopened := artifact.MergeFindings(suppressed, nil, mergeNow, false, corrected)
+
+	f := reopened[0]
+	if f.Status != artifact.FindingStatusOpen {
+		t.Fatalf("status = %q, want %q -- uploading an 'affected' statement must retract immediately, not at the next scan", f.Status, artifact.FindingStatusOpen)
+	}
+	if f.Justification != "" {
+		t.Fatalf("justification = %q, want cleared with the suppression it explained", f.Justification)
+	}
+	if f.ResolvedAt != nil {
+		t.Fatalf("resolved_at = %v, want nil", f.ResolvedAt)
+	}
+	if !f.FirstSeenAt.Equal(firstSeen) {
+		t.Fatalf("first_seen_at = %v, want original %v", f.FirstSeenAt, firstSeen)
+	}
+}

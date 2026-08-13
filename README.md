@@ -825,9 +825,10 @@ every count, the same treatment `fixed` gets.
 `/findings` caller can't invent one. Re-uploading a document replaces the
 previous one; a document that fails to parse is a `400` and leaves
 whatever was already applied in place. To retract a suppression, upload a
-document that states `affected` for that vulnerability — a document that
-merely stops mentioning it leaves the suppression alone, since silence
-isn't an assertion.
+document that states `affected` for that vulnerability — it reopens
+immediately, on the same upload that applies one. A document that merely
+stops mentioning it leaves the suppression alone, since silence isn't an
+assertion.
 
 ### SBOM and SARIF scanning
 
