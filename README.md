@@ -871,11 +871,46 @@ and `file`:
 
 ### Searching by component: which images ship this package?
 
-Every SBOM uploaded to `POST /api/v1/artifacts/{id}/documents/sbom` is
-parsed into a normalized component inventory (a `components` table
-keyed on purl), so the question an SBOM exists to answer is actually
-answerable across the fleet rather than one downloaded document at a
-time:
+An SBOM answers "what is in this artifact". Stored as a document, that
+answer can only be read one download at a time — which is the wrong
+shape for the question people actually turn up with, which is the
+inverse: *"we just heard about log4j / that base image / this
+transitive Go module — where is it?"*
+
+So every SBOM ingested through
+`POST /api/v1/artifacts/{id}/documents/sbom` is also parsed into a
+normalized `components` table (purl, name, version, artifact id) indexed
+on purl, and `GET /api/v1/components?purl=…` answers across the whole
+fleet at once. It's the package-level counterpart to
+`GET /api/v1/findings/{findingID}/artifacts`, which answers the same
+shape of question about a CVE, and it shares that endpoint's
+conventions: the full artifacts rather than bare IDs, newest first, and
+an empty array (not a `404`) when nothing ships it.
+
+**Getting SBOMs in.** For `image` artifacts this is already happening:
+a scan-worker Job converts the trivy report it just produced into a
+CycloneDX SBOM and uploads it (see "Image scanning" above), and that
+upload is what triggers indexing. **Scan an image and its components
+index themselves** — there is no second tool to run and no extra step.
+
+To index an SBOM produced somewhere else (syft, a build system, a
+vendor-supplied document), upload it yourself:
+
+```bash
+curl -s -X POST "${AUTH[@]}" \
+  -H 'Content-Type: application/vnd.cyclonedx+json' \
+  --data-binary @sbom.json \
+  localhost:8080/api/v1/artifacts/<id>/documents/sbom
+```
+
+CycloneDX and SPDX are both read, and in JSON only. They're told apart
+by shape (a `components` array vs a `packages` one) rather than by
+`bomFormat`/`spdxVersion`, so a hand-assembled document that omits or
+misspells those still parses. Nested `components[].components[]` are
+walked, which matters for producers like syft that express transitive
+dependencies as nesting rather than a flat list.
+
+**Querying it.** The API, for a specific package:
 
 ```bash
 curl -s "${AUTH[@]}" \
@@ -883,33 +918,86 @@ curl -s "${AUTH[@]}" \
   localhost:8080/api/v1/components
 ```
 
-It returns the full artifacts (not just IDs) containing that component,
-newest first, and an empty array when nothing does — the same shape and
-conventions as `/api/v1/findings/{findingID}/artifacts`, which answers
-the same question about a CVE instead of a package. The dashboard's
-component box above the artifact table is this endpoint.
+`--get --data-urlencode`, not a hand-built query string: a purl contains
+`/`, `@`, and frequently a query string of its own
+(`?arch=x86_64&distro=3.19.9`), all of which have to arrive
+percent-encoded. That's also why the endpoint takes the purl as a query
+parameter rather than a path segment.
 
-Both CycloneDX and SPDX (JSON) are read, told apart by shape rather than
-by a version field, and the artifact the document *describes* is not
-counted as a component of itself. Some details worth knowing:
+The dashboard's component box (above the artifact table) is this same
+endpoint: paste a purl, press Enter, and the table narrows to the
+artifacts containing it with the count in the pager line. The status and
+type filters grey out while it's active — this endpoint takes no
+filters — and clearing the box returns to the normal paginated list.
+
+For fleet-wide aggregates the endpoint deliberately doesn't try to
+answer ("what is most widespread", "which packages appear in more than
+N artifacts"), query the table directly via `make db-shell`:
+
+```sql
+-- the packages that would hurt most to have a CVE published against
+SELECT purl, count(DISTINCT artifact_id) AS artifacts
+FROM components GROUP BY purl ORDER BY artifacts DESC LIMIT 20;
+
+-- everything one artifact contains
+SELECT purl FROM components WHERE artifact_id = '<id>' ORDER BY purl;
+```
+
+**Finding the exact purl.** The most common way to get nothing back is
+to guess the string, since matching is exact (see below). Look it up
+instead — by package name across the fleet, which is the search a person
+actually starts from:
+
+```sql
+SELECT DISTINCT purl FROM components WHERE name = 'openssl' ORDER BY purl;
+```
+
+Some details worth knowing:
 
 - **The purl is matched exactly, qualifiers included.**
   `pkg:apk/alpine/openssl@3.1.4-r5?arch=x86_64` and the same purl
   without `?arch=` are different keys. "Any version of this package" is
-  a different query, and this isn't it.
+  a different query, and this isn't it — use the `name` column above, or
+  `purl LIKE 'pkg:apk/alpine/openssl@%'`, for that.
+- **Indexing happens on upload.** SBOMs that were already stored before
+  this feature existed have no inventory until their next scan re-uploads
+  one. To backfill without rescanning anything, replay the documents the
+  API already holds — download each stored SBOM and POST it straight
+  back, which is idempotent:
+
+  ```bash
+  for id in $(curl -s "${AUTH[@]}" 'localhost:8080/api/v1/artifacts?limit=200' \
+                | jq -r '.artifacts[] | select(.has_sbom) | .id'); do
+    curl -s "${AUTH[@]}" "localhost:8080/api/v1/artifacts/$id/documents/sbom" -o /tmp/sbom.json
+    curl -s -o /dev/null -X POST "${AUTH[@]}" -H 'Content-Type: application/vnd.cyclonedx+json' \
+      --data-binary @/tmp/sbom.json "localhost:8080/api/v1/artifacts/$id/documents/sbom"
+  done
+  ```
+
 - **A re-uploaded SBOM replaces the inventory**, exactly as it replaces
   the document itself — so an artifact stops matching a package a
-  rebuild removed, rather than matching forever.
+  rebuild removed, rather than matching forever. Upload the complete
+  current document, never a delta.
 - **A component with no purl is skipped**, since a purl is what this
   query keys on (in practice: the CycloneDX `operating-system` entry).
+  A minimal image can legitimately index to zero components — `pause`
+  and `busybox` SBOMs list no packages at all, so an empty inventory
+  there is the correct answer, not a failure.
+- **The artifact an SBOM describes is not a component of itself.**
+  CycloneDX keeps it in `metadata.component`, SPDX in `packages[]` with
+  `primaryPackagePurpose: CONTAINER` — both are skipped, so searching an
+  image's own `pkg:oci/…` purl returns nothing.
 - **An SBOM that can't be parsed doesn't fail the upload.** The document
   is stored and downloadable either way; only the inventory is skipped,
-  and the reason is logged. A scan worker uploading a document treats
-  any non-200 as a scan error, and a component inventory is not worth
-  turning a good scan into a failed one.
+  and the reason is logged (`kubectl -n supply-chain-monitor logs
+  deployment/monitor-api | grep -i sbom`). A scan worker uploading a
+  document treats any non-200 as a scan error, and a component inventory
+  is not worth turning a good scan into a failed one.
 - **`sbom`-*type artifacts* don't get an inventory** — those are scanned
   from a ref (`trivy sbom`, see above) and never pass through the
   document-upload path. Upload the document itself to index it.
+- **Deleting an artifact takes its inventory with it** (`ON DELETE
+  CASCADE`), so a deleted image never lingers in a component search.
 
 ### Registering `file`/`sbom`/`sarif` artifacts by registry reference
 
