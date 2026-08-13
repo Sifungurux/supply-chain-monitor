@@ -778,25 +778,40 @@ the most recent update.
 
 ### Suppressing findings with VEX
 
-A scanner can tell you a vulnerable component is *present*. It can't
-tell you whether the vulnerable code is reachable in your image — that's
-a human judgement, and VEX is the format for recording it. Upload one
-against an artifact:
+A scanner can tell you a vulnerable component is *present*. It cannot
+tell you whether the vulnerable code is reachable in your image, whether
+the affected feature is even compiled in, or whether the CVE applies to
+your platform at all. Those are human judgements, and without somewhere
+to record them the list of findings only grows — until nobody reads it,
+which costs more than the CVEs did.
 
-```bash
-curl -s -X POST localhost:8080/api/v1/artifacts/<id>/vex "${AUTH[@]}" \
-  -H 'Content-Type: application/json' \
-  --data-binary @vex.json
+VEX (Vulnerability EXploitability eXchange) is the format for recording
+them, and `POST /api/v1/artifacts/{id}/vex` is where it goes. A
+suppressed finding is not deleted: it stays on the artifact with its
+justification and a badge, out of every count.
+
+**Writing a document.** Both formats are accepted — OpenVEX
+(`{"statements": […]}`) and CycloneDX VEX
+(`{"vulnerabilities": [{"id": …, "analysis": {"state": …}}]}`) — told
+apart by shape rather than by a version string, so a document whose
+`@context`/`bomFormat` is missing or misspelled still parses. OpenVEX's
+`vulnerability` may be the 0.0.1 bare string or the 0.2.0 object form.
+
+The smallest document this service will act on is two fields:
+
+```json
+{ "statements": [ { "vulnerability": "CVE-2024-1234", "status": "not_affected" } ] }
 ```
 
-Both formats are accepted, sniffed by shape rather than by version
-string — OpenVEX (`{"statements": [...]}`, either the 0.0.1 bare-string
-or the 0.2.0 object form of `vulnerability`) and CycloneDX VEX
-(`{"vulnerabilities": [{"id": ..., "analysis": {"state": ...}}]}`):
+A realistic one adds the reason, which is what makes the record worth
+keeping. `@context`, `author`, `timestamp` and `version` are all
+accepted and ignored here — keep them if you want the document to be
+valid OpenVEX for other tools:
 
 ```json
 {
   "@context": "https://openvex.dev/ns/v0.2.0",
+  "author": "security@example.com",
   "statements": [
     {
       "vulnerability": { "name": "CVE-2024-1234" },
@@ -807,12 +822,51 @@ or the 0.2.0 object form of `vulnerability`) and CycloneDX VEX
 }
 ```
 
-The response reports how many statements were understood, plus the
-updated artifact:
+**Uploading it.** From a file, which is what a document checked in next
+to a Dockerfile or produced by `vexctl create` looks like:
+
+```bash
+curl -s -X POST localhost:8080/api/v1/artifacts/<id>/vex "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  --data-binary @vex.json
+```
+
+A file isn't required — the endpoint takes the document as the request
+body, so a one-off assessment can go inline, and a generator can pipe
+straight in:
+
+```bash
+curl -s -X POST localhost:8080/api/v1/artifacts/<id>/vex "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d '{"statements":[{"vulnerability":{"name":"CVE-2024-1234"},
+       "status":"not_affected","justification":"component_not_present"}]}'
+
+# anything that writes an OpenVEX document to stdout (vexctl, a build
+# step, jq) can pipe straight in -- see vexctl's own docs for its flags
+vexctl create <args> \
+  | curl -s -X POST localhost:8080/api/v1/artifacts/<id>/vex "${AUTH[@]}" \
+      -H 'Content-Type: application/json' --data-binary @-
+```
+
+The response reports how many statements were understood — the one
+number that tells you the document said something this service could
+read — plus the updated artifact:
 
 ```json
 { "status": "applied", "statements": 1, "artifact": { ... } }
 ```
+
+`"statements": 0` means a document that parsed but asserted nothing
+matchable: usually a `vulnerability` field this parser couldn't find an
+id in. It's a successful upload that changed nothing, which is worth
+being able to see without diffing the artifact.
+
+An artifact holds **one** VEX document: re-uploading replaces the
+previous one, so upload the complete current set of statements rather
+than a delta. A document that fails to parse is a `400` and leaves
+whatever was already applied in place — deliberately unlike an SBOM
+upload, which stores the document and only skips the indexing, because
+there the parse is a bonus and here it *is* the point.
 
 What each status does:
 
@@ -824,23 +878,81 @@ What each status does:
 | `under_investigation` (`in_triage`) | nothing — "nobody's decided yet" is not a reason to hide a finding, or to un-hide one somebody already assessed |
 | anything unrecognized | nothing — a status this parser doesn't know shows the vulnerability rather than hiding it |
 
-Suppression **sticks across scans**: the next scan will report
-`CVE-2024-1234` again (VEX doesn't change the image), and it stays
-`not_affected` rather than reopening. It also applies to findings
-discovered *later* — the document is re-read on every scan and every
-`/findings` submission, so a vulnerability first seen next month lands
-already suppressed. Suppressed findings aren't deleted: they stay on the
-artifact with a `VEX: not affected` badge on the detail page and out of
-every count, the same treatment `fixed` gets.
+**What happens to the finding.** It gains `"status": "not_affected"` and
+the `justification` from the statement, and drops out of every count:
+the dashboard's summary cards, the per-artifact CVE/malware columns, the
+risk spectrum, the tab counts, and search. It stays visible on the
+artifact's detail page with a `VEX: not affected` badge (justification in
+the tooltip), dimmed the way a fixed finding is — the record of an
+assessment is worth as much as the assessment.
 
-`justification` is server-managed — only a VEX document can set it, so a
-`/findings` caller can't invent one. Re-uploading a document replaces the
-previous one; a document that fails to parse is a `400` and leaves
-whatever was already applied in place. To retract a suppression, upload a
-document that states `affected` for that vulnerability — it reopens
-immediately, on the same upload that applies one. A document that merely
-stops mentioning it leaves the suppression alone, since silence isn't an
-assertion.
+Notifications follow the same line: a suppressed finding is not "new and
+at or above the threshold", so it never pages anyone.
+
+**You upload once, not per scan.** The suppression is written onto the
+finding, so the next scan — which *will* report that CVE again, because
+VEX asserts reachability and doesn't change the image — leaves it
+suppressed. That matters more than it sounds: if suppression were
+re-derived from the document each time, a scan that couldn't read it
+would silently reopen work somebody had already assessed.
+
+The document is *also* re-read on every scan and every `/findings`
+submission, but only to catch what wasn't there before: a vulnerability
+first reported next month lands already suppressed rather than being
+open until something merges it.
+
+**Checking it worked**, without trusting a `200`:
+
+```bash
+# the finding itself
+curl -s "${AUTH[@]}" localhost:8080/api/v1/artifacts/<id> \
+  | jq '.cve_findings[] | select(.status == "not_affected")
+        | {id, status, justification}'
+```
+```sql
+-- or across the fleet, via `make db-shell`
+SELECT a.ref, f.finding_id, f.justification
+FROM findings f JOIN artifacts a ON a.id = f.artifact_id
+WHERE f.status = 'not_affected';
+```
+
+**Retracting.** Upload a document that states `affected` for that
+vulnerability and it reopens immediately, on the same upload path that
+applies one:
+
+```bash
+curl -s -X POST localhost:8080/api/v1/artifacts/<id>/vex "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d '{"statements":[{"vulnerability":{"name":"CVE-2024-1234"},"status":"affected"}]}'
+```
+
+The status goes back to `open` and the justification is cleared with the
+suppression it explained. A document that merely *stops mentioning* a
+vulnerability retracts nothing — silence isn't an assertion, so removing
+a statement leaves the earlier one standing.
+
+Some details worth knowing:
+
+- **`justification` is server-managed.** Only a VEX document can set it;
+  `MergeFindings` recomputes it on every write, so a `/findings` caller
+  can't attach a reason to a finding nobody assessed. The same is true of
+  `status` — `not_affected` cannot be submitted, only asserted.
+- **A statement applies to the artifact you uploaded it to, and only
+  that one.** OpenVEX `products[]`/`subcomponents` are ignored: the
+  document arrived at `/artifacts/{id}/vex`, so the scoping is already
+  done. There is no fleet-wide VEX ingestion — the same document has to
+  be uploaded per artifact (a loop over
+  `/api/v1/findings/{cve}/artifacts` is the practical way to do that).
+- **Unrecognized statuses suppress nothing.** A typo or an unfamiliar
+  vocabulary leaves the finding exactly as the scan found it. The
+  failure direction is showing a real vulnerability, never hiding one.
+- **It suppresses findings, not artifacts.** An image whose only CVE is
+  suppressed shows 0 CVEs and stays exactly where it was in every other
+  view.
+- **The document is kept** (document kind `vex`) so a later scan can
+  re-read it — but it is deliberately *not* reachable through
+  `POST /documents/{kind}`, which stores bytes and would let a document
+  land without ever being applied.
 
 ### SBOM and SARIF scanning
 

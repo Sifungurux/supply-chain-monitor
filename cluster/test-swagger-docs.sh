@@ -154,6 +154,21 @@ else
 
 	curl -s -o /tmp/get-vex.json "${AUTH[@]}" "${BASE}/api/v1/artifacts/${artifact_id}"
 	grep -q '"status":"not_affected"' /tmp/get-vex.json || { echo "FAIL: finding not suppressed after the documented VEX upload: $(cat /tmp/get-vex.json)" >&2; fail=1; }
+
+	# The retraction the README documents, run for real. This is the half
+	# that shipped broken: uploading an "affected" statement answered 200
+	# with "1 statement understood" and left the finding suppressed,
+	# because nothing is reported on the upload path. A Go test covers it
+	# now too, but only this exercises the documented curl end to end.
+	retract_status=$(curl -s -o /tmp/vex-retract.json -w '%{http_code}' -X POST "${AUTH[@]}" \
+		-H 'Content-Type: application/json' \
+		-d '{"statements":[{"vulnerability":{"name":"CVE-2024-1234"},"status":"affected"}]}' \
+		"${BASE}/api/v1/artifacts/${artifact_id}/vex")
+	check "POST /api/v1/artifacts/{id}/vex retraction (README's example)" "$retract_status" "200"
+
+	curl -s -o /tmp/get-retracted.json "${AUTH[@]}" "${BASE}/api/v1/artifacts/${artifact_id}"
+	grep -q '"status":"not_affected"' /tmp/get-retracted.json && { echo "FAIL: an \"affected\" statement did not retract the suppression: $(cat /tmp/get-retracted.json)" >&2; fail=1; }
+	grep -q '"justification"' /tmp/get-retracted.json && { echo "FAIL: the justification outlived the suppression it explained: $(cat /tmp/get-retracted.json)" >&2; fail=1; }
 	grep -q '"justification":"vulnerable_code_not_in_execute_path"' /tmp/get-vex.json || { echo "FAIL: VEX justification didn't persist: $(cat /tmp/get-vex.json)" >&2; fail=1; }
 
 	# README's "Searching by component" example, end to end: upload an
