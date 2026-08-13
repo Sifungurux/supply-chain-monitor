@@ -761,6 +761,69 @@ func TestPostgresStore_SearchComponents(t *testing.T) {
 	}
 }
 
+// The live bug, against real SQL: one id recorded with different titles
+// across artifacts. Counting matched rows reported 21 for a CVE that 23
+// artifacts carried.
+func TestPostgresStore_SearchCountsEveryArtifactWithTheKey(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	const ns = "titlespread"
+	const cve = "CVE-2024-" + ns
+	const purl = "pkg:apk/" + ns + "/openssl@3.1.4-r5"
+
+	mkFinding := func(ref, title string) {
+		t.Helper()
+		a, err := s.Create(ref, artifact.TypeImage)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if _, err := s.Update(a.ID, func(art *artifact.Artifact) {
+			art.CVEFindings = append(art.CVEFindings, artifact.Finding{
+				ID: cve, Title: title, Severity: "critical", Status: artifact.FindingStatusOpen,
+			})
+		}); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		if err := s.SaveComponents(a.ID, []artifact.Component{{PURL: purl, Name: title, Version: "3.1.4-r5"}}); err != nil {
+			t.Fatalf("SaveComponents: %v", err)
+		}
+	}
+	// Only the first carries the search term in its title/name.
+	mkFinding("app:1.0-"+ns, "openssl"+ns+" buffer overread")
+	mkFinding("app:2.0-"+ns, "libcrypto3 3.1.4-r5")
+	mkFinding("app:3.0-"+ns, "libssl1.0.0 1.0.2g")
+
+	matches, _, err := s.SearchFindings("openssl"+ns, 50)
+	if err != nil {
+		t.Fatalf("SearchFindings: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Artifacts != 3 {
+		t.Fatalf("finding matches = %+v, want the id counted across all 3 artifacts, not just the row whose title matched", matches)
+	}
+	affected, err := s.FindByFindingID(cve)
+	if err != nil {
+		t.Fatalf("FindByFindingID: %v", err)
+	}
+	if len(affected) != matches[0].Artifacts {
+		t.Fatalf("search promised %d artifacts, exact lookup returned %d", matches[0].Artifacts, len(affected))
+	}
+
+	comps, _, err := s.SearchComponents("openssl"+ns, 50)
+	if err != nil {
+		t.Fatalf("SearchComponents: %v", err)
+	}
+	if len(comps) != 1 || comps[0].Artifacts != 3 {
+		t.Fatalf("component matches = %+v, want the purl counted across all 3 artifacts", comps)
+	}
+	containing, err := s.FindByComponentPURL(purl)
+	if err != nil {
+		t.Fatalf("FindByComponentPURL: %v", err)
+	}
+	if len(containing) != comps[0].Artifacts {
+		t.Fatalf("search promised %d artifacts, exact lookup returned %d", comps[0].Artifacts, len(containing))
+	}
+}
+
 // dsnWithSearchPath points a DSN at a specific Postgres schema via the
 // search_path connection parameter, so a test can create its own
 // artifacts table (in its own schema, via the admin connection) and

@@ -466,3 +466,90 @@ func TestSeverityRankMatchesNotify(t *testing.T) {
 		}
 	}
 }
+
+// The bug this test exists for was found on live data, not here: one
+// CVE is recorded with whichever package title each scanner reported --
+// "openssl: SSL_select_next_proto buffer overread" in most artifacts,
+// "libcrypto3 3.1.4-r5" in others -- so counting the rows that MATCHED
+// the query reported 21 artifacts for a CVE that 23 artifacts carried.
+// The picker undercounting its own click-through is precisely the
+// mismatch this feature was built to avoid.
+func TestMemStore_SearchFindingsCountsEveryArtifactWithTheID(t *testing.T) {
+	s := artifact.NewMemStore()
+
+	const cve = "CVE-2024-5535"
+	mk := func(ref, title string) {
+		t.Helper()
+		a, err := s.Create(ref, artifact.TypeImage)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if _, err := s.Update(a.ID, func(art *artifact.Artifact) {
+			art.CVEFindings = append(art.CVEFindings, artifact.Finding{
+				ID: cve, Title: title, Severity: "critical", Status: artifact.FindingStatusOpen,
+			})
+		}); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+	}
+	// Only the first title contains "openssl".
+	mk("app:1.0", "openssl: SSL_select_next_proto buffer overread")
+	mk("app:2.0", "libcrypto3 3.1.4-r5")
+	mk("app:3.0", "libssl1.0.0 1.0.2g-1ubuntu4.8")
+
+	matches, _, err := s.SearchFindings("openssl", 50)
+	if err != nil {
+		t.Fatalf("SearchFindings: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("matches = %+v, want the one id", matches)
+	}
+	if matches[0].Artifacts != 3 {
+		t.Fatalf("artifacts = %d, want 3 -- the count must cover every artifact carrying the id, not just the rows whose title matched the query",
+			matches[0].Artifacts)
+	}
+
+	list, err := s.FindByFindingID(cve)
+	if err != nil {
+		t.Fatalf("FindByFindingID: %v", err)
+	}
+	if len(list) != matches[0].Artifacts {
+		t.Fatalf("search promised %d artifacts, the exact lookup returned %d", matches[0].Artifacts, len(list))
+	}
+}
+
+// The same shape for components: an artifact whose SBOM spells the name
+// differently for the same purl must still be counted.
+func TestMemStore_SearchComponentsCountsEveryArtifactWithThePURL(t *testing.T) {
+	s := artifact.NewMemStore()
+
+	const purl = "pkg:apk/alpine/openssl@3.1.4-r5"
+	mk := func(ref, name string) {
+		t.Helper()
+		a, err := s.Create(ref, artifact.TypeImage)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := s.SaveComponents(a.ID, []artifact.Component{{PURL: purl, Name: name, Version: "3.1.4-r5"}}); err != nil {
+			t.Fatalf("SaveComponents: %v", err)
+		}
+	}
+	mk("app:1.0", "openssl")
+	mk("app:2.0", "libcrypto3") // same purl, different name
+
+	matches, _, err := s.SearchComponents("openssl", 50)
+	if err != nil {
+		t.Fatalf("SearchComponents: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Artifacts != 2 {
+		t.Fatalf("matches = %+v, want one purl in 2 artifacts", matches)
+	}
+
+	containing, err := s.FindByComponentPURL(purl)
+	if err != nil {
+		t.Fatalf("FindByComponentPURL: %v", err)
+	}
+	if len(containing) != matches[0].Artifacts {
+		t.Fatalf("search promised %d artifacts, the exact lookup returned %d", matches[0].Artifacts, len(containing))
+	}
+}
