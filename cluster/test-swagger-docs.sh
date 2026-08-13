@@ -156,6 +156,40 @@ else
 	grep -q '"status":"not_affected"' /tmp/get-vex.json || { echo "FAIL: finding not suppressed after the documented VEX upload: $(cat /tmp/get-vex.json)" >&2; fail=1; }
 	grep -q '"justification":"vulnerable_code_not_in_execute_path"' /tmp/get-vex.json || { echo "FAIL: VEX justification didn't persist: $(cat /tmp/get-vex.json)" >&2; fail=1; }
 
+	# README's "Searching by component" example, end to end: upload an
+	# SBOM, then run the documented --get/--data-urlencode curl and check
+	# the artifact comes back. The purl carries "/", "@" and a query
+	# string of its own, which is exactly what a live round trip through
+	# real URL parsing tests and an httptest handler call cannot.
+	cat >/tmp/sbom.json <<-'SBOMDOC'
+		{
+		  "bomFormat": "CycloneDX",
+		  "specVersion": "1.5",
+		  "metadata": { "component": { "type": "container", "name": "alpine:3.19", "purl": "pkg:oci/alpine@sha256:abc" } },
+		  "components": [
+		    { "type": "library", "name": "openssl", "version": "3.1.4-r5", "purl": "pkg:apk/alpine/openssl@3.1.4-r5?arch=x86_64" }
+		  ]
+		}
+	SBOMDOC
+	sbom_status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${AUTH[@]}" \
+		-H 'Content-Type: application/vnd.cyclonedx+json' \
+		--data-binary @/tmp/sbom.json \
+		"${BASE}/api/v1/artifacts/${artifact_id}/documents/sbom")
+	check "POST /api/v1/artifacts/{id}/documents/sbom" "$sbom_status" "200"
+
+	component_status=$(curl -s -o /tmp/components.json -w '%{http_code}' "${AUTH[@]}" \
+		--get --data-urlencode 'purl=pkg:apk/alpine/openssl@3.1.4-r5?arch=x86_64' \
+		"${BASE}/api/v1/components")
+	check "GET /api/v1/components?purl=... (README's example)" "$component_status" "200"
+	grep -q "\"id\":\"${artifact_id}\"" /tmp/components.json || { echo "FAIL: component search didn't return the artifact whose SBOM lists it: $(cat /tmp/components.json)" >&2; fail=1; }
+
+	# The document's own subject is not a component of it.
+	subject_json=$(curl -s "${AUTH[@]}" --get --data-urlencode 'purl=pkg:oci/alpine@sha256:abc' "${BASE}/api/v1/components")
+	[ "$subject_json" = "[]" ] || { echo "FAIL: the SBOM's own subject was indexed as a component of itself: $subject_json" >&2; fail=1; }
+
+	missing_purl_status=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" "${BASE}/api/v1/components")
+	check "GET /api/v1/components (no purl)" "$missing_purl_status" "400"
+
 	delete_status=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "${AUTH[@]}" "${BASE}/api/v1/artifacts/${artifact_id}")
 	check "DELETE /api/v1/artifacts/{id}" "$delete_status" "200"
 fi

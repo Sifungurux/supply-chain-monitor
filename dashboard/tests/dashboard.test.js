@@ -857,6 +857,103 @@ test('a VEX-suppressed finding shows a "VEX: not affected" badge, dims, and drop
   dom.window.close();
 });
 
+test('the component box queries /api/v1/components and lists every artifact containing that purl', async () => {
+  const PURL = 'pkg:apk/alpine/openssl@3.1.4-r5';
+  const containing = [SAMPLE_ARTIFACTS[0], SAMPLE_ARTIFACTS[2]];
+  const componentRequests = [];
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.indexOf('/api/v1/components') !== -1) {
+        componentRequests.push(url);
+        // The endpoint answers with a bare array, not a {total,
+        // artifacts} page -- see internal/api/components.go.
+        return jsonResponse(url.indexOf(encodeURIComponent(PURL)) !== -1 ? containing : []);
+      }
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  assert.equal(doc.querySelectorAll('#artifact-rows tr').length, 3, 'starts on the normal paginated list');
+
+  const box = doc.getElementById('component-input');
+  box.value = PURL;
+  box.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await tick(20);
+
+  assert.equal(componentRequests.length, 1, 'one request per query, not one per keystroke');
+  assert.match(componentRequests[0], /\/api\/v1\/components\?purl=/);
+  assert.match(componentRequests[0], new RegExp(encodeURIComponent(PURL).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    'the purl must be percent-encoded — it contains "/", "@" and often "?"');
+
+  const ids = [...doc.querySelectorAll('#artifact-rows tr')].map((tr) => tr.dataset.id);
+  assert.deepEqual(ids.sort(), ['a1', 'a3'], 'only the artifacts whose SBOM lists the component');
+  assert.match(doc.getElementById('search-note').textContent, /every artifact whose SBOM lists/);
+  assert.match(doc.getElementById('page-range').textContent, /2 artifacts contain this component/);
+  assert.equal(doc.getElementById('page-next').disabled, true, 'a component answer is complete — nothing to page to');
+
+  // The "Artifacts" card means "how many artifacts are there", not "how
+  // many matched" -- the match count belongs in the pager line above,
+  // and narrowing to 2 of 3 must not make the fleet look like it shrank.
+  const artifactsCard = doc.querySelector('#cards .n').textContent;
+  assert.equal(artifactsCard, '3', 'the fleet-total card must not be overwritten by the match count');
+
+  // The component endpoint takes no status/type filter, so leaving the
+  // selects live would let them display a selection that changes nothing.
+  assert.equal(doc.getElementById('filter-status').disabled, true);
+  assert.equal(doc.getElementById('filter-type').disabled, true);
+
+  // The 10s poll re-renders from state: a search that only touched the
+  // DOM would be wiped by the next tick, so prove it survives one.
+  dom.window.document.getElementById('refresh').click();
+  await tick(20);
+  assert.deepEqual([...doc.querySelectorAll('#artifact-rows tr')].map((tr) => tr.dataset.id).sort(), ['a1', 'a3'],
+    'the component search must survive a reload, not be a one-shot DOM filter');
+
+  // Clearing the box (the native × on a search input fires "change")
+  // returns to the normal paginated list.
+  box.value = '';
+  box.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await tick(20);
+  assert.equal(doc.querySelectorAll('#artifact-rows tr').length, 3, 'clearing returns to the full list');
+  assert.match(doc.getElementById('search-note').textContent, /Search only looks at the artifacts on this page/);
+  assert.equal(doc.getElementById('filter-status').disabled, false, 'the filters come back with the normal list');
+  assert.equal(doc.getElementById('filter-type').disabled, false);
+
+  dom.window.close();
+});
+
+test('a component search that matches nothing says so, rather than "no artifacts yet"', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.indexOf('/api/v1/components') !== -1) return jsonResponse([]);
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  const box = doc.getElementById('component-input');
+  box.value = 'pkg:apk/alpine/nothing@1.0';
+  box.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await tick(20);
+
+  const empty = doc.querySelector('#artifact-rows .empty').textContent;
+  assert.match(empty, /No artifact/);
+  assert.match(empty, /pkg:apk\/alpine\/nothing@1\.0/);
+  assert.doesNotMatch(empty, /No artifacts yet/, 'there ARE artifacts — none of them ship this package');
+
+  dom.window.close();
+});
+
 test('an artifact registered unsafe (REQUIRE_DIGEST mismatch) shows an Unsafe badge in the row and on the detail page', async () => {
   const withUnsafe = [
     { ...SAMPLE_ARTIFACTS[0], id: 'a8', ref: 'unsafe-image:1.0', unsafe: true },

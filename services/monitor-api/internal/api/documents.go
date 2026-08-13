@@ -2,9 +2,11 @@ package api
 
 import (
 	"io"
+	"log"
 	"net/http"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
 )
 
 // maxDocumentUploadBytes bounds a single SBOM/SARIF document upload --
@@ -57,7 +59,41 @@ func (h *handler) uploadDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+	if kind == artifact.DocumentKindSBOM {
+		h.indexSBOMComponents(id, content)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved", "id": id, "kind": kind})
+}
+
+// indexSBOMComponents parses an uploaded SBOM into the normalized
+// components table, so "which artifacts contain this package" is
+// answerable (see listByComponent in components.go) instead of the
+// inventory staying locked inside a blob.
+//
+// Best-effort, and deliberately AFTER the document is stored, never
+// before: this endpoint's actual job is to be the scan-worker's return
+// path for a document too large for the findings channel, and
+// scanner.UploadDocument treats any non-200 as an error that lands in
+// the artifact's LastScanErrors. A malformed or unfamiliar SBOM would
+// then read as a failed scan, and the document itself -- which is
+// perfectly fine, and downloadable -- would be discarded with it. So a
+// parse failure is logged and nothing else, the same convention
+// resolveDigest already uses for its own best-effort work.
+//
+// (This is the opposite ordering from uploadVEX, which parses BEFORE
+// storing. There, the parse IS the point: a VEX document that stored
+// successfully but suppressed nothing would be worse than a rejection.)
+func (h *handler) indexSBOMComponents(id string, content []byte) {
+	components, err := scanner.ParseSBOMComponents(content)
+	if err != nil {
+		log.Printf("could not parse the SBOM uploaded for artifact %s into components (the document itself is stored and downloadable): %v", id, err)
+		return
+	}
+	if err := h.store.SaveComponents(id, components); err != nil {
+		log.Printf("could not store the component inventory for artifact %s: %v", id, err)
+		return
+	}
+	log.Printf("indexed %d component(s) from the SBOM uploaded for artifact %s", len(components), id)
 }
 
 // downloadDocument returns a captured document's raw bytes -- the

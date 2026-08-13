@@ -55,6 +55,7 @@ func TestOpenAPISpec_DescribesEveryRegisteredRoute(t *testing.T) {
 		"/api/v1/artifacts/bulk",
 		"/api/v1/artifacts/{id}:",
 		"/api/v1/findings/{findingID}/artifacts",
+		"/api/v1/components",
 		"/api/v1/artifacts/{id}/scan",
 		"/api/v1/artifacts/{id}/stage",
 		"/api/v1/artifacts/{id}/maintainer",

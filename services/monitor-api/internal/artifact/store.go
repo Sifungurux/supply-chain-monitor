@@ -94,6 +94,26 @@ type Store interface {
 	// found is the expected, common case" convention FindByDigest above
 	// already uses.
 	GetDocument(artifactID, kind string) (*Document, error)
+	// SaveComponents REPLACES this artifact's component inventory with
+	// the one parsed from its most recently uploaded SBOM (see
+	// scanner.ParseSBOMComponents). Replace, not append, deliberately:
+	// SaveDocument already overwrites the previous SBOM rather than
+	// keeping history, so appending here would leave the components of
+	// every SBOM this artifact ever had on record, and
+	// FindByComponentPURL would keep returning it for a package a
+	// rebuild removed months ago. An empty slice therefore means "this
+	// artifact now contains nothing we could identify", which is a
+	// meaningful statement, not a no-op.
+	SaveComponents(artifactID string, components []Component) error
+	// FindByComponentPURL returns every artifact whose inventory
+	// contains this exact purl -- "which of our images ship
+	// log4j-core 2.14.1", the component-level counterpart to
+	// FindByFindingID's "which are affected by CVE-X". Exact match, not
+	// a prefix: that's what the indexed column supports, and "any
+	// version of this package" is a different question than this one
+	// answers. Returns an empty slice (not an error) when nothing
+	// matches, exactly like FindByFindingID.
+	FindByComponentPURL(purl string) ([]*Artifact, error)
 }
 
 // MemStore is a thread-safe, in-memory Store implementation.
@@ -109,10 +129,18 @@ type MemStore struct {
 	// MemStore only ever backs tests, never production (see the type's
 	// own comment).
 	documents map[string]map[string]*Document
+	// components is keyed by artifact ID. Same reasoning as documents:
+	// a map is enough for a test backend, where PostgresStore has a real
+	// table with an index on purl.
+	components map[string][]Component
 }
 
 func NewMemStore() *MemStore {
-	return &MemStore{data: make(map[string]*Artifact), documents: make(map[string]map[string]*Document)}
+	return &MemStore{
+		data:       make(map[string]*Artifact),
+		documents:  make(map[string]map[string]*Document),
+		components: make(map[string][]Component),
+	}
 }
 
 // newID generates the random hex artifact ID used by every Store
@@ -254,7 +282,58 @@ func (s *MemStore) Delete(id string) error {
 	}
 	delete(s.data, id)
 	delete(s.documents, id)
+	// Mirrors PostgresStore's ON DELETE CASCADE -- without this a
+	// deleted artifact's components would still answer
+	// FindByComponentPURL, from a map nothing else can reach.
+	delete(s.components, id)
 	return nil
+}
+
+func (s *MemStore) SaveComponents(artifactID string, components []Component) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.data[artifactID]; !ok {
+		return fmt.Errorf("artifact %q not found", artifactID)
+	}
+	// Replaces, never appends -- see the Store interface's comment.
+	s.components[artifactID] = append([]Component(nil), components...)
+	return nil
+}
+
+// FindByComponentPURL answers with a linear scan, the same way
+// FindByFindingID does here -- PostgresStore uses the components.purl
+// index for the same query.
+func (s *MemStore) FindByComponentPURL(purl string) ([]*Artifact, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]*Artifact, 0)
+	if purl == "" {
+		return out, nil
+	}
+	for id, components := range s.components {
+		a, ok := s.data[id]
+		if !ok {
+			continue
+		}
+		for _, c := range components {
+			if c.PURL == purl {
+				out = append(out, copyArtifact(a))
+				break
+			}
+		}
+	}
+	// Newest first, matching PostgresStore's ORDER BY created_at DESC --
+	// MemStore ranges over a map, so without this the order would differ
+	// between two calls with the same data.
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].ID > out[j].ID
+	})
+	return out, nil
 }
 
 func (s *MemStore) SaveDocument(artifactID, kind, contentType string, content []byte) error {

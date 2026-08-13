@@ -1,0 +1,85 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "alpine:3.19",
+  "documentNamespace": "http://trivy.dev/container_image/alpine:3.19-7098125a-3ecc-4611-b3cb-40639c884c5f",
+  "creationInfo": {
+    "creators": [
+      "Organization: aquasecurity",
+      "Tool: trivy-0.71.1"
+    ],
+    "created": "2026-08-13T07:04:41Z"
+  },
+  "packages": [
+    {
+      "name": "alpine:3.19",
+      "SPDXID": "SPDXRef-ContainerImage-c26c926bd6e6f4ab",
+      "licenseDeclared": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:oci/alpine@sha256:6baf43584bcb78f2e5847d1de515f23499913ac9f12bdf834811a3145eb11ca1?arch=amd64&repository_url=index.docker.io%2Flibrary%2Falpine"
+        }
+      ],
+      "primaryPackagePurpose": "CONTAINER"
+    },
+    {
+      "name": "alpine-baselayout",
+      "SPDXID": "SPDXRef-Package-5c88e3d2fcd61b6d",
+      "versionInfo": "3.4.3-r2",
+      "licenseDeclared": "GPL-2.0-only",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:apk/alpine/alpine-baselayout@3.4.3-r2?arch=x86_64&distro=3.19.9"
+        }
+      ],
+      "primaryPackagePurpose": "LIBRARY"
+    },
+    {
+      "name": "alpine-baselayout-data",
+      "SPDXID": "SPDXRef-Package-be618015c5f3e31c",
+      "versionInfo": "3.4.3-r2",
+      "licenseDeclared": "GPL-2.0-only",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:apk/alpine/alpine-baselayout-data@3.4.3-r2?arch=x86_64&distro=3.19.9"
+        }
+      ],
+      "primaryPackagePurpose": "LIBRARY"
+    },
+    {
+      "name": "alpine-keys",
+      "SPDXID": "SPDXRef-Package-672c3e5ca7bf7781",
+      "versionInfo": "2.4-r1",
+      "licenseDeclared": "MIT",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:apk/alpine/alpine-keys@2.4-r1?arch=x86_64&distro=3.19.9"
+        }
+      ],
+      "primaryPackagePurpose": "LIBRARY"
+    },
+    {
+      "name": "apk-tools",
+      "SPDXID": "SPDXRef-Package-f96813e8fb624b77",
+      "versionInfo": "2.14.4-r0",
+      "licenseDeclared": "GPL-2.0-only",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:apk/alpine/apk-tools@2.14.4-r0?arch=x86_64&distro=3.19.9"
+        }
+      ],
+      "primaryPackagePurpose": "LIBRARY"
+    }
+  ]
+}

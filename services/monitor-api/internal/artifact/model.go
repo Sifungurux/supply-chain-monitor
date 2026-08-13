@@ -246,6 +246,26 @@ const (
 	DocumentKindVEX = "vex"
 )
 
+// Component is one entry from an ingested SBOM's component inventory --
+// a package this artifact contains. Deliberately its own type/table
+// rather than a field on Artifact, for the same reason Document is (see
+// its comment): a real image's SBOM lists hundreds to thousands of
+// these, and Artifact is round-tripped whole on every List() call the
+// dashboard polls every 10 seconds.
+//
+// PURL (a Package URL, e.g. "pkg:apk/alpine/openssl@3.1.4-r5") is the
+// identity that matters here: it's what makes "which of our artifacts
+// contain this exact package" answerable across ecosystems, and it's
+// the indexed column Store.FindByComponentPURL queries. Name and
+// Version are carried alongside for display -- both are derivable from
+// a purl, but not without parsing one, and this way the API answer
+// reads without a client having to.
+type Component struct {
+	PURL    string `json:"purl"`
+	Name    string `json:"name,omitempty"`
+	Version string `json:"version,omitempty"`
+}
+
 // VEXStatement is one VEX statement reduced to what merging a finding
 // needs: which vulnerability it speaks about, what it asserts, and why.
 // Lives here rather than in internal/scanner (which does the actual

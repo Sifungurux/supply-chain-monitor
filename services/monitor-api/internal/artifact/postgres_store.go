@@ -189,6 +189,34 @@ var schemaStatements = []string{
 		created_at   TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (artifact_id, kind)
 	)`,
+	// The component inventory parsed out of an ingested SBOM (see
+	// scanner.ParseSBOMComponents and internal/api/documents.go) --
+	// the same "normalize it into rows so it can be queried" move
+	// findings already got, applied to the other thing an SBOM
+	// carries. The document itself stays in artifact_documents: this
+	// table is not a second copy of it, it's the two or three fields
+	// per component that a query needs, with the rest of the document
+	// left where it is.
+	//
+	// UNIQUE (artifact_id, purl) rather than a plain index: a single
+	// SBOM legitimately lists the same purl more than once (the same
+	// package pulled in through two paths), and without this each
+	// duplicate would be its own row, so one artifact would appear
+	// repeatedly for one purl query. It also makes SaveComponents'
+	// insert idempotent if it's ever retried mid-flight.
+	`CREATE TABLE IF NOT EXISTS components (
+		id          BIGSERIAL PRIMARY KEY,
+		artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+		purl        TEXT NOT NULL, -- e.g. "pkg:apk/alpine/openssl@3.1.4-r5"
+		name        TEXT NOT NULL DEFAULT '',
+		version     TEXT NOT NULL DEFAULT '',
+		UNIQUE (artifact_id, purl)
+	)`,
+	// Powers FindByComponentPURL -- "every artifact containing this
+	// package" -- without scanning every artifact's inventory, exactly
+	// what findings_finding_id_idx does for "every artifact affected by
+	// this CVE".
+	`CREATE INDEX IF NOT EXISTS components_purl_idx ON components (purl)`,
 }
 
 const selectArtifactColumns = `SELECT id, ref, digest, type, status, current_stage, created_at, updated_at, last_scan_at, maintainer_team, maintainer_email, last_scan_failure_reason FROM artifacts`
@@ -1031,6 +1059,80 @@ func (s *PostgresStore) SaveDocument(artifactID, kind, contentType string, conte
 		return fmt.Errorf("save %s document for %q: %w", kind, artifactID, err)
 	}
 	return nil
+}
+
+// SaveComponents replaces this artifact's component inventory in one
+// transaction: DELETE everything on record, then insert what the
+// current SBOM lists. A transaction, unlike SaveDocument's single
+// upsert, because the delete and the inserts are only correct together
+// -- a crash between them would otherwise leave the artifact with no
+// components at all, silently dropping it out of every purl query.
+//
+// ON CONFLICT DO NOTHING covers the same purl appearing twice in one
+// document (see the components table's own comment); the parser
+// already dedupes, this is the database saying so too rather than
+// trusting it.
+func (s *PostgresStore) SaveComponents(artifactID string, components []Component) error {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("save components for %q: %w", artifactID, err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Explicit existence check: unlike SaveDocument (whose INSERT hits
+	// the foreign key and fails), this function's write path for an
+	// artifact with an empty component list is a DELETE that affects
+	// nothing and reports no error -- so a bad ID would look like a
+	// success.
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM artifacts WHERE id = $1)`, artifactID).Scan(&exists); err != nil {
+		return fmt.Errorf("save components for %q: %w", artifactID, err)
+	}
+	if !exists {
+		return fmt.Errorf("artifact %q not found", artifactID)
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM components WHERE artifact_id = $1`, artifactID); err != nil {
+		return fmt.Errorf("save components for %q: %w", artifactID, err)
+	}
+	for _, c := range components {
+		// ponytail: a per-row Exec, matching insertFinding. Measured
+		// against a 2.4MB, 5,000-component SBOM (a large node_modules
+		// tree, well past what a real image produces): 8ms to parse,
+		// 476ms to insert -- against main.go's 30s httpWriteTimeout,
+		// which is the deadline that matters since this runs inside the
+		// upload request. pgx.CopyFrom is the upgrade path if that
+		// headroom ever stops being ~60x.
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO components (artifact_id, purl, name, version) VALUES ($1, $2, $3, $4)
+			ON CONFLICT (artifact_id, purl) DO NOTHING
+		`, artifactID, c.PURL, c.Name, c.Version); err != nil {
+			return fmt.Errorf("save components for %q: %w", artifactID, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("save components for %q: %w", artifactID, err)
+	}
+	return nil
+}
+
+// FindByComponentPURL answers "every artifact containing this package"
+// via the components.purl index -- the component-inventory counterpart
+// to FindByFindingID, and the reason an ingested SBOM is parsed into
+// rows at all rather than only kept as a blob.
+func (s *PostgresStore) FindByComponentPURL(purl string) ([]*Artifact, error) {
+	if purl == "" {
+		return []*Artifact{}, nil
+	}
+	out, err := s.queryArtifacts(context.Background(), selectArtifactColumns+`
+		WHERE id IN (SELECT DISTINCT artifact_id FROM components WHERE purl = $1)
+		ORDER BY created_at DESC
+	`, purl)
+	if err != nil {
+		return nil, fmt.Errorf("find artifacts by component purl: %w", err)
+	}
+	return out, nil
 }
 
 // GetDocument returns (nil, nil) if no document of that kind has been

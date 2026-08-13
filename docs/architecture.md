@@ -79,8 +79,9 @@ An `Artifact` (`internal/artifact/model.go`) has:
 Postgres (`internal/artifact/postgres_store.go`) normalizes this into
 `artifacts`, `stage_history`, `findings` (a `bucket` column instead of
 five arrays, indexed on `finding_id` for `GET
-/api/v1/findings/{findingID}/artifacts`), `scan_errors`, and
-`artifact_documents` — all foreign-keyed to `artifacts(id)` with
+/api/v1/findings/{findingID}/artifacts`), `scan_errors`,
+`artifact_documents`, and `components` (see "Indexing SBOM components"
+below) — all foreign-keyed to `artifacts(id)` with
 `ON DELETE CASCADE`. `Store` is an interface
 (`Create`/`Get`/`List`/`Update`/`Delete`/`FindByDigest`/
 `FindByFindingID`); `MemStore` (a `sync.RWMutex`-protected map) backs
@@ -148,6 +149,39 @@ rejection. OpenVEX `products[]` is ignored: the document was uploaded to
 one artifact, so the operator has already scoped it (matching purls
 would be the change needed if VEX ever arrives fleet-wide rather than
 per-artifact).
+
+**Indexing SBOM components.** An SBOM's whole point is the inventory it
+carries, but as a stored blob that inventory can only be read one
+downloaded document at a time. So `uploadDocument`
+(`internal/api/documents.go`) parses each uploaded SBOM
+(`scanner.ParseSBOMComponents` — CycloneDX or SPDX JSON, told apart by
+whether the document has a `components` or a `packages` array) into a
+`components` table indexed on purl, and `GET /api/v1/components?purl=…`
+answers "every artifact containing this package" through that index —
+the component-level counterpart to `FindByFindingID`'s "every artifact
+affected by this CVE", and the same normalize-so-it's-queryable move
+findings already got.
+
+Three things this gets right that are easy to get wrong:
+
+- **Parse after storing, best-effort.** The document is saved first and
+  a parse failure is only logged. `scanner.UploadDocument` treats any
+  non-200 as a scan error that lands in `LastScanErrors`, so rejecting
+  an unfamiliar SBOM would turn a good scan into a failed one *and*
+  discard a document that is itself fine and downloadable. (Deliberately
+  the opposite ordering from `uploadVEX`, which parses first — there the
+  parse *is* the point.)
+- **`SaveComponents` replaces, in a transaction.** `SaveDocument`
+  overwrites the previous SBOM rather than keeping history, so appending
+  here would leave every package the artifact ever contained on record
+  and keep answering queries for one a rebuild removed. DELETE + INSERT
+  in one transaction, with `UNIQUE (artifact_id, purl)` making a
+  duplicate inside one document a no-op.
+- **The document's own subject isn't a component of itself.** CycloneDX
+  keeps it in `metadata.component` (outside the array), SPDX puts it in
+  `packages[]` with `primaryPackagePurpose: CONTAINER` — skipped
+  explicitly, or the two formats disagree by exactly one row for the
+  same image.
 
 ## Scanning pipeline
 
