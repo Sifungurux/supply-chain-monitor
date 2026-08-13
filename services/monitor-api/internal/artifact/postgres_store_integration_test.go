@@ -164,6 +164,9 @@ func TestPostgresStore_Delete(t *testing.T) {
 	if err := s.SaveDocument(a.ID, artifact.DocumentKindSBOM, "application/vnd.cyclonedx+json", []byte(`{"bomFormat":"CycloneDX"}`)); err != nil {
 		t.Fatalf("SaveDocument: %v", err)
 	}
+	if err := s.SaveComponents(a.ID, []artifact.Component{{PURL: "pkg:apk/alpine/openssl@3.1.4-r5", Name: "openssl", Version: "3.1.4-r5"}}); err != nil {
+		t.Fatalf("SaveComponents: %v", err)
+	}
 
 	countRows := func(table string) int {
 		t.Helper()
@@ -174,7 +177,7 @@ func TestPostgresStore_Delete(t *testing.T) {
 		return n
 	}
 
-	if countRows("findings") == 0 || countRows("stage_history") == 0 || countRows("scan_errors") == 0 || countRows("artifact_documents") == 0 {
+	if countRows("findings") == 0 || countRows("stage_history") == 0 || countRows("scan_errors") == 0 || countRows("artifact_documents") == 0 || countRows("components") == 0 {
 		t.Fatal("expected child rows to exist before delete (test setup didn't work)")
 	}
 
@@ -196,7 +199,7 @@ func TestPostgresStore_Delete(t *testing.T) {
 		}
 	}
 
-	for _, table := range []string{"findings", "stage_history", "scan_errors", "artifact_documents"} {
+	for _, table := range []string{"findings", "stage_history", "scan_errors", "artifact_documents", "components"} {
 		if n := countRows(table); n != 0 {
 			t.Fatalf("expected ON DELETE CASCADE to remove every %s row for the deleted artifact, found %d left behind", table, n)
 		}
@@ -565,6 +568,111 @@ func TestPostgresStore_VEXSuppressionRoundTrips(t *testing.T) {
 		t.Fatalf("artifact %s not in the first page of ListPage", a.ID)
 	}
 	assertSuppressed("ListPage (fillChildrenBatch)", listed.CVEFindings)
+}
+
+// TestPostgresStore_ComponentInventory exercises the components table
+// end to end against a real database -- the migration, the purl index's
+// query, the replace-on-re-upload transaction, and the foreign key's
+// ON DELETE CASCADE. The MemStore tests in store_test.go cover the same
+// contract in pure Go, but only this one can catch a SQL or schema
+// mistake, which is exactly where this feature's risk is.
+func TestPostgresStore_ComponentInventory(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	const openssl = "pkg:apk/alpine/openssl@3.1.4-r5"
+	// A purl with qualifiers, which is what real SBOMs carry -- stored
+	// and matched verbatim, "?" and "&" included.
+	const qualified = "pkg:apk/alpine/apk-tools@2.14.4-r0?arch=x86_64&distro=3.19.9"
+
+	a, err := s.Create("alpine:3.19-components", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	other, err := s.Create("debian:12-components", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := s.SaveComponents(a.ID, []artifact.Component{
+		{PURL: openssl, Name: "openssl", Version: "3.1.4-r5"},
+		{PURL: qualified, Name: "apk-tools", Version: "2.14.4-r0"},
+		// The same purl twice in one document: UNIQUE (artifact_id,
+		// purl) plus ON CONFLICT DO NOTHING must make this a no-op, not
+		// an error and not a duplicate row.
+		{PURL: openssl, Name: "openssl", Version: "3.1.4-r5"},
+	}); err != nil {
+		t.Fatalf("SaveComponents: %v", err)
+	}
+	if err := s.SaveComponents(other.ID, []artifact.Component{{PURL: openssl, Name: "openssl", Version: "3.1.4-r5"}}); err != nil {
+		t.Fatalf("SaveComponents (other): %v", err)
+	}
+
+	matches, err := s.FindByComponentPURL(openssl)
+	if err != nil {
+		t.Fatalf("FindByComponentPURL: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, m := range matches {
+		ids[m.ID] = true
+	}
+	if !ids[a.ID] || !ids[other.ID] {
+		t.Fatalf("matches = %+v, want both artifacts sharing the package", matches)
+	}
+	// One row per artifact, even though one of them reported the purl
+	// twice -- a duplicate would show up here as the same artifact
+	// returned more than once.
+	if len(matches) != len(ids) {
+		t.Fatalf("FindByComponentPURL returned %d rows for %d distinct artifacts -- duplicates leaked", len(matches), len(ids))
+	}
+
+	if got, err := s.FindByComponentPURL(qualified); err != nil || len(got) != 1 || got[0].ID != a.ID {
+		t.Fatalf("FindByComponentPURL(qualified) = %+v, %v, want just %s", got, err, a.ID)
+	}
+	if got, err := s.FindByComponentPURL("pkg:apk/alpine/nothing@1.0"); err != nil || len(got) != 0 {
+		t.Fatalf("FindByComponentPURL(unknown) = %+v, %v, want no matches", got, err)
+	}
+	if got, err := s.FindByComponentPURL(""); err != nil || len(got) != 0 {
+		t.Fatalf(`FindByComponentPURL("") = %+v, %v, want no matches`, got, err)
+	}
+
+	// Re-upload: the previous inventory must be gone, not added to.
+	if err := s.SaveComponents(a.ID, []artifact.Component{{PURL: "pkg:apk/alpine/openssl@3.2.0-r0", Name: "openssl", Version: "3.2.0-r0"}}); err != nil {
+		t.Fatalf("SaveComponents (re-upload): %v", err)
+	}
+	after, err := s.FindByComponentPURL(openssl)
+	if err != nil {
+		t.Fatalf("FindByComponentPURL after re-upload: %v", err)
+	}
+	for _, m := range after {
+		if m.ID == a.ID {
+			t.Fatalf("%s still matches %q after an SBOM that no longer lists it", a.ID, openssl)
+		}
+	}
+	if got, err := s.FindByComponentPURL("pkg:apk/alpine/openssl@3.2.0-r0"); err != nil || len(got) != 1 {
+		t.Fatalf("FindByComponentPURL(new version) = %+v, %v, want the artifact", got, err)
+	}
+
+	// ON DELETE CASCADE: deleting the artifact takes its inventory with
+	// it, rather than leaving rows that answer a query with a ghost.
+	if err := s.Delete(other.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	ghosts, err := s.FindByComponentPURL(openssl)
+	if err != nil {
+		t.Fatalf("FindByComponentPURL after delete: %v", err)
+	}
+	if len(ghosts) != 0 {
+		t.Fatalf("matches after deleting the only artifact left with %q = %+v, want none", openssl, ghosts)
+	}
+
+	if err := s.SaveComponents("does-not-exist", []artifact.Component{{PURL: openssl}}); err == nil {
+		t.Fatal("expected an error saving components against a missing artifact")
+	}
+	// The same call with an empty inventory has no INSERT to trip the
+	// foreign key, so it needs the explicit existence check to fail.
+	if err := s.SaveComponents("does-not-exist", nil); err == nil {
+		t.Fatal("expected an error saving an EMPTY inventory against a missing artifact")
+	}
 }
 
 // dsnWithSearchPath points a DSN at a specific Postgres schema via the

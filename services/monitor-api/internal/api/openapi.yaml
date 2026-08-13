@@ -355,6 +355,33 @@ paths:
                 items: { $ref: "#/components/schemas/Artifact" }
         "400": { $ref: "#/components/responses/BadRequest" }
 
+  /api/v1/components:
+    get:
+      tags: [findings]
+      summary: Find every artifact containing one component
+      description: >-
+        Queries the component inventory parsed out of each artifact's
+        ingested SBOM (see POST /api/v1/artifacts/{id}/documents/sbom).
+        The purl is matched exactly, qualifiers included -- "any version
+        of this package" is a different question than this answers. A
+        query parameter rather than a path segment because a purl
+        contains slashes, "@" and often a query string of its own.
+      parameters:
+        - name: purl
+          in: query
+          required: true
+          schema: { type: string }
+          example: pkg:apk/alpine/openssl@3.1.4-r5
+      responses:
+        "200":
+          description: Artifacts containing this component (empty array if none).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Artifact" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
   /api/v1/artifacts/{id}/documents/{kind}:
     parameters:
       - $ref: "#/components/parameters/ArtifactID"

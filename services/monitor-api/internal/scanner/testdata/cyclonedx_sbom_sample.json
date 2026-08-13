@@ -1,0 +1,50 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.7",
+  "serialNumber": "urn:uuid:003cdd88-7524-44b1-992e-7e089aec173b",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "bom-ref": "pkg:oci/alpine@sha256:6baf43584bcb78f2e5847d1de515f23499913ac9f12bdf834811a3145eb11ca1?arch=amd64&repository_url=index.docker.io%2Flibrary%2Falpine",
+      "type": "container",
+      "name": "alpine:3.19",
+      "purl": "pkg:oci/alpine@sha256:6baf43584bcb78f2e5847d1de515f23499913ac9f12bdf834811a3145eb11ca1?arch=amd64&repository_url=index.docker.io%2Flibrary%2Falpine"
+    }
+  },
+  "components": [
+    {
+      "bom-ref": "277a8282-f93d-4025-a4cd-ecb4e62480c8",
+      "type": "operating-system",
+      "name": "alpine",
+      "version": "3.19.9"
+    },
+    {
+      "bom-ref": "pkg:apk/alpine/alpine-baselayout-data@3.4.3-r2?arch=x86_64&distro=3.19.9",
+      "type": "library",
+      "name": "alpine-baselayout-data",
+      "version": "3.4.3-r2",
+      "purl": "pkg:apk/alpine/alpine-baselayout-data@3.4.3-r2?arch=x86_64&distro=3.19.9"
+    },
+    {
+      "bom-ref": "pkg:apk/alpine/alpine-baselayout@3.4.3-r2?arch=x86_64&distro=3.19.9",
+      "type": "library",
+      "name": "alpine-baselayout",
+      "version": "3.4.3-r2",
+      "purl": "pkg:apk/alpine/alpine-baselayout@3.4.3-r2?arch=x86_64&distro=3.19.9"
+    },
+    {
+      "bom-ref": "pkg:apk/alpine/alpine-keys@2.4-r1?arch=x86_64&distro=3.19.9",
+      "type": "library",
+      "name": "alpine-keys",
+      "version": "2.4-r1",
+      "purl": "pkg:apk/alpine/alpine-keys@2.4-r1?arch=x86_64&distro=3.19.9"
+    },
+    {
+      "bom-ref": "pkg:apk/alpine/apk-tools@2.14.4-r0?arch=x86_64&distro=3.19.9",
+      "type": "library",
+      "name": "apk-tools",
+      "version": "2.14.4-r0",
+      "purl": "pkg:apk/alpine/apk-tools@2.14.4-r0?arch=x86_64&distro=3.19.9"
+    }
+  ]
+}

@@ -160,6 +160,104 @@ func TestMemStore_Delete(t *testing.T) {
 	}
 }
 
+func TestMemStore_FindByComponentPURL(t *testing.T) {
+	s := artifact.NewMemStore()
+
+	const openssl = "pkg:apk/alpine/openssl@3.1.4-r5"
+	alpine, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	debian, err := s.Create("debian:12", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := s.SaveComponents(alpine.ID, []artifact.Component{
+		{PURL: openssl, Name: "openssl", Version: "3.1.4-r5"},
+		{PURL: "pkg:apk/alpine/busybox@1.36.1-r15", Name: "busybox", Version: "1.36.1-r15"},
+	}); err != nil {
+		t.Fatalf("SaveComponents: %v", err)
+	}
+	if err := s.SaveComponents(debian.ID, []artifact.Component{
+		{PURL: "pkg:deb/debian/openssl@3.0.11-1", Name: "openssl", Version: "3.0.11-1"},
+	}); err != nil {
+		t.Fatalf("SaveComponents: %v", err)
+	}
+
+	matches, err := s.FindByComponentPURL(openssl)
+	if err != nil {
+		t.Fatalf("FindByComponentPURL: %v", err)
+	}
+	if len(matches) != 1 || matches[0].ID != alpine.ID {
+		t.Fatalf("matches = %+v, want just %q -- debian's openssl is a different purl", matches, alpine.ID)
+	}
+
+	if none, err := s.FindByComponentPURL("pkg:apk/alpine/nothing@1.0"); err != nil || len(none) != 0 {
+		t.Fatalf("FindByComponentPURL(unknown) = %+v, %v, want no matches", none, err)
+	}
+	// An empty purl is not a wildcard -- same convention FindByDigest
+	// uses for an empty digest.
+	if none, err := s.FindByComponentPURL(""); err != nil || len(none) != 0 {
+		t.Fatalf(`FindByComponentPURL("") = %+v, %v, want no matches`, none, err)
+	}
+
+	if err := s.SaveComponents("does-not-exist", nil); err == nil {
+		t.Fatal("expected an error saving components against a missing artifact")
+	}
+}
+
+// A re-uploaded SBOM REPLACES the inventory, it doesn't add to it --
+// SaveDocument already overwrites the document itself, so appending
+// here would keep answering queries for a package a rebuild removed.
+func TestMemStore_SaveComponentsReplaces(t *testing.T) {
+	s := artifact.NewMemStore()
+
+	a, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	const old = "pkg:apk/alpine/openssl@1.1.1"
+	const updated = "pkg:apk/alpine/openssl@3.0.0"
+	if err := s.SaveComponents(a.ID, []artifact.Component{{PURL: old, Name: "openssl", Version: "1.1.1"}}); err != nil {
+		t.Fatalf("SaveComponents: %v", err)
+	}
+	if err := s.SaveComponents(a.ID, []artifact.Component{{PURL: updated, Name: "openssl", Version: "3.0.0"}}); err != nil {
+		t.Fatalf("SaveComponents: %v", err)
+	}
+
+	if stale, err := s.FindByComponentPURL(old); err != nil || len(stale) != 0 {
+		t.Fatalf("FindByComponentPURL(%q) = %+v, %v -- the previous SBOM's components must not survive a re-upload", old, stale, err)
+	}
+	if fresh, err := s.FindByComponentPURL(updated); err != nil || len(fresh) != 1 {
+		t.Fatalf("FindByComponentPURL(%q) = %+v, %v, want the artifact", updated, fresh, err)
+	}
+}
+
+// Components are keyed to an artifact that no longer exists once it's
+// deleted -- MemStore has to drop them the way PostgresStore's
+// ON DELETE CASCADE does, or a purl query answers with a ghost.
+func TestMemStore_DeleteDropsComponents(t *testing.T) {
+	s := artifact.NewMemStore()
+
+	const purl = "pkg:apk/alpine/openssl@3.1.4-r5"
+	a, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := s.SaveComponents(a.ID, []artifact.Component{{PURL: purl, Name: "openssl"}}); err != nil {
+		t.Fatalf("SaveComponents: %v", err)
+	}
+	if err := s.Delete(a.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if ghosts, err := s.FindByComponentPURL(purl); err != nil || len(ghosts) != 0 {
+		t.Fatalf("FindByComponentPURL after delete = %+v, %v, want nothing", ghosts, err)
+	}
+}
+
 func TestTypeValid(t *testing.T) {
 	valid := []artifact.Type{artifact.TypeImage, artifact.TypeFile, artifact.TypeSBOM, artifact.TypeSARIF}
 	for _, ty := range valid {

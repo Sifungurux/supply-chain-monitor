@@ -308,6 +308,7 @@ request/response shapes.
 | POST   | `/api/v1/artifacts/{id}/vex`       | upload an OpenVEX/CycloneDX-VEX document and suppress the findings it clears |
 | POST   | `/api/v1/artifacts/{id}/stage`     | record a pipeline-stage transition         |
 | GET    | `/api/v1/findings/{findingID}/artifacts` | every artifact affected by a given finding ID (e.g. a CVE) |
+| GET    | `/api/v1/components?purl=...`      | every artifact whose ingested SBOM lists that component |
 
 `type` is one of `image`, `file`, `sbom`, `sarif`.
 
@@ -866,6 +867,48 @@ and `file`:
      the same place every SARIF result used to land before this
      classification existed — this only ever adds precision, it never
      drops a finding.
+
+### Searching by component: which images ship this package?
+
+Every SBOM uploaded to `POST /api/v1/artifacts/{id}/documents/sbom` is
+parsed into a normalized component inventory (a `components` table
+keyed on purl), so the question an SBOM exists to answer is actually
+answerable across the fleet rather than one downloaded document at a
+time:
+
+```bash
+curl -s "${AUTH[@]}" \
+  --get --data-urlencode 'purl=pkg:apk/alpine/openssl@3.1.4-r5' \
+  localhost:8080/api/v1/components
+```
+
+It returns the full artifacts (not just IDs) containing that component,
+newest first, and an empty array when nothing does — the same shape and
+conventions as `/api/v1/findings/{findingID}/artifacts`, which answers
+the same question about a CVE instead of a package. The dashboard's
+component box above the artifact table is this endpoint.
+
+Both CycloneDX and SPDX (JSON) are read, told apart by shape rather than
+by a version field, and the artifact the document *describes* is not
+counted as a component of itself. Some details worth knowing:
+
+- **The purl is matched exactly, qualifiers included.**
+  `pkg:apk/alpine/openssl@3.1.4-r5?arch=x86_64` and the same purl
+  without `?arch=` are different keys. "Any version of this package" is
+  a different query, and this isn't it.
+- **A re-uploaded SBOM replaces the inventory**, exactly as it replaces
+  the document itself — so an artifact stops matching a package a
+  rebuild removed, rather than matching forever.
+- **A component with no purl is skipped**, since a purl is what this
+  query keys on (in practice: the CycloneDX `operating-system` entry).
+- **An SBOM that can't be parsed doesn't fail the upload.** The document
+  is stored and downloadable either way; only the inventory is skipped,
+  and the reason is logged. A scan worker uploading a document treats
+  any non-200 as a scan error, and a component inventory is not worth
+  turning a good scan into a failed one.
+- **`sbom`-*type artifacts* don't get an inventory** — those are scanned
+  from a ref (`trivy sbom`, see above) and never pass through the
+  document-upload path. Upload the document itself to index it.
 
 ### Registering `file`/`sbom`/`sarif` artifacts by registry reference
 

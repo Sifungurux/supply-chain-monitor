@@ -317,6 +317,10 @@
       <div class="search-row">
         <input type="search" id="search-input" placeholder="Search ref, digest, maintainer, stage, CVE/malware id or title…" />
       </div>
+      <div class="search-row">
+        <input type="search" id="component-input" aria-label="Find artifacts containing a component"
+               placeholder="Component purl, e.g. pkg:apk/alpine/openssl@3.1.4-r5 — press Enter" />
+      </div>
       <div class="filter-row">
         <select id="filter-status" aria-label="Filter by status">
           <option value="">Any status</option>
@@ -333,7 +337,7 @@
           <option value="sarif">sarif</option>
         </select>
       </div>
-      <p class="search-note">Search only looks at the artifacts on this page — narrow the set with the status/type filters, which are applied by the server.</p>
+      <p class="search-note" id="search-note">Search only looks at the artifacts on this page — narrow the set with the status/type filters, which are applied by the server.</p>
       <table>
         <thead>
           <tr>
@@ -426,7 +430,15 @@
     offset: 0,
     total: 0,
     filterStatus: '',
-    filterType: ''
+    filterType: '',
+    // componentPURL, when set, switches the list away from
+    // GET /api/v1/artifacts to GET /api/v1/components?purl=... -- "show
+    // me every artifact containing this exact package" (see
+    // internal/api/components.go). Deliberately in state rather than
+    // filtering the DOM: the 10s poll re-renders from state.artifacts,
+    // so a search that only touched the table would be wiped within ten
+    // seconds. Empty string means the normal, paginated list.
+    componentPURL: ''
   };
   var lastDetailId = null;
   // Cache for an artifact opened by URL (#/artifacts/<id>) that isn't on
@@ -465,6 +477,8 @@
     stages: document.getElementById('stages'),
     rows: document.getElementById('artifact-rows'),
     search: document.getElementById('search-input'),
+    component: document.getElementById('component-input'),
+    searchNote: document.getElementById('search-note'),
     filterStatus: document.getElementById('filter-status'),
     filterType: document.getElementById('filter-type'),
     pagePrev: document.getElementById('page-prev'),
@@ -767,8 +781,31 @@
   async function loadAll() {
     try {
       var stagesRes = await fetchJSON('/api/v1/pipeline/stages');
-      var page = await fetchJSON(artifactsPath());
       state.stages = (stagesRes && stagesRes.stages) || [];
+
+      // A component search answers with a bare array of every artifact
+      // containing that purl -- no paging, because the answer is "the
+      // artifacts that ship this package", which is a complete set by
+      // definition and small enough to render whole. total is set from
+      // its length so the pager and its "offset past the end" recovery
+      // below read the same numbers the list actually has.
+      if (state.componentPURL) {
+        var containing = await fetchJSON('/api/v1/components?purl=' + encodeURIComponent(state.componentPURL));
+        state.artifacts = containing || [];
+        state.offset = 0;
+        // state.total is deliberately NOT overwritten with the match
+        // count: it's what the "Artifacts" card shows, and that card
+        // means "how many artifacts are there", not "how many matched"
+        // (renderCards' own comment). Searching for a component doesn't
+        // change the size of the fleet, so the last full-list total is
+        // still the right answer -- and the match count already has its
+        // own place to live, in the pager line below.
+        setStatus('Connected to ' + state.apiBase, false);
+        render();
+        return;
+      }
+
+      var page = await fetchJSON(artifactsPath());
       state.artifacts = (page && page.artifacts) || [];
       state.total = (page && page.total) || 0;
       // Deleting the last artifact on the final page (or a filter change
@@ -802,6 +839,7 @@
     renderStages();
     renderRows();
     renderPager();
+    renderSearchNote();
   }
 
   // renderPager shows which slice of the (server-side) result set is on
@@ -810,6 +848,18 @@
   // offset and total already, and arithmetic on those is less machinery
   // than a header parser for the same two buttons.
   function renderPager() {
+    // A component search returns its whole answer at once, so paging
+    // through it would be paging through a single page -- both buttons
+    // stay disabled and the range reads as a count, not a slice.
+    if (state.componentPURL) {
+      var matches = state.artifacts.length;
+      els.pageRange.textContent = matches === 1
+        ? '1 artifact contains this component'
+        : matches + ' artifacts contain this component';
+      els.pagePrev.disabled = true;
+      els.pageNext.disabled = true;
+      return;
+    }
     var first = state.total === 0 ? 0 : state.offset + 1;
     var last = Math.min(state.offset + state.limit, state.total);
     els.pageRange.textContent = state.total === 0
@@ -817,6 +867,27 @@
       : first + '–' + last + ' of ' + state.total;
     els.pagePrev.disabled = state.offset <= 0;
     els.pageNext.disabled = state.offset + state.limit >= state.total;
+  }
+
+  // renderSearchNote keeps the line under the filters honest about
+  // which of the two list sources is on screen -- the status/type
+  // filters and the pager mean something different in each, and a note
+  // describing the wrong one is worse than no note.
+  function renderSearchNote() {
+    // The status/type selects are disabled during a component search
+    // rather than left enabled and ignored: the component endpoint
+    // takes no filters, so a select that still looks usable but changes
+    // nothing (while displaying a stale selection) reads as a bug. This
+    // is the one place that state is visible, so it's set here.
+    els.filterStatus.disabled = !!state.componentPURL;
+    els.filterType.disabled = !!state.componentPURL;
+
+    if (state.componentPURL) {
+      els.searchNote.innerHTML = 'Showing every artifact whose SBOM lists <code>' + esc(state.componentPURL) +
+        '</code> (exact match) — the status and type filters don’t apply to this view. Clear the component box to go back to the full list.';
+      return;
+    }
+    els.searchNote.textContent = 'Search only looks at the artifacts on this page — narrow the set with the status/type filters, which are applied by the server.';
   }
 
   function renderDetailView(id) {
@@ -924,6 +995,14 @@
       var emptyMsg = els.registerLinkSection.hidden
         ? 'No artifacts yet.'
         : 'No artifacts yet. Register one above to get started.';
+      // During a component search, "no artifacts yet" would be a lie --
+      // there are artifacts, none of them ship this package (or none has
+      // had an SBOM uploaded yet, which is the other reason a purl finds
+      // nothing and is worth saying out loud).
+      if (state.componentPURL) {
+        emptyMsg = 'No artifact’s SBOM lists ' + esc(state.componentPURL) +
+          '. Check the purl (it must match exactly, qualifiers included), or whether these artifacts have SBOMs uploaded at all.';
+      }
       els.rows.innerHTML = '<tr><td colspan="11" class="empty">' + emptyMsg + '</td></tr>';
       return;
     }
@@ -1358,6 +1437,18 @@
   els.search.addEventListener('input', function () {
     state.searchQuery = els.search.value;
     renderRows();
+  });
+
+  // The component box is a server round trip per query, not a local
+  // filter like the search box above -- so it applies on "change"
+  // (Enter, or leaving the field) rather than on every keystroke, which
+  // would fire a request per character of a long purl. A search input
+  // also fires "change" when its native clear (×) is used, so emptying
+  // it returns to the normal paginated list with no extra wiring.
+  els.component.addEventListener('change', function () {
+    state.componentPURL = els.component.value.trim();
+    state.offset = 0;
+    loadAll();
   });
 
   // Changing a filter resets to the first page: staying on offset 400
