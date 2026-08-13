@@ -65,7 +65,19 @@ Two ways to run the cluster, selected via `SCM_RUNTIME`:
 SCM_RUNTIME=podman ./cluster/create-cluster.sh  # podman, experimental
 ```
 
-`make` targets default to colima; override with `SCM_RUNTIME=podman make cluster-up`, etc.
+`make` targets detect the runtime: a running podman machine with no
+running colima picks podman, and anything else (both running, neither
+running, colima only) falls back to colima. Override whenever the guess
+is wrong — `make cluster-up SCM_RUNTIME=podman`, or export it — since a
+running VM doesn't prove the k3d cluster was created on it. The scripts
+above are unchanged: run directly, they still default to colima.
+
+Getting this wrong used to fail badly rather than loudly. On podman
+without the flag, `DOCKER_HOST` was never resolved, so `make build` went
+looking for `/var/run/docker.sock` and reported what reads like a broken
+Docker install — and the k3d image import was skipped silently, so a
+`make deploy` that appeared to succeed would roll out the previous
+image.
 
 ## Quickstart
 

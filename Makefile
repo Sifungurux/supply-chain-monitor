@@ -1,10 +1,43 @@
-# Runtime backend: colima (default) or podman. See cluster/create-cluster.sh.
-# NOTE: this must match whatever SCM_RUNTIME you actually created the
-# cluster with (e.g. `make build SCM_RUNTIME=podman`, or `export
-# SCM_RUNTIME=podman` in your shell first) -- it isn't read back from the
-# running cluster, so a mismatch here silently skips the k3d image
-# import below rather than erroring.
-SCM_RUNTIME      ?= colima
+# Runtime backend: colima or podman. See cluster/create-cluster.sh.
+#
+# Detected from whichever VM is actually running, because getting this
+# wrong doesn't fail cleanly: on podman with the old hardcoded `colima`
+# default, DOCKER_HOST stayed empty (it's only resolved in the podman
+# branch below), so `make build` reached for /var/run/docker.sock and
+# died with "check if the path is correct and if the daemon is running"
+# -- which reads as a broken Docker install rather than one missing
+# flag. It also silently skips the k3d image import, so a `make deploy`
+# that appeared to work would roll out the previous image.
+#
+# The rule, in the order the checks actually run:
+#
+#   - a podman machine is running and colima is NOT -> podman
+#   - anything else                                 -> colima
+#
+# "Anything else" deliberately includes both running and neither
+# running: colima was the previous default, so an ambiguous or
+# undetectable environment behaves exactly as it did before this
+# existed, and nothing changes under someone who never had a podman
+# machine. The podman check runs first because it's the cheap one
+# (~20ms, vs ~200ms for `colima status`), and when it says no, the
+# answer is colima regardless -- so the expensive check only runs when
+# it can still change the outcome.
+#
+# Override whenever the guess is wrong or you have both running:
+# `make build SCM_RUNTIME=podman`, or export it. The `origin` test below
+# is what makes that work -- it also means the detection shell runs once
+# per make invocation rather than on every reference to the variable
+# (which a plain `?=` with $(shell ...) would do, since ?= creates a
+# recursively expanded variable).
+#
+# Still not read back from the running cluster: a machine being up
+# doesn't prove the k3d cluster was created on it. A wrong guess is a
+# skipped image import, same as before -- hence the override.
+ifeq ($(origin SCM_RUNTIME), undefined)
+SCM_RUNTIME := $(shell \
+	if podman machine ls --format '{{.Running}}' 2>/dev/null | grep -qx true && \
+	   ! colima status >/dev/null 2>&1; then echo podman; else echo colima; fi)
+endif
 SCM_CLUSTER_NAME ?= supply-chain-monitor
 IMAGE            := monitor-api:dev
 
