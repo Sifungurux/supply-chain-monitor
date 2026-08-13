@@ -187,8 +187,23 @@ else
 	subject_json=$(curl -s "${AUTH[@]}" --get --data-urlencode 'purl=pkg:oci/alpine@sha256:abc' "${BASE}/api/v1/components")
 	[ "$subject_json" = "[]" ] || { echo "FAIL: the SBOM's own subject was indexed as a component of itself: $subject_json" >&2; fail=1; }
 
+	# The discovery half of the same endpoint: a substring somebody
+	# types, answered with packages rather than artifacts. Worth running
+	# for real -- `q` is free text that arrives through the same URL
+	# parsing as the purl, and the response is a different shape.
+	search_status=$(curl -s -o /tmp/component-search.json -w '%{http_code}' "${AUTH[@]}" \
+		--get --data-urlencode 'q=openssl' "${BASE}/api/v1/components")
+	check "GET /api/v1/components?q=... (README's example)" "$search_status" "200"
+	grep -q '"packages"' /tmp/component-search.json || { echo "FAIL: package search response has no \"packages\" key: $(cat /tmp/component-search.json)" >&2; fail=1; }
+	grep -q '"artifacts":1' /tmp/component-search.json || { echo "FAIL: package search didn't report an artifact count: $(cat /tmp/component-search.json)" >&2; fail=1; }
+	grep -q 'pkg:apk/alpine/openssl@3.1.4-r5' /tmp/component-search.json || { echo "FAIL: package search didn't find the uploaded component by name: $(cat /tmp/component-search.json)" >&2; fail=1; }
+
+	# A term matching nothing is an empty answer, not an error.
+	empty_search=$(curl -s "${AUTH[@]}" --get --data-urlencode 'q=nothing-like-this' "${BASE}/api/v1/components")
+	echo "$empty_search" | grep -q '"total":0' || { echo "FAIL: no-match search should report total 0: $empty_search" >&2; fail=1; }
+
 	missing_purl_status=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" "${BASE}/api/v1/components")
-	check "GET /api/v1/components (no purl)" "$missing_purl_status" "400"
+	check "GET /api/v1/components (neither purl nor q)" "$missing_purl_status" "400"
 
 	delete_status=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "${AUTH[@]}" "${BASE}/api/v1/artifacts/${artifact_id}")
 	check "DELETE /api/v1/artifacts/{id}" "$delete_status" "200"

@@ -910,25 +910,52 @@ misspells those still parses. Nested `components[].components[]` are
 walked, which matters for producers like syft that express transitive
 dependencies as nesting rather than a flat list.
 
-**Querying it.** The API, for a specific package:
+**Querying it, in two steps.** Nobody knows they want
+`pkg:apk/alpine/openssl@3.1.4-r6?arch=x86_64&distro=3.19.1`. They know
+`openssl`. So the endpoint answers two questions — search, then answer:
 
 ```bash
-curl -s "${AUTH[@]}" \
-  --get --data-urlencode 'purl=pkg:apk/alpine/openssl@3.1.4-r5' \
+# 1. which openssl packages actually exist, and where's the weight?
+curl -s "${AUTH[@]}" --get --data-urlencode 'q=openssl' \
   localhost:8080/api/v1/components
 ```
+```json
+{ "total": 3, "packages": [
+  { "purl": "pkg:apk/alpine/openssl@3.1.4-r6?arch=x86_64&distro=3.19.1",
+    "name": "openssl", "version": "3.1.4-r6", "artifacts": 12 },
+  { "purl": "pkg:deb/debian/openssl@3.0.11-1~deb12u2?arch=amd64&distro=debian-12.5",
+    "name": "openssl", "version": "3.0.11-1~deb12u2", "artifacts": 4 } ] }
+```
+```bash
+# 2. exactly which artifacts contain the one you meant
+curl -s "${AUTH[@]}" \
+  --get --data-urlencode 'purl=pkg:apk/alpine/openssl@3.1.4-r6?arch=x86_64&distro=3.19.1' \
+  localhost:8080/api/v1/components
+```
+
+`q` matches a substring of either the package name or the purl,
+case-insensitively, so `q=openssl`, `q=OpenSSL` and `q=pkg:apk/alpine/`
+all work — and it returns *distinct packages* (one entry per purl, with
+the number of artifacts containing it), most widespread first, capped at
+200 with the true total always reported. `purl` stays exact, qualifiers
+included: the search is forgiving so a person can find the thing, and
+the answer is precise so it can be trusted. If both are supplied, `purl`
+wins.
 
 `--get --data-urlencode`, not a hand-built query string: a purl contains
 `/`, `@`, and frequently a query string of its own
 (`?arch=x86_64&distro=3.19.9`), all of which have to arrive
-percent-encoded. That's also why the endpoint takes the purl as a query
-parameter rather than a path segment.
+percent-encoded. That's also why these are query parameters rather than
+path segments.
 
-The dashboard's component box (above the artifact table) is this same
-endpoint: paste a purl, press Enter, and the table narrows to the
-artifacts containing it with the count in the pager line. The status and
-type filters grey out while it's active — this endpoint takes no
-filters — and clearing the box returns to the normal paginated list.
+The dashboard's component box (above the artifact table) is exactly this
+flow: type `openssl`, press Enter, and you get the matching packages
+with their artifact counts; click one and the table narrows to the
+artifacts containing precisely that purl, with a link back to the other
+matches. Pasting a full `pkg:…` purl skips the picker and goes straight
+to the artifacts. The status and type filters grey out while a component
+search is active — this endpoint takes no filters — and clearing the box
+returns to the normal paginated list.
 
 For fleet-wide aggregates the endpoint deliberately doesn't try to
 answer ("what is most widespread", "which packages appear in more than
@@ -943,10 +970,8 @@ FROM components GROUP BY purl ORDER BY artifacts DESC LIMIT 20;
 SELECT purl FROM components WHERE artifact_id = '<id>' ORDER BY purl;
 ```
 
-**Finding the exact purl.** The most common way to get nothing back is
-to guess the string, since matching is exact (see below). Look it up
-instead — by package name across the fleet, which is the search a person
-actually starts from:
+**Finding the exact purl.** `?q=` above is the answer for this most of
+the time. The SQL equivalent, if you're already in `make db-shell`:
 
 ```sql
 SELECT DISTINCT purl FROM components WHERE name = 'openssl' ORDER BY purl;
@@ -954,11 +979,13 @@ SELECT DISTINCT purl FROM components WHERE name = 'openssl' ORDER BY purl;
 
 Some details worth knowing:
 
-- **The purl is matched exactly, qualifiers included.**
+- **`purl` is matched exactly, qualifiers included.**
   `pkg:apk/alpine/openssl@3.1.4-r5?arch=x86_64` and the same purl
-  without `?arch=` are different keys. "Any version of this package" is
-  a different query, and this isn't it — use the `name` column above, or
-  `purl LIKE 'pkg:apk/alpine/openssl@%'`, for that.
+  without `?arch=` are different keys — which is the point: an answer
+  that quietly included packages you didn't ask about would be worth
+  less than no answer. Use `?q=` (or `q=openssl@3.1` for a
+  version-family) when you want the forgiving side; it's the step that
+  hands you the exact purl to ask with.
 - **Indexing happens on upload.** SBOMs that were already stored before
   this feature existed have no inventory until their next scan re-uploads
   one. To backfill without rescanning anything, replay the documents the

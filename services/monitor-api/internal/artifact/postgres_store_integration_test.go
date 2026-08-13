@@ -675,6 +675,92 @@ func TestPostgresStore_ComponentInventory(t *testing.T) {
 	}
 }
 
+// TestPostgresStore_SearchComponents mirrors MemStore's own search test
+// against real SQL, where the risk actually lives: the GROUP BY, the
+// count(DISTINCT artifact_id) (count(*) would report one match per
+// artifact instead of one match with a count), the ordering the picker
+// depends on, and LIKE's own wildcards inside a user-typed query.
+func TestPostgresStore_SearchComponents(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	// A prefix unique to this test: the database is shared with every
+	// other test in this file, so a substring search would otherwise
+	// match whatever they left behind.
+	const ns = "searchtest"
+	alpineSSL := "pkg:apk/" + ns + "/openssl@3.1.4-r5?arch=x86_64"
+	debianSSL := "pkg:deb/" + ns + "/openssl@3.0.11-1"
+	oddName := ns + "_under%score"
+
+	a1, err := s.Create("alpine:3.19-"+ns, artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	a2, err := s.Create("alpine:3.19-slim-"+ns, artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	a3, err := s.Create("debian:12-"+ns, artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	for _, id := range []string{a1.ID, a2.ID} {
+		if err := s.SaveComponents(id, []artifact.Component{
+			{PURL: alpineSSL, Name: "openssl-" + ns, Version: "3.1.4-r5"},
+		}); err != nil {
+			t.Fatalf("SaveComponents: %v", err)
+		}
+	}
+	if err := s.SaveComponents(a3.ID, []artifact.Component{
+		{PURL: debianSSL, Name: "openssl-" + ns, Version: "3.0.11-1"},
+		{PURL: "pkg:generic/" + oddName + "@1.0", Name: oddName, Version: "1.0"},
+	}); err != nil {
+		t.Fatalf("SaveComponents: %v", err)
+	}
+
+	matches, total, err := s.SearchComponents("openssl-"+ns, 50)
+	if err != nil {
+		t.Fatalf("SearchComponents: %v", err)
+	}
+	if total != 2 || len(matches) != 2 {
+		t.Fatalf("matches = %+v (total %d), want 2 distinct packages, not one row per artifact", matches, total)
+	}
+	if matches[0].PURL != alpineSSL || matches[0].Artifacts != 2 {
+		t.Fatalf("matches[0] = %+v, want the purl in 2 artifacts first", matches[0])
+	}
+	if matches[1].PURL != debianSSL || matches[1].Artifacts != 1 {
+		t.Fatalf("matches[1] = %+v, want the single-artifact purl second", matches[1])
+	}
+	if matches[0].Name != "openssl-"+ns || matches[0].Version != "3.1.4-r5" {
+		t.Fatalf("matches[0] = %+v, want name/version carried through the GROUP BY", matches[0])
+	}
+
+	// Case-insensitive, and matches the purl as well as the name.
+	if m, _, err := s.SearchComponents("OPENSSL-"+ns, 50); err != nil || len(m) != 2 {
+		t.Fatalf("case-insensitive search = %+v, %v, want the same 2", m, err)
+	}
+	if m, _, err := s.SearchComponents("pkg:deb/"+ns, 50); err != nil || len(m) != 1 || m[0].PURL != debianSSL {
+		t.Fatalf("purl-substring search = %+v, %v", m, err)
+	}
+
+	// A query containing LIKE's own wildcards must match those
+	// characters literally, not act as a pattern -- without the escaping,
+	// "%" here would match every component in the table.
+	if m, _, err := s.SearchComponents(oddName, 50); err != nil || len(m) != 1 {
+		t.Fatalf("SearchComponents(%q) = %+v, %v, want exactly the one package containing that literal string", oddName, m, err)
+	}
+	if m, _, err := s.SearchComponents(ns+"_under%", 50); err != nil || len(m) != 1 {
+		t.Fatalf("wildcard-containing query = %+v, %v, want it treated as literal text", m, err)
+	}
+
+	if m, total, err := s.SearchComponents("openssl-"+ns, 1); err != nil || len(m) != 1 || total != 2 {
+		t.Fatalf("capped search = %+v (total %d), %v, want 1 returned but total 2", m, total, err)
+	}
+	if m, total, err := s.SearchComponents("   ", 50); err != nil || len(m) != 0 || total != 0 {
+		t.Fatalf("blank query = %+v (total %d), %v, want nothing", m, total, err)
+	}
+}
+
 // dsnWithSearchPath points a DSN at a specific Postgres schema via the
 // search_path connection parameter, so a test can create its own
 // artifacts table (in its own schema, via the admin connection) and

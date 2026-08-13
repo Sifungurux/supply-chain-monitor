@@ -210,6 +210,88 @@ func TestMemStore_FindByComponentPURL(t *testing.T) {
 // A re-uploaded SBOM REPLACES the inventory, it doesn't add to it --
 // SaveDocument already overwrites the document itself, so appending
 // here would keep answering queries for a package a rebuild removed.
+// The discovery half: a human types "openssl", not a purl with
+// qualifiers. Every assertion here has a mirror in the Postgres
+// integration test, since the two implementations have to agree on
+// exactly what the picker shows.
+func TestMemStore_SearchComponents(t *testing.T) {
+	s := artifact.NewMemStore()
+
+	alpine, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	slim, err := s.Create("alpine:3.19-slim", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	debian, err := s.Create("debian:12", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	const alpineSSL = "pkg:apk/alpine/openssl@3.1.4-r5?arch=x86_64"
+	const debianSSL = "pkg:deb/debian/openssl@3.0.11-1"
+	shared := []artifact.Component{
+		{PURL: alpineSSL, Name: "openssl", Version: "3.1.4-r5"},
+		{PURL: "pkg:apk/alpine/busybox@1.36.1-r15", Name: "busybox", Version: "1.36.1-r15"},
+	}
+	for _, id := range []string{alpine.ID, slim.ID} {
+		if err := s.SaveComponents(id, shared); err != nil {
+			t.Fatalf("SaveComponents: %v", err)
+		}
+	}
+	if err := s.SaveComponents(debian.ID, []artifact.Component{
+		{PURL: debianSSL, Name: "openssl", Version: "3.0.11-1"},
+	}); err != nil {
+		t.Fatalf("SaveComponents: %v", err)
+	}
+
+	matches, total, err := s.SearchComponents("openssl", 50)
+	if err != nil {
+		t.Fatalf("SearchComponents: %v", err)
+	}
+	// Two DISTINCT packages, not three rows -- the alpine purl exists in
+	// two artifacts and must collapse to one match carrying the count.
+	if total != 2 || len(matches) != 2 {
+		t.Fatalf("matches = %+v (total %d), want 2 distinct openssl packages", matches, total)
+	}
+	if matches[0].PURL != alpineSSL || matches[0].Artifacts != 2 {
+		t.Fatalf("matches[0] = %+v, want the alpine purl first with 2 artifacts (ordered by count)", matches[0])
+	}
+	if matches[1].PURL != debianSSL || matches[1].Artifacts != 1 {
+		t.Fatalf("matches[1] = %+v, want the debian purl with 1 artifact", matches[1])
+	}
+	if matches[0].Name != "openssl" || matches[0].Version != "3.1.4-r5" {
+		t.Fatalf("matches[0] = %+v, want name/version carried for display", matches[0])
+	}
+
+	// Substring of the purl, not just the name -- searching an ecosystem
+	// or namespace is the other half of how people look.
+	if m, _, err := s.SearchComponents("pkg:deb/", 50); err != nil || len(m) != 1 || m[0].PURL != debianSSL {
+		t.Fatalf("SearchComponents(\"pkg:deb/\") = %+v, %v, want the one debian package", m, err)
+	}
+	// Case-insensitive.
+	if m, _, err := s.SearchComponents("OpenSSL", 50); err != nil || len(m) != 2 {
+		t.Fatalf("SearchComponents(\"OpenSSL\") = %+v, %v, want the same 2 matches", m, err)
+	}
+	// No match, and an empty query, are both empty answers rather than
+	// errors or (much worse) everything.
+	if m, total, err := s.SearchComponents("nothing-like-this", 50); err != nil || len(m) != 0 || total != 0 {
+		t.Fatalf("SearchComponents(unknown) = %+v (total %d), %v", m, total, err)
+	}
+	if m, total, err := s.SearchComponents("  ", 50); err != nil || len(m) != 0 || total != 0 {
+		t.Fatalf("SearchComponents(blank) = %+v (total %d), %v, want nothing -- blank is not a wildcard", m, total, err)
+	}
+
+	// The cap reports what it dropped, so a caller can say "showing 1 of
+	// 2" rather than presenting a truncated list as complete.
+	capped, total, err := s.SearchComponents("openssl", 1)
+	if err != nil || len(capped) != 1 || total != 2 {
+		t.Fatalf("SearchComponents(limit 1) = %+v (total %d), %v, want 1 match but a total of 2", capped, total, err)
+	}
+}
+
 func TestMemStore_SaveComponentsReplaces(t *testing.T) {
 	s := artifact.NewMemStore()
 

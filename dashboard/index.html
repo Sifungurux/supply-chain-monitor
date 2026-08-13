@@ -171,6 +171,20 @@
   #search-input { width: 320px; max-width: 100%; }
   .filter-row { display: flex; justify-content: center; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 6px; }
   .search-note { text-align: center; font-size: 12px; color: var(--text-muted); margin: 0 0 14px; }
+  /* The component picker: matching packages, one per row, click to see
+     the artifacts containing that exact purl. Deliberately not the
+     artifact table -- these are packages, and reusing eleven columns
+     built for artifacts would misrepresent them. */
+  .pkg-row { display: flex; align-items: baseline; gap: 10px; width: 100%; text-align: left;
+    border: 1px solid var(--border-faint); border-radius: var(--radius-sm);
+    background: var(--surface); color: var(--text); padding: 8px 12px; margin-bottom: 6px;
+    font-family: inherit; font-size: 13px; cursor: pointer; }
+  .pkg-row:hover { border-color: var(--accent); }
+  .pkg-name { font-weight: 600; flex: 0 0 auto; }
+  .pkg-version { color: var(--text-muted); flex: 0 0 auto; }
+  .pkg-purl { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; font-family: var(--font-mono, monospace); font-size: 12px; color: var(--text-muted); }
+  .pkg-count { flex: 0 0 auto; font-size: 12px; color: var(--text-muted); }
   .pager { display: flex; justify-content: center; align-items: center; gap: 10px; margin: 12px 0 0; font-size: 13px; }
   .pager .range { color: var(--text-muted); font-family: var(--font-mono); }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
@@ -319,7 +333,7 @@
       </div>
       <div class="search-row">
         <input type="search" id="component-input" aria-label="Find artifacts containing a component"
-               placeholder="Component purl, e.g. pkg:apk/alpine/openssl@3.1.4-r5 — press Enter" />
+               placeholder="Find a package: openssl, or a full pkg: purl — press Enter" />
       </div>
       <div class="filter-row">
         <select id="filter-status" aria-label="Filter by status">
@@ -338,7 +352,8 @@
         </select>
       </div>
       <p class="search-note" id="search-note">Search only looks at the artifacts on this page — narrow the set with the status/type filters, which are applied by the server.</p>
-      <table>
+      <div id="component-picker" hidden></div>
+      <table id="artifact-table">
         <thead>
           <tr>
             <th>Ref</th><th>Type</th><th>Status</th><th>Stage</th><th>CVEs</th><th>Malware</th><th>Misconfig</th><th>Secrets</th><th>Other</th><th>Updated</th><th></th>
@@ -346,7 +361,7 @@
         </thead>
         <tbody id="artifact-rows"></tbody>
       </table>
-      <div class="pager">
+      <div class="pager" id="pager">
         <button type="button" id="page-prev">← Previous</button>
         <span class="range" id="page-range"></span>
         <button type="button" id="page-next">Next →</button>
@@ -431,14 +446,30 @@
     total: 0,
     filterStatus: '',
     filterType: '',
-    // componentPURL, when set, switches the list away from
-    // GET /api/v1/artifacts to GET /api/v1/components?purl=... -- "show
-    // me every artifact containing this exact package" (see
-    // internal/api/components.go). Deliberately in state rather than
-    // filtering the DOM: the 10s poll re-renders from state.artifacts,
-    // so a search that only touched the table would be wiped within ten
-    // seconds. Empty string means the normal, paginated list.
-    componentPURL: ''
+    // Component search is two stages, and needs two pieces of state
+    // rather than one (see internal/api/components.go, which answers
+    // both from one endpoint):
+    //
+    //   componentQuery -- a substring somebody typed ("openssl"). Shows
+    //     the PICKER: which packages actually exist, with how many
+    //     artifacts contain each.
+    //   componentPURL  -- one exact purl, chosen from that picker (or
+    //     pasted directly). Shows the ARTIFACTS containing it.
+    //
+    // Both set means "picked from a search": the artifact list, plus a
+    // way back to the matches. Keeping them separate is what makes that
+    // back link possible -- collapsing them into one field would make
+    // clearing a selection drop all the way to the full artifact list.
+    //
+    // Deliberately in state rather than filtered in the DOM: the 10s
+    // poll re-renders from state, so a search that only touched the
+    // table would be wiped within ten seconds.
+    componentQuery: '',
+    componentPURL: '',
+    // Last picker result: packages plus how many matched in total, so a
+    // capped list can say so instead of looking complete.
+    componentMatches: [],
+    componentTotal: 0
   };
   var lastDetailId = null;
   // Cache for an artifact opened by URL (#/artifacts/<id>) that isn't on
@@ -478,6 +509,9 @@
     rows: document.getElementById('artifact-rows'),
     search: document.getElementById('search-input'),
     component: document.getElementById('component-input'),
+    componentPicker: document.getElementById('component-picker'),
+    artifactTable: document.getElementById('artifact-table'),
+    pager: document.getElementById('pager'),
     searchNote: document.getElementById('search-note'),
     filterStatus: document.getElementById('filter-status'),
     filterType: document.getElementById('filter-type'),
@@ -789,6 +823,20 @@
       // definition and small enough to render whole. total is set from
       // its length so the pager and its "offset past the end" recovery
       // below read the same numbers the list actually has.
+      // Stage 1: a typed substring with nothing picked yet -- fetch the
+      // matching PACKAGES, not artifacts. Re-fetched on every poll like
+      // everything else, so the artifact counts beside each package stay
+      // current rather than freezing at whatever they were when the
+      // search ran.
+      if (state.componentQuery && !state.componentPURL) {
+        var found = await fetchJSON('/api/v1/components?q=' + encodeURIComponent(state.componentQuery));
+        state.componentMatches = (found && found.packages) || [];
+        state.componentTotal = (found && found.total) || 0;
+        setStatus('Connected to ' + state.apiBase, false);
+        render();
+        return;
+      }
+
       if (state.componentPURL) {
         var containing = await fetchJSON('/api/v1/components?purl=' + encodeURIComponent(state.componentPURL));
         state.artifacts = containing || [];
@@ -837,9 +885,52 @@
     els.detailView.hidden = true;
     renderCards();
     renderStages();
-    renderRows();
-    renderPager();
+    // The picker and the artifact table are two different answers to
+    // two different questions ("which packages match this?" vs "which
+    // artifacts contain this one?"), so exactly one is on screen at a
+    // time rather than the picker being squeezed into columns built for
+    // artifacts.
+    var picking = !!state.componentQuery && !state.componentPURL;
+    els.componentPicker.hidden = !picking;
+    els.artifactTable.hidden = picking;
+    els.pager.hidden = picking;
+    if (picking) {
+      renderComponentPicker();
+    } else {
+      renderRows();
+      renderPager();
+    }
     renderSearchNote();
+  }
+
+  // renderComponentPicker lists the packages a substring matched, one
+  // per row, sorted by how many artifacts contain each (the server
+  // decides that order -- the package in the most artifacts is usually
+  // the one meant). Clicking a row narrows to that exact purl, which is
+  // the whole point: the search is forgiving, the answer stays exact.
+  function renderComponentPicker() {
+    if (!state.componentMatches.length) {
+      els.componentPicker.innerHTML = '<p class="empty">No package matches &quot;' + esc(state.componentQuery) +
+        '&quot;. Try a shorter term, or part of the purl (e.g. <code>pkg:apk/</code>) — and note only artifacts with an uploaded SBOM have components at all.</p>';
+      return;
+    }
+    var rows = state.componentMatches.map(function (m) {
+      var artifacts = m.artifacts === 1 ? '1 artifact' : m.artifacts + ' artifacts';
+      return '<button type="button" class="pkg-row" data-action="pick-component" data-purl="' + esc(m.purl) + '">' +
+        '<span class="pkg-name">' + esc(m.name || m.purl) + '</span>' +
+        (m.version ? '<span class="pkg-version">' + esc(m.version) + '</span>' : '') +
+        '<span class="pkg-purl" title="' + esc(m.purl) + '">' + esc(m.purl) + '</span>' +
+        '<span class="pkg-count">' + artifacts + '</span>' +
+      '</button>';
+    });
+    // A capped list says so. Silently showing the first 200 of 4,000
+    // reads as "these are all of them", which is the one thing a search
+    // result must never imply.
+    if (state.componentTotal > state.componentMatches.length) {
+      rows.push('<p class="search-note">Showing the ' + state.componentMatches.length +
+        ' most widespread of ' + state.componentTotal + ' matching packages — narrow the term to see the rest.</p>');
+    }
+    els.componentPicker.innerHTML = rows.join('');
   }
 
   // renderPager shows which slice of the (server-side) result set is on
@@ -879,12 +970,24 @@
     // takes no filters, so a select that still looks usable but changes
     // nothing (while displaying a stale selection) reads as a bug. This
     // is the one place that state is visible, so it's set here.
-    els.filterStatus.disabled = !!state.componentPURL;
-    els.filterType.disabled = !!state.componentPURL;
+    var componentMode = !!(state.componentPURL || state.componentQuery);
+    els.filterStatus.disabled = componentMode;
+    els.filterType.disabled = componentMode;
 
     if (state.componentPURL) {
+      // Reached through a search rather than by pasting a purl? Offer
+      // the way back to the matches -- otherwise picking the wrong one
+      // of three openssls means retyping the search.
+      var back = state.componentQuery
+        ? ' <button type="button" class="link-btn" data-action="back-to-matches">← back to matches for “' + esc(state.componentQuery) + '”</button>'
+        : '';
       els.searchNote.innerHTML = 'Showing every artifact whose SBOM lists <code>' + esc(state.componentPURL) +
-        '</code> (exact match) — the status and type filters don’t apply to this view. Clear the component box to go back to the full list.';
+        '</code> (exact match) — the status and type filters don’t apply to this view. Clear the component box to go back to the full list.' + back;
+      return;
+    }
+    if (state.componentQuery) {
+      els.searchNote.innerHTML = 'Packages matching <code>' + esc(state.componentQuery) +
+        '</code> — pick one to see every artifact containing exactly that version. Paste a full <code>pkg:…</code> purl to skip this step.';
       return;
     }
     els.searchNote.textContent = 'Search only looks at the artifacts on this page — narrow the set with the status/type filters, which are applied by the server.';
@@ -1445,9 +1548,45 @@
   // would fire a request per character of a long purl. A search input
   // also fires "change" when its native clear (×) is used, so emptying
   // it returns to the normal paginated list with no extra wiring.
+  // One box, two behaviours, decided by what was typed: a full purl
+  // (anything starting "pkg:") is an exact request and goes straight to
+  // the artifacts, while any other text is a search for packages. That
+  // keeps "I already know the purl" a paste-and-Enter away without a
+  // second input or a mode switch to get wrong.
+  //
+  // Applied on "change" (Enter, or leaving the field) rather than on
+  // every keystroke: each query is a server round trip, and a purl is
+  // long. A search input also fires "change" when its native clear (×)
+  // is used, so emptying it returns to the normal list with no extra
+  // wiring.
   els.component.addEventListener('change', function () {
-    state.componentPURL = els.component.value.trim();
+    var value = els.component.value.trim();
     state.offset = 0;
+    state.componentMatches = [];
+    state.componentTotal = 0;
+    if (value.indexOf('pkg:') === 0) {
+      state.componentPURL = value;
+      state.componentQuery = '';
+    } else {
+      state.componentQuery = value;
+      state.componentPURL = '';
+    }
+    loadAll();
+  });
+
+  els.componentPicker.addEventListener('click', function (ev) {
+    var btn = ev.target.closest('[data-action="pick-component"]');
+    if (!btn) return;
+    // componentQuery is kept, not cleared: it's what "back to matches"
+    // returns to, and what the note names.
+    state.componentPURL = btn.getAttribute('data-purl');
+    state.offset = 0;
+    loadAll();
+  });
+
+  els.searchNote.addEventListener('click', function (ev) {
+    if (!ev.target.closest('[data-action="back-to-matches"]')) return;
+    state.componentPURL = '';
     loadAll();
   });
 
