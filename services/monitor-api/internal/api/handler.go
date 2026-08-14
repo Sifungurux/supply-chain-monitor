@@ -68,6 +68,14 @@ type handler struct {
 	// means unlimited (the behavior before this existed) -- see
 	// ScanLimits and acquireScanSlot.
 	scanSlots chan struct{}
+	// ready reports whether the backing store is usable right now, for
+	// GET /readyz. nil means "nothing to check, always ready" -- see
+	// Config.Ready for why this is a func rather than a Store method.
+	ready func(context.Context) error
+	// metrics holds the process counters GET /metrics exposes. Always
+	// non-nil (NewRouter constructs one), so hot paths increment
+	// without a nil check.
+	metrics *metrics
 }
 
 // scanRetryAfter is the Retry-After (seconds) sent with the 429 a
@@ -162,9 +170,8 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func (h *handler) healthz(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
+// healthz and readyz live in health.go -- see that file for why they
+// are two different endpoints checking two different things.
 
 // Notifications configures outbound scan notifications. The zero value
 // disables them: no notifiers means scanArtifact's notify step is

@@ -1408,10 +1408,26 @@ func runAPIServer() {
 		log.Printf("registration capped at %d artifacts (MAX_ARTIFACTS)", maxArtifacts)
 	}
 
-	router := api.NewRouter(store, stageTracker, scanners, apiKey, rateLimitRPS, rateLimitBurst, digestResolver, fetchPlainHTTP, scanTimeout, requireDigest,
-		api.ScanLimits{Concurrency: scanConcurrency},
-		api.Notifications{Notifiers: notifiers, MinSeverity: notifyMinSeverity, NotifyOnFirstScan: !suppressFirstScan},
-		api.RegistrationLimits{MaxArtifacts: maxArtifacts})
+	router := api.NewRouter(api.Config{
+		Store:          store,
+		Tracker:        stageTracker,
+		Scanners:       scanners,
+		APIKey:         apiKey,
+		RateLimitRPS:   rateLimitRPS,
+		RateLimitBurst: rateLimitBurst,
+		DigestResolver: digestResolver,
+		FetchPlainHTTP: fetchPlainHTTP,
+		ScanTimeout:    scanTimeout,
+		RequireDigest:  requireDigest,
+		ScanLimits:     api.ScanLimits{Concurrency: scanConcurrency},
+		Notifications:  api.Notifications{Notifiers: notifiers, MinSeverity: notifyMinSeverity, NotifyOnFirstScan: !suppressFirstScan},
+		RegLimits:      api.RegistrationLimits{MaxArtifacts: maxArtifacts},
+		// What GET /readyz actually checks. This is the only place a
+		// concrete *PostgresStore is in scope -- api.Config takes a func
+		// precisely so the Store interface doesn't have to grow a second
+		// context-taking method to expose it.
+		Ready: store.Ping,
+	})
 
 	srv := &http.Server{
 		Addr:         listenAddr,

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"net/http"
 	"strings"
@@ -11,61 +12,98 @@ import (
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
 )
 
+// Config is everything NewRouter needs. It replaces what had grown into
+// a thirteen-parameter positional signature -- the consolidation that
+// signature's own comment asked for at the next knob, done when that
+// knob (Ready, below) arrived.
+//
+// Every field's zero value is the behavior this service had before that
+// field existed, which is what makes `NewRouter(Config{Store: s,
+// Tracker: t, APIKey: k})` a valid call: a test that doesn't care about
+// rate limiting, dedup, notifications or quotas simply doesn't mention
+// them, instead of passing a row of zeros and nils positionally.
+type Config struct {
+	Store    artifact.Store
+	Tracker  *pipeline.Tracker
+	Scanners scanner.Registry
+	// APIKey is required (main.go fails to start rather than run with it
+	// empty -- see docs/architecture.md, "Adding API authentication") --
+	// every request must carry it as `Authorization: Bearer <apiKey>`,
+	// except the unauthenticated routes listed in withAuth below and
+	// CORS preflight OPTIONS requests (browsers never attach custom
+	// headers to those).
+	APIKey string
+	// RateLimitRPS/RateLimitBurst configure the per-key rate limiter (see
+	// withRateLimit below). RateLimitRPS <= 0 disables rate limiting
+	// entirely -- a nonsensical zero-or-negative rate reads more
+	// naturally as "off" than as a real limit, so callers that don't care
+	// about this (like most tests) leave it unset and get unthrottled
+	// behavior.
+	RateLimitRPS   float64
+	RateLimitBurst float64
+	// DigestResolver enables best-effort duplicate-registration detection
+	// (see handler.go's resolveDigest) -- nil disables it entirely (every
+	// registration behaves exactly as it did before this existed).
+	DigestResolver scanner.DigestResolver
+	// FetchPlainHTTP mirrors the same flag RegistryFetcher is already
+	// constructed with (FETCH_PLAIN_HTTP in main.go) -- see resolveDigest's
+	// comment for why it only ever applies to non-image artifact types.
+	FetchPlainHTTP bool
+	// ScanTimeout is the shared per-scan budget scanArtifact gives every
+	// scanner registered for one artifact type (see handler.scanTimeout's
+	// own comment) -- zero gets the 5-minute default.
+	ScanTimeout time.Duration
+	// RequireDigest is a deployment-wide policy (monitorApi.requireDigest /
+	// REQUIRE_DIGEST): false preserves today's behavior exactly (a
+	// request's own expected_digest is optional, checked only if provided,
+	// and registration is refused outright on a mismatch). true makes
+	// expected_digest a required field on every registration, and turns a
+	// mismatch (or an unresolvable ref) into Artifact.Unsafe = true instead
+	// of a rejection -- see createArtifact/bulkCreateArtifacts and
+	// Artifact.Unsafe's own comment for why this is a mark, not a block.
+	RequireDigest bool
+	// ScanLimits caps concurrent scanning -- the zero value is unlimited.
+	ScanLimits ScanLimits
+	// Notifications is optional: a zero value (no notifiers) leaves the
+	// service behaving exactly as it did before outbound notifications
+	// existed -- nothing is sent, and nothing can fail.
+	Notifications Notifications
+	// RegLimits bounds how many artifacts may exist at all -- the zero
+	// value is unlimited.
+	RegLimits RegistrationLimits
+	// Ready reports whether this process's backing store is actually
+	// usable right now, for GET /readyz (see readyz in health.go). nil
+	// means "nothing to check, always ready" -- which is both the honest
+	// answer for MemStore and what every test gets by not setting it.
+	//
+	// Deliberately a func rather than a method on the Store interface:
+	// only PostgresStore has anything to check (main.go passes its Ping),
+	// and adding a second context-taking method to that interface would
+	// entrench the wart Stats(ctx) already documents as one.
+	Ready func(context.Context) error
+}
+
 // NewRouter wires up the v1 REST API. Uses Go 1.22's stdlib ServeMux
 // method+wildcard routing, so no external router dependency is needed.
-//
-// apiKey is required (main.go fails to start rather than run with it
-// empty -- see docs/architecture.md, "Adding API authentication") --
-// every request must carry it as `Authorization: Bearer <apiKey>`,
-// except /healthz (liveness/readiness probes shouldn't need
-// credentials) and CORS preflight OPTIONS requests (browsers never
-// attach custom headers to those).
-// rateLimitRPS/rateLimitBurst configure the per-key rate limiter (see
-// withRateLimit below). rateLimitRPS <= 0 disables rate limiting
-// entirely -- a nonsensical zero-or-negative rate reads more naturally
-// as "off" than as a real limit, so callers that don't care about this
-// (like most existing tests) can just pass 0 and get today's
-// unthrottled behavior back.
-// digestResolver enables best-effort duplicate-registration detection
-// (see handler.go's resolveDigest) -- pass nil to disable it entirely
-// (every registration behaves exactly as it did before this existed).
-// fetchPlainHTTP mirrors the same flag RegistryFetcher is already
-// constructed with (FETCH_PLAIN_HTTP in main.go) -- see resolveDigest's
-// comment for why it only ever applies to non-image artifact types.
-// scanTimeout is the shared per-scan budget scanArtifact gives every
-// scanner registered for one artifact type (see handler.scanTimeout's
-// own comment) -- pass 0 to get the 5-minute default (what every caller
-// got before this was configurable).
-// requireDigest is a deployment-wide policy (monitorApi.requireDigest /
-// REQUIRE_DIGEST): false preserves today's behavior exactly (a request's
-// own expected_digest is optional, checked only if provided, and
-// registration is refused outright on a mismatch). true makes
-// expected_digest a required field on every registration, and turns a
-// mismatch (or an unresolvable ref) into Artifact.Unsafe = true instead
-// of a rejection -- see createArtifact/bulkCreateArtifacts and
-// Artifact.Unsafe's own comment for why this is a mark, not a block.
-// scanLimits caps concurrent scanning -- the zero value is unlimited,
-// exactly what every caller got before it existed (see ScanLimits).
-// It's a struct rather than this function's twelfth positional
-// parameter; further scan-related knobs belong in it rather than
-// lengthening this signature again.
-// notifications is optional: a zero value (no notifiers) leaves the
-// service behaving exactly as it did before outbound notifications
-// existed -- nothing is sent, and nothing can fail.
-// regLimits bounds how many artifacts may exist at all -- the zero
-// value is unlimited (see RegistrationLimits).
-//
-// This signature has grown to thirteen parameters. The next knob should
-// consolidate ScanLimits/Notifications/RegistrationLimits into one
-// Config struct rather than adding a fourteenth.
-func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner.Registry, apiKey string, rateLimitRPS float64, rateLimitBurst float64, digestResolver scanner.DigestResolver, fetchPlainHTTP bool, scanTimeout time.Duration, requireDigest bool, scanLimits ScanLimits, notifications Notifications, regLimits RegistrationLimits) http.Handler {
-	h := &handler{store: store, tracker: tracker, scanners: scanners, digestResolver: digestResolver, fetchPlainHTTP: fetchPlainHTTP, scanTimeout: scanTimeout, requireDigest: requireDigest, notifiers: notifications.Notifiers, notifyMinSeverity: notifications.MinSeverity, notifyOnFirstScan: notifications.NotifyOnFirstScan, maxArtifacts: regLimits.MaxArtifacts}
-	if scanLimits.Concurrency > 0 {
-		h.scanSlots = make(chan struct{}, scanLimits.Concurrency)
+// See Config for what each field does and what its zero value means.
+func NewRouter(cfg Config) http.Handler {
+	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready}
+	h.metrics = newMetrics()
+	if cfg.ScanLimits.Concurrency > 0 {
+		h.scanSlots = make(chan struct{}, cfg.ScanLimits.Concurrency)
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.healthz)
+	mux.HandleFunc("GET /readyz", h.readyz)
+	// Unauthenticated, like the probes -- and unlike /api/v1/stats,
+	// which reports the same fleet in security terms. What this exposes
+	// is PROCESS state only: request/scan counts, goroutines, heap.
+	// Nothing here says which artifacts carry malware, which is what
+	// makes leaving it open defensible at all. Adding a fleet gauge
+	// changes that calculus, so it needs this exemption revisited in
+	// the same change -- see metrics.go.
+	mux.HandleFunc("GET /metrics", h.metricsHandler)
 	mux.HandleFunc("GET /swagger", h.swaggerUI)
 	mux.HandleFunc("GET /openapi.yaml", h.openapiSpec)
 	mux.HandleFunc("GET /api/v1/pipeline/stages", h.listStages)
@@ -92,10 +130,10 @@ func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/vex", h.uploadVEX)
 
 	var top http.Handler = mux
-	if rateLimitRPS > 0 {
+	if cfg.RateLimitRPS > 0 {
 		// Sits between withAuth and mux (wired below), not outside
 		// withAuth -- see withRateLimit's own comment for why.
-		top = withRateLimit(top, newRateLimiter(rateLimitRPS, rateLimitBurst))
+		top = withRateLimit(top, newRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst))
 	}
 
 	// withCORS must wrap withAuth, not the other way around: a CORS
@@ -104,11 +142,13 @@ func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner
 	// all), so it has to be short-circuited before auth ever runs, or
 	// every cross-origin call from the dashboard would fail preflight
 	// with a 401 before the browser even attempts the real request.
-	return withCORS(withAuth(top, apiKey))
+	// withMetrics is outside withAuth so a 401 gets counted -- see its
+	// own comment.
+	return withMetrics(withCORS(withAuth(top, cfg.APIKey)), h.metrics)
 }
 
 // withAuth requires `Authorization: Bearer <apiKey>` on every request
-// except /healthz, /swagger, and /openapi.yaml. Uses
+// except /healthz, /readyz, /metrics, /swagger, and /openapi.yaml. Uses
 // crypto/subtle.ConstantTimeCompare rather than == specifically to avoid
 // a timing side-channel that could let an attacker guess the key one
 // byte at a time -- overkill for a single-shared-key scheme against most
@@ -126,7 +166,7 @@ func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner
 func withAuth(next http.Handler, apiKey string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/healthz", "/swagger", "/openapi.yaml":
+		case "/healthz", "/readyz", "/metrics", "/swagger", "/openapi.yaml":
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -202,7 +242,7 @@ func withRateLimit(next http.Handler, limiter *rateLimiter) http.Handler {
 		// Authorization header (see limiter.allow below) shouldn't be able
 		// to lock other anonymous callers out of the API docs page.
 		switch r.URL.Path {
-		case "/healthz", "/swagger", "/openapi.yaml":
+		case "/healthz", "/readyz", "/metrics", "/swagger", "/openapi.yaml":
 			next.ServeHTTP(w, r)
 			return
 		}

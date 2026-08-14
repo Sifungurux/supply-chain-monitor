@@ -50,6 +50,8 @@ func TestOpenAPISpec_DescribesEveryRegisteredRoute(t *testing.T) {
 	// exactly, so no translation is needed between the two).
 	wantPaths := []string{
 		"/healthz",
+		"/readyz",
+		"/metrics",
 		"/api/v1/pipeline/stages",
 		"/api/v1/stats",
 		"/api/v1/artifacts:",

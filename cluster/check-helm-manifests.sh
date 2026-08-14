@@ -41,6 +41,12 @@ check_render "localArtifacts + extraVolumes/Mounts" \
 	--set 'monitorApi.extraVolumeMounts[0].mountPath=/artifacts' \
 	--set 'monitorApi.extraVolumeMounts[0].readOnly=true'
 check_render "postgres.dsnExistingSecret" --set monitorApi.postgres.dsnExistingSecret=scm-external-db
+# The ServiceMonitor is off by default (it needs prometheus-operator's
+# CRD), so the default render above never touches this template at all
+# -- exactly the shape of conditional block that ships broken.
+check_render "serviceMonitor.enabled=true" \
+	--set monitorApi.serviceMonitor.enabled=true \
+	--set monitorApi.serviceMonitor.labels.release=kube-prometheus-stack
 
 # NetworkPolicies, asserted by NAME in both directions.
 #
@@ -70,6 +76,32 @@ expect_policies() {
 			}
 		done
 	fi
+}
+
+# The ServiceMonitor's selector has to match the LABELS ON THE SERVICE,
+# which are a different field from the Service's own pod selector. Get
+# that wrong and nothing errors: the scrape config just matches no
+# Service and silently collects nothing, which is indistinguishable
+# from an exporter that is down. check_render above cannot see this --
+# both documents render perfectly well while disagreeing.
+echo "== servicemonitor selector matches the service =="
+# Renders ONLY the Service template (-s), so "before spec:" is an
+# unambiguous test for "in the metadata block" -- matching against the
+# whole multi-document render instead would happily find
+# `app: monitor-api` in the Deployment's labels or the Service's own pod
+# selector and pass while the metadata label was missing.
+helm template scm-ci charts/supply-chain-monitor \
+	-s templates/monitor-api/service.yaml | awk '
+	/^spec:/ { in_metadata=0 }
+	/^metadata:/ { in_metadata=1 }
+	in_metadata && /^[ \t]+app: monitor-api$/ { found=1 }
+	END { exit(found ? 0 : 1) }
+' || {
+	echo "ERROR: the monitor-api Service has no 'app: monitor-api' METADATA label." >&2
+	echo "       spec.selector is a different field -- a ServiceMonitor selects Services by" >&2
+	echo "       their metadata labels, so without it the scrape matches nothing and" >&2
+	echo "       reports no error. See templates/monitor-api/servicemonitor.yaml." >&2
+	exit 1
 }
 
 expect_policies "enabled by default" 3

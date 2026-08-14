@@ -328,6 +328,23 @@ monitorApi:
     pullPolicy: IfNotPresent
   listenAddr: ":8080"
   pipelineStages: "source,build,test,scan,sign,publish,deploy"
+  # Prometheus scraping of monitor-api's /metrics (process and scan
+  # counters -- see services/monitor-api/internal/api/metrics.go).
+  #
+  # The endpoint is always served; this only creates the ServiceMonitor
+  # that asks a Prometheus Operator to come and read it. Off by default
+  # because ServiceMonitor is a CRD: enabling it on a cluster without
+  # prometheus-operator installed makes the install fail on an unknown
+  # kind.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    # Extra labels for the Prometheus instance's own ServiceMonitor
+    # selector -- kube-prometheus-stack typically wants
+    # `release: <its release name>`. Without the label it selects on,
+    # this object is created and then silently ignored, which looks
+    # identical to a broken exporter.
+    labels: {}
   # Service name + port only -- templates/monitor-api/configmap.yaml
   # builds the full in-cluster FQDN using .Release.Namespace, so these
   # stay correct regardless of which namespace this chart is installed
