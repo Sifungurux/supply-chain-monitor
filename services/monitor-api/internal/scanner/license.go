@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -78,8 +79,19 @@ func (d LicenseDenylist) Denies(component artifact.Component) (string, bool) {
 	return "", false
 }
 
-// Findings turns a component inventory into one finding per component
+// Findings turns a component inventory into one finding per PACKAGE
 // carrying a denied license.
+//
+// Per package, not per component row: artifact.LicenseFindingID strips
+// the version, so an inventory legitimately shipping two versions of
+// one library -- which happens, and which the component diff handles
+// explicitly -- maps both to the same finding ID. Emitting both would
+// hand MergeFindings a `reported` slice containing duplicate IDs, where
+// one would silently overwrite the other and which one won would depend
+// on inventory order. So they are deduped here, and the surviving entry
+// is chosen by lowest purl: an arbitrary rule, but a STABLE one, so two
+// runs over the same inventory produce byte-identical findings rather
+// than a Title that flickers between versions.
 //
 // The result is a COMPLETE picture of this producer's findings for the
 // inventory it was given, which is what lets the caller merge it with
@@ -91,18 +103,28 @@ func (d LicenseDenylist) Findings(components []artifact.Component) []artifact.Fi
 	if !d.Enabled() {
 		return nil
 	}
-	out := make([]artifact.Finding, 0)
+
+	byID := make(map[string]artifact.Finding)
+	// wonBy records which purl produced the current entry for an id, so
+	// the lowest-purl tie-break is decidable without re-parsing.
+	wonBy := make(map[string]string)
+
 	for _, c := range components {
 		license, denied := d.Denies(c)
 		if !denied {
+			continue
+		}
+		id := artifact.LicenseFindingID(c.PURL)
+		if prev, taken := wonBy[id]; taken && prev <= c.PURL {
 			continue
 		}
 		name := c.Name
 		if name == "" {
 			name = c.PURL
 		}
-		out = append(out, artifact.Finding{
-			ID:       artifact.LicenseFindingID(c.PURL),
+		wonBy[id] = c.PURL
+		byID[id] = artifact.Finding{
+			ID:       id,
 			Severity: licenseFindingSeverity,
 			Title:    name + " is licensed " + license + ", which this deployment denies",
 			Source:   artifact.LicenseFindingSource,
@@ -110,8 +132,16 @@ func (d LicenseDenylist) Findings(components []artifact.Component) []artifact.Fi
 			// Category is a Scanner-to-classifyBucket signal, and this
 			// is not reached through the scanner path at all.
 			Category: LicenseFindingBucket,
-		})
+		}
 	}
+
+	out := make([]artifact.Finding, 0, len(byID))
+	for _, f := range byID {
+		out = append(out, f)
+	}
+	// Map iteration has no order of its own; sort so the output is
+	// stable across runs.
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 

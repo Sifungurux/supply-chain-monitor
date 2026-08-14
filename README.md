@@ -651,9 +651,18 @@ substring**, for both the denylist and `?license=`:
   positive. Add the whole expression as its own denylist entry to
   refuse those too; expressions are stored verbatim.
 
-The finding ID is `license:<purl>`, and a purl embeds its version — so
-upgrading a denylisted package resolves the old finding and opens a new
-one against the release nobody has re-assessed yet.
+The finding ID is `license:<package>` with the **version stripped** —
+`license:pkg:npm/foo`, not `license:pkg:npm/foo@1.2.3`. A denylisted
+package that bumps version is the same unresolved compliance problem,
+so it stays one finding: `FirstSeenAt` says how long you have shipped
+it, an accepted VEX exception keeps holding across upgrades (VEX
+suppression keys on the finding ID), and the findings list does not
+accumulate a dimmed "fixed" row per release for something nobody fixed.
+It still resolves normally once the package is removed or relicensed.
+
+Which releases carried the denied license is recorded by
+`components_history` instead — per-scan inventory with licenses,
+queryable through the diff endpoint.
 
 ### SBOM component diffing
 
