@@ -23,6 +23,13 @@ spec:
         # is always "<chart>/templates", not the subdirectory of the
         # currently-rendering template).
         checksum/config: {{ include (print $.Template.BasePath "/dashboard/configmap.yaml") . | sha256sum }}
+        # This pod reads the API key through secretKeyRef too (see the
+        # render-config initContainer below), and env vars are captured
+        # once at container start -- so without this, rotating the key
+        # left the dashboard presenting the old one until somebody
+        # restarted it by hand. Same gap monitor-api's own deployment
+        # had.
+        checksum/api-key: {{ include (print $.Template.BasePath "/monitor-api/auth-secret.yaml") . | sha256sum }}
     spec:
       automountServiceAccountToken: false
       # uid 101 is nginx-unprivileged's own "nginx" user. fsGroup so the

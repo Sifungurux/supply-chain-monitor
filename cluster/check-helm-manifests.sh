@@ -135,6 +135,36 @@ if grep -rn "changeme" charts/supply-chain-monitor/ >/dev/null 2>&1; then
 	exit 1
 fi
 
+# Credentials reach these pods through secretKeyRef, and env vars are
+# captured once at container start -- so a rotated credential is
+# invisible to a running pod unless something changes its spec. These
+# checksum annotations ARE that something. A rotation with them missing
+# looks entirely healthy: both Secrets correct, pod Running and Ready,
+# and every registry pull failing 401 against a password it no longer
+# has. That happened.
+echo "== credential rotation changes the pods that consume it =="
+annots() {
+	helm template scm-ci charts/supply-chain-monitor "$@" \
+		| awk -v want="$DEPLOY" '
+			/^kind: Deployment$/ { d=1; name="" }
+			d && /^  name: / { name=$2 }
+			d && name==want && /checksum\// { print $1 $2 }
+		'
+}
+
+for pair in "monitor-api:dockerAuth.accounts.reader.password" "monitor-api:monitorApi.apiKey" "scm-dashboard:monitorApi.apiKey"; do
+	DEPLOY="${pair%%:*}"
+	key="${pair##*:}"
+	before=$(annots)
+	after=$(annots --set "${key}=rotated-to-something-else")
+	if [ "$before" = "$after" ]; then
+		echo "ERROR: rotating ${key} does not change any checksum annotation on ${DEPLOY}." >&2
+		echo "       That pod would keep serving the old credential after a rotation," >&2
+		echo "       with everything reporting healthy." >&2
+		exit 1
+	fi
+done
+
 echo "== servicemonitor selector matches the service =="
 # Renders ONLY the Service template (-s), so "before spec:" is an
 # unambiguous test for "in the metadata block" -- matching against the
