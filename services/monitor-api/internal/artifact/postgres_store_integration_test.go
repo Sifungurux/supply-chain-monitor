@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1653,5 +1654,221 @@ func TestPostgresStore_ComponentLicenses(t *testing.T) {
 	}
 	if len(matches) != 1 || matches[0].Licenses != "MIT,Apache-2.0" {
 		t.Errorf("SearchComponents = %+v, want one match carrying its licenses", matches)
+	}
+}
+
+// scanSlotCount is a direct row count, bypassing the store, so the
+// assertions below check the TABLE rather than what the API believes.
+func scanSlotCount(t *testing.T, kind string) int {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), testDSN(t))
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	defer pool.Close()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM scan_slots WHERE scanner_kind = $1`, kind).Scan(&n); err != nil {
+		t.Fatalf("count scan_slots: %v", err)
+	}
+	return n
+}
+
+func clearScanSlots(t *testing.T) {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), testDSN(t))
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(context.Background(), `DELETE FROM scan_slots`); err != nil {
+		t.Fatalf("clear scan_slots: %v", err)
+	}
+}
+
+// THE TEST THIS FEATURE EXISTS FOR. `INSERT ... SELECT WHERE count <
+// cap` does NOT serialize under READ COMMITTED: two transactions racing
+// for the last slot each count against their own snapshot, neither sees
+// the other's uncommitted row, both find count = cap-1, and both
+// insert. The cap is exceeded silently, under exactly the concurrent
+// load it exists to bound.
+//
+// So this races many acquirers at a cap of ONE and asserts exactly one
+// won. Two sequential acquirers would pass whether or not the advisory
+// lock is there, which is why this is shaped as a race.
+func TestPostgresStore_AcquireScanSlotsIsExclusiveUnderRace(t *testing.T) {
+	s := newTestPostgresStore(t)
+	clearScanSlots(t)
+	t.Cleanup(func() { clearScanSlots(t) })
+
+	const kind = "racetest"
+	// 16 racers over several rounds. Both numbers are tuned, not
+	// decorative: with the advisory lock removed this shape violates the
+	// cap in 59 of 60 measured rounds, while a handful of racers in a
+	// single round passes comfortably without it -- a test that cannot
+	// fail is worse than no test, since it certifies the exact bug it
+	// was written to catch.
+	const (
+		racers = 16
+		rounds = 5
+	)
+
+	var acquired []string
+	for round := 0; round < rounds; round++ {
+		clearScanSlots(t)
+
+		var (
+			wg       sync.WaitGroup
+			mu       sync.Mutex
+			failures []error
+		)
+		acquired = nil
+		start := make(chan struct{})
+
+		for i := 0; i < racers; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				holder := fmt.Sprintf("racer-%d-%d-%d", time.Now().UnixNano(), round, i)
+				<-start // release them all at once
+				res, err := s.AcquireScanSlots(artifact.ScanSlotRequest{
+					HolderID:   holder,
+					Kinds:      []string{kind},
+					Caps:       map[string]int{kind: 1},
+					StaleAfter: time.Hour,
+				})
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					failures = append(failures, err)
+					return
+				}
+				if res.Acquired {
+					acquired = append(acquired, holder)
+				}
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		for _, err := range failures {
+			t.Errorf("round %d: acquire errored: %v", round, err)
+		}
+		if len(acquired) != 1 {
+			t.Fatalf("round %d: %d of %d racers acquired a cap-1 slot, want exactly 1 -- the count is being evaluated against a stale snapshot, so two transactions both saw a free slot",
+				round, len(acquired), racers)
+		}
+		if n := scanSlotCount(t, kind); n != 1 {
+			t.Fatalf("round %d: scan_slots holds %d rows for a cap of 1, want 1", round, n)
+		}
+	}
+
+	// The winner releasing frees it for the next acquirer, and nobody
+	// else's release can take it away.
+	if err := s.ReleaseScanSlots("some-other-holder"); err != nil {
+		t.Fatalf("releasing an unrelated holder: %v", err)
+	}
+	if n := scanSlotCount(t, kind); n != 1 {
+		t.Fatalf("releasing an unrelated holder freed %d rows -- a holder must only free its own", 1-n)
+	}
+	if err := s.ReleaseScanSlots(acquired[0]); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if n := scanSlotCount(t, kind); n != 0 {
+		t.Fatalf("scan_slots holds %d rows after release, want 0", n)
+	}
+}
+
+// All-or-nothing across kinds: a scan blocked on ONE saturated cap must
+// not leave slots held for the kinds that were free.
+func TestPostgresStore_AcquireScanSlotsIsAllOrNothing(t *testing.T) {
+	s := newTestPostgresStore(t)
+	clearScanSlots(t)
+	t.Cleanup(func() { clearScanSlots(t) })
+
+	const heavy, light = "heavytest", "lighttest"
+	caps := map[string]int{heavy: 1, light: 5}
+
+	first, err := s.AcquireScanSlots(artifact.ScanSlotRequest{
+		HolderID: "first", Kinds: []string{heavy, light}, Caps: caps, StaleAfter: time.Hour,
+	})
+	if err != nil || !first.Acquired {
+		t.Fatalf("first acquire = %+v, %v", first, err)
+	}
+
+	// heavy is now full; light is not.
+	second, err := s.AcquireScanSlots(artifact.ScanSlotRequest{
+		HolderID: "second", Kinds: []string{heavy, light}, Caps: caps, StaleAfter: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("second acquire: %v", err)
+	}
+	if second.Acquired {
+		t.Fatal("second acquire succeeded despite the heavy cap being full")
+	}
+	if second.BlockedKind != heavy {
+		t.Errorf("BlockedKind = %q, want %q -- the 429 has to name the cap that refused", second.BlockedKind, heavy)
+	}
+	if n := scanSlotCount(t, light); n != 1 {
+		t.Errorf("a rejected acquisition left %d light slots held, want only the first holder's 1", n)
+	}
+}
+
+// A pod killed between acquiring and releasing leaves its rows behind.
+// Reaping is what stops that from saturating a cap forever, and it runs
+// inside acquisition because that is the only moment anyone cares.
+func TestPostgresStore_AcquireScanSlotsReapsAbandonedSlots(t *testing.T) {
+	s := newTestPostgresStore(t)
+	clearScanSlots(t)
+	t.Cleanup(func() { clearScanSlots(t) })
+
+	const kind = "reaptest"
+	caps := map[string]int{kind: 1}
+
+	if res, err := s.AcquireScanSlots(artifact.ScanSlotRequest{
+		HolderID: "abandoned", Kinds: []string{kind}, Caps: caps, StaleAfter: time.Hour,
+	}); err != nil || !res.Acquired {
+		t.Fatalf("setup acquire = %+v, %v", res, err)
+	}
+	// Never released -- the process "died" here.
+
+	// Still held while it is within the staleness window.
+	if res, _ := s.AcquireScanSlots(artifact.ScanSlotRequest{
+		HolderID: "next", Kinds: []string{kind}, Caps: caps, StaleAfter: time.Hour,
+	}); res.Acquired {
+		t.Fatal("a slot inside its staleness window was reaped -- a slow but healthy scan would lose its slot")
+	}
+
+	// Past the window, it is reaped and the slot is available again.
+	res, err := s.AcquireScanSlots(artifact.ScanSlotRequest{
+		HolderID: "next", Kinds: []string{kind}, Caps: caps, StaleAfter: time.Nanosecond,
+	})
+	if err != nil {
+		t.Fatalf("acquire after staleness: %v", err)
+	}
+	if !res.Acquired {
+		t.Fatal("an abandoned slot past its staleness window was not reaped")
+	}
+	if n := scanSlotCount(t, kind); n != 1 {
+		t.Errorf("scan_slots holds %d rows, want 1 (the abandoned one reaped, the new one held)", n)
+	}
+}
+
+// A kind with no cap configured is unbounded -- the behaviour every
+// scanner had before per-kind caps existed.
+func TestPostgresStore_AcquireScanSlotsUncappedKindIsUnlimited(t *testing.T) {
+	s := newTestPostgresStore(t)
+	clearScanSlots(t)
+	t.Cleanup(func() { clearScanSlots(t) })
+
+	const kind = "uncappedtest"
+	for i := 0; i < 5; i++ {
+		res, err := s.AcquireScanSlots(artifact.ScanSlotRequest{
+			HolderID: fmt.Sprintf("h%d", i), Kinds: []string{kind},
+			Caps: map[string]int{}, StaleAfter: time.Hour,
+		})
+		if err != nil || !res.Acquired {
+			t.Fatalf("acquire %d = %+v, %v -- an uncapped kind must never refuse", i, res, err)
+		}
 	}
 }

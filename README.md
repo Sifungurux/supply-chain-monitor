@@ -788,6 +788,19 @@ Scanning is asynchronous, so nobody is blocked on the response: a
 request arriving with every slot busy is rejected immediately with a
 `429` and `Retry-After`, rather than queueing:
 
+Per-scanner caps (`monitorApi.scanConcurrencyPerKind`,
+`SCAN_CONCURRENCY_MALCONTENT` and friends) bound one tool independently.
+The chart ships `malcontent: 2` because that scanner has OOMKilled at
+2Gi–8Gi on ordinary language-runtime images where trivy on the same
+image is comfortable — without a per-kind cap the one global number has
+to be set for malcontent's worst case and throttles everything else with
+it. Unset inherits the global cap; `0` means unlimited for that kind.
+
+Both are **cluster-wide**, not per replica: slots are rows in Postgres,
+so two monitor-api pods share one budget. A rejected scan still leaves
+the artifact's status untouched and answers `429` with `Retry-After: 10`,
+naming which cap refused so an operator knows which knob to turn.
+
 ```bash
 curl -s -o /dev/null -w '%{http_code} %header{Retry-After}\n' \
   -X POST localhost:8080/api/v1/artifacts/$ID/scan \

@@ -54,3 +54,7 @@ func (c *ClamAVScanner) Scan(ctx context.Context, ref string) ([]artifact.Findin
 		Source:   "clamav",
 	}}, nil
 }
+
+// Kind implements ScanKind: this scanner is capped independently of
+// the global scan cap via SCAN_CONCURRENCY_CLAMAV.
+func (s *ClamAVScanner) Kind() string { return "clamav" }

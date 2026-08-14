@@ -303,6 +303,51 @@ type ComponentMatch struct {
 	Artifacts int `json:"artifacts"`
 }
 
+// GlobalScanSlotKind is the pseudo-kind the process-wide scan cap
+// (SCAN_CONCURRENCY) is counted under, so one mechanism serves both it
+// and the per-scanner caps instead of two that can disagree. Never a
+// real scanner's kind -- Scanner.Kind() values are names like "trivy".
+const GlobalScanSlotKind = "*"
+
+// ScanSlotRequest asks for one slot per named kind, all or nothing.
+//
+// All-or-nothing because a scan runs its scanners concurrently and is
+// accepted or rejected as a unit: holding three of four slots while
+// waiting for the fourth would be a queue, and this deliberately has
+// none (see internal/api's scanArtifact -- nobody is blocked on the
+// response, so a saturated cap answers 429 rather than backlogging work
+// a pod restart would silently drop).
+type ScanSlotRequest struct {
+	// HolderID is unique per scan and tags every row this acquires, so
+	// ReleaseScanSlots can free exactly these and nothing else.
+	HolderID string
+	// Kinds is what to take, typically GlobalScanSlotKind plus each
+	// distinct scanner kind the scan will run. Duplicates are ignored.
+	Kinds []string
+	// Caps is kind -> maximum concurrent holders. A kind absent from
+	// this map, or mapped to <= 0, is UNLIMITED -- the same "a
+	// nonsensical zero-or-negative value reads as off" convention
+	// rate limiting and the artifact quota already use.
+	Caps map[string]int
+	// StaleAfter is how old a slot must be before it is treated as
+	// abandoned and reaped. See scanSlotReapMargin in main.go for why
+	// this has to sit above the scan timeout and below the sweep's own
+	// artifact reclamation.
+	StaleAfter time.Duration
+}
+
+// ScanSlotResult reports whether the slots were taken, and if not,
+// which cap refused -- the 429 says "malcontent" rather than just
+// "concurrency limit", which is the difference between an operator
+// raising the right knob and guessing.
+type ScanSlotResult struct {
+	Acquired bool
+	// BlockedKind is the first kind at its cap. Empty when Acquired.
+	BlockedKind string
+	// BlockedCap is that kind's configured cap, for the message.
+	BlockedCap int
+}
+
 // LicenseFindingSource is the Source every denylisted-license finding
 // carries, and the key that partitions the "other" bucket between the
 // license evaluator and the scanners that also write there -- see

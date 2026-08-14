@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -62,12 +64,12 @@ type handler struct {
 	// unlimited (the behaviour before this existed). See
 	// RegistrationLimits.
 	maxArtifacts int
-	// scanSlots caps how many scans run at once across the whole
-	// process: one buffered slot per permitted concurrent scan, taken
-	// for the duration of a scan and released when it finishes. nil
-	// means unlimited (the behavior before this existed) -- see
-	// ScanLimits and acquireScanSlot.
-	scanSlots chan struct{}
+	// scanCaps bounds concurrent scanning, per scanner kind plus a
+	// global cap under artifact.GlobalScanSlotKind. Enforced through
+	// the store (artifact.ScanSlotRequest), not in this process: the
+	// buffered channel this replaced capped each REPLICA separately, so
+	// two pods allowed twice the configured concurrency.
+	scanCaps map[string]int
 	// ready reports whether the backing store is usable right now, for
 	// GET /readyz. nil means "nothing to check, always ready" -- see
 	// Config.Ready for why this is a func rather than a Store method.
@@ -104,34 +106,127 @@ const scanRetryAfter = 10 * time.Second
 // thing standing between the cluster and node-level disk exhaustion was
 // however many scans a client chose to fire at once.
 type ScanLimits struct {
-	// Concurrency is the maximum number of scans running at once.
-	// <= 0 means unlimited, the same "a nonsensical zero-or-negative
-	// value reads as off" convention rateLimitRPS already uses.
+	// Concurrency is the maximum number of scans running at once,
+	// across every replica. <= 0 means unlimited, the same "a
+	// nonsensical zero-or-negative value reads as off" convention
+	// rateLimitRPS already uses.
 	Concurrency int
+	// PerKind caps concurrent scans of one scanner kind
+	// (SCAN_CONCURRENCY_MALCONTENT and friends), keyed by
+	// scanner.ScanKind's Kind(). A kind absent here inherits nothing --
+	// it is bounded only by Concurrency, which is what every scanner
+	// got before per-kind caps existed.
+	//
+	// The point is that the memory cost of a scan belongs to the TOOL:
+	// malcontent has OOMKilled at 2-8Gi on ordinary images (README,
+	// "malcontent") where trivy on the same image is fine, so one global
+	// cap has to be set for the worst case and throttles everything
+	// else with it.
+	PerKind map[string]int
 }
 
-// tryAcquireScanSlot takes a scan slot if one is free right now, and
-// reports whether it got one. Non-blocking on purpose: scans are
-// asynchronous (see scanArtifact), so there is no client waiting whose
-// experience a short queue would improve -- a saturated cap answers 429
-// immediately, and the in-flight set stays hard-bounded with no
-// server-side backlog to lose on a restart.
+// caps flattens ScanLimits into the kind -> cap map the store's slot
+// accounting takes, with the global cap stored under its pseudo-kind so
+// one mechanism serves both instead of two that can disagree.
+func (l ScanLimits) caps() map[string]int {
+	out := make(map[string]int, len(l.PerKind)+1)
+	for kind, n := range l.PerKind {
+		out[kind] = n
+	}
+	if l.Concurrency > 0 {
+		out[artifact.GlobalScanSlotKind] = l.Concurrency
+	}
+	return out
+}
+
+// tryAcquireScanSlots takes one slot for the global cap and one per
+// distinct scanner kind this scan will run, all or nothing, and returns
+// a release func plus the result.
 //
-// (This replaced a queue-then-reject wait that existed only because the
-// caller used to block on the response. That wait had to be kept below
-// main.go's http.Server WriteTimeout or its own 429 raced the write
-// deadline -- a constraint asynchronous scanning removes outright, since
-// every response is now written in milliseconds.)
-func (h *handler) tryAcquireScanSlot() (func(), bool) {
-	if h.scanSlots == nil {
-		return func() {}, true
+// Non-blocking: scans are asynchronous (see scanArtifact), so there is
+// no client waiting whose experience a short queue would improve -- a
+// saturated cap answers 429 immediately, and the in-flight set stays
+// hard-bounded with no server-side backlog to lose on a restart.
+//
+// All-or-nothing across kinds, so a scan is accepted or rejected as a
+// unit. The alternative -- letting a scan start and skipping the
+// scanner whose cap was full -- would be worse than a 429: a skipped
+// scanner's bucket would have to be marked blocked or fix-detection
+// would mark its findings "fixed" on a round where it never ran (see
+// scan.go's blockedBuckets).
+//
+// The release func is always safe to call, including for a rejected
+// acquisition: ReleaseScanSlots on a holder with no slots is a no-op,
+// which is what lets every path release unconditionally.
+func (h *handler) tryAcquireScanSlots(scanners []scanner.Scanner) (func(), artifact.ScanSlotResult, error) {
+	holderID := newScanHolderID()
+	kinds := []string{artifact.GlobalScanSlotKind}
+	for _, s := range scanners {
+		if k := scanner.KindOf(s); k != "" {
+			kinds = append(kinds, k)
+		}
 	}
-	select {
-	case h.scanSlots <- struct{}{}:
-		return func() { <-h.scanSlots }, true
-	default:
-		return nil, false
+
+	release := func() {
+		if err := h.store.ReleaseScanSlots(holderID); err != nil {
+			// Logged, never propagated: the scan itself is done, and the
+			// stale-slot reaping in AcquireScanSlots is the backstop
+			// that stops a failed release from saturating a cap forever.
+			slog.Error("could not release scan slots", "holder_id", holderID, "err", err)
+		}
 	}
+
+	result, err := h.store.AcquireScanSlots(artifact.ScanSlotRequest{
+		HolderID:   holderID,
+		Kinds:      kinds,
+		Caps:       h.scanCaps,
+		StaleAfter: h.scanSlotStaleAfter(),
+	})
+	if err != nil || !result.Acquired {
+		return release, result, err
+	}
+	return release, result, nil
+}
+
+// effectiveScanTimeout is the configured per-scan budget, or the
+// default when unset. Shared by the scan itself and by the slot
+// staleness threshold derived from it, so the two cannot drift into
+// reaping a slot from a scan that is still legitimately running.
+func (h *handler) effectiveScanTimeout() time.Duration {
+	if h.scanTimeout <= 0 {
+		return defaultScanTimeout
+	}
+	return h.scanTimeout
+}
+
+// scanSlotStaleAfter is how long a slot may sit before it is treated as
+// abandoned. Derived from the scan timeout rather than fixed, and
+// deliberately sitting BETWEEN two other timings:
+//
+//   - Above scanTimeout, or a slow-but-healthy scan would have its slot
+//     reaped out from under it and a cap+1th scan could start -- the one
+//     thing this whole mechanism exists to prevent.
+//   - Below the sweep CronJob's own staleScanningAfter (20 minutes),
+//     which reclaims artifacts stuck at "scanning" by re-scanning them.
+//     If the slot outlived that, the reclaim's own POST /scan would be
+//     429'd by the dead scan's slot and the artifact would stay stuck
+//     for another sweep interval.
+//
+// With the 660s default that is 11m < 16m < 20m.
+func (h *handler) scanSlotStaleAfter() time.Duration {
+	return h.effectiveScanTimeout() + scanSlotReapMargin
+}
+
+// scanSlotReapMargin is the headroom over the scan timeout before a
+// slot is considered abandoned -- see scanSlotStaleAfter.
+const scanSlotReapMargin = 5 * time.Minute
+
+// newScanHolderID tags one scan's slots so they can be released
+// together and nothing else can free them.
+func newScanHolderID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // digestResolveTimeout bounds how long a single registry manifest call

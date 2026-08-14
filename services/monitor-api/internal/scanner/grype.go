@@ -236,3 +236,7 @@ func (g *GrypeScanner) ScanRaw(ctx context.Context, ref string) ([]byte, error) 
 
 	return stdout.Bytes(), nil
 }
+
+// Kind implements ScanKind: this scanner is capped independently of
+// the global scan cap via SCAN_CONCURRENCY_GRYPE.
+func (s *GrypeScanner) Kind() string { return "grype" }

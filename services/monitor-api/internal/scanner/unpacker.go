@@ -194,3 +194,7 @@ func (u *UnpackerScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 
 	return findings, nil
 }
+
+// Kind implements ScanKind: this scanner is capped independently of
+// the global scan cap via SCAN_CONCURRENCY_UNPACKER.
+func (s *UnpackerScanner) Kind() string { return "unpacker" }

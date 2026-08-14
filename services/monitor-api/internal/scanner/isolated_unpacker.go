@@ -268,3 +268,8 @@ func (s *IsolatedUnpackerScanner) Scan(ctx context.Context, ref string) ([]artif
 func (s *IsolatedUnpackerScanner) waitForCompletion(ctx context.Context, name string) error {
 	return waitForJob(ctx, s.client, name, "scan job", s.cfg.PollInterval)
 }
+
+// Kind implements ScanKind. Same kind as the in-process unpacker scanner:
+// the cap bounds concurrent runs of the TOOL, and whether it runs in a
+// Job or in this process does not change what it costs to run.
+func (s *IsolatedUnpackerScanner) Kind() string { return "unpacker" }
