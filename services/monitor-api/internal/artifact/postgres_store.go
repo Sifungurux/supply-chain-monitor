@@ -1251,6 +1251,51 @@ func (s *PostgresStore) Stats(ctx context.Context) (Stats, error) {
 	return stats, nil
 }
 
+// CountOlderThan answers the dry run: how many artifacts have not been
+// touched since cutoff. See the Store interface for why this is
+// separate from deleting them.
+func (s *PostgresStore) CountOlderThan(cutoff time.Time) (int, error) {
+	var n int
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM artifacts WHERE updated_at < $1`, cutoff).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count artifacts older than %s: %w", cutoff.Format(time.RFC3339), err)
+	}
+	return n, nil
+}
+
+// DeleteOlderThan removes up to limit artifacts, oldest first.
+//
+// The subselect is what bounds it: Postgres has no DELETE ... LIMIT, so
+// the ids to remove are chosen first (ORDER BY updated_at, so a capped
+// run takes the oldest and the next run continues) and the DELETE
+// matches on those. Without the bound, a first run against a store that
+// has never been pruned would delete an unbounded number of rows in one
+// statement, holding locks and a growing transaction the whole time --
+// on a table the API is concurrently serving from.
+//
+// Findings, stage history, scan errors, documents and components go
+// with each artifact via ON DELETE CASCADE -- the same cascade Delete
+// relies on, which is why this needs no per-child cleanup and why it is
+// genuinely irreversible.
+func (s *PostgresStore) DeleteOlderThan(cutoff time.Time, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	tag, err := s.pool.Exec(context.Background(), `
+		DELETE FROM artifacts
+		WHERE id IN (
+			SELECT id FROM artifacts
+			WHERE updated_at < $1
+			ORDER BY updated_at
+			LIMIT $2
+		)
+	`, cutoff, limit)
+	if err != nil {
+		return 0, fmt.Errorf("delete artifacts older than %s: %w", cutoff.Format(time.RFC3339), err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // FindByRef returns the first-registered artifact with this exact ref --
 // the dedup fallback used only when a digest could not be resolved. See
 // the Store interface's comment for why that fallback exists.

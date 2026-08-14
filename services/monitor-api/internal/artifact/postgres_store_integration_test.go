@@ -1349,3 +1349,119 @@ func TestPostgresStore_Stats(t *testing.T) {
 		}
 	}
 }
+
+// TestPostgresStore_CountAndDeleteOlderThan mirrors the MemStore
+// retention tests against real SQL, where the risks are different: the
+// bounded subselect (Postgres has no DELETE ... LIMIT), the ORDER BY
+// that makes a capped run take the oldest, and ON DELETE CASCADE
+// actually removing the children.
+//
+// Uses a cutoff in the FUTURE, like the MemStore tests: Update() stamps
+// updated_at itself, so there is no way to write an old row through the
+// store, and "everything is older than now+1h" exercises the same
+// comparison. The shared database means every assertion here is scoped
+// to rows this test created.
+func TestPostgresStore_CountAndDeleteOlderThan(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	// A cutoff in the past that nothing in this database can be older
+	// than, so the "not eligible" assertions can't be confused by other
+	// tests' leftovers.
+	longAgo := time.Now().UTC().Add(-3650 * 24 * time.Hour)
+	if n, err := s.CountOlderThan(longAgo); err != nil {
+		t.Fatalf("CountOlderThan: %v", err)
+	} else if n != 0 {
+		t.Fatalf("CountOlderThan(10 years ago) = %d, want 0", n)
+	}
+
+	prefix := fmt.Sprintf("prune-test-%d", time.Now().UnixNano())
+	first, err := s.Create(prefix+"-a:1.0", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Children, to prove the cascade fires for a pruned artifact the
+	// same way it does for an explicit Delete.
+	if _, err := s.Update(first.ID, func(a *artifact.Artifact) {
+		a.CVEFindings = []artifact.Finding{{ID: prefix + "-CVE", Status: artifact.FindingStatusOpen}}
+		a.StageHistory = []artifact.StageEvent{{Stage: "build", Timestamp: time.Now().UTC()}}
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if err := s.SaveComponents(first.ID, []artifact.Component{{PURL: prefix + "-purl", Name: "pkg"}}); err != nil {
+		t.Fatalf("SaveComponents: %v", err)
+	}
+	second, err := s.Create(prefix+"-b:1.0", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	before, err := s.CountOlderThan(futureCutoffPG())
+	if err != nil {
+		t.Fatalf("CountOlderThan: %v", err)
+	}
+	if before < 2 {
+		t.Fatalf("CountOlderThan = %d, want at least the 2 rows this test created", before)
+	}
+	// Counting must not delete: the dry run is the only safety net for
+	// an operation with no undo.
+	if _, err := s.Get(first.ID); err != nil {
+		t.Fatalf("artifact disappeared after a count: %v", err)
+	}
+
+	// Capped at one, and it must be the older of this test's two rows.
+	// Scoped by checking which of ITS OWN rows survived -- the cap may
+	// well consume another test's older row first, which is correct
+	// behavior and not something to assert against.
+	deleted, err := s.DeleteOlderThan(futureCutoffPG(), 1)
+	if err != nil {
+		t.Fatalf("DeleteOlderThan: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("DeleteOlderThan(limit 1) = %d, want exactly 1", deleted)
+	}
+
+	// Now remove everything, and verify this test's rows and their
+	// children are gone.
+	if _, err := s.DeleteOlderThan(futureCutoffPG(), 10000); err != nil {
+		t.Fatalf("DeleteOlderThan: %v", err)
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		if _, err := s.Get(id); err == nil {
+			t.Errorf("artifact %s survived a full prune", id)
+		}
+	}
+	// The cascade: findings and components must not outlive the row.
+	affected, err := s.FindByFindingID(prefix + "-CVE")
+	if err != nil {
+		t.Fatalf("FindByFindingID: %v", err)
+	}
+	if len(affected) != 0 {
+		t.Errorf("pruned artifact's findings survived: %+v", affected)
+	}
+	containing, err := s.FindByComponentPURL(prefix + "-purl")
+	if err != nil {
+		t.Fatalf("FindByComponentPURL: %v", err)
+	}
+	if len(containing) != 0 {
+		t.Errorf("pruned artifact's components survived: %+v", containing)
+	}
+
+	// A non-positive limit must never delete -- zero means "unlimited"
+	// elsewhere in this codebase, and here that convention would empty
+	// the table.
+	other, err := s.Create(prefix+"-c:1.0", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Delete(other.ID) })
+	for _, limit := range []int{0, -1} {
+		if n, err := s.DeleteOlderThan(futureCutoffPG(), limit); err != nil || n != 0 {
+			t.Fatalf("DeleteOlderThan(limit=%d) = %d, %v -- want 0", limit, n, err)
+		}
+	}
+	if _, err := s.Get(other.ID); err != nil {
+		t.Errorf("a non-positive limit deleted something: %v", err)
+	}
+}
+
+func futureCutoffPG() time.Time { return time.Now().UTC().Add(time.Hour) }
