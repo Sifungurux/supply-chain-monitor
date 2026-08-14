@@ -2,7 +2,7 @@ package api
 
 import (
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -86,14 +86,14 @@ func (h *handler) uploadDocument(w http.ResponseWriter, r *http.Request) {
 func (h *handler) indexSBOMComponents(id string, content []byte) {
 	components, err := scanner.ParseSBOMComponents(content)
 	if err != nil {
-		log.Printf("could not parse the SBOM uploaded for artifact %s into components (the document itself is stored and downloadable): %v", id, err)
+		slog.Warn("could not parse the uploaded SBOM into components (the document itself is stored and downloadable)", "artifact_id", id, "err", err)
 		return
 	}
 	if err := h.store.SaveComponents(id, components); err != nil {
-		log.Printf("could not store the component inventory for artifact %s: %v", id, err)
+		slog.Error("could not store the component inventory", "artifact_id", id, "err", err)
 		return
 	}
-	log.Printf("indexed %d component(s) from the SBOM uploaded for artifact %s", len(components), id)
+	slog.Info("indexed components from the uploaded SBOM", "artifact_id", id, "count", len(components))
 }
 
 // downloadDocument returns a captured document's raw bytes -- the

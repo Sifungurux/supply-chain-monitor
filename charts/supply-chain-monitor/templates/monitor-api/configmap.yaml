@@ -6,6 +6,11 @@ metadata:
 data:
   LISTEN_ADDR: {{ .Values.monitorApi.listenAddr | quote }}
   PIPELINE_STAGES: {{ .Values.monitorApi.pipelineStages | quote }}
+  # Log verbosity. Output is always JSON on stderr (see main.go's
+  # setupLogging) -- this only sets the floor. An unrecognized value
+  # falls back to info rather than refusing to start: a typo in a
+  # verbosity setting is not a reason to fail a deployment.
+  LOG_LEVEL: {{ .Values.monitorApi.logLevel | quote }}
   CLAMAV_ADDR: {{ printf "%s.%s.svc.cluster.local:%s" .Values.monitorApi.clamav.service .Release.Namespace .Values.monitorApi.clamav.port | quote }}
   REGISTRY_ADDR: {{ printf "%s.%s.svc.cluster.local:%s" .Values.monitorApi.registry.service .Release.Namespace .Values.monitorApi.registry.port | quote }}
   # Postgres holds every artifact/finding/stage-history record -- see

@@ -1,7 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -506,4 +511,72 @@ func TestBuildImageScanners_MalwareSelectorReachesTheList(t *testing.T) {
 			}
 		}
 	})
+}
+
+// setupLogging reads LOG_LEVEL and installs the process-wide JSON
+// handler. Tested through slog.Default() rather than by exporting the
+// level, because the thing that matters is whether a debug line
+// actually reaches the output -- a correctly parsed level that never
+// gets applied to the handler looks identical from the outside.
+func TestSetupLogging_LevelFromEnv(t *testing.T) {
+	previous := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	cases := []struct {
+		env        string
+		debugShows bool
+	}{
+		{"", false},         // default: info
+		{"info", false},     //
+		{"DEBUG", true},     // case-insensitive
+		{" debug ", true},   // surrounding whitespace tolerated
+		{"warn", false},     //
+		{"nonsense", false}, // unrecognized falls back to info, never refuses to start
+	}
+	for _, tc := range cases {
+		t.Setenv("LOG_LEVEL", tc.env)
+		setupLogging()
+		if got := slog.Default().Enabled(context.Background(), slog.LevelDebug); got != tc.debugShows {
+			t.Errorf("LOG_LEVEL=%q: debug enabled = %v, want %v", tc.env, got, tc.debugShows)
+		}
+		// Every level must still let errors through -- a log-verbosity
+		// setting that could silence errors would be a foot-gun.
+		if !slog.Default().Enabled(context.Background(), slog.LevelError) {
+			t.Errorf("LOG_LEVEL=%q: error level is disabled, which no setting should do", tc.env)
+		}
+	}
+}
+
+// The handler must write to stderr, leaving stdout to `monitor-api
+// scan-worker`'s WorkerResult JSON. The parent parses that back out of
+// the Job pod's combined logs anchored on scanner.ResultMarker, so it
+// would survive either way -- but keeping the result on its own stream
+// means the two never have to be untangled.
+func TestSetupLogging_WritesJSONToStderr(t *testing.T) {
+	previous := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	realStderr := os.Stderr
+	os.Stderr = w
+	t.Setenv("LOG_LEVEL", "info")
+	setupLogging()
+	slog.Info("a message", "artifact_id", "abc123")
+	os.Stderr = realStderr
+	w.Close()
+
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+	var line map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(out), &line); err != nil {
+		t.Fatalf("stderr line is not JSON: %s (%v)", out, err)
+	}
+	if line["msg"] != "a message" || line["artifact_id"] != "abc123" {
+		t.Errorf("line = %v, want msg and artifact_id carried as fields", line)
+	}
 }

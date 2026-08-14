@@ -2,7 +2,7 @@ package api
 
 import (
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -84,7 +84,7 @@ func (h *handler) uploadVEX(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("VEX document applied to artifact %s: %d statement(s)", id, len(statements))
+	slog.Info("VEX document applied", "artifact_id", id, "count", len(statements))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "applied",
 		// How many statements were understood -- the one number that
@@ -110,7 +110,7 @@ func (h *handler) uploadVEX(w http.ResponseWriter, r *http.Request) {
 func (h *handler) vexFor(id string) map[string]artifact.VEXStatement {
 	doc, err := h.store.GetDocument(id, artifact.DocumentKindVEX)
 	if err != nil {
-		log.Printf("could not read VEX document for artifact %s (continuing without it): %v", id, err)
+		slog.Warn("could not read the stored VEX document (continuing without it)", "artifact_id", id, "err", err)
 		return nil
 	}
 	if doc == nil {
@@ -120,7 +120,7 @@ func (h *handler) vexFor(id string) map[string]artifact.VEXStatement {
 	if err != nil {
 		// Only reachable if a document that parsed at upload time no
 		// longer does -- worth a log line rather than a silent skip.
-		log.Printf("stored VEX document for artifact %s no longer parses (continuing without it): %v", id, err)
+		slog.Warn("the stored VEX document no longer parses (continuing without it)", "artifact_id", id, "err", err)
 		return nil
 	}
 	return artifact.VEXByID(statements)

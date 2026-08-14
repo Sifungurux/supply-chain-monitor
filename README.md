@@ -580,6 +580,38 @@ A scan interrupted by a pod restart leaves its artifact at `scanning`
 with nothing left to finish it; the `sweep-registered` CronJob reclaims
 those by re-scanning anything stuck there for over 20 minutes.
 
+### Logs and metrics
+
+Logs are **structured JSON on stderr**, one object per line
+(`log/slog`). `monitorApi.logLevel` (`LOG_LEVEL`, **info**) sets the
+floor — `debug`, `info`, `warn`, `error`; anything unrecognized means
+`info` rather than refusing to start.
+
+Fields are named consistently across packages so one identifier finds
+everything about it: `artifact_id`, `ref`, `err`, `scanner`, `status`,
+`job`, `host`, `count`.
+
+```bash
+kubectl logs deploy/monitor-api | jq 'select(.artifact_id == "b4e826f58da2884c")'
+kubectl logs deploy/monitor-api | jq 'select(.level == "ERROR")'
+```
+
+stderr specifically, because `monitor-api scan-worker` prints its
+result JSON to stdout and the parent reads it back out of the Job pod's
+logs.
+
+`GET /metrics` serves Prometheus text-format metrics — responses by
+status class, scans started/succeeded/failed, uptime, goroutines, heap.
+It needs no API key: it reports *process* state only, never fleet data
+(that's `/api/v1/stats`, which does need the key), and it never queries
+the database — a scrape endpoint that did would fail exactly when the
+database is down.
+
+Set `monitorApi.serviceMonitor.enabled=true` to have a Prometheus
+Operator scrape it. Off by default because `ServiceMonitor` is a CRD:
+enabling it without prometheus-operator installed makes the install
+fail on an unknown kind.
+
 ### Capping how many artifacts can exist
 
 `monitorApi.maxArtifacts` (`MAX_ARTIFACTS`, **0 = unlimited** by

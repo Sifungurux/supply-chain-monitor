@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -346,7 +346,7 @@ func (s *PostgresStore) migrateLegacyJSONBColumns(ctx context.Context) error {
 		return nil
 	}
 
-	log.Printf("postgres: found the old single-table JSONB schema -- migrating stage history and findings into normalized tables (one-time, see docs/architecture.md, %q)",
+	slog.Info("postgres: found the old single-table JSONB schema -- migrating stage history and findings into normalized tables (one-time, see docs/architecture.md)", "section",
 		"Normalizing findings and stage history into their own tables")
 
 	tx, err := s.pool.Begin(ctx)
@@ -431,7 +431,7 @@ func (s *PostgresStore) migrateLegacyJSONBColumns(ctx context.Context) error {
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
-	log.Printf("postgres: migration complete -- migrated %d artifacts' findings/stage history into normalized tables", len(legacy))
+	slog.Info("postgres: migration complete -- migrated findings/stage history into normalized tables", "count", len(legacy))
 	return nil
 }
 

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -138,7 +138,7 @@ func (u *UnpackerScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 	// itself is the thing running right now, not just unpacker (which
 	// already finished by this point). See main.go's runScanWorker for
 	// the equivalent start/complete markers around trivy/grype.
-	log.Printf("unpacker: image unpacked, scanning files with clamav (%s)", u.clamAddr)
+	slog.Info("unpacker: image unpacked, scanning files with clamav", "scanner", "clamav", "clam_addr", u.clamAddr)
 
 	var findings []artifact.Finding
 	var attempted, failed int
@@ -183,7 +183,8 @@ func (u *UnpackerScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 	if walkErr != nil {
 		return findings, fmt.Errorf("failed walking unpacked image: %w", walkErr)
 	}
-	log.Printf("unpacker: clamav scan complete -- %d file(s) scanned, %d failed, %d finding(s)", attempted, failed, len(findings))
+	slog.Info("unpacker: clamav scan complete",
+		"scanner", "clamav", "files_scanned", attempted, "files_failed", failed, "count", len(findings))
 	// If every single file failed to scan (e.g. clamd was unreachable
 	// for the whole run), surface that as an error rather than quietly
 	// reporting a "clean" scan that never actually happened.

@@ -328,6 +328,10 @@ monitorApi:
     pullPolicy: IfNotPresent
   listenAddr: ":8080"
   pipelineStages: "source,build,test,scan,sign,publish,deploy"
+  # debug | info | warn | error. Logs are structured JSON on stderr
+  # regardless; this is only the level floor. Anything unrecognized
+  # means info.
+  logLevel: info
   # Prometheus scraping of monitor-api's /metrics (process and scan
   # counters -- see services/monitor-api/internal/api/metrics.go).
   #

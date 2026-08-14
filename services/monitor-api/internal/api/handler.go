@@ -3,7 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -154,7 +154,7 @@ func (h *handler) resolveDigest(ctx context.Context, ref string, t artifact.Type
 	defer cancel()
 	digest, err := h.digestResolver.Resolve(rctx, ref, plainHTTP)
 	if err != nil {
-		log.Printf("digest resolution failed for %q (continuing without dedup for this artifact): %v", ref, err)
+		slog.Warn("digest resolution failed (continuing without dedup for this artifact)", "ref", ref, "err", err)
 		return ""
 	}
 	return digest

@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -49,7 +49,7 @@ func NewWebhook(url, secret string) *WebhookNotifier {
 func (w *WebhookNotifier) Notify(ctx context.Context, event ScanEvent) error {
 	body, err := json.Marshal(event)
 	if err != nil {
-		log.Printf("notify: could not encode event for artifact %s: %v", event.ArtifactID, err)
+		slog.Error("notify: could not encode event", "artifact_id", event.ArtifactID, "err", err)
 		return fmt.Errorf("encode event: %w", err)
 	}
 
@@ -64,7 +64,7 @@ func (w *WebhookNotifier) Notify(ctx context.Context, event ScanEvent) error {
 			break
 		}
 	}
-	log.Printf("notify: webhook delivery failed for artifact %s (%s): %v", event.ArtifactID, event.ArtifactRef, lastErr)
+	slog.Error("notify: webhook delivery failed", "artifact_id", event.ArtifactID, "ref", event.ArtifactRef, "err", lastErr)
 	return lastErr
 }
 
