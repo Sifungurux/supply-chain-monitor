@@ -132,6 +132,11 @@ data:
   # Selects which CVE scanner(s) run for image/sbom artifacts -- see
   # values.yaml's monitorApi.cveScanner comment and main.go's
   # runAPIServer.
+  # Scan-Job scratch space: empty means a node-disk emptyDir (unchanged
+  # behaviour), a StorageClass name means a per-Job PVC. See
+  # values.yaml's monitorApi.scanScratch.
+  SCAN_SCRATCH_STORAGE_CLASS: {{ .Values.monitorApi.scanScratch.storageClass | quote }}
+  SCAN_SCRATCH_SIZE: {{ .Values.monitorApi.scanScratch.size | quote }}
   CVE_SCANNER: {{ .Values.monitorApi.cveScanner | quote }}
   # Selects which malware scanner(s) run for image artifacts -- the
   # counterpart to CVE_SCANNER above. "clamav" (the default) is exactly

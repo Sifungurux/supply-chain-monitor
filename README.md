@@ -1386,6 +1386,63 @@ fetches its own copy first (the same `oras pull`-backed fetch
 `FetchingScanner` already does in-process). See docs/architecture.md's
 "Scanning pipeline" section for the full reasoning.
 
+### Scan scratch space: node disk or a StorageClass
+
+Every scan Job extracts the image it is scanning to `/tmp`, and that
+`/tmp` is an `emptyDir` — which means the **node's own disk**. Measured
+extractions reach 2395Mi, so a handful of concurrent scans compete for
+the same filesystem as the kubelet, the container images and every other
+pod on that node. On this project's own cluster that has already gone
+wrong once: a load test filled the disk and evicted `monitor-api` itself.
+
+`monitorApi.scanScratch.storageClass` moves that traffic onto storage:
+
+```yaml
+monitorApi:
+  scanScratch:
+    storageClass: "ceph-rbd"   # or "-" for the cluster default
+    size: "3Gi"                # per Job; defaults to 3Gi
+```
+
+Each Job then gets a **generic ephemeral volume** — a PVC created from
+an inline template when the pod starts and deleted with it. That is an
+`emptyDir`'s lifecycle (per-pod, nothing shared between concurrent
+scans, nothing to clean up) with a StorageClass's capacity behind it.
+Empty (the default) keeps today's `emptyDir`, so nothing changes until
+you set it.
+
+The setting is process-wide, and `"none"` is how a single Job opts back
+out of it — an `emptyDir`, explicitly, even where a StorageClass is
+configured. That exists because the sensible arrangement is usually a
+mix: PVCs for image scans, which extract gigabytes, and `emptyDir` for
+`sbom`-mode Jobs, which fetch one JSON document and spill nothing (hence
+their much smaller 128Mi/256Mi ephemeral sizing). Without it, enabling
+the feature would hand every SBOM scan a PVC and charge it provisioning
+latency for storage it never writes to.
+
+So the setting has three non-default values, and they mean three
+different things: a class name, `"-"` for the cluster default, and
+`"none"` for an explicit `emptyDir`.
+
+Two more things to know:
+
+- **The chart grants extra RBAC only when you set it.** A pod requesting
+  a generic ephemeral volume creates a PVC indirectly, so monitor-api
+  needs `create`/`delete` on `persistentvolumeclaims`. That rule is
+  rendered only when a `storageClass` is configured — an unused
+  permission is one worth not having.
+- **The class has to be backed by something other than the node.**
+  k3s/k3d ship `local-path`, which provisions from
+  `/var/lib/rancher/k3s/storage` *on the node* — setting that moves the
+  bytes into a PVC without moving them off the disk they were already
+  competing for. Verified end to end against `local-path` (PVC created
+  per Job, bound, scan ran, PVC deleted with the pod), which proves the
+  plumbing but not the relief. For relief, point it at network or
+  attached storage.
+
+This applies to every scan Job — trivy, grype, unpacker+ClamAV and
+malcontent alike — not just to one scanner.
+
 ### A second malware scanner: malcontent (prototype)
 
 ClamAV answers "is this a *known* threat". It cannot answer "does this

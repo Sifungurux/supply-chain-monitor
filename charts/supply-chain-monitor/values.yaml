@@ -701,6 +701,45 @@ monitorApi:
   # "grype"/"both" also turn on grype-db-cache-primer-job.yaml/
   # grype-db-refresh-cronjob.yaml below, since grype then actually
   # needs a warm DB to read.
+  # Where scan Jobs put the images they extract. Empty (the default)
+  # keeps the emptyDir every scan Job has always had, which lives on the
+  # NODE's disk -- so a scan competes for the same filesystem as the
+  # kubelet, the container images, and every other pod on that node.
+  # Measured extractions reach 2395Mi, and a full node has already
+  # evicted monitor-api itself during a load test on this cluster.
+  #
+  # Set storageClass to move that traffic onto storage instead: each Job
+  # gets its own generic ephemeral volume (a PVC created and deleted with
+  # the pod -- an emptyDir's lifecycle, a StorageClass's capacity). Use
+  # "-" for the cluster's default StorageClass. This is the lever worth
+  # reaching for on a cluster where storage can be added but memory
+  # cannot.
+  #
+  # Note it needs RBAC: with a storageClass set, the chart grants
+  # monitor-api create/delete on persistentvolumeclaims, because a pod
+  # requesting a generic ephemeral volume creates one indirectly.
+  #
+  # And note WHICH class: this only relieves the node when the class is
+  # backed by storage that is not the node's own disk (Ceph RBD, EBS, a
+  # NAS). k3s/k3d ship "local-path", which provisions from
+  # /var/lib/rancher/k3s/storage on the node itself -- setting that
+  # moves the bytes into a PVC without moving them off the disk they
+  # were already competing for. Verified working end to end against
+  # local-path (PVC created per Job, deleted with the pod), which proves
+  # the plumbing but not the relief.
+  scanScratch:
+    # "" (default) -- the emptyDir every scan Job has always had.
+    # "<class>"    -- a per-Job PVC from that StorageClass.
+    # "-"          -- the cluster's default StorageClass.
+    # "none"       -- an emptyDir, explicitly. Same as "" here, and the
+    #                 value a single scanner can set to opt back out
+    #                 when the deployment has moved scratch space onto
+    #                 storage (see k8sjob.ScratchNone).
+    storageClass: ""
+    # Per-Job volume size. Defaults to 3Gi, matching the
+    # ephemeral-storage limit these Jobs already carry (see
+    # internal/scanner/isolated.go for the measurements).
+    size: ""
   cveScanner: "both"
   # Which malware scanner(s) run for `image` artifacts: "clamav"
   # (default), "malcontent", or "both". The counterpart to cveScanner

@@ -982,6 +982,23 @@ func runAPIServer() {
 	// same "fail closed, fail loud" convention scanTimeoutSeconds'
 	// validation below uses.
 	cveScanner := getenv("CVE_SCANNER", "trivy")
+	// Scan scratch space: an emptyDir on the node's disk by default, or
+	// a per-Job PVC from a StorageClass when one is named here. Set once
+	// for the whole process (k8sjob's package-level default) rather than
+	// per-scanner, since it is one cluster-wide decision about where
+	// extracted images land -- see k8sjob.ScratchStorageClass.
+	//
+	// Worth setting on any cluster where scan Jobs and the kubelet share
+	// a filesystem: an image extraction measured at 2395Mi lands on the
+	// node otherwise, and a full node evicts pods that have nothing to
+	// do with scanning.
+	k8sjob.ScratchStorageClass = getenv("SCAN_SCRATCH_STORAGE_CLASS", "")
+	k8sjob.ScratchSize = getenv("SCAN_SCRATCH_SIZE", "")
+	if k8sjob.ScratchStorageClass != "" {
+		log.Printf("scan Jobs will take their /tmp scratch space from StorageClass %q (size %s) instead of a node-disk emptyDir",
+			k8sjob.ScratchStorageClass, getenv("SCAN_SCRATCH_SIZE", "3Gi default"))
+	}
+
 	// MALWARE_SCANNER is cveScanner's counterpart for the malware
 	// bucket: "clamav" (the default, and what every deployment did
 	// before this existed), "malcontent", or "both". MALCONTENT_MIN_RISK

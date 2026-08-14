@@ -21,6 +21,18 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+{{- if .Values.monitorApi.scanScratch.storageClass }}
+  # Only granted when scan scratch space comes from a StorageClass.
+  # Kubernetes treats a pod requesting a generic ephemeral volume as
+  # creating a PVC indirectly, so the identity creating those Jobs needs
+  # to be allowed to create them -- and delete, since the volume's whole
+  # point is that it dies with its pod. Left ungranted otherwise: an
+  # emptyDir needs none of this, and a permission nothing uses is a
+  # permission worth not having.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "delete"]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
