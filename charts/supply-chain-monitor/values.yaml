@@ -143,27 +143,49 @@ dockerAuth:
   # IDs) -- flip to false only if registry.image.tag is ever rolled
   # back to a 2.x. See cesanta/docker_auth#386.
   disableLegacyKeyId: true
+  # true if you manage docker_auth's config AND monitor-api's registry
+  # credentials yourself. The chart then renders neither
+  # scm-docker-auth-config nor scm-registry-credentials and expects both
+  # to already exist under those names -- same convention as
+  # postgres.credentials.existingSecret. Both together, because they are
+  # the two halves of one credential set (hashes on the server side,
+  # cleartext on the client side) and half-managing them just makes them
+  # disagree.
+  existingSecret: false
   # Three static accounts, one flat ACL rule each matching every
   # repository (docker_auth's match.name defaults to "any" when
   # omitted) -- this is a single shared registry with no multi-tenant
   # repo namespacing today, so per-repo scoping would be pure
   # unused flexibility. Add a `name:` pattern per account later if that
-  # ever changes. Passwords are dev-only cleartext placeholders, same
-  # convention as postgres.credentials.password above -- change before
-  # this points at anything shared. Hashed into docker_auth's config via
-  # Sprig's `bcrypt` template function at render time; the rendered
-  # Secret only ever holds the bcrypt hash, never the cleartext value
-  # below.
+  # ever changes.
+  #
+  # PASSWORDS ARE EMPTY BY DEFAULT -- no registry credential ships in
+  # this repo, same as postgres.credentials.password and
+  # monitorApi.apiKey above. A real value comes from `make chart-secrets`
+  # (Flux valuesFrom), `--set`/`-f` for a bare helm install, or
+  # existingSecret above.
+  #
+  # An account left empty is OMITTED from docker_auth's config entirely
+  # -- no user entry, no ACL rule -- so it cannot authenticate at all.
+  # It is NOT rendered as a hash of the empty string, which is what
+  # piping "" through Sprig's `bcrypt` would otherwise produce: a
+  # perfectly valid hash that accepts an empty password. Leave them all
+  # empty and the registry refuses everyone, which is the right failure
+  # direction for a credential nobody configured.
+  #
+  # The cleartext is only ever hashed into docker_auth's own config; the
+  # one place it stays cleartext is scm-registry-credentials, because
+  # monitor-api has to present it to log in.
   accounts:
     reader:
       username: scm-reader
-      password: changeme-reader
+      password: ""
     writer:
       username: scm-writer
-      password: changeme-writer
+      password: ""
     admin:
       username: scm-admin
-      password: changeme-admin
+      password: ""
   resources:
     # ephemeral-storage declared for the same reason as the other
     # components: undeclared reads as a 0 request to the kubelet's

@@ -70,7 +70,8 @@ spec:
   # postgres.credentials.password and monitorApi.apiKey are empty in
   # the chart's own values.yaml on purpose -- a real value there would
   # sit in plaintext in this file, in git. valuesFrom below sources
-  # both from the scm-chart-secrets Secret instead (create/update it
+  # them (plus the three registry account passwords) from the
+  # scm-chart-secrets Secret instead (create/update it
   # with `make chart-secrets`, see cluster/chart-secrets.sh and
   # README's "Bringing your own secrets") -- that Secret is cluster
   # state, never a committed file. spec.values (below) takes precedence
@@ -85,6 +86,24 @@ spec:
       name: scm-chart-secrets
       valuesKey: api-key
       targetPath: monitorApi.apiKey
+    # The three docker_auth registry accounts. Same reasoning as the two
+    # above -- values.yaml ships them empty, and an account with no
+    # password is omitted from docker_auth's config entirely rather than
+    # rendered as a hash of "" (which would accept an empty password).
+    # So without these, the registry refuses everyone, including
+    # monitor-api's own pulls.
+    - kind: Secret
+      name: scm-chart-secrets
+      valuesKey: registry-reader-password
+      targetPath: dockerAuth.accounts.reader.password
+    - kind: Secret
+      name: scm-chart-secrets
+      valuesKey: registry-writer-password
+      targetPath: dockerAuth.accounts.writer.password
+    - kind: Secret
+      name: scm-chart-secrets
+      valuesKey: registry-admin-password
+      targetPath: dockerAuth.accounts.admin.password
   # image.tag stays "dev" (the chart's default) for local iteration --
   # `make deploy` rebuilds monitor-api:dev and rollout-restarts the
   # Deployment directly, since Flux/Helm alone can't detect a same-tag

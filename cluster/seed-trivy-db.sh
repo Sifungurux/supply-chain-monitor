@@ -17,15 +17,20 @@ set -euo pipefail
 #   ./cluster/seed-trivy-db.sh myregistry.example.com   # any other reachable registry
 #
 # scm-registry now requires push auth (see README's "Registry
-# authentication") -- SCM_WRITER_USERNAME/PASSWORD default to the
-# dev-placeholder scm-writer account values.yaml ships
-# (dockerAuth.accounts.writer), override both if you've changed them.
+# authentication"). SCM_WRITER_PASSWORD is REQUIRED: values.yaml ships
+# no password for this account any more, so there is no default left to
+# fall back to -- and a wrong one would fail as an opaque 401 from the
+# registry rather than as the missing-configuration it is. With
+# `make chart-secrets`, read it back with:
+#
+#   kubectl get secret scm-chart-secrets -n flux-system \
+#     -o jsonpath='{.data.registry-writer-password}' | base64 --decode
 
 REGISTRY="${1:-localhost:30500}"
 DB_REF="aquasecurity/trivy-db:2"
 JAVA_DB_REF="aquasecurity/trivy-java-db:1"
 SCM_WRITER_USERNAME="${SCM_WRITER_USERNAME:-scm-writer}"
-SCM_WRITER_PASSWORD="${SCM_WRITER_PASSWORD:-changeme-writer}"
+SCM_WRITER_PASSWORD="${SCM_WRITER_PASSWORD:?SCM_WRITER_PASSWORD is required -- values.yaml ships no registry password; see the header of this script for how to read yours back}"
 
 if ! command -v oras >/dev/null 2>&1; then
   echo "oras is not installed. Install it: brew install oras" >&2

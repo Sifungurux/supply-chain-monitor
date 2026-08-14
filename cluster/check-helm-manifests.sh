@@ -51,6 +51,7 @@ check_render "serviceMonitor.enabled=true" \
 # prune CronJob template -- the same conditional-block blind spot the
 # ServiceMonitor case above covers.
 check_render "retention.enabled=true" --set monitorApi.retention.enabled=true
+check_render "dockerAuth.existingSecret=true" --set dockerAuth.existingSecret=true
 
 # NetworkPolicies, asserted by NAME in both directions.
 #
@@ -99,6 +100,40 @@ helm template scm-ci charts/supply-chain-monitor --set monitorApi.retention.enab
 	echo "ERROR: retention.enabled=true did not render the prune CronJob" >&2
 	exit 1
 }
+
+# docker_auth accounts: an account with NO password must be omitted from
+# the rendered config entirely. Sprig's `bcrypt` hashes an empty string
+# into a perfectly valid hash that authenticates an EMPTY PASSWORD, so
+# the difference between "omitted" and "rendered" here is the difference
+# between a locked registry and an open one -- and both render, both
+# lint, and only this check tells them apart.
+echo "== docker_auth omits accounts that have no password =="
+default_render=$(helm template scm-ci charts/supply-chain-monitor)
+echo "$default_render" | grep -q "users: {}" || {
+	echo "ERROR: values.yaml ships no docker_auth passwords, so the rendered config" >&2
+	echo "       must have an empty user map. It does not -- which means an account" >&2
+	echo "       was rendered with a bcrypt hash of the empty string, i.e. an account" >&2
+	echo "       anyone can log into." >&2
+	exit 1
+}
+
+# The opposite direction, so the check above cannot pass merely because
+# the template stopped rendering users at all.
+echo "== docker_auth renders an account that HAS a password =="
+helm template scm-ci charts/supply-chain-monitor \
+	--set dockerAuth.accounts.writer.password=some-real-password \
+	| grep -q '"scm-writer"' || {
+	echo "ERROR: a configured account did not render into docker_auth's config" >&2
+	exit 1
+}
+
+# No dev-placeholder credential may survive anywhere in the chart.
+echo "== no placeholder credentials ship in the chart =="
+if grep -rn "changeme" charts/supply-chain-monitor/ >/dev/null 2>&1; then
+	echo "ERROR: a 'changeme' placeholder credential is still present:" >&2
+	grep -rn "changeme" charts/supply-chain-monitor/ >&2
+	exit 1
+fi
 
 echo "== servicemonitor selector matches the service =="
 # Renders ONLY the Service template (-s), so "before spec:" is an

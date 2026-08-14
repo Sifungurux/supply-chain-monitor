@@ -577,8 +577,12 @@ a rebuild, so nothing else notices a new image is available.
   plain `kubectl create secret`). Left genuinely unset, Postgres's own
   entrypoint and `monitor-api`'s own startup check both refuse to run
   rather than come up with an empty password/key — see README's
-  "Bringing your own secrets". `dockerAuth.accounts.*.password`
-  (registry auth) has no such escape hatch yet, still plaintext-only.
+  "Bringing your own secrets". The three `dockerAuth.accounts.*.password`
+  values (registry auth) now work the same way -- empty by default,
+  sourced from `make chart-secrets`/`--set`/`dockerAuth.existingSecret`,
+  and an account left unset is omitted from docker_auth's config
+  entirely rather than rendered as a hash of the empty string (which
+  would accept an empty password).
 - Both fetch paths (`RegistryFetcher`, `UnpackerScanner`) assume
   unauthenticated, plain-HTTP access to the registry — no credentials
   wired up for a private or TLS-terminated registry.
