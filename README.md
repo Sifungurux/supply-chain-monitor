@@ -622,6 +622,41 @@ Operator scrape it. Off by default because `ServiceMonitor` is a CRD:
 enabling it without prometheus-operator installed makes the install
 fail on an unknown kind.
 
+### Retention: deleting old artifacts
+
+`monitorApi.retention` runs `monitor-api prune` as a CronJob, deleting
+artifacts **nothing has touched** in `days` (default 90), oldest first,
+up to `maxPerRun` (500) per run.
+
+**Off by default, and irreversible when on.** Deleting an artifact
+takes its findings, stage history, documents and components with it via
+`ON DELETE CASCADE` — there is no archive and no undo. Start with
+`dryRun: true`, which counts and deletes nothing:
+
+```
+{"level":"INFO","msg":"prune: artifacts eligible for deletion","count":2,"retention_days":90,...,"dry_run":true}
+{"level":"INFO","msg":"prune: RETENTION_DRY_RUN=true -- nothing deleted"}
+```
+
+"Touched" means `updated_at`, not `created_at`. An artifact registered
+two years ago that is still being re-scanned or re-staged is in active
+use and is **never** eligible, however old it is. The flip side is
+real: an image still deployed but never re-registered *will* age out.
+If that matters, keep re-registering it (CI already does on every
+build) or leave retention off.
+
+Two guards, because the failure mode here is an empty database:
+
+- `RETENTION_DAYS` unset or `0` means **retention is disabled**, not "a
+  cutoff of now". The process exits without connecting to Postgres at
+  all.
+- Below `1` it refuses to run and exits non-zero, so the CronJob shows
+  as failed. A value that low is far more likely to be a units mistake
+  or an unset variable than a real intent.
+
+A run that hits `maxPerRun` says so (`"capped":true`) and reports what
+is left, so a partial prune doesn't read as a finished one.
+
 ### Capping how many artifacts can exist
 
 `monitorApi.maxArtifacts` (`MAX_ARTIFACTS`, **0 = unlimited** by

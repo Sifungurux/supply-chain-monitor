@@ -47,6 +47,10 @@ check_render "postgres.dsnExistingSecret" --set monitorApi.postgres.dsnExistingS
 check_render "serviceMonitor.enabled=true" \
 	--set monitorApi.serviceMonitor.enabled=true \
 	--set monitorApi.serviceMonitor.labels.release=kube-prometheus-stack
+# Retention is off by default, so the default render never touches the
+# prune CronJob template -- the same conditional-block blind spot the
+# ServiceMonitor case above covers.
+check_render "retention.enabled=true" --set monitorApi.retention.enabled=true
 check_render "dockerAuth.existingSecret=true" --set dockerAuth.existingSecret=true
 
 # NetworkPolicies, asserted by NAME in both directions.
@@ -85,6 +89,18 @@ expect_policies() {
 # Service and silently collects nothing, which is indistinguishable
 # from an exporter that is down. check_render above cannot see this --
 # both documents render perfectly well while disagreeing.
+echo "== prune cronjob is absent unless retention is enabled =="
+if helm template scm-ci charts/supply-chain-monitor | grep -q "name: scm-prune"; then
+	echo "ERROR: the prune CronJob renders with DEFAULT values -- retention deletes" >&2
+	echo "       artifacts irreversibly and must never be on unless asked for." >&2
+	exit 1
+fi
+helm template scm-ci charts/supply-chain-monitor --set monitorApi.retention.enabled=true \
+	| grep -q "name: scm-prune" || {
+	echo "ERROR: retention.enabled=true did not render the prune CronJob" >&2
+	exit 1
+}
+
 # docker_auth accounts: an account with NO password must be omitted from
 # the rendered config entirely. Sprig's `bcrypt` hashes an empty string
 # into a perfectly valid hash that authenticates an EMPTY PASSWORD, so

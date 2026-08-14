@@ -162,6 +162,29 @@ type Store interface {
 	// context the same way eventually; that's a mechanical change worth
 	// doing on its own rather than smuggling in here.
 	Stats(ctx context.Context) (Stats, error)
+	// CountOlderThan and DeleteOlderThan implement age-based retention
+	// (`monitor-api prune`, see main.go): "older" means UpdatedAt is
+	// before cutoff, i.e. nothing has touched this artifact since --
+	// not CreatedAt, because a long-lived artifact that is still being
+	// re-scanned and re-staged is in active use however old it is.
+	//
+	// Both take a limit, and DeleteOlderThan deletes the OLDEST first,
+	// so a first run against a large backlog does bounded work and the
+	// next run continues rather than one statement locking the table
+	// for a very long time. Same batching instinct as SWEEP_BATCH_SIZE.
+	//
+	// Counting is separate from deleting so a dry run costs nothing and
+	// risks nothing -- this deletes an artifact's findings, stage
+	// history, documents and components with it (Delete's cascade, see
+	// above) and there is no undo, so "show me what this would remove"
+	// has to be answerable without removing it.
+	//
+	// Deliberately no context parameter, matching the other seventeen
+	// methods here -- see Stats' own comment. Two of nineteen taking a
+	// context is a worse state than one, and the fix is the mechanical
+	// pass that converts all of them.
+	CountOlderThan(cutoff time.Time) (int, error)
+	DeleteOlderThan(cutoff time.Time, limit int) (int, error)
 }
 
 // MemStore is a thread-safe, in-memory Store implementation.
@@ -693,6 +716,56 @@ func (s *MemStore) Stats(_ context.Context) (Stats, error) {
 		}
 	}
 	return stats, nil
+}
+
+func (s *MemStore) CountOlderThan(cutoff time.Time) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	n := 0
+	for _, a := range s.data {
+		if a.UpdatedAt.Before(cutoff) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// DeleteOlderThan removes the oldest-first, up to limit. Sorting before
+// deleting matters even here: MemStore ranges over a map, so without it
+// a limited run would delete an arbitrary subset rather than the oldest
+// ones, and two backends would disagree about which artifacts survive a
+// capped prune.
+func (s *MemStore) DeleteOlderThan(cutoff time.Time, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stale := make([]*Artifact, 0)
+	for _, a := range s.data {
+		if a.UpdatedAt.Before(cutoff) {
+			stale = append(stale, a)
+		}
+	}
+	sort.Slice(stale, func(i, j int) bool {
+		if !stale[i].UpdatedAt.Equal(stale[j].UpdatedAt) {
+			return stale[i].UpdatedAt.Before(stale[j].UpdatedAt)
+		}
+		return stale[i].ID < stale[j].ID
+	})
+	if len(stale) > limit {
+		stale = stale[:limit]
+	}
+	for _, a := range stale {
+		// Mirrors PostgresStore's ON DELETE CASCADE, the same way
+		// Delete above has to.
+		delete(s.data, a.ID)
+		delete(s.documents, a.ID)
+		delete(s.components, a.ID)
+	}
+	return len(stale), nil
 }
 
 func (s *MemStore) FindByRef(ref string) (*Artifact, error) {

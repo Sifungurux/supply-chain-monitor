@@ -959,6 +959,42 @@ monitorApi:
       limits:
         cpu: 250m
         memory: 256Mi
+  # Age-based retention: `monitor-api prune` deletes artifacts nothing
+  # has touched in `days`, oldest first, up to `maxPerRun` per run.
+  #
+  # OFF by default and irreversible when on. Deleting an artifact takes
+  # its findings, stage history, documents and components with it (ON
+  # DELETE CASCADE) -- there is no archive and no undo. Turn dryRun on
+  # first and read the "artifacts eligible for deletion" count out of
+  # the Job's logs before letting it delete anything.
+  #
+  # "Touched" is updated_at, not created_at: an artifact registered two
+  # years ago that is still being re-scanned or re-staged is in active
+  # use and is never eligible, however old it is. The flip side is that
+  # an image still deployed but never re-registered WILL age out -- if
+  # that matters, keep re-registering it (CI already does on every
+  # build) or leave retention off.
+  retention:
+    enabled: false
+    schedule: "30 3 * * *" # daily, 03:30
+    # Days since last activity. `monitor-api prune` refuses to run below
+    # 1 and treats 0 as "disabled" rather than "delete everything",
+    # because that is far more likely to be a units mistake or an unset
+    # variable than a real intent.
+    days: 90
+    # Bounds one run, so a first prune against a long backlog does
+    # bounded work and the next run continues, instead of one statement
+    # holding locks on a table the API is serving from.
+    maxPerRun: 500
+    # Count what would be deleted and delete nothing. Start here.
+    dryRun: false
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
   resources:
     # ephemeral-storage right-sized down: unpacking a container image no
     # longer happens in this pod -- it runs in its own per-scan
