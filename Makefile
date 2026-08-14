@@ -342,7 +342,7 @@ test-artifact:
 		-H 'Content-Type: application/json' \
 		-d '{"ref":"alpine:3.19","type":"image"}' | tee /tmp/scm-artifact.json
 
-test: test-api test-dashboard check-dashboard-configmap
+test: test-api test-dashboard check-dashboard-configmap check-openapi-spec
 
 # Runs services/monitor-api's Go test suite (handlers, store, pipeline)
 # via a containerized golang image -- no local Go install needed, just
@@ -420,6 +420,19 @@ lock-deps:
 check-dashboard-configmap:
 	diff -q dashboard/index.html charts/supply-chain-monitor/files/index.html || \
 		(echo "charts/supply-chain-monitor/files/index.html is out of date -- run: cp dashboard/index.html charts/supply-chain-monitor/files/index.html" && exit 1)
+
+# Parses internal/api/openapi.yaml and resolves every $ref in it -- see
+# cluster/check-openapi-spec.rb's own header for why neither happens
+# anywhere else (the spec is served as raw bytes, and the only test
+# that reads it greps substrings), so a broken indent or a $ref
+# pointing at a schema that doesn't exist ships green and only fails in
+# somebody's browser.
+#
+# Containerized like every other target here, so this needs nothing but
+# Docker. Ruby specifically because YAML is in its standard library:
+# no gem install, no lockfile, nothing to keep current.
+check-openapi-spec:
+	docker run --rm -v "$(CURDIR)":/src -w /src ruby:3.4-alpine ruby cluster/check-openapi-spec.rb
 
 # Structural lint against the chart's own conventions (required fields,
 # indentation, etc.). Does NOT validate that a rendered document is a

@@ -98,6 +98,19 @@ jobs:
       - name: make check-dashboard-configmap
         run: make check-dashboard-configmap
 
+  # Parses internal/api/openapi.yaml and resolves every $ref in it.
+  # Nothing else does either: the spec is served as raw bytes, and
+  # TestOpenAPISpec_DescribesEveryRegisteredRoute only greps it for
+  # substrings -- so a broken indent or a $ref pointing at a schema
+  # that doesn't exist passes the whole suite and fails only in
+  # somebody's browser. See cluster/check-openapi-spec.rb's header.
+  check-openapi-spec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: make check-openapi-spec
+        run: make check-openapi-spec
+
   # Static analysis over cluster/*.sh (13 scripts, ~1,100 lines) -- see
   # docs/tech-debt-audit.md, "No lint on cluster/*.sh". This exact class
   # of script (podman.sh especially) has had several real bugs this
