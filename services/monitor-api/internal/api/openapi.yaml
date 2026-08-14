@@ -541,6 +541,18 @@ paths:
           description: Exact purl. Returns artifacts.
           schema: { type: string }
           example: pkg:apk/alpine/openssl@3.1.4-r5
+        - name: license
+          in: query
+          required: false
+          description: >-
+            EXACT SPDX identifier. Returns artifacts containing a
+            component carrying it. Matched per identifier and
+            case-insensitively, never as a substring — `GPL-3.0-only`
+            does not match `LGPL-3.0-only`, and does not match inside
+            the expression `MIT OR AGPL-3.0-only` where the `OR` is the
+            permissive escape. Same rule LICENSE_DENYLIST applies.
+          schema: { type: string }
+          example: AGPL-3.0-only
         - name: q
           in: query
           required: false
@@ -821,6 +833,15 @@ components:
           example: pkg:apk/alpine/openssl@3.1.4-r5
         name: { type: string, example: openssl }
         version: { type: string, example: 3.1.4-r5 }
+        licenses:
+          type: string
+          description: >-
+            Comma-joined license identifiers — SPDX ids where the
+            document gave one, otherwise a free-text name or an SPDX
+            expression stored verbatim. Empty means the SBOM said
+            nothing usable (NOASSERTION/NONE are dropped), not that the
+            package is unlicensed.
+          example: MIT,Apache-2.0
 
     ComponentDiff:
       type: object
@@ -1005,6 +1026,10 @@ components:
         version:
           type: string
           example: 3.1.4-r5
+        licenses:
+          type: string
+          description: Comma-joined license identifiers for this package.
+          example: MIT,Apache-2.0
         artifacts:
           type: integer
           description: Number of distinct artifacts containing this purl.

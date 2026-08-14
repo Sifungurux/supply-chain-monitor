@@ -63,6 +63,49 @@ import (
 // That's what makes this stick across scans rather than depending on
 // every caller remembering to re-read the document -- see
 // docs/architecture.md ("Suppressing findings with VEX").
+// MergePartition merges only the part of a bucket one producer owns,
+// carrying every other finding in it through completely untouched.
+//
+// This exists because the "other" bucket has two independent producers
+// and MergeFindings' contract is that `reported` is a COMPLETE picture
+// of what it is merged against. SARIF and pluggable scanners write
+// there during a scan; license findings (see LicenseFindingSource) are
+// produced when an SBOM is indexed, which is a different event
+// entirely. Merge either one against the whole bucket and everything
+// the other producer wrote is absent from `reported`, so fix-detection
+// marks all of it "fixed":
+//
+//   - a scan of an artifact with license findings would resolve every
+//     one of them, because no scanner reports licenses;
+//   - indexing an SBOM would resolve every SARIF finding, because the
+//     license evaluator reports none.
+//
+// Both are silent data corruption -- the findings still exist, they
+// just quietly claim to be fixed. So each producer merges its own
+// partition and leaves the rest alone. The two call sites use
+// complementary predicates (Source == licenseSource, Source !=
+// licenseSource), which is what makes it checkable at a glance that the
+// bucket is partitioned exactly once with nothing dropped.
+//
+// owns identifies the EXISTING findings this merge is responsible for.
+// Everything reported is assumed to belong to the caller -- it is the
+// caller's own output.
+func MergePartition(existing, reported []Finding, owns func(Finding) bool, now time.Time, detectFixed bool, vex map[string]VEXStatement) []Finding {
+	mine := make([]Finding, 0, len(existing))
+	theirs := make([]Finding, 0, len(existing))
+	for _, f := range existing {
+		if owns(f) {
+			mine = append(mine, f)
+			continue
+		}
+		theirs = append(theirs, f)
+	}
+	// theirs is passed through verbatim -- not re-merged, not restamped
+	// -- so another producer's FirstSeenAt, Status and Justification
+	// survive this call untouched.
+	return append(theirs, MergeFindings(mine, reported, now, detectFixed, vex)...)
+}
+
 func MergeFindings(existing, reported []Finding, now time.Time, detectFixed bool, vex map[string]VEXStatement) []Finding {
 	reportedByID := make(map[string]Finding, len(reported))
 	for _, f := range reported {

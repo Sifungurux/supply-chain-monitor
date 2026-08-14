@@ -88,13 +88,18 @@ type Config struct {
 	// test that doesn't set it gets, and exactly the behaviour before
 	// this existed.
 	Fetcher scanner.Fetcher
+	// LicenseDenylist flags components licensed under identifiers this
+	// deployment refuses, as a finding in the "other" bucket (see
+	// documents.go's applyLicenseDenylist). The zero value denies
+	// nothing -- exactly the behaviour before this existed.
+	LicenseDenylist scanner.LicenseDenylist
 }
 
 // NewRouter wires up the v1 REST API. Uses Go 1.22's stdlib ServeMux
 // method+wildcard routing, so no external router dependency is needed.
 // See Config for what each field does and what its zero value means.
 func NewRouter(cfg Config) http.Handler {
-	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher}
+	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher, licenseDenylist: cfg.LicenseDenylist}
 	h.metrics = newMetrics()
 	if cfg.ScanLimits.Concurrency > 0 {
 		h.scanSlots = make(chan struct{}, cfg.ScanLimits.Concurrency)

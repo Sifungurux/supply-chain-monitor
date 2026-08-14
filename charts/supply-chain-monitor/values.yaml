@@ -354,6 +354,21 @@ monitorApi:
   # regardless; this is only the level floor. Anything unrecognized
   # means info.
   logLevel: info
+  # Licenses this deployment refuses, comma-separated SPDX identifiers.
+  # A component carrying one gets a medium-severity finding in its
+  # artifact's "other" bucket, participating in the same open/fixed
+  # lifecycle as any scanner finding -- it resolves on its own once the
+  # package is gone or relicensed.
+  #
+  # Matched EXACTLY per identifier, case-insensitively, never as a
+  # substring: "GPL-3.0-only" does not flag a component licensed
+  # "LGPL-3.0-only", and does not flag the SPDX expression
+  # "MIT OR GPL-3.0-only" -- the OR is the permissive escape that makes
+  # such a package usable, so flagging it would be a false positive. To
+  # refuse those too, add the whole expression as its own entry.
+  #
+  # Empty (the default) denies nothing and skips the evaluation.
+  licenseDenylist: ""
   # Prometheus scraping of monitor-api's /metrics (process and scan
   # counters -- see services/monitor-api/internal/api/metrics.go).
   #

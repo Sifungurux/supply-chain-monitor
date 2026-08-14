@@ -217,6 +217,13 @@ var schemaStatements = []string{
 	// what findings_finding_id_idx does for "every artifact affected by
 	// this CVE".
 	`CREATE INDEX IF NOT EXISTS components_purl_idx ON components (purl)`,
+	// License identifiers for each component, comma-joined (see
+	// artifact.Component.Licenses). Same idempotent ADD COLUMN IF NOT
+	// EXISTS as every other column added after the fact; DEFAULT ''
+	// matches the "empty means the document said nothing usable"
+	// convention the Go field documents, so there is no NULL case for
+	// the ?license= filter to get wrong.
+	`ALTER TABLE components ADD COLUMN IF NOT EXISTS licenses TEXT NOT NULL DEFAULT ''`,
 	// Per-scan snapshots of the above, which is what makes "what changed
 	// between these two scans" answerable at all (see SaveComponents and
 	// GET /api/v1/artifacts/{id}/components/diff). The `components` table
@@ -249,6 +256,13 @@ var schemaStatements = []string{
 	// "this artifact's rows at this scan_at" -- both served by this one
 	// index, which is also what the retention DELETE scans.
 	`CREATE INDEX IF NOT EXISTS components_history_artifact_scan_idx ON components_history (artifact_id, scan_at DESC)`,
+	// Licenses on the history table too, so a component appearing in a
+	// diff carries the same license information the picker shows for
+	// it. MUST come after the CREATE TABLE above: schemaStatements runs
+	// in order, and ALTER TABLE ... IF NOT EXISTS still fails outright
+	// on a table that does not exist yet -- which on a fresh database
+	// is every one above its own CREATE.
+	`ALTER TABLE components_history ADD COLUMN IF NOT EXISTS licenses TEXT NOT NULL DEFAULT ''`,
 }
 
 const selectArtifactColumns = `SELECT id, ref, digest, type, status, current_stage, created_at, updated_at, last_scan_at, maintainer_team, maintainer_email, last_scan_failure_reason FROM artifacts`
@@ -1422,9 +1436,9 @@ func (s *PostgresStore) SaveComponents(artifactID string, components []Component
 		// headroom as ~30x rather than ~60x. pgx.CopyFrom is the upgrade
 		// path when it stops being comfortable.
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO components (artifact_id, purl, name, version) VALUES ($1, $2, $3, $4)
+			INSERT INTO components (artifact_id, purl, name, version, licenses) VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (artifact_id, purl) DO NOTHING
-		`, artifactID, c.PURL, c.Name, c.Version); err != nil {
+		`, artifactID, c.PURL, c.Name, c.Version, c.Licenses); err != nil {
 			return fmt.Errorf("save components for %q: %w", artifactID, err)
 		}
 	}
@@ -1435,9 +1449,9 @@ func (s *PostgresStore) SaveComponents(artifactID string, components []Component
 	scanAt := time.Now().UTC()
 	for _, c := range components {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO components_history (artifact_id, scan_at, purl, name, version)
-			VALUES ($1, $2, $3, $4, $5)
-		`, artifactID, scanAt, c.PURL, c.Name, c.Version); err != nil {
+			INSERT INTO components_history (artifact_id, scan_at, purl, name, version, licenses)
+			VALUES ($1, $2, $3, $4, $5, $6)
+		`, artifactID, scanAt, c.PURL, c.Name, c.Version, c.Licenses); err != nil {
 			return fmt.Errorf("save component history for %q: %w", artifactID, err)
 		}
 	}
@@ -1508,7 +1522,7 @@ func (s *PostgresStore) ComponentSnapshots(artifactID string, limit int) ([]time
 // future change there cannot make the two disagree.
 func (s *PostgresStore) ComponentsAt(artifactID string, scanAt time.Time) ([]Component, error) {
 	rows, err := s.pool.Query(context.Background(), `
-		SELECT purl, name, version FROM components_history
+		SELECT purl, name, version, licenses FROM components_history
 		WHERE artifact_id = $1 AND scan_at = $2
 		ORDER BY purl
 	`, artifactID, scanAt)
@@ -1520,7 +1534,7 @@ func (s *PostgresStore) ComponentsAt(artifactID string, scanAt time.Time) ([]Com
 	out := make([]Component, 0)
 	for rows.Next() {
 		var c Component
-		if err := rows.Scan(&c.PURL, &c.Name, &c.Version); err != nil {
+		if err := rows.Scan(&c.PURL, &c.Name, &c.Version, &c.Licenses); err != nil {
 			return nil, fmt.Errorf("scan historical component: %w", err)
 		}
 		out = append(out, c)
@@ -1545,6 +1559,40 @@ func (s *PostgresStore) FindByComponentPURL(purl string) ([]*Artifact, error) {
 	`, purl)
 	if err != nil {
 		return nil, fmt.Errorf("find artifacts by component purl: %w", err)
+	}
+	return out, nil
+}
+
+// FindByLicense returns every artifact containing at least one
+// component whose license identifiers include this exact one.
+//
+// EXACT identifier match, case-insensitive, against one entry of the
+// comma-joined list -- not a substring of the whole column. Substring
+// matching would make "GPL-3.0-only" match "LGPL-3.0-only", which is a
+// materially different license, and would match inside an SPDX
+// expression like "MIT OR AGPL-3.0-only" where the OR is precisely the
+// permissive escape that makes the package usable. Same rule
+// LicenseDenylist applies, deliberately: a component the filter finds
+// is a component the denylist would flag.
+func (s *PostgresStore) FindByLicense(license string) ([]*Artifact, error) {
+	license = strings.TrimSpace(license)
+	if license == "" {
+		return []*Artifact{}, nil
+	}
+	// string_to_array + unnest so the comparison is per-identifier
+	// rather than against the joined string.
+	out, err := s.queryArtifacts(context.Background(), selectArtifactColumns+`
+		WHERE id IN (
+			SELECT DISTINCT artifact_id FROM components
+			WHERE EXISTS (
+				SELECT 1 FROM unnest(string_to_array(licenses, ',')) AS one
+				WHERE lower(btrim(one)) = lower(btrim($1))
+			)
+		)
+		ORDER BY created_at DESC
+	`, license)
+	if err != nil {
+		return nil, fmt.Errorf("find artifacts by license: %w", err)
 	}
 	return out, nil
 }
@@ -1614,11 +1662,11 @@ func (s *PostgresStore) SearchComponents(query string, limit int) ([]ComponentMa
 			-- name would split one package into several rows of 1 instead
 			-- of one row of 3. Alphabetically first is arbitrary but
 			-- stable, and matches MemStore.
-			SELECT DISTINCT ON (c.purl) c.purl, c.name, c.version
+			SELECT DISTINCT ON (c.purl) c.purl, c.name, c.version, c.licenses
 			FROM components c JOIN matched_purls m ON m.purl = c.purl
 			ORDER BY c.purl, c.name, c.version
 		)
-		SELECT d.purl, d.name, d.version, c.artifacts
+		SELECT d.purl, d.name, d.version, d.licenses, c.artifacts
 		FROM counts c JOIN display d USING (purl)
 		ORDER BY c.artifacts DESC, d.purl ASC
 		LIMIT $2
@@ -1631,7 +1679,7 @@ func (s *PostgresStore) SearchComponents(query string, limit int) ([]ComponentMa
 	out := make([]ComponentMatch, 0)
 	for rows.Next() {
 		var m ComponentMatch
-		if err := rows.Scan(&m.PURL, &m.Name, &m.Version, &m.Artifacts); err != nil {
+		if err := rows.Scan(&m.PURL, &m.Name, &m.Version, &m.Licenses, &m.Artifacts); err != nil {
 			return nil, 0, fmt.Errorf("scan component match: %w", err)
 		}
 		out = append(out, m)

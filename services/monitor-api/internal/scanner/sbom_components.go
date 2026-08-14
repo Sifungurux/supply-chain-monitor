@@ -46,6 +46,15 @@ func ParseSBOMComponents(content []byte) ([]artifact.Component, error) {
 		Packages []struct {
 			Name        string `json:"name"`
 			VersionInfo string `json:"versionInfo"`
+			// SPDX carries two license fields per package.
+			// licenseConcluded is the producer's assessment, declared is
+			// what the package itself claims -- concluded wins when both
+			// are present and disagree, since it is the considered
+			// answer. Both are frequently the placeholders "NOASSERTION"
+			// or "NONE", which are dropped rather than stored as if they
+			// were licenses (see normalizeLicenses).
+			LicenseConcluded string `json:"licenseConcluded"`
+			LicenseDeclared  string `json:"licenseDeclared"`
 			// PrimaryPackagePurpose is "CONTAINER" on the package
 			// describing the image the document is ABOUT (confirmed in
 			// trivy's spdx-json output, where it's packages[0] and
@@ -87,7 +96,10 @@ func ParseSBOMComponents(content []byte) ([]artifact.Component, error) {
 	var walk func(components []cycloneDXComponent)
 	walk = func(components []cycloneDXComponent) {
 		for _, c := range components {
-			add(artifact.Component{PURL: c.PURL, Name: c.Name, Version: c.Version})
+			add(artifact.Component{
+				PURL: c.PURL, Name: c.Name, Version: c.Version,
+				Licenses: normalizeLicenses(c.licenseIDs()),
+			})
 			// CycloneDX components nest: syft and several other
 			// producers express "this package brings in these packages"
 			// as a child array rather than flattening. A top-level-only
@@ -108,7 +120,14 @@ func ParseSBOMComponents(content []byte) ([]artifact.Component, error) {
 			if !strings.EqualFold(strings.TrimSpace(ref.ReferenceType), "purl") {
 				continue
 			}
-			add(artifact.Component{PURL: ref.ReferenceLocator, Name: p.Name, Version: p.VersionInfo})
+			add(artifact.Component{
+				PURL: ref.ReferenceLocator, Name: p.Name, Version: p.VersionInfo,
+				// Concluded first: it is the producer's considered
+				// answer, where declared is only what the package says
+				// about itself. Both are listed when they differ and
+				// both carry information.
+				Licenses: normalizeLicenses([]string{p.LicenseConcluded, p.LicenseDeclared}),
+			})
 			break
 		}
 	}
@@ -118,8 +137,77 @@ func ParseSBOMComponents(content []byte) ([]artifact.Component, error) {
 // cycloneDXComponent is its own named type purely so the nested
 // `components` array can refer to it recursively.
 type cycloneDXComponent struct {
-	Name       string               `json:"name"`
-	Version    string               `json:"version"`
-	PURL       string               `json:"purl"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	PURL    string `json:"purl"`
+	// CycloneDX expresses licenses as a list whose entries are EITHER a
+	// `license` object (with an SPDX `id`, or a free-text `name` when
+	// the producer could not map it to one) OR an `expression`
+	// ("MIT OR Apache-2.0"). Both shapes appear in real trivy output,
+	// sometimes within one document, so both are read.
+	Licenses []struct {
+		License struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"license"`
+		Expression string `json:"expression"`
+	} `json:"licenses"`
 	Components []cycloneDXComponent `json:"components"`
+}
+
+// licenseIDs pulls the identifiers out of one CycloneDX component,
+// preferring the SPDX `id` over the free-text `name` for a given entry
+// (the id is the machine-comparable one, which is the whole point of
+// storing these) and taking `expression` as its own single identifier.
+//
+// An expression is deliberately NOT split on its operators. "MIT OR
+// AGPL-3.0-only" means a consumer may choose MIT, so decomposing it and
+// matching AGPL-3.0-only against a denylist would flag a package that
+// can be used compliantly -- a false positive on the one signal this
+// data exists to produce. It is stored whole, and matched whole. See
+// LicenseDenylist.
+func (c cycloneDXComponent) licenseIDs() []string {
+	out := make([]string, 0, len(c.Licenses))
+	for _, l := range c.Licenses {
+		switch {
+		case strings.TrimSpace(l.License.ID) != "":
+			out = append(out, l.License.ID)
+		case strings.TrimSpace(l.License.Name) != "":
+			out = append(out, l.License.Name)
+		case strings.TrimSpace(l.Expression) != "":
+			out = append(out, l.Expression)
+		}
+	}
+	return out
+}
+
+// normalizeLicenses trims, drops SPDX's "no information" placeholders,
+// dedupes case-insensitively while keeping the first spelling seen, and
+// joins with commas -- the form artifact.Component.Licenses stores.
+//
+// NOASSERTION and NONE are dropped rather than stored: both mean "this
+// document is not telling you the license", and keeping them would make
+// a package with no license information indistinguishable from one
+// licensed under something actually called NOASSERTION, while filling
+// the column with noise on the many real packages that carry them.
+func normalizeLicenses(ids []string) string {
+	seen := make(map[string]bool, len(ids))
+	kept := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		switch strings.ToUpper(id) {
+		case "NOASSERTION", "NONE":
+			continue
+		}
+		key := strings.ToLower(id)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		kept = append(kept, id)
+	}
+	return strings.Join(kept, ",")
 }
