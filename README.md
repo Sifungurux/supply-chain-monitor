@@ -1408,11 +1408,20 @@ designed to hide files" rather than a signature name, keyed on the rule
 id (`exec/shell/busybox_exec`) so it stays stable across scans.
 
 **Why `minRisk` defaults to `critical`.** Measured, not guessed: a stock
-`alpine:3.19` at `--min-risk medium` reports **four HIGH behaviours** —
-busybox exec patterns, a `/dev/shm` reference, a route lookup. Nothing
-about that image is compromised. At `high` most of a normal fleet grows
-malware findings and notifications page on them, so the default sits one
-notch above and you lower it deliberately.
+`alpine:3.19` reports **four HIGH behaviours** — busybox exec patterns, a
+`/dev/shm` reference, a route lookup. Nothing about that image is
+compromised. At `high` most of a normal fleet grows malware findings and
+notifications page on them, so the default sits one notch above and you
+lower it deliberately.
+
+**The threshold is applied by monitor-api, not by malcontent.** Its
+`--min-risk` flag is still passed, but on a live scan it filters nothing
+in `scan` mode: `--min-risk critical`, `high` and `any` all returned
+byte-identical output for the same image. `scan` is documented as
+returning "findings of the highest severity" and means it literally. So
+the floor is enforced on the parsed findings (`scanner.FilterBySeverity`)
+— which is the difference between a default that reads like a filter and
+one that is one.
 
 Two things worth knowing before enabling it:
 

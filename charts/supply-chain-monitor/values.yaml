@@ -727,12 +727,18 @@ monitorApi:
     # Dockerfile carries the full note). Bump when the digest stops
     # being pullable; Chainguard's free tier keeps only :latest.
     image: "cgr.dev/chainguard/malcontent@sha256:c71f2ff27243efb52494a468379a0182bfb304716b7139daf331d3b5db0416a6"
-    # --min-risk. Deliberately "critical", not the tool's own "low":
-    # measured against a stock alpine:3.19, malcontent reports four HIGH
-    # behaviours (busybox exec patterns, /dev/shm references, route
-    # lookups) on an image nobody would call compromised. At "high" most
-    # of a normal fleet grows malware findings, and notifications page on
-    # them. Lower it deliberately, knowing that.
+    # Severity floor: findings below this are dropped. "critical" by
+    # default because a stock alpine:3.19 reports four HIGH behaviours
+    # (busybox exec patterns, /dev/shm references, route lookups) --
+    # nothing about that image is compromised, and at "high" most of a
+    # normal fleet grows malware findings that notifications then page
+    # on. Lower it deliberately, knowing that.
+    #
+    # Enforced by monitor-api, NOT by malcontent's --min-risk flag. The
+    # flag is still passed, but measured on a live scan it changes
+    # nothing in `scan` mode: --min-risk critical, high and any all
+    # returned byte-identical output for alpine:3.19. See
+    # scanner.FilterBySeverity.
     minRisk: "critical"
   # Operator-configured pluggable scanners -- plug in a different CVE
   # scanner (Grype, OSV-Scanner, ...) or SBOM tool alongside (never

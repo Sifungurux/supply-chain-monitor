@@ -32,7 +32,7 @@ func TestIsolatedMalcontentScanner_Scan_HappyPath(t *testing.T) {
 		logs: `{"Files":{"/bin/busybox":{"Path":"/bin/busybox","Behaviors":[
 			{"ID":"exec/shell/busybox_exec","Description":"runs atypical busybox programs","RiskLevel":"HIGH"}]}}}`,
 	}
-	s := NewIsolatedMalcontentScanner(client, IsolatedMalcontentConfig{MinRisk: "critical"})
+	s := NewIsolatedMalcontentScanner(client, IsolatedMalcontentConfig{MinRisk: "high"})
 
 	findings, err := s.Scan(context.Background(), "alpine:3.19")
 	if err != nil {
@@ -43,6 +43,29 @@ func TestIsolatedMalcontentScanner_Scan_HappyPath(t *testing.T) {
 	}
 	if client.deleteCalled == 0 {
 		t.Error("the Job must be deleted after a successful scan")
+	}
+}
+
+// The severity floor has to be applied on THIS side of the Job. The
+// flag handed to malcontent does not filter (measured: --min-risk
+// critical, high and any return identical output in scan mode), so if
+// the isolated path skipped FilterBySeverity, every deployment would
+// get the noise the default exists to prevent -- and the unit tests
+// covering the in-process path would still pass.
+func TestIsolatedMalcontentScanner_AppliesTheSeverityFloor(t *testing.T) {
+	logs := `{"Files":{"/bin/busybox":{"Path":"/bin/busybox","Behaviors":[
+		{"ID":"exec/shell/busybox_exec","Description":"d","RiskLevel":"HIGH"}]}}}`
+
+	high := &fakeJobClient{namespace: "n", statusSequence: []jobStatusResult{{succeeded: true}}, podName: "p", logs: logs}
+	got, err := NewIsolatedMalcontentScanner(high, IsolatedMalcontentConfig{MinRisk: "high"}).Scan(context.Background(), "alpine:3.19")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("at threshold high: %+v, %v -- want the HIGH finding kept", got, err)
+	}
+
+	critical := &fakeJobClient{namespace: "n", statusSequence: []jobStatusResult{{succeeded: true}}, podName: "p", logs: logs}
+	got, err = NewIsolatedMalcontentScanner(critical, IsolatedMalcontentConfig{MinRisk: "critical"}).Scan(context.Background(), "alpine:3.19")
+	if err != nil || len(got) != 0 {
+		t.Fatalf("at threshold critical: %+v, %v -- want the HIGH finding dropped", got, err)
 	}
 }
 
