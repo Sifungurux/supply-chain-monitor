@@ -265,6 +265,24 @@ func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 	return s, nil
 }
 
+// Ping reports whether the database is reachable right now, for the
+// readiness probe (GET /readyz -- see internal/api's Config.Ready).
+//
+// Deliberately a method on this concrete type rather than on the Store
+// interface: MemStore has nothing to check, and the interface already
+// carries one context-taking method documented as a wart. main.go is
+// the only caller and holds a *PostgresStore, so nothing needs the
+// abstraction.
+//
+// NewPostgresStore already pings once at startup. This is the same call
+// asked repeatedly afterwards, which is the part that was missing: a
+// database that goes away after a successful start left the pod Ready
+// and serving errors, because the only health signal was a handler that
+// returned "ok" without consulting anything.
+func (s *PostgresStore) Ping(ctx context.Context) error {
+	return s.pool.Ping(ctx)
+}
+
 // Close releases the underlying connection pool. Not called on every
 // pod exit today (Kubernetes just kills the pod and Postgres cleans up
 // server-side), but useful for tests and any future graceful-shutdown

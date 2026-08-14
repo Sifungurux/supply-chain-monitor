@@ -206,7 +206,8 @@ dashboard pod unable to mount its own HTML at all).
 
 ## Authentication
 
-Every endpoint except `/healthz` requires `Authorization: Bearer <key>`.
+Every endpoint except `/healthz` and `/readyz` requires
+`Authorization: Bearer <key>` (a kubelet probe can't present one).
 The key is sourced from `API_KEY`, which `monitor-api` reads from the
 `scm-monitor-api-auth` Secret (rendered from
 `charts/supply-chain-monitor/values.yaml`'s `monitorApi.apiKey` by
@@ -233,7 +234,7 @@ curl -s "localhost:8080/api/v1/artifacts?limit=100&offset=100&status=scanned&typ
 ```
 
 See docs/architecture.md ("Adding API authentication") for why a
-single shared key, why `/healthz` and CORS preflight `OPTIONS` are
+single shared key, why the probe endpoints and CORS preflight `OPTIONS` are
 exempt, and what's still missing (per-client keys, rotation, rate
 limiting).
 
@@ -308,7 +309,8 @@ request/response shapes.
 
 | Method | Path                              | Purpose                                   |
 |--------|-----------------------------------|--------------------------------------------|
-| GET    | `/healthz`                        | liveness/readiness                         |
+| GET    | `/healthz`                        | liveness — the process only, never the database (a liveness failure kills the pod) |
+| GET    | `/readyz`                         | readiness — pings Postgres; 503 when it is unreachable, so the pod leaves the Service instead of serving 500s |
 | GET    | `/api/v1/pipeline/stages`         | list configured pipeline stages            |
 | GET    | `/api/v1/stats`                   | fleet-wide counts: artifacts by status/type/stage, plus how many carry active findings per bucket — what the dashboard's summary cards read, since `/api/v1/artifacts` is paginated |
 | POST   | `/api/v1/artifacts`                | register an artifact `{ref, type}`         |

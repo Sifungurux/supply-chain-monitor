@@ -585,13 +585,17 @@ a rebuild, so nothing else notices a new image is available.
 - The scan concurrency cap is per-process, not cluster-wide: two
   monitor-api replicas would each allow `SCAN_CONCURRENCY` scans. Fine
   today (the chart runs one replica), wrong the moment it doesn't.
-- No `NetworkPolicy` on scan-worker Job pods — locked down at the
-  pod-security level, but not restricted at the network level.
 - No TLS on the Gateway.
 - The dashboard's search box only searches the page currently loaded
-  (server-side `status`/`type` filters narrow the whole set instead);
-  every summary card except "Artifacts" counts that one page too --
-  there's no aggregate endpoint behind them.
+  (server-side `status`/`type` filters narrow the whole set instead).
+  The summary cards and pipeline strip no longer have this problem —
+  they read `GET /api/v1/stats`, which aggregates over the whole store
+  in the backend.
+- `/healthz` reports the process, not its dependencies: it returns
+  `{"status":"ok"}` without touching Postgres, and backs both the
+  readiness and the liveness probe. Startup is covered (main.go blocks
+  on `connectStoreWithRetry` before listening), but a database that
+  goes away *after* startup leaves the pod Ready and serving 500s.
 - SARIF and pluggable scanners can't declare a single finding bucket,
   so a failure in either still conservatively blocks fix-detection for
   all five buckets that scan round.

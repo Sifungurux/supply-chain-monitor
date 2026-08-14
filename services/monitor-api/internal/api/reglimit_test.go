@@ -8,16 +8,16 @@ import (
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/api"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/pipeline"
-	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
 )
 
 func newCappedRouter(t *testing.T, max int) (http.Handler, *artifact.MemStore) {
 	t.Helper()
 	store := artifact.NewMemStore()
 	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
-	return api.NewRouter(store, tracker, scanner.Registry{}, testAPIKey, 0, 0, nil, false, 0, false,
-		api.ScanLimits{}, api.Notifications{},
-		api.RegistrationLimits{MaxArtifacts: max}), store
+	return api.NewRouter(api.Config{
+		Store: store, Tracker: tracker, APIKey: testAPIKey,
+		RegLimits: api.RegistrationLimits{MaxArtifacts: max},
+	}), store
 }
 
 // A quota is not a rate limit: 403, not 429. Retrying cannot help --

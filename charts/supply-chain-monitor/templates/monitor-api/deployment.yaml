@@ -102,7 +102,12 @@ spec:
                   key: REGISTRY_PASSWORD
           readinessProbe:
             httpGet:
-              path: /healthz
+              # /readyz, NOT /healthz: this one actually pings Postgres,
+              # so a database that goes away after startup takes this pod
+              # out of the Service instead of leaving it Ready and
+              # serving 500s from every endpoint that touches the store.
+              # It rejoins on its own when the check passes again.
+              path: /readyz
               port: 8080
             # main.go blocks startup on connectStoreWithRetry (up to 12
             # attempts, 5s apart -- worst case ~60s) if Postgres isn't
@@ -113,6 +118,13 @@ spec:
             initialDelaySeconds: 10
           livenessProbe:
             httpGet:
+              # Stays /healthz, which deliberately checks nothing but
+              # the process itself. A liveness failure KILLS the
+              # container, so pointing this at the database would turn a
+              # Postgres outage into every monitor-api pod restarting on
+              # a loop for the duration -- a recoverable dependency
+              # failure converted into a crashloop that can't recover.
+              # See internal/api/health.go.
               path: /healthz
               port: 8080
             # Unlike readinessProbe, a liveness failure kills the pod --

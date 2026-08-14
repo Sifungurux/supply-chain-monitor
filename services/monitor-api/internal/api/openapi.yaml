@@ -41,6 +41,48 @@ paths:
                 properties:
                   status: { type: string, example: ok }
 
+  /readyz:
+    get:
+      tags: [meta]
+      summary: Readiness probe — is the backing store reachable
+      description: >-
+        Unlike `/healthz`, this one actually checks the database. It
+        backs the Kubernetes readiness probe: a pod failing it is
+        removed from the Service and stops receiving traffic, then
+        rejoins on its own once the check passes again.
+
+
+        Deliberately NOT what the liveness probe uses. A liveness
+        failure kills the container, so checking a dependency there
+        would turn a Postgres outage into every pod restarting on a loop
+        for as long as it lasted.
+
+
+        Unauthenticated, like `/healthz` — a kubelet probe can't present
+        an API key, and the response carries no fleet data.
+      security: []
+      responses:
+        "200":
+          description: The store is reachable.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ready }
+        "503":
+          description: >-
+            The store could not be reached within the probe's own short
+            timeout. `error` carries the reason for whoever is reading
+            `kubectl describe pod`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: unavailable }
+                  error: { type: string }
+
   /api/v1/pipeline/stages:
     get:
       tags: [pipeline]
