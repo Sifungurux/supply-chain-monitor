@@ -32,6 +32,27 @@ spec:
         # segment below instead of relying on BasePath to already
         # include it.
         checksum/config: {{ include (print $.Template.BasePath "/monitor-api/configmap.yaml") . | sha256sum }}
+        # The two Secrets this pod reads through secretKeyRef. Env vars
+        # are captured once, at container start, so a rotated credential
+        # is invisible to a running pod -- it keeps presenting the old
+        # one until something happens to restart it.
+        #
+        # That is not hypothetical: rotating the registry password left
+        # monitor-api holding the previous value while docker_auth had
+        # already been re-rendered with a hash of the new one, so every
+        # pull failed 401 with both Secrets looking correct and the pod
+        # reporting healthy. The ConfigMap had this annotation and these
+        # did not, which is exactly the gap.
+        #
+        # scm-postgres-credentials is deliberately NOT here. Rotating it
+        # has a required order (update the Secret, ALTER ROLE against
+        # the running database, THEN restart) -- see
+        # cluster/chart-secrets.sh. Rolling monitor-api on step one
+        # would restart it against a password the database does not have
+        # yet, turning a documented three-step rotation into a window of
+        # failed readiness.
+        checksum/registry-credentials: {{ include (print $.Template.BasePath "/monitor-api/registry-credentials-secret.yaml") . | sha256sum }}
+        checksum/api-key: {{ include (print $.Template.BasePath "/monitor-api/auth-secret.yaml") . | sha256sum }}
     spec:
       serviceAccountName: monitor-api
       # Matches the hardening every scan-worker Job already carries (see
