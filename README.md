@@ -1411,14 +1411,18 @@ scans, nothing to clean up) with a StorageClass's capacity behind it.
 Empty (the default) keeps today's `emptyDir`, so nothing changes until
 you set it.
 
-The setting is process-wide, and `"none"` is how a single Job opts back
-out of it — an `emptyDir`, explicitly, even where a StorageClass is
-configured. That exists because the sensible arrangement is usually a
-mix: PVCs for image scans, which extract gigabytes, and `emptyDir` for
-`sbom`-mode Jobs, which fetch one JSON document and spill nothing (hence
-their much smaller 128Mi/256Mi ephemeral sizing). Without it, enabling
-the feature would hand every SBOM scan a PVC and charge it provisioning
-latency for storage it never writes to.
+**`sbom`-mode Jobs opt out automatically.** They fetch a single JSON
+document and scan it — that's why they already carry the much smaller
+128Mi/256Mi ephemeral sizing — so giving them a PVC would add
+provisioning latency and a volume attach to buy storage they never write
+to. Image-mode Jobs, which extract gigabytes, take whatever you
+configured. The rule lives next to the sizing rationale it mirrors
+(`scratchClassFor` in `internal/scanner/isolated.go`), so the two can't
+drift into disagreeing about which modes touch disk.
+
+The mechanism behind that is `"none"`, which any Job can use to opt back
+into an `emptyDir` even where a StorageClass is configured
+process-wide.
 
 So the setting has three non-default values, and they mean three
 different things: a class name, `"-"` for the cluster default, and

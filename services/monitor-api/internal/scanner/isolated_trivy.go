@@ -294,6 +294,8 @@ func (s *IsolatedTrivyScanner) ScanForArtifact(ctx context.Context, ref, artifac
 		CPULimit:                s.cfg.CPULimit,
 		MemoryLimit:             s.cfg.MemoryLimit,
 		EphemeralStorageLimit:   s.cfg.EphemeralStorageLimit,
+		// "sbom" mode opts back into an emptyDir -- see scratchClassFor.
+		ScratchStorageClass: scratchClassFor(s.cfg.SubCommand),
 	})
 
 	// See IsolatedUnpackerScanner.Scan's identical comment: this must be

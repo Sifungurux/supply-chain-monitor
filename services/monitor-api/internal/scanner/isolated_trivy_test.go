@@ -231,3 +231,75 @@ func TestIsolatedTrivyScanner_Bucket(t *testing.T) {
 		t.Errorf("Bucket() = %q, want %q", got, "cve")
 	}
 }
+
+// An "sbom"-mode Job fetches one JSON document and spills nothing --
+// it already carries the small 128Mi/256Mi sizing for that reason. So
+// when a deployment moves scan scratch space onto a StorageClass, these
+// Jobs opt back out: a PVC would add provisioning latency and a volume
+// attach to buy storage they never write to.
+//
+// Asserted for both modes in one test, because the value of the rule is
+// entirely in the contrast -- an implementation that opted EVERY Job out
+// would pass a test that only looked at "sbom".
+func TestIsolatedScanners_SBOMJobsKeepTheEmptyDirScratch(t *testing.T) {
+	k8sjob.ScratchStorageClass, k8sjob.ScratchSize = "ceph-rbd", "10Gi"
+	defer func() { k8sjob.ScratchStorageClass, k8sjob.ScratchSize = "", "" }()
+
+	scratchOf := func(t *testing.T, job *k8sjob.Job) k8sjob.Volume {
+		t.Helper()
+		for _, v := range job.Spec.Template.Spec.Volumes {
+			if v.Name == "scratch" {
+				return v
+			}
+		}
+		t.Fatal("no scratch volume on the job")
+		return k8sjob.Volume{}
+	}
+
+	run := func(t *testing.T, s Scanner) *k8sjob.Job {
+		t.Helper()
+		client := &recordingJobClient{fakeJobClient: fakeJobClient{
+			namespace:      "supply-chain-monitor",
+			statusSequence: []jobStatusResult{{succeeded: true}},
+			podName:        "p",
+			logs:           `{"findings":[]}`,
+		}}
+		switch v := s.(type) {
+		case *IsolatedTrivyScanner:
+			v.client = client
+		case *IsolatedGrypeScanner:
+			v.client = client
+		}
+		if _, err := s.Scan(context.Background(), "alpine:3.19"); err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		return client.createdJobs[0]
+	}
+
+	for _, tc := range []struct {
+		name       string
+		subCommand string
+		wantPVC    bool
+	}{
+		{"trivy image mode takes the configured StorageClass", "image", true},
+		{"trivy sbom mode keeps its emptyDir", "sbom", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewIsolatedTrivyScanner(nil, IsolatedTrivyConfig{Image: "monitor-api:dev", SubCommand: tc.subCommand})
+			vol := scratchOf(t, run(t, s))
+			if tc.wantPVC && vol.Ephemeral == nil {
+				t.Fatalf("%s: want a volume claim template, got %+v", tc.subCommand, vol)
+			}
+			if !tc.wantPVC && vol.EmptyDir == nil {
+				t.Fatalf("%s: want an emptyDir, got %+v", tc.subCommand, vol)
+			}
+		})
+	}
+
+	t.Run("grype sbom mode keeps its emptyDir too", func(t *testing.T) {
+		s := NewIsolatedGrypeScanner(nil, IsolatedGrypeConfig{Image: "monitor-api:dev", SubCommand: "sbom"})
+		if vol := scratchOf(t, run(t, s)); vol.EmptyDir == nil {
+			t.Fatalf("want an emptyDir, got %+v", vol)
+		}
+	})
+}
