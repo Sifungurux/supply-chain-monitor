@@ -336,6 +336,7 @@ request/response shapes.
 | GET    | `/api/v1/findings?q=...`           | search finding ids/titles ("log4j") — returns matching ids with artifact counts |
 | GET    | `/api/v1/findings/{findingID}/artifacts` | every artifact still affected by a given finding ID (e.g. a CVE) |
 | GET    | `/api/v1/components?purl=...`      | every artifact whose ingested SBOM lists that component |
+| GET    | `/api/v1/artifacts/{id}/components/diff` | what changed in this artifact's SBOM between two scans — added, removed, and upgraded packages (optional `?from=&to=`) |
 
 `type` is one of `image`, `file`, `sbom`, `sarif`.
 
@@ -621,6 +622,44 @@ Set `monitorApi.serviceMonitor.enabled=true` to have a Prometheus
 Operator scrape it. Off by default because `ServiceMonitor` is a CRD:
 enabling it without prometheus-operator installed makes the install
 fail on an unknown kind.
+
+### SBOM component diffing
+
+Every time an SBOM is indexed for an artifact, its component set is
+snapshotted into `components_history` — in the same transaction that
+replaces the current inventory, so the two can't disagree. The last 10
+snapshots per artifact are kept.
+
+`GET /api/v1/artifacts/{id}/components/diff` compares the two most
+recent (or the pair named by `?from=&to=`):
+
+```json
+{
+  "from": "2026-08-14T10:00:00Z",
+  "to": "2026-08-15T10:00:00Z",
+  "added":   [{"purl": "pkg:apk/alpine/curl@8.5.0-r0", "name": "curl", "version": "8.5.0-r0"}],
+  "removed": [{"purl": "pkg:apk/alpine/apk-tools@2.14.4-r0", "name": "apk-tools", "version": "2.14.4-r0"}],
+  "version_changed": [{"purl": "pkg:apk/alpine/openssl@3.1.4-r6", "from": "3.1.4-r5", "to": "3.1.4-r6"}]
+}
+```
+
+`version_changed` is separate on purpose. **A purl embeds its version**,
+so an upgrade changes the purl — a diff keyed on purl alone reports
+every upgrade as an unrelated removal plus addition, which is exactly
+the change anyone comparing two SBOMs is looking for. Packages are
+matched on exact purl first, then by package identity with the version
+stripped, so an artifact legitimately shipping two versions of one
+library and dropping one reports a removal rather than inventing an
+upgrade.
+
+Fewer than two snapshots is a `200` with null `from`/`to` and three
+empty lists, not a `404` — an artifact indexed once has genuinely had
+nothing change yet. The dashboard's detail view shows this as an "SBOM
+changes" section.
+
+The current inventory (`/api/v1/components?purl=`) is still
+latest-only: a package that only ever appeared in an old snapshot does
+not answer component search.
 
 ### Retention: deleting old artifacts
 

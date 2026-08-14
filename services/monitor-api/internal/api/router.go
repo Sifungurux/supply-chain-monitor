@@ -81,13 +81,20 @@ type Config struct {
 	// and adding a second context-taking method to that interface would
 	// entrench the wart Stats(ctx) already documents as one.
 	Ready func(context.Context) error
+	// Fetcher resolves an sbom-type artifact's ref to a local file after
+	// a scan, so its own component inventory can be indexed the same way
+	// an uploaded SBOM's is (see scan.go's indexSBOMTypeComponents).
+	// nil means that indexing is skipped entirely -- which is what every
+	// test that doesn't set it gets, and exactly the behaviour before
+	// this existed.
+	Fetcher scanner.Fetcher
 }
 
 // NewRouter wires up the v1 REST API. Uses Go 1.22's stdlib ServeMux
 // method+wildcard routing, so no external router dependency is needed.
 // See Config for what each field does and what its zero value means.
 func NewRouter(cfg Config) http.Handler {
-	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready}
+	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher}
 	h.metrics = newMetrics()
 	if cfg.ScanLimits.Concurrency > 0 {
 		h.scanSlots = make(chan struct{}, cfg.ScanLimits.Concurrency)
@@ -121,6 +128,7 @@ func NewRouter(cfg Config) http.Handler {
 	mux.HandleFunc("GET /api/v1/findings", h.searchFindings)
 	mux.HandleFunc("GET /api/v1/findings/{findingID}/artifacts", h.findByFindingID)
 	mux.HandleFunc("GET /api/v1/components", h.listByComponent)
+	mux.HandleFunc("GET /api/v1/artifacts/{id}/components/diff", h.listComponentDiff)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/scan", h.scanArtifact)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/stage", h.updateStage)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/maintainer", h.updateMaintainer)

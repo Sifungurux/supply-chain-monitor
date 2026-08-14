@@ -1465,3 +1465,108 @@ func TestPostgresStore_CountAndDeleteOlderThan(t *testing.T) {
 }
 
 func futureCutoffPG() time.Time { return time.Now().UTC().Add(time.Hour) }
+
+// TestPostgresStore_ComponentHistory covers what only real SQL can get
+// wrong here: the snapshot rows landing in the same transaction as the
+// replace, the DISTINCT-scan_at retention DELETE (Postgres has no
+// DELETE ... LIMIT, and the unit kept is a SNAPSHOT, not a row), and
+// ON DELETE CASCADE taking the history with the artifact.
+func TestPostgresStore_ComponentHistory(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	prefix := fmt.Sprintf("hist-%d", time.Now().UnixNano())
+	a, err := s.Create(prefix+":1.0", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Delete(a.ID) })
+
+	first := []artifact.Component{
+		{PURL: prefix + "/openssl@3.1.4-r5", Name: "openssl", Version: "3.1.4-r5"},
+		{PURL: prefix + "/busybox@1.36.1-r15", Name: "busybox", Version: "1.36.1-r15"},
+	}
+	second := []artifact.Component{
+		{PURL: prefix + "/openssl@3.1.4-r6", Name: "openssl", Version: "3.1.4-r6"},
+		{PURL: prefix + "/zlib@1.3-r0", Name: "zlib", Version: "1.3-r0"},
+	}
+	for _, set := range [][]artifact.Component{first, second} {
+		if err := s.SaveComponents(a.ID, set); err != nil {
+			t.Fatalf("SaveComponents: %v", err)
+		}
+	}
+
+	snaps, err := s.ComponentSnapshots(a.ID, 0)
+	if err != nil {
+		t.Fatalf("ComponentSnapshots: %v", err)
+	}
+	if len(snaps) != 2 {
+		t.Fatalf("got %d snapshots, want 2 -- two SaveComponents calls must not collapse into one", len(snaps))
+	}
+	// Newest first.
+	if !snaps[0].After(snaps[1]) {
+		t.Fatalf("snapshots not newest-first: %s then %s", snaps[0], snaps[1])
+	}
+
+	older, err := s.ComponentsAt(a.ID, snaps[1])
+	if err != nil {
+		t.Fatalf("ComponentsAt(older): %v", err)
+	}
+	newer, err := s.ComponentsAt(a.ID, snaps[0])
+	if err != nil {
+		t.Fatalf("ComponentsAt(newer): %v", err)
+	}
+	// The same diff the MemStore test asserts, so the two backends
+	// cannot disagree about what a snapshot pair means.
+	diff := artifact.DiffComponents(older, newer)
+	if len(diff.Added) != 1 || diff.Added[0].Name != "zlib" {
+		t.Errorf("added = %+v, want just zlib", diff.Added)
+	}
+	if len(diff.Removed) != 1 || diff.Removed[0].Name != "busybox" {
+		t.Errorf("removed = %+v, want just busybox", diff.Removed)
+	}
+	if len(diff.VersionChanged) != 1 || diff.VersionChanged[0].To != "3.1.4-r6" {
+		t.Errorf("version_changed = %+v, want openssl -> 3.1.4-r6", diff.VersionChanged)
+	}
+
+	// The current inventory is still latest-only: the history is
+	// additional, not a replacement for the components table's contract.
+	if containing, err := s.FindByComponentPURL(prefix + "/busybox@1.36.1-r15"); err != nil {
+		t.Fatalf("FindByComponentPURL: %v", err)
+	} else if len(containing) != 0 {
+		t.Errorf("a package only present in an OLD snapshot still answers component search: %+v", containing)
+	}
+
+	// Retention: past the cap, the oldest snapshots are evicted and
+	// exactly MaxComponentSnapshots distinct scan_at values remain.
+	for i := 0; i < artifact.MaxComponentSnapshots+3; i++ {
+		if err := s.SaveComponents(a.ID, first); err != nil {
+			t.Fatalf("SaveComponents (retention loop): %v", err)
+		}
+	}
+	capped, err := s.ComponentSnapshots(a.ID, 0)
+	if err != nil {
+		t.Fatalf("ComponentSnapshots: %v", err)
+	}
+	if len(capped) != artifact.MaxComponentSnapshots {
+		t.Fatalf("got %d snapshots, want the cap of %d", len(capped), artifact.MaxComponentSnapshots)
+	}
+	// The very first snapshot must be gone, and the newest must survive
+	// -- the DELETE runs after the insert precisely so the row being
+	// written is among the ones it keeps.
+	for _, ts := range capped {
+		if ts.Equal(snaps[1]) {
+			t.Errorf("the oldest snapshot survived past the cap")
+		}
+	}
+	if rows, err := s.ComponentsAt(a.ID, capped[0]); err != nil || len(rows) == 0 {
+		t.Errorf("the newest snapshot has no rows (%v, %v) -- the retention DELETE ran before the insert", rows, err)
+	}
+
+	// ON DELETE CASCADE.
+	if err := s.Delete(a.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if gone, err := s.ComponentSnapshots(a.ID, 0); err != nil || len(gone) != 0 {
+		t.Errorf("component history survived the artifact: %v (%v)", gone, err)
+	}
+}

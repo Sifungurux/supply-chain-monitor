@@ -1,7 +1,10 @@
 package api
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 )
@@ -78,4 +81,120 @@ func (h *handler) listByComponent(w http.ResponseWriter, r *http.Request) {
 
 	writeError(w, http.StatusBadRequest,
 		`one of "purl" (exact, returns artifacts) or "q" (substring, returns matching packages) is required, e.g. ?q=openssl`)
+}
+
+// componentDiffResponse is the /components/diff answer. From/To are the
+// snapshots actually compared, echoed back because the caller usually
+// didn't name them -- the default is "the two most recent" and a
+// dashboard has to be able to say which two that was.
+//
+// Both are null, with three empty lists, when there is nothing to
+// compare yet. See listComponentDiff.
+type componentDiffResponse struct {
+	From *time.Time `json:"from"`
+	To   *time.Time `json:"to"`
+	// The three keys of artifact.ComponentDiff, spelled out rather than
+	// embedded so this struct reads as the documented response shape.
+	Added          []artifact.Component              `json:"added"`
+	Removed        []artifact.Component              `json:"removed"`
+	VersionChanged []artifact.ComponentVersionChange `json:"version_changed"`
+}
+
+// listComponentDiff answers "what changed in this artifact's SBOM"
+// between two component snapshots -- by default the two most recent,
+// or the pair named by ?from= and ?to= (RFC3339 timestamps from
+// ComponentSnapshots).
+//
+// This is the payoff of components_history existing at all. The
+// components table holds only the CURRENT inventory (SaveComponents
+// replaces it wholesale, matching artifact_documents' latest-only
+// contract), so before the snapshot log there was no previous state to
+// compare against -- a rescan simply overwrote what an upgrade would
+// have been measured from.
+//
+// Fewer than two snapshots is a 200 with null from/to and three empty
+// lists, NOT a 404: "this artifact has only ever been indexed once, so
+// nothing has changed yet" is a real and extremely common answer, and
+// the same convention findByFindingID and listByComponent already use
+// for their own empty results. A 404 here would make a brand-new
+// artifact look broken on the dashboard.
+func (h *handler) listComponentDiff(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := h.store.Get(id); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	from, to, err := parseDiffRange(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if from == nil || to == nil {
+		// No explicit pair: use the two most recent snapshots.
+		snapshots, err := h.store.ComponentSnapshots(id, 2)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if len(snapshots) < 2 {
+			writeJSON(w, http.StatusOK, componentDiffResponse{
+				Added:          []artifact.Component{},
+				Removed:        []artifact.Component{},
+				VersionChanged: []artifact.ComponentVersionChange{},
+			})
+			return
+		}
+		// ComponentSnapshots is newest-first, and a diff reads
+		// oldest -> newest.
+		to, from = &snapshots[0], &snapshots[1]
+	}
+
+	older, err := h.store.ComponentsAt(id, *from)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	newer, err := h.store.ComponentsAt(id, *to)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	diff := artifact.DiffComponents(older, newer)
+	writeJSON(w, http.StatusOK, componentDiffResponse{
+		From:           from,
+		To:             to,
+		Added:          diff.Added,
+		Removed:        diff.Removed,
+		VersionChanged: diff.VersionChanged,
+	})
+}
+
+// parseDiffRange reads the optional ?from=/?to= pair. Both or neither:
+// one alone has no sensible reading -- "changes since X" would silently
+// mean "up to whenever the newest snapshot happens to be", which is a
+// different question than the caller asked and one whose answer changes
+// under them between two identical requests.
+func parseDiffRange(r *http.Request) (*time.Time, *time.Time, error) {
+	rawFrom := r.URL.Query().Get("from")
+	rawTo := r.URL.Query().Get("to")
+	if rawFrom == "" && rawTo == "" {
+		return nil, nil, nil
+	}
+	if rawFrom == "" || rawTo == "" {
+		return nil, nil, errors.New(`"from" and "to" must be given together (or neither, to compare the two most recent snapshots)`)
+	}
+
+	from, err := time.Parse(time.RFC3339Nano, rawFrom)
+	if err != nil {
+		return nil, nil, fmt.Errorf(`"from" must be an RFC3339 timestamp from this artifact's snapshot list: %v`, err)
+	}
+	to, err := time.Parse(time.RFC3339Nano, rawTo)
+	if err != nil {
+		return nil, nil, fmt.Errorf(`"to" must be an RFC3339 timestamp from this artifact's snapshot list: %v`, err)
+	}
+	fromUTC, toUTC := from.UTC(), to.UTC()
+	return &fromUTC, &toUTC, nil
 }

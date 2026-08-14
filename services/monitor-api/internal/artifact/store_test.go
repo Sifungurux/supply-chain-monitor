@@ -703,3 +703,110 @@ func TestMemStore_DeleteOlderThanCascades(t *testing.T) {
 		t.Error("a pruned artifact still has its SBOM document")
 	}
 }
+
+// Two SaveComponents calls back to back must be TWO snapshots. If they
+// collapse into one -- same time.Now() on a coarse clock -- the diff
+// endpoint compares a merged set against an older one, or against
+// itself, and reports "no changes": a wrong answer indistinguishable
+// from a right one. MemStore forces a strictly-newer stamp for exactly
+// this; PostgresStore gets it from separate transactions.
+func TestMemStore_BackToBackSavesAreDistinctSnapshots(t *testing.T) {
+	s := artifact.NewMemStore()
+	a := mustCreateStore(t, s, "churny:1.0")
+
+	for i := 0; i < 25; i++ {
+		if err := s.SaveComponents(a.ID, []artifact.Component{
+			{PURL: "pkg:npm/x@1.0.0", Name: "x", Version: "1.0.0"},
+		}); err != nil {
+			t.Fatalf("SaveComponents: %v", err)
+		}
+	}
+
+	snaps, err := s.ComponentSnapshots(a.ID, 0)
+	if err != nil {
+		t.Fatalf("ComponentSnapshots: %v", err)
+	}
+	if len(snaps) != artifact.MaxComponentSnapshots {
+		t.Fatalf("got %d snapshots after 25 saves, want the cap of %d",
+			len(snaps), artifact.MaxComponentSnapshots)
+	}
+	seen := map[int64]bool{}
+	for _, ts := range snaps {
+		if seen[ts.UnixNano()] {
+			t.Fatalf("duplicate snapshot timestamp %s -- two saves collapsed into one snapshot", ts.Format(time.RFC3339Nano))
+		}
+		seen[ts.UnixNano()] = true
+	}
+	// Newest first.
+	for i := 1; i < len(snaps); i++ {
+		if !snaps[i-1].After(snaps[i]) {
+			t.Fatalf("snapshots not newest-first at %d: %s then %s", i, snaps[i-1], snaps[i])
+		}
+	}
+}
+
+func TestMemStore_ComponentSnapshotsAndDiff(t *testing.T) {
+	s := artifact.NewMemStore()
+	a := mustCreateStore(t, s, "app:1.0")
+
+	first := []artifact.Component{
+		{PURL: "pkg:apk/alpine/openssl@3.1.4-r5", Name: "openssl", Version: "3.1.4-r5"},
+		{PURL: "pkg:apk/alpine/busybox@1.36.1-r15", Name: "busybox", Version: "1.36.1-r15"},
+	}
+	second := []artifact.Component{
+		{PURL: "pkg:apk/alpine/openssl@3.1.4-r6", Name: "openssl", Version: "3.1.4-r6"},
+		{PURL: "pkg:apk/alpine/zlib@1.3-r0", Name: "zlib", Version: "1.3-r0"},
+	}
+	for _, set := range [][]artifact.Component{first, second} {
+		if err := s.SaveComponents(a.ID, set); err != nil {
+			t.Fatalf("SaveComponents: %v", err)
+		}
+	}
+
+	snaps, err := s.ComponentSnapshots(a.ID, 2)
+	if err != nil || len(snaps) != 2 {
+		t.Fatalf("ComponentSnapshots = %v, %v -- want 2", snaps, err)
+	}
+	// snaps[0] is newest.
+	older, err := s.ComponentsAt(a.ID, snaps[1])
+	if err != nil {
+		t.Fatalf("ComponentsAt(older): %v", err)
+	}
+	newer, err := s.ComponentsAt(a.ID, snaps[0])
+	if err != nil {
+		t.Fatalf("ComponentsAt(newer): %v", err)
+	}
+
+	diff := artifact.DiffComponents(older, newer)
+	if len(diff.Added) != 1 || diff.Added[0].Name != "zlib" {
+		t.Errorf("added = %+v, want just zlib", diff.Added)
+	}
+	if len(diff.Removed) != 1 || diff.Removed[0].Name != "busybox" {
+		t.Errorf("removed = %+v, want just busybox", diff.Removed)
+	}
+	if len(diff.VersionChanged) != 1 || diff.VersionChanged[0].From != "3.1.4-r5" || diff.VersionChanged[0].To != "3.1.4-r6" {
+		t.Errorf("version_changed = %+v, want openssl r5 -> r6", diff.VersionChanged)
+	}
+
+	// An unknown timestamp is an empty inventory, not an error.
+	gone, err := s.ComponentsAt(a.ID, time.Now().UTC().Add(-time.Hour))
+	if err != nil || len(gone) != 0 {
+		t.Errorf("ComponentsAt(unknown) = %v, %v -- want empty and no error", gone, err)
+	}
+}
+
+// Snapshots must not outlive their artifact, the same way components
+// and documents don't -- PostgresStore gets this from ON DELETE CASCADE.
+func TestMemStore_DeleteDropsComponentHistory(t *testing.T) {
+	s := artifact.NewMemStore()
+	a := mustCreateStore(t, s, "doomed:1.0")
+	if err := s.SaveComponents(a.ID, []artifact.Component{{PURL: "pkg:npm/x@1.0.0"}}); err != nil {
+		t.Fatalf("SaveComponents: %v", err)
+	}
+	if err := s.Delete(a.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if snaps, _ := s.ComponentSnapshots(a.ID, 0); len(snaps) != 0 {
+		t.Errorf("deleted artifact still has %d snapshots", len(snaps))
+	}
+}

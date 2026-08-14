@@ -183,6 +183,22 @@ type Store interface {
 	// methods here -- see Stats' own comment. Two of nineteen taking a
 	// context is a worse state than one, and the fix is the mechanical
 	// pass that converts all of them.
+	// ComponentSnapshots returns the scan timestamps this artifact has a
+	// component snapshot for, NEWEST FIRST, at most limit of them. Empty
+	// for an artifact whose SBOM has never been indexed, which is the
+	// common case rather than an error.
+	//
+	// Timestamps rather than the snapshots themselves: the diff endpoint
+	// needs to pick two (the latest pair, or the ones ?from=/?to= name)
+	// before it wants any component rows, and a real image's inventory
+	// runs to thousands of them per snapshot.
+	ComponentSnapshots(artifactID string, limit int) ([]time.Time, error)
+	// ComponentsAt returns the inventory recorded at exactly this scan
+	// timestamp -- one of the values ComponentSnapshots handed back.
+	// An unknown timestamp is an empty slice, not an error: the caller
+	// asking for a snapshot that has since aged out of the retained
+	// window (MaxComponentSnapshots) is a normal race, not a fault.
+	ComponentsAt(artifactID string, scanAt time.Time) ([]Component, error)
 	CountOlderThan(cutoff time.Time) (int, error)
 	DeleteOlderThan(cutoff time.Time, limit int) (int, error)
 }
@@ -192,6 +208,13 @@ type Store interface {
 // This used to be the only Store this service had ("v1 stub, no
 // external dependencies"). It's kept around now purely as a fast,
 // hermetic backend for tests -- production always uses PostgresStore.
+// MaxComponentSnapshots bounds how many per-scan component snapshots
+// each artifact keeps (see SaveComponents). Every scan of a real image
+// writes another few thousand rows, so this is unbounded growth without
+// a cap -- and the question the history answers ("what changed?") is
+// asked about recent scans, not about the hundredth one back.
+const MaxComponentSnapshots = 10
+
 type MemStore struct {
 	mu   sync.RWMutex
 	data map[string]*Artifact
@@ -204,13 +227,26 @@ type MemStore struct {
 	// a map is enough for a test backend, where PostgresStore has a real
 	// table with an index on purl.
 	components map[string][]Component
+	// componentHistory is the per-scan snapshot log behind the diff
+	// endpoint, oldest first, capped at MaxComponentSnapshots. Mirrors
+	// PostgresStore's components_history table.
+	componentHistory map[string][]componentSnapshot
+}
+
+// componentSnapshot is one artifact's inventory as of one scan.
+// Unexported: the Store interface hands out timestamps and components
+// separately, so nothing outside this file needs the pairing.
+type componentSnapshot struct {
+	scanAt     time.Time
+	components []Component
 }
 
 func NewMemStore() *MemStore {
 	return &MemStore{
-		data:       make(map[string]*Artifact),
-		documents:  make(map[string]map[string]*Document),
-		components: make(map[string][]Component),
+		data:             make(map[string]*Artifact),
+		documents:        make(map[string]map[string]*Document),
+		components:       make(map[string][]Component),
+		componentHistory: make(map[string][]componentSnapshot),
 	}
 }
 
@@ -357,6 +393,7 @@ func (s *MemStore) Delete(id string) error {
 	// deleted artifact's components would still answer
 	// FindByComponentPURL, from a map nothing else can reach.
 	delete(s.components, id)
+	delete(s.componentHistory, id)
 	return nil
 }
 
@@ -369,7 +406,68 @@ func (s *MemStore) SaveComponents(artifactID string, components []Component) err
 	}
 	// Replaces, never appends -- see the Store interface's comment.
 	s.components[artifactID] = append([]Component(nil), components...)
+	s.appendSnapshotLocked(artifactID, components)
 	return nil
+}
+
+// appendSnapshotLocked records this inventory as a new snapshot and
+// evicts anything past MaxComponentSnapshots. Caller holds the lock.
+//
+// The timestamp is forced strictly newer than the previous snapshot's.
+// That is not paranoia about clocks: two SaveComponents calls in the
+// same test (or two scans of a small SBOM back to back) can land on the
+// same time.Now() on a coarse monotonic clock, and two snapshots
+// sharing a timestamp silently become ONE -- so the diff endpoint,
+// which is defined as "compare the two most recent snapshots", would
+// compare a merged set against an older one, or against itself, and
+// report no changes. A wrong answer that looks exactly like a right
+// one. PostgresStore gets this for free (separate transactions, distinct
+// now()), so the guard lives here where the risk is.
+func (s *MemStore) appendSnapshotLocked(artifactID string, components []Component) {
+	now := time.Now().UTC()
+	history := s.componentHistory[artifactID]
+	if n := len(history); n > 0 && !now.After(history[n-1].scanAt) {
+		now = history[n-1].scanAt.Add(time.Nanosecond)
+	}
+	history = append(history, componentSnapshot{
+		scanAt:     now,
+		components: append([]Component(nil), components...),
+	})
+	if len(history) > MaxComponentSnapshots {
+		history = history[len(history)-MaxComponentSnapshots:]
+	}
+	s.componentHistory[artifactID] = history
+}
+
+// ComponentSnapshots returns retained snapshot timestamps, newest
+// first. See the Store interface.
+func (s *MemStore) ComponentSnapshots(artifactID string, limit int) ([]time.Time, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	history := s.componentHistory[artifactID]
+	out := make([]time.Time, 0, len(history))
+	for i := len(history) - 1; i >= 0; i-- {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		out = append(out, history[i].scanAt)
+	}
+	return out, nil
+}
+
+func (s *MemStore) ComponentsAt(artifactID string, scanAt time.Time) ([]Component, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, snap := range s.componentHistory[artifactID] {
+		if snap.scanAt.Equal(scanAt) {
+			return append([]Component(nil), snap.components...), nil
+		}
+	}
+	// Unknown timestamp is an empty inventory, not an error -- see the
+	// Store interface.
+	return []Component{}, nil
 }
 
 // SearchComponents scans and groups in Go, matching PostgresStore's
@@ -764,6 +862,7 @@ func (s *MemStore) DeleteOlderThan(cutoff time.Time, limit int) (int, error) {
 		delete(s.data, a.ID)
 		delete(s.documents, a.ID)
 		delete(s.components, a.ID)
+		delete(s.componentHistory, a.ID)
 	}
 	return len(stale), nil
 }

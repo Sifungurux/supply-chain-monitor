@@ -76,6 +76,12 @@ type handler struct {
 	// non-nil (NewRouter constructs one), so hot paths increment
 	// without a nil check.
 	metrics *metrics
+	// fetcher resolves an sbom-type artifact's ref to a local file so
+	// its components can be indexed after a scan (see
+	// indexSBOMTypeComponents). nil disables that -- every test that
+	// doesn't care about it, and any deployment without a registry
+	// fetcher configured, behaves exactly as before it existed.
+	fetcher scanner.Fetcher
 }
 
 // scanRetryAfter is the Retry-After (seconds) sent with the 429 a
