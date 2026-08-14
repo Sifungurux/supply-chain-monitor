@@ -718,6 +718,21 @@ monitorApi:
   #
   # Nothing to mirror or refresh: malcontent embeds its rules, so unlike
   # trivy/grype there is no DB cache PVC and no refresh CronJob.
+  # Left at "clamav" on evidence, not caution -- trial runs against this
+  # project's own test fleet found two blockers, both recorded in
+  # internal/scanner/isolated_malcontent.go and the README:
+  #
+  #   - Memory. A rust:1.79 scan peaks at ~6.4GiB and OOMKills at 2, 4
+  #     and 6GiB; playwright OOMKills even at 8GiB. One scan is most of a
+  #     15GiB node, and SCAN_CONCURRENCY (8) applies to every scanner
+  #     equally, so a fleet-wide enable wants a per-scanner concurrency
+  #     cap that does not exist yet.
+  #   - False positives at the default threshold. A stock
+  #     node-exporter:v1.8.1 reports CRITICAL "malware/family/mirai" on
+  #     /bin/getconf, which notifications page on.
+  #
+  # None of that makes the scanner wrong -- it makes it something to
+  # enable per-artifact, deliberately, rather than fleet-wide.
   malwareScanner: "clamav"
   malcontent:
     # Upstream's image, pinned by multi-arch index digest. The scan Job

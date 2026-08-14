@@ -1440,6 +1440,38 @@ DB cache PVC and no refresh CronJob, and the air-gapped story is simpler
 than Trivy's or Grype's. Private-registry pulls are not wired up yet —
 public images work today; see `IsolatedMalcontentConfig`'s note.
 
+**What a trial actually measured**, one Job per image on a four-node k3d
+cluster, before enabling this anywhere:
+
+| image | limit | result |
+|---|---|---|
+| `alpine:3.19` | 2Gi | 15s · 4 rules · 0 critical |
+| `node-exporter:v1.8.1` | 2Gi | 27s · 1 rule · **1 CRITICAL** |
+| `python:3.11-slim` | 2Gi | 25s · 16 rules · 34 HIGH |
+| `lambda/python:3.12` | 2Gi | **OOMKilled** |
+| `rust:1.79` | 2Gi / 4Gi / 6Gi | **OOMKilled** |
+| `rust:1.79` | 8Gi | 119s · peak 6351Mi · 28 rules |
+| `playwright:v1.44.0-jammy` | 8Gi | **OOMKilled** |
+
+Two things follow, and both are why `malwareScanner` still defaults to
+`clamav`:
+
+- **Memory.** A rust-sized image needs ~6.4GiB — over three times the
+  2Gi this shipped with, now raised to 8Gi — and the largest image in
+  this fleet needs more than 8GiB. One scan is most of a 15GiB node, and
+  `SCAN_CONCURRENCY` applies to every scanner equally, so enabling this
+  fleet-wide wants a per-scanner concurrency cap that doesn't exist yet.
+- **False positives at the default threshold.** A stock
+  `node-exporter:v1.8.1` reports CRITICAL `malware/family/mirai` on
+  `/bin/getconf`. At `notify`'s default that pages someone. malcontent's
+  `--ignore-rules` is the lever for this, unwired here.
+
+What did hold up: runtime is a non-issue when a scan completes (25–120s),
+and five consecutive OOMKills had no effect on anything else in the
+cluster — no evictions, no disk growth, other workloads untouched. The
+Job isolation does exactly what it exists for, which is what made
+measuring this against a live cluster safe in the first place.
+
 ### Choosing a CVE scanner: Trivy, Grype, or both
 
 Trivy is the default CVE scanner for `image`/`sbom` artifacts, but

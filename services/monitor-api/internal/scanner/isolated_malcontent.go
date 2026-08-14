@@ -81,12 +81,42 @@ func (c IsolatedMalcontentConfig) withDefaults() IsolatedMalcontentConfig {
 		c.CPULimit = "1"
 	}
 	if c.MemoryLimit == "" {
-		// YARA matching over every file in an image is memory-hungrier
-		// than streaming them to clamd, so this starts at twice the
-		// unpacker Job's limit. A prototype number: raise it if
-		// malcontent Jobs come back OOMKilled on large images, and see
-		// isolated.go's ceiling note before raising ephemeral storage.
-		c.MemoryLimit = "2Gi"
+		// Measured, not guessed -- the 2Gi this shipped with was a guess
+		// and it was wrong. Trial Jobs on the k3d cluster, one image per
+		// run, `kubectl top` sampled every 2s:
+		//
+		//	alpine:3.19            2Gi   15s   ok     4 rules
+		//	node-exporter:v1.8.1   2Gi   27s   ok     1 rule (1 CRITICAL)
+		//	python:3.11-slim       2Gi   25s   ok    16 rules, 34 HIGH
+		//	lambda/python:3.12     2Gi    --   OOMKilled
+		//	rust:1.79              2Gi    --   OOMKilled
+		//	rust:1.79              4Gi    --   OOMKilled
+		//	rust:1.79              6Gi    --   OOMKilled
+		//	rust:1.79              8Gi  119s   ok    28 rules, peak 6351Mi
+		//	playwright:v1.44-jammy 8Gi    --   OOMKilled
+		//
+		// So a rust-sized image needs ~6.4Gi and the largest image in
+		// this project's own test fleet needs more than 8Gi. YARA
+		// matching over every file in an image is in a different league
+		// from streaming those files to clamd, which does the same work
+		// inside 1Gi.
+		//
+		// 8Gi is the limit, not a reservation: the request stays at
+		// MemoryRequest (256Mi), so this does not change scheduling --
+		// it changes how far a scan may grow before the kubelet kills
+		// it. Two things follow, and neither is solved here:
+		//
+		//   - A node has to be able to give it. On the 15GiB podman VM
+		//     this project develops against, one such scan is most of
+		//     the machine.
+		//   - SCAN_CONCURRENCY (8 by default) applies to every scanner
+		//     equally, and eight concurrent 8Gi scans is not a thing any
+		//     of these nodes can do. Enabling malcontent fleet-wide
+		//     wants a per-scanner concurrency cap, which does not exist.
+		//
+		// Both are why monitorApi.malwareScanner still defaults to
+		// "clamav". See the README's malcontent section.
+		c.MemoryLimit = "8Gi"
 	}
 	if c.EphemeralStorageLimit == "" {
 		c.EphemeralStorageLimit = ephemeralStorageLimitFor("image")
