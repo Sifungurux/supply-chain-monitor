@@ -149,6 +149,34 @@ func TestIsolatedMalcontentScanner_UsesImageSizedEphemeralStorage(t *testing.T) 
 	}
 }
 
+// The memory limit is a measured figure, not a preference -- a rust
+// image peaked at 6351Mi and OOMKilled at 2, 4 and 6Gi. Asserted so
+// that lowering it is a deliberate act with a failing test to explain
+// itself, the same way the ephemeral-storage sizing is asserted above.
+func TestIsolatedMalcontentScanner_MemoryLimitMatchesTheMeasurement(t *testing.T) {
+	client := &fakeJobClient{
+		namespace:      "supply-chain-monitor",
+		statusSequence: []jobStatusResult{{succeeded: true}},
+		podName:        "p",
+		logs:           `{"Files":{}}`,
+	}
+	if _, err := NewIsolatedMalcontentScanner(client, IsolatedMalcontentConfig{}).Scan(context.Background(), "alpine:3.19"); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	res := client.created.Spec.Template.Spec.Containers[0].Resources
+	if got := res.Limits["memory"]; got != "8Gi" {
+		t.Errorf("memory limit = %q, want 8Gi -- see withDefaults for the OOMKill measurements behind it", got)
+	}
+	// The request is deliberately NOT raised with it: the limit is a
+	// kill threshold, the request is what scheduling reserves, and
+	// reserving 8Gi per scan would make these Jobs unschedulable on the
+	// nodes that can run them today.
+	if got := res.Requests["memory"]; got != "256Mi" {
+		t.Errorf("memory request = %q, want it left at 256Mi", got)
+	}
+}
+
 func TestIsolatedMalcontentScanner_CleansUpEvenOnFailure(t *testing.T) {
 	client := &fakeJobClient{
 		namespace:      "supply-chain-monitor",
