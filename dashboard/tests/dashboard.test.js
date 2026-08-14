@@ -9,6 +9,48 @@ const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
 
 const SAMPLE_STAGES = { stages: ['source', 'build', 'test', 'scan', 'sign', 'publish', 'deploy'] };
 
+// GET /api/v1/stats is where the summary cards and the stage strip now
+// get their numbers -- fleet-wide, from the server, because
+// /api/v1/artifacts is paginated and counting one page of it produced
+// cards that read as totals and meant "of these 50".
+//
+// These values are exactly what SAMPLE_ARTIFACTS below would have
+// computed back when the dashboard counted them client-side, so the
+// card and stage-pill assertions throughout this file are unchanged: 3
+// artifacts, one scanning, one with an active CVE, one with active
+// malware, and stages scan/build/unstaged one each.
+//
+// Note by_stage's EMPTY-STRING key for the unstaged artifact -- not
+// "unassigned". The stage list is deployment configuration, so the API
+// won't invent a name that could collide with a real stage; the
+// "unassigned" label is the dashboard's own (see renderStages).
+const SAMPLE_STATS = {
+  total: 3,
+  by_status: { scanned: 2, scanning: 1 },
+  by_type: { image: 2, file: 1 },
+  with_findings: { cve: 1, malware: 1, misconfiguration: 0, secret: 0, other: 0 },
+  by_stage: { scan: 1, build: 1, '': 1 }
+};
+
+// statsFor builds a /api/v1/stats body for the handful of tests that
+// supply their own one-artifact list instead of SAMPLE_ARTIFACTS. Only
+// the bucket counts ever differ between them, so that's all it takes --
+// what those tests are checking is that each card reads the bucket it
+// claims to (the cards are positional, and swapping "With secrets" for
+// "With misconfigurations" would be invisible if every bucket were 1).
+function statsFor(buckets) {
+  return {
+    total: 1,
+    by_status: { scanned: 1 },
+    by_type: {},
+    with_findings: Object.assign(
+      { cve: 0, malware: 0, misconfiguration: 0, secret: 0, other: 0 },
+      buckets
+    ),
+    by_stage: {}
+  };
+}
+
 const SAMPLE_ARTIFACTS = [
   {
     id: 'a1',
@@ -136,11 +178,66 @@ function buildDom({ url, fetchImpl, beforeParseExtra }) {
   });
 }
 
+// The regression this endpoint exists to fix: /api/v1/artifacts is
+// paginated, so a card counted from the rows on screen was capped at
+// the page size while reading like a fleet total. Here the store has
+// 812 artifacts and the page holds one, with numbers deliberately
+// unreachable by counting that page -- if any card or stage pill is
+// still computed client-side it reads 0 or 1, never these.
+test('summary cards and stage pills come from /api/v1/stats, not the page on screen', async () => {
+  const onePage = [SAMPLE_ARTIFACTS[0]];
+  const fleet = {
+    total: 812,
+    by_status: { scanned: 780, scanning: 29, failed: 3 },
+    by_type: { image: 812 },
+    with_findings: { cve: 214, malware: 2, misconfiguration: 61, secret: 4, other: 33 },
+    by_stage: { build: 300, scan: 402, '': 110 }
+  };
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(fleet);
+      if (isArtifactsList(url)) return artifactsPage(onePage);
+      return errorResponse(404, { error: 'not found' });
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  const cardNumbers = [...doc.querySelectorAll('#cards .n')].map((n) => n.textContent);
+  // total, scanning, cve, malware, other, misconfiguration, secret --
+  // the card order is positional, so this also pins each card to the
+  // bucket it's labelled with.
+  assert.deepEqual(cardNumbers, ['812', '29', '214', '2', '33', '61', '4']);
+
+  // Stage pills read by_stage, and the empty-string key becomes the
+  // "unassigned" pill -- the API won't name that bucket itself, because
+  // the stage list is deployment config and any name it invented could
+  // collide with a real stage.
+  const pills = [...doc.querySelectorAll('#stages .stage-pill')].map((p) => p.textContent);
+  assert.ok(pills.includes('build300'), `expected a build pill of 300, got ${pills}`);
+  assert.ok(pills.includes('scan402'), `expected a scan pill of 402, got ${pills}`);
+  assert.ok(pills.includes('unassigned110'), `expected an unassigned pill of 110, got ${pills}`);
+  // A configured stage nothing has reached is absent from by_stage
+  // entirely, and must render as 0 rather than undefined.
+  assert.ok(pills.includes('deploy0'), `expected a deploy pill of 0, got ${pills}`);
+
+  // The table still shows only what the page actually contains -- the
+  // cards being fleet-wide is exactly the point, but the rows are not.
+  assert.equal(doc.querySelectorAll('#artifact-rows tr[data-id]').length, 1);
+
+  dom.window.close();
+});
+
 test('renders artifact rows, summary cards, and stage pills from a live API response', async () => {
   const dom = buildDom({
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
       return errorResponse(404, { error: 'not found' });
     }
@@ -172,6 +269,7 @@ test('Details navigates to the artifact detail page with last-scan/digest/CVE/ma
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
       return errorResponse(404, {});
     }
@@ -225,6 +323,7 @@ test('a bookmarked detail URL resolves once the artifact list loads, and an unkn
     url: 'http://localhost:30301/#/artifacts/a1',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
       return errorResponse(404, {});
     }
@@ -260,6 +359,7 @@ test('the detail page shows a download button only for documents that have actua
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage(artifacts);
       return errorResponse(404, {});
     }
@@ -293,6 +393,7 @@ test('clicking a document download button fetches it with the API key and trigge
     url: 'http://localhost:30301/',
     fetchImpl(url, opts) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage(artifacts);
       if (url.endsWith('/api/v1/artifacts/d1/documents/sbom')) {
         capturedRequest = { url, headers: (opts && opts.headers) || {} };
@@ -343,6 +444,7 @@ test('search filters the artifact table by ref, digest, stage, and CVE/malware i
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
       return errorResponse(404, {});
     }
@@ -408,6 +510,7 @@ test('search matches maintainer team/email, and shows a distinct message when no
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage(artifactsWithMaintainer);
       return errorResponse(404, {});
     }
@@ -476,6 +579,7 @@ test('search matches an artifact id, but not a finding that has since been fixed
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage(withFixed);
       return errorResponse(404, {});
     }
@@ -507,6 +611,7 @@ test('editing maintainer on the detail page POSTs to the maintainer endpoint and
     fetchImpl(url, opts) {
       calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
       if (url.endsWith('/a1/maintainer') && opts && opts.method === 'POST') {
         const sent = JSON.parse(opts.body);
@@ -550,6 +655,7 @@ test('shows an empty-state row, not a blank table, when there are no artifacts',
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
@@ -569,6 +675,7 @@ test('the empty-state row points at "Register one above" only when the register 
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
@@ -609,6 +716,7 @@ test("defaults the API base to the dashboard's own host on port 30300, not a har
     url: 'http://192.168.64.12:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
@@ -639,6 +747,7 @@ test('escapes user-supplied artifact data before it reaches innerHTML', async ()
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage(malicious);
       return errorResponse(404, {});
     }
@@ -671,6 +780,7 @@ test('renders SARIF/other findings in their own count column and detail section'
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(statsFor({ other: 1 }));
       if (isArtifactsList(url)) return artifactsPage(withOther);
       return errorResponse(404, {});
     }
@@ -715,6 +825,7 @@ test('renders misconfiguration and secret findings in their own count columns an
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(statsFor({ misconfiguration: 1, secret: 1 }));
       if (isArtifactsList(url)) return artifactsPage(withMisconfigAndSecret);
       return errorResponse(404, {});
     }
@@ -774,6 +885,13 @@ test('a fixed finding shows a Fixed badge, dims, and drops out of open-finding c
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      // cve: 0 -- excluding fixed findings from this count is the
+      // SERVER's job now (see TestStats_SuppressedFindingsDoNotCount in
+      // internal/api/stats_test.go). What's still this dashboard's job,
+      // and what the rest of this test checks, is the per-row column
+      // and the detail page: those read the artifact's own findings
+      // array and filter it client-side via openFindings.
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(statsFor({}));
       if (isArtifactsList(url)) return artifactsPage(withFixed);
       return errorResponse(404, {});
     }
@@ -828,6 +946,10 @@ test('a VEX-suppressed finding shows a "VEX: not affected" badge, dims, and drop
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      // cve: 0 for the same reason as the fixed-finding test above:
+      // the card is server-computed now, the badge and the per-row
+      // column below are not.
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(statsFor({}));
       if (isArtifactsList(url)) return artifactsPage(withSuppressed);
       return errorResponse(404, {});
     }
@@ -866,6 +988,7 @@ test('the component box queries /api/v1/components and lists every artifact cont
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (url.indexOf('/api/v1/components') !== -1) {
         componentRequests.push(url);
         // The endpoint answers with a bare array, not a {total,
@@ -946,6 +1069,7 @@ test('typing a package name shows a picker of matching packages, and choosing on
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (url.indexOf('/api/v1/components') !== -1) {
         requests.push(url);
         if (url.indexOf('q=') !== -1) return jsonResponse(packages);
@@ -1007,6 +1131,7 @@ test('pasting a full purl goes straight to the artifacts, skipping the picker', 
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (url.indexOf('/api/v1/components') !== -1) {
         requests.push(url);
         return jsonResponse([SAMPLE_ARTIFACTS[0]]);
@@ -1038,6 +1163,7 @@ test('a truncated package search says how many it is not showing', async () => {
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (url.indexOf('/api/v1/components?q=') !== -1) {
         return jsonResponse({
           total: 4312,
@@ -1066,6 +1192,7 @@ test('a package search that matches nothing suggests what to try, without claimi
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (url.indexOf('/api/v1/components?q=') !== -1) return jsonResponse({ total: 0, packages: [] });
       if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
       return errorResponse(404, {});
@@ -1092,6 +1219,7 @@ test('a component search that matches nothing says so, rather than "no artifacts
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (url.indexOf('/api/v1/components') !== -1) return jsonResponse([]);
       if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
       return errorResponse(404, {});
@@ -1127,6 +1255,7 @@ test('typing a finding name shows matching ids, and choosing one lists the artif
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (url.indexOf('/api/v1/findings?q=') !== -1) {
         requests.push(url);
         return jsonResponse(matches);
@@ -1182,6 +1311,7 @@ test('an exact CVE id skips the picker, and starting one search clears the other
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (url.indexOf('/api/v1/components') !== -1) {
         requests.push(url);
         return jsonResponse({ total: 1, packages: [{ purl: 'pkg:apk/alpine/openssl@3.1.4-r5', name: 'openssl', version: '3.1.4-r5', artifacts: 1 }] });
@@ -1232,6 +1362,7 @@ test('an artifact registered unsafe (REQUIRE_DIGEST mismatch) shows an Unsafe ba
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage(withUnsafe);
       return errorResponse(404, {});
     }
@@ -1276,6 +1407,7 @@ test('a finding first seen on the artifact\'s most recent update gets a New badg
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage(withNew);
       return errorResponse(404, {});
     }
@@ -1302,6 +1434,7 @@ test('sends the saved API key as a Bearer Authorization header on every request'
     fetchImpl(url, opts) {
       calls.push({ url, headers: (opts && opts.headers) || {} });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
@@ -1346,6 +1479,7 @@ test('saving the form persists the API key to localStorage and re-sends it', asy
     fetchImpl(url, opts) {
       calls.push({ url, headers: (opts && opts.headers) || {} });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
@@ -1370,6 +1504,7 @@ test('uses window.SCM_CONFIG (injected by the render-config initContainer) when 
     fetchImpl(url, opts) {
       calls.push({ url, headers: (opts && opts.headers) || {} });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
@@ -1400,6 +1535,7 @@ test('a value saved in localStorage still overrides window.SCM_CONFIG', async ()
     fetchImpl(url, opts) {
       calls.push({ url, headers: (opts && opts.headers) || {} });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
@@ -1423,6 +1559,7 @@ test('falls back to the old manual-entry behavior when window.SCM_CONFIG is abse
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
@@ -1442,6 +1579,7 @@ test('the "+ Register an artifact" link stays hidden unless allowManualRegistrat
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
@@ -1455,6 +1593,7 @@ test('the "+ Register an artifact" link stays hidden unless allowManualRegistrat
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
@@ -1471,6 +1610,7 @@ test('the "+ Register an artifact" link stays hidden unless allowManualRegistrat
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
@@ -1491,6 +1631,7 @@ test('the connection settings (API/Key/Refresh/status) stay visible unless showC
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
@@ -1504,6 +1645,7 @@ test('the connection settings (API/Key/Refresh/status) stay visible unless showC
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
@@ -1520,6 +1662,7 @@ test('the connection settings (API/Key/Refresh/status) stay visible unless showC
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
@@ -1537,6 +1680,7 @@ test('an error stays visible even with showConnectionSettings: "false" -- a brok
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     },
@@ -1571,6 +1715,7 @@ test('clicking "+ Register an artifact" opens the register modal, closing on out
     url: 'http://localhost:30301/',
     fetchImpl(url, opts) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url) && opts && opts.method === 'POST') {
         return jsonResponse({ id: 'new1', ...JSON.parse(opts.body) });
       }
@@ -1629,6 +1774,7 @@ test('register form POSTs the entered ref/type and reloads the list', async () =
     fetchImpl(url, opts) {
       calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url) && opts && opts.method === 'POST') {
         registered = true;
         return jsonResponse({ id: 'new1', ...JSON.parse(opts.body) });
@@ -1667,6 +1813,7 @@ test('registering with maintainer team + email sends both fields and clears them
     fetchImpl(url, opts) {
       calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url) && opts && opts.method === 'POST') {
         return jsonResponse({ id: 'new1', ...JSON.parse(opts.body) });
       }
@@ -1702,6 +1849,7 @@ test('registering with only maintainer team (no email) is rejected client-side w
     fetchImpl(url, opts) {
       calls.push({ url, method: (opts && opts.method) || 'GET' });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage([]);
       return errorResponse(404, {});
     }
@@ -1728,6 +1876,7 @@ test('filling in the expected-digest field sends expected_digest and surfaces a 
     fetchImpl(url, opts) {
       calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url) && opts && opts.method === 'POST') {
         return errorResponse(409, { error: 'resolved digest does not match the expected digest -- registration refused' });
       }
@@ -1764,6 +1913,7 @@ test('leaving the expected-digest field blank registers normally, with no expect
     fetchImpl(url, opts) {
       calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url) && opts && opts.method === 'POST') {
         return jsonResponse({ id: 'new1', ...JSON.parse(opts.body) });
       }
@@ -1796,6 +1946,7 @@ test('clicking Delete and confirming sends a DELETE request and reloads the list
       const method = (opts && opts.method) || 'GET';
       calls.push({ url, method });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (method === 'DELETE' && /\/api\/v1\/artifacts\/a1$/.test(url)) {
         deleted = true;
         return jsonResponse({});
@@ -1839,6 +1990,7 @@ test('clicking Delete from the detail page removes the artifact and navigates ba
       const method = (opts && opts.method) || 'GET';
       calls.push({ url, method });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (method === 'DELETE' && /\/api\/v1\/artifacts\/a1$/.test(url)) {
         deleted = true;
         return jsonResponse({});
@@ -1881,6 +2033,7 @@ test('clicking Delete and cancelling the confirm dialog makes no request', async
       const method = (opts && opts.method) || 'GET';
       calls.push({ url, method });
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
       return errorResponse(404, {});
     },
@@ -1912,6 +2065,7 @@ test('Next and Previous request the neighbouring page and show the current range
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) {
         requested.push(url);
         const offset = Number(new URL(url, 'http://x').searchParams.get('offset'));
@@ -1949,6 +2103,7 @@ test('choosing a status filter sends it to the server and returns to the first p
     url: 'http://localhost:30301/',
     fetchImpl(url) {
       if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (isArtifactsList(url)) {
         requested.push(url);
         return jsonResponse({ total: 120, artifacts: SAMPLE_ARTIFACTS.slice(0, 1) });
@@ -1972,6 +2127,14 @@ test('choosing a status filter sends it to the server and returns to the first p
   const last = requested[requested.length - 1];
   assert.match(last, /status=scanned/, 'the filter is applied by the server, not client-side');
   assert.match(last, /offset=0/, 'changing a filter goes back to the first page');
+
+  // The cards stay fleet-wide while a filter narrows the table: this
+  // reads SAMPLE_STATS' 3, not the filtered list's 120 or the one row
+  // on screen. Same rule the component-search test asserts a few tests
+  // up -- the cards answer "how much is there", which a filter doesn't
+  // change, and the filtered count has the pager line to itself.
+  assert.equal(doc.querySelector('#cards .n').textContent, '3',
+    'the Artifacts card is the fleet total, not the filtered page count');
 
   dom.window.close();
 });

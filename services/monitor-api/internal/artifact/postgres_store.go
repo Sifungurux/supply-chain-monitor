@@ -1138,6 +1138,101 @@ func (s *PostgresStore) Count() (int, error) {
 	return n, nil
 }
 
+// Stats answers the whole summary in two aggregate queries -- see
+// Stats itself in model.go for what each map means.
+//
+// Two, not five or nine, because the numbers split cleanly along the
+// two tables they come from:
+//
+//   - One `GROUP BY status, type, current_stage` over artifacts gives
+//     the total and all three of its maps at once, folded apart in Go
+//     below. That's a single sequential scan instead of four, and the
+//     grouping can't blow up: status and type have four valid values
+//     each and current_stage is bounded by PIPELINE_STAGES, so this
+//     returns at most a couple of hundred rows regardless of how many
+//     artifacts exist.
+//
+//   - One `GROUP BY bucket` over active findings gives the per-bucket
+//     artifact counts. count(DISTINCT artifact_id), never count(*): the
+//     question is "how many artifacts have a malware hit", and an
+//     artifact with nine active CVEs must count once, not nine times.
+//     Equivalent to an EXISTS subquery per bucket against artifacts,
+//     with one scan instead of five -- a findings row can't outlive its
+//     artifact (ON DELETE CASCADE), so a distinct artifact_id here is
+//     always a real, still-present artifact.
+//
+// activeFindingSQL is reused rather than restated so this can't drift
+// from FindByFindingID/SearchFindings and start reporting a population
+// the click-through disagrees with. It already covers findings whose
+// status is the empty string (rows predating the lifecycle columns):
+// the column is NOT NULL, so an empty status is simply not one of
+// ('fixed', 'not_affected') and counts as active, which is the same
+// direction Finding.IsActive fails in.
+func (s *PostgresStore) Stats(ctx context.Context) (Stats, error) {
+	stats := Stats{
+		ByStatus:     map[string]int{},
+		ByType:       map[string]int{},
+		WithFindings: map[string]int{},
+		ByStage:      map[string]int{},
+	}
+	// Pre-seeded to zero, unlike the other three maps -- see Stats' own
+	// comment. A GROUP BY only ever returns buckets that have rows, so
+	// without this "no artifact has malware" would be an absent key
+	// rather than a stated 0.
+	for _, bucket := range bucketNames {
+		stats.WithFindings[bucket] = 0
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT status, type, current_stage, count(*)
+		FROM artifacts
+		GROUP BY status, type, current_stage
+	`)
+	if err != nil {
+		return Stats{}, fmt.Errorf("stats: group artifacts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status, artifactType, stage string
+		var n int
+		if err := rows.Scan(&status, &artifactType, &stage, &n); err != nil {
+			return Stats{}, fmt.Errorf("stats: scan artifact group: %w", err)
+		}
+		stats.Total += n
+		stats.ByStatus[status] += n
+		stats.ByType[artifactType] += n
+		// Unstaged artifacts land under "", which is what the column
+		// already holds for them (DEFAULT '') -- see Stats.ByStage.
+		stats.ByStage[stage] += n
+	}
+	if err := rows.Err(); err != nil {
+		return Stats{}, fmt.Errorf("stats: group artifacts: %w", err)
+	}
+
+	bucketRows, err := s.pool.Query(ctx, `
+		SELECT bucket, count(DISTINCT artifact_id)
+		FROM findings
+		WHERE `+activeFindingSQL+`
+		GROUP BY bucket
+	`)
+	if err != nil {
+		return Stats{}, fmt.Errorf("stats: group findings: %w", err)
+	}
+	defer bucketRows.Close()
+	for bucketRows.Next() {
+		var bucket string
+		var n int
+		if err := bucketRows.Scan(&bucket, &n); err != nil {
+			return Stats{}, fmt.Errorf("stats: scan finding group: %w", err)
+		}
+		stats.WithFindings[bucket] = n
+	}
+	if err := bucketRows.Err(); err != nil {
+		return Stats{}, fmt.Errorf("stats: group findings: %w", err)
+	}
+	return stats, nil
+}
+
 // FindByRef returns the first-registered artifact with this exact ref --
 // the dedup fallback used only when a digest could not be resolved. See
 // the Store interface's comment for why that fallback exists.

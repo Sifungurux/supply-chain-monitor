@@ -239,8 +239,30 @@ else
 	missing_purl_status=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" "${BASE}/api/v1/components")
 	check "GET /api/v1/components (neither purl nor q)" "$missing_purl_status" "400"
 
+	# The aggregate endpoint, checked against live state rather than by
+	# accepting a 200: this database has exactly one artifact (created
+	# above), it is an image, and its CVE-2024-1234 is active again
+	# after the retraction the VEX section just exercised. Two separate
+	# aggregate queries have to agree with the rest of the API on all of
+	# that -- which is the failure a 200 alone would sail straight past.
+	stats_status=$(curl -s -o /tmp/stats.json -w '%{http_code}' "${AUTH[@]}" "${BASE}/api/v1/stats")
+	check "GET /api/v1/stats" "$stats_status" "200"
+	grep -q '"total":1,' /tmp/stats.json || { echo "FAIL: stats total should be 1: $(cat /tmp/stats.json)" >&2; fail=1; }
+	grep -q '"by_type":{"image":1}' /tmp/stats.json || { echo "FAIL: stats by_type should report the registered image: $(cat /tmp/stats.json)" >&2; fail=1; }
+	grep -q '"with_findings":{"cve":1,' /tmp/stats.json || { echo "FAIL: stats with_findings should count the artifact's active CVE: $(cat /tmp/stats.json)" >&2; fail=1; }
+	# Buckets with nothing in them are still reported, explicitly zero --
+	# "no artifact has malware" is a statement this endpoint makes.
+	grep -q '"malware":0,' /tmp/stats.json || { echo "FAIL: stats with_findings should report an explicit 0 for empty buckets: $(cat /tmp/stats.json)" >&2; fail=1; }
+
 	delete_status=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "${AUTH[@]}" "${BASE}/api/v1/artifacts/${artifact_id}")
 	check "DELETE /api/v1/artifacts/{id}" "$delete_status" "200"
+
+	# Deleting cascades to findings, so the bucket count has to come
+	# back down with it -- an aggregate that counted orphaned finding
+	# rows would keep reporting an artifact that no longer exists.
+	after_delete=$(curl -s "${AUTH[@]}" "${BASE}/api/v1/stats")
+	echo "$after_delete" | grep -q '"total":0,' || { echo "FAIL: stats total should be 0 after the delete: $after_delete" >&2; fail=1; }
+	echo "$after_delete" | grep -q '"with_findings":{"cve":0,' || { echo "FAIL: stats still counts a deleted artifact's CVE: $after_delete" >&2; fail=1; }
 fi
 
 if [ "$fail" -ne 0 ]; then
