@@ -3,7 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"sync"
@@ -128,7 +128,7 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 			// unrecovered panic here would take the whole process down
 			// rather than failing one request. Mark the artifact failed
 			// and keep serving.
-			log.Printf("scan for artifact %s panicked: %v", a.ID, rec)
+			slog.Error("scan panicked", "artifact_id", a.ID, "err", rec)
 			// A panic short-circuits the normal outcome below, so it has
 			// to record its own -- otherwise started would outrun
 			// succeeded+failed by exactly the number of panics, which is
@@ -138,7 +138,7 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 				art.Status = artifact.StatusFailed
 				art.LastScanErrors = []string{"scan panicked -- see server logs"}
 			}); err != nil {
-				log.Printf("could not mark artifact %s failed after a panic: %v", a.ID, err)
+				slog.Error("could not mark artifact failed after a panic", "artifact_id", a.ID, "err", err)
 			}
 		}
 	}()
@@ -267,7 +267,7 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 	cleanErrors := make([]string, len(scanErrors))
 	var failureReason string
 	for i, raw := range scanErrors {
-		log.Printf("scan error for artifact %s: %s", a.ID, raw)
+		slog.Warn("scan error", "artifact_id", a.ID, "err", raw)
 		reason, message := scanner.ClassifyScanError(raw)
 		cleanErrors[i] = message
 		if failureReason == "" || scanner.ReasonRank(reason) < scanner.ReasonRank(failureReason) {
@@ -365,10 +365,12 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 		// Nobody to return a 500 to -- the artifact is left at whatever
 		// the store last persisted (status "scanning"), which the sweep
 		// CronJob reclaims once it goes stale.
-		log.Printf("could not persist scan results for artifact %s: %v", id, updErr)
+		slog.Error("could not persist scan results", "artifact_id", id, "err", updErr)
 		return
 	}
-	log.Printf("scan finished for artifact %s (%s): status=%s, %d scan error(s)", id, updated.Ref, updated.Status, len(updated.LastScanErrors))
+	slog.Info("scan finished",
+		"artifact_id", id, "ref", updated.Ref,
+		"status", updated.Status, "scan_errors", len(updated.LastScanErrors))
 
 	// a is the pre-scan snapshot taken before this scan started, so
 	// a.LastScanAt == nil means this was the artifact's first ever scan
@@ -416,7 +418,7 @@ func (h *handler) notifyNewFindings(a *artifact.Artifact, roundStamp time.Time, 
 	// notify -- which is right: we did look, and this is the first time
 	// we have actually seen the contents.
 	if firstScan && !h.notifyOnFirstScan {
-		log.Printf("scan for artifact %s was its first -- notifications suppressed (every finding is new on a first look; set notifications.suppressFirstScan=false to send these)", a.ID)
+		slog.Info("first scan -- notifications suppressed (every finding is new on a first look; set notifications.suppressFirstScan=false to send these)", "artifact_id", a.ID)
 		return
 	}
 	threshold := h.notifyMinSeverity
@@ -447,14 +449,15 @@ func (h *handler) notifyNewFindings(a *artifact.Artifact, roundStamp time.Time, 
 		NewFindings: newFindings,
 		Severity:    notify.Worst(newFindings),
 	}
-	log.Printf("scan for artifact %s introduced %d new finding(s) at or above %q -- notifying %d destination(s)",
-		a.ID, len(newFindings), threshold, len(h.notifiers))
+	slog.Info("scan introduced new findings at or above the notify threshold",
+		"artifact_id", a.ID, "count", len(newFindings),
+		"threshold", threshold, "destinations", len(h.notifiers))
 
 	for _, n := range h.notifiers {
 		go func(n notify.Notifier) {
 			defer func() {
 				if rec := recover(); rec != nil {
-					log.Printf("notifier panicked for artifact %s: %v", a.ID, rec)
+					slog.Error("notifier panicked", "artifact_id", a.ID, "err", rec)
 				}
 			}()
 			// Its own context, not the scan's: the scan's is already

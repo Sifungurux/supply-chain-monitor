@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -240,7 +240,7 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 			// The artifact itself was created successfully; only the
 			// digest/unsafe metadata failed to persist. Log rather than
 			// fail a registration that otherwise succeeded.
-			log.Printf("failed to persist resolved digest for artifact %s: %v", a.ID, err)
+			slog.Error("could not persist the resolved digest", "artifact_id", a.ID, "err", err)
 		} else {
 			a = updated
 		}
@@ -250,7 +250,7 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 			art.MaintainerTeam = req.MaintainerTeam
 			art.MaintainerEmail = req.MaintainerEmail
 		}); err != nil {
-			log.Printf("failed to persist maintainer info for artifact %s: %v", a.ID, err)
+			slog.Error("could not persist maintainer info", "artifact_id", a.ID, "err", err)
 		} else {
 			a = updated
 		}
@@ -510,7 +510,7 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 				art.Digest = digest
 				art.Unsafe = unsafe
 			}); err != nil {
-				log.Printf("failed to persist resolved digest for artifact %s: %v", a.ID, err)
+				slog.Error("could not persist the resolved digest", "artifact_id", a.ID, "err", err)
 			} else {
 				a = updated
 			}
@@ -525,7 +525,7 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 				art.MaintainerTeam = item.MaintainerTeam
 				art.MaintainerEmail = item.MaintainerEmail
 			}); err != nil {
-				log.Printf("failed to persist maintainer info for artifact %s: %v", a.ID, err)
+				slog.Error("could not persist maintainer info", "artifact_id", a.ID, "err", err)
 			} else {
 				a = updated
 				if digest != "" {

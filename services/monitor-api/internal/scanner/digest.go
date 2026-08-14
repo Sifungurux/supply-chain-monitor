@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/exec"
 	"strings"
 )
@@ -118,7 +118,8 @@ func (r *OrasDigestResolver) Resolve(ctx context.Context, ref string, plainHTTP 
 		// this one, and "the raw text simply never leaves the process"
 		// is the version that stays true. An operator loses nothing:
 		// the full stderr is in this pod's logs.
-		log.Printf("oras manifest fetch --descriptor %q failed: %v (%s)", ref, err, strings.TrimSpace(stderr.String()))
+		slog.Warn("oras manifest fetch --descriptor failed",
+			"ref", ref, "stderr", strings.TrimSpace(stderr.String()), "err", err)
 		return "", fmt.Errorf("oras manifest fetch --descriptor %q failed: %w", ref, err)
 	}
 

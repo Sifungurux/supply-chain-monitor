@@ -166,11 +166,16 @@ func TestMetrics_CountsScanOutcomes(t *testing.T) {
 	}
 }
 
-// Every scan must land in exactly one of succeeded/failed, including
-// the ones that panic -- the recovered-panic path returns before the
-// normal outcome is computed, so it records its own. If it stops doing
-// that, started outruns succeeded+failed and nothing else notices.
-func TestMetrics_PanickingScanCountsAsFailed(t *testing.T) {
+// Every scan must land in exactly one of succeeded/failed, so started
+// never outruns succeeded+failed -- a drift nothing else would notice.
+//
+// Note what this does and does not cover: a scanner that panics is
+// recovered inside its own goroutine and reported as a scan error, so
+// this exercises the NORMAL outcome path with every scanner failed.
+// runScan's own recover() -- for a panic in runScan itself -- records
+// its outcome separately and is not reached from here; it is defensive
+// code for a case no test currently provokes.
+func TestMetrics_EveryScanRecordsExactlyOneOutcome(t *testing.T) {
 	store := artifact.NewMemStore()
 	h := api.NewRouter(api.Config{
 		Store:    store,

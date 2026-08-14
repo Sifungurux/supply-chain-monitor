@@ -3,7 +3,7 @@ package scanner
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 )
 
@@ -65,7 +65,9 @@ func waitForJob(ctx context.Context, client JobStatusChecker, name, noun string,
 			// Logged, not returned: this is the condition that used to
 			// fail scans silently-looking-like-scanner-errors, and an
 			// operator needs to see it happening even when it recovers.
-			log.Printf("job %s: status check failed (%d/%d), retrying: %v", name, consecutiveErrors, maxConsecutiveStatusErrors, err)
+			slog.Warn("job status check failed, retrying",
+				"job", name, "consecutive_errors", consecutiveErrors,
+				"max_consecutive_errors", maxConsecutiveStatusErrors, "err", err)
 		case failed:
 			return fmt.Errorf("%s failed to run (crashed or was killed before producing a result)", noun)
 		case succeeded:

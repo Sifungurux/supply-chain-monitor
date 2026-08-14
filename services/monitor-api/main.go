@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -134,11 +135,11 @@ func writeDockerConfig(registryAddr, username, password string) string {
 	}
 	dir, err := os.MkdirTemp("", "scm-dockerconfig-*")
 	if err != nil {
-		log.Fatalf("create docker config temp dir: %v", err)
+		fatal("could not create the docker config temp dir", "err", err)
 	}
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, buildDockerConfigJSON(registryAddr, username, password), 0o600); err != nil {
-		log.Fatalf("write docker config temp file: %v", err)
+		fatal("could not write the docker config temp file", "err", err)
 	}
 	return path
 }
@@ -216,7 +217,75 @@ func connectStoreWithRetry(ctx context.Context, dsn string, attempts int, delay 
 	return nil, fmt.Errorf("giving up after %d attempts: %w", attempts, lastErr)
 }
 
+// logFieldKeys documents the field names this service logs, so the same
+// fact is queryable by the same key across every package. Three
+// packages spelling the artifact id three ways is the failure mode here,
+// and nothing in the toolchain catches it -- structured logs are only
+// worth the change if `artifact_id=abc` finds everything about abc.
+//
+//	artifact_id  the artifact an event concerns
+//	ref          its OCI ref / path
+//	err          the error, always the LAST pair on a line
+//	scanner      which scanner ("trivy", "clamav", ...)
+//	status       an artifact status, or an HTTP status
+//	job          a Kubernetes Job name
+//	host         a hostname being resolved or refused
+//	count        how many of whatever the message names
+//
+// Not enforced by anything -- a linter for this would cost more than it
+// saves at this size. It is a convention, written down once.
+const logFieldKeys = "artifact_id, ref, err, scanner, status, job, host, count"
+
+// setupLogging installs a JSON slog handler as the process-wide default.
+//
+// stderr, not stdout, matching where the stdlib log package already
+// wrote: `monitor-api scan-worker` prints its WorkerResult JSON to
+// stdout and the parent parses it back out of the Job pod's logs. That
+// parse is anchored on scanner.ResultMarker and reads the combined
+// stream, so it would survive log lines either way -- but keeping the
+// result on its own stream means the two never have to be untangled in
+// the first place.
+//
+// slog.SetDefault also redirects the stdlib log package through this
+// handler, which is what makes a partial migration safe: a log.Printf
+// this change did not convert still comes out as JSON with its text in
+// "msg", rather than leaving two formats interleaved in one stream.
+// fatal logs at error level and exits non-zero -- what log.Fatalf did,
+// minus the part that made it wrong here. log.Fatalf still works
+// through the slog bridge, but everything it writes arrives at INFO,
+// so a startup misconfiguration that stops the process would be
+// indistinguishable from a routine "listening on :8080" to anything
+// filtering by level. Which is the one line you would filter for.
+func fatal(msg string, args ...any) {
+	slog.Error(msg, args...)
+	os.Exit(1)
+}
+
+func setupLogging() {
+	level := slog.LevelInfo
+	// Parsed leniently: an unset or unrecognized LOG_LEVEL keeps info
+	// rather than refusing to start. A typo in a log-verbosity env var
+	// is not a reason to fail a deployment, and info is the level that
+	// was effectively in force before this existed.
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL"))) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn", "warning":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+}
+
 func main() {
+	// Before the mode dispatch below, so scan-worker and
+	// sweep-registered log the same way the API server does -- the
+	// scan-worker's output is the one a human actually reads under
+	// `kubectl logs`, so it is the last mode that should be left on a
+	// different format.
+	setupLogging()
+
 	// `monitor-api scan-worker` is the same binary running in a
 	// different mode: a single, one-shot unpack+malware-scan of one
 	// image artifact, then exit -- no HTTP server, no Postgres
@@ -511,7 +580,7 @@ func runSweepRegistered() {
 
 	all, err := listRegisteredFromAPI(ctx, apiBase, apiKey)
 	if err != nil {
-		log.Fatalf("sweep-registered: could not list artifacts: %v", err)
+		fatal("sweep-registered: could not list artifacts", "err", err)
 	}
 
 	// Artifacts stuck at "scanning" get reclaimed here too. A scan runs
@@ -1012,7 +1081,7 @@ func runAPIServer() {
 	switch cveScanner {
 	case "trivy", "grype", "both":
 	default:
-		log.Fatalf(`CVE_SCANNER=%q is invalid -- must be "trivy", "grype", or "both"`, cveScanner)
+		fatal(`CVE_SCANNER is invalid -- must be "trivy", "grype", or "both"`, "cve_scanner", cveScanner)
 	}
 
 	stages := strings.Split(stagesEnv, ",")
@@ -1028,7 +1097,7 @@ func runAPIServer() {
 	// already used for POSTGRES_PASSWORD.
 	apiKey := os.Getenv("API_KEY")
 	if apiKey == "" {
-		log.Fatalf("API_KEY is required and was not set")
+		fatal("API_KEY is required and was not set")
 	}
 
 	// Artifacts are persisted in Postgres (Percona Distribution for
@@ -1040,7 +1109,7 @@ func runAPIServer() {
 	dsn := buildPostgresDSN()
 	store, err := connectStoreWithRetry(ctx, dsn, 12, 5*time.Second)
 	if err != nil {
-		log.Fatalf("could not connect to postgres: %v", err)
+		fatal("could not connect to postgres", "err", err)
 	}
 
 	stageTracker := pipeline.NewTracker(stages)
@@ -1089,8 +1158,9 @@ func runAPIServer() {
 	//
 	// DISABLE_SCAN_ISOLATION restores the ability to run this binary
 	// that way, for quick local iteration: it skips
-	// k8sjob.NewInClusterClient entirely (so its own log.Fatalf on a
-	// missing ServiceAccount token never fires) and falls back to
+	// k8sjob.NewInClusterClient entirely (so the error it returns for a
+	// missing KUBERNETES_SERVICE_HOST / ServiceAccount token, which
+	// this file turns into a fatal, never happens) and falls back to
 	// running UnpackerScanner and TrivyScanner directly in-process,
 	// exactly like before the isolation work landed. Left at its
 	// default (isolation stays on) for every real deployment in k8s/ --
@@ -1148,7 +1218,9 @@ func runAPIServer() {
 	scanWorkerActiveDeadlineSeconds := getenvInt("SCAN_WORKER_ACTIVE_DEADLINE_SECONDS", 600)
 	scanTimeoutSeconds := getenvInt("SCAN_TIMEOUT_SECONDS", 660)
 	if scanTimeoutSeconds <= scanWorkerActiveDeadlineSeconds {
-		log.Fatalf("SCAN_TIMEOUT_SECONDS (%ds) must be greater than SCAN_WORKER_ACTIVE_DEADLINE_SECONDS (%ds) -- otherwise a scan gets reported as timed out before Kubernetes would even kill a genuinely stuck scan-worker Job", scanTimeoutSeconds, scanWorkerActiveDeadlineSeconds)
+		fatal("SCAN_TIMEOUT_SECONDS must be greater than SCAN_WORKER_ACTIVE_DEADLINE_SECONDS -- otherwise a scan gets reported as timed out before Kubernetes would even kill a genuinely stuck scan-worker Job",
+			"scan_timeout_seconds", scanTimeoutSeconds,
+			"scan_worker_active_deadline_seconds", scanWorkerActiveDeadlineSeconds)
 	}
 	scanTimeout := time.Duration(scanTimeoutSeconds) * time.Second
 
@@ -1164,7 +1236,7 @@ func runAPIServer() {
 	if !disableScanIsolation {
 		k8sClient, err := k8sjob.NewInClusterClient()
 		if err != nil {
-			log.Fatalf("could not create kubernetes client for scan-worker jobs: %v (set DISABLE_SCAN_ISOLATION=true to run without one -- see README)", err)
+			fatal("could not create the kubernetes client for scan-worker jobs (set DISABLE_SCAN_ISOLATION=true to run without one -- see README)", "err", err)
 		}
 		workerImage := getenv("SCAN_WORKER_IMAGE", "monitor-api:dev")
 		// Empty (the pre-registry-auth default) when scm-registry has no
@@ -1309,10 +1381,10 @@ func runAPIServer() {
 	if pluggableScannersEnv := getenv("PLUGGABLE_SCANNERS", ""); pluggableScannersEnv != "" {
 		var specs []scanner.PluggableScannerConfig
 		if err := json.Unmarshal([]byte(pluggableScannersEnv), &specs); err != nil {
-			log.Fatalf("PLUGGABLE_SCANNERS is not valid JSON: %v", err)
+			fatal("PLUGGABLE_SCANNERS is not valid JSON", "err", err)
 		}
 		if err := registerPluggableScanners(scanners, specs, fetcher); err != nil {
-			log.Fatalf("invalid PLUGGABLE_SCANNERS config: %v", err)
+			fatal("invalid PLUGGABLE_SCANNERS config", "err", err)
 		}
 	}
 
@@ -1370,7 +1442,7 @@ func runAPIServer() {
 		// unrecognized threshold ranks 0) -- a typo'd threshold that
 		// quietly pages on every low-severity finding is worse than a
 		// refused startup.
-		log.Fatalf("NOTIFY_MIN_SEVERITY=%q is not a known severity (critical, high, medium, low, negligible, unknown)", notifyMinSeverity)
+		fatal("NOTIFY_MIN_SEVERITY is not a known severity (critical, high, medium, low, negligible, unknown)", "notify_min_severity", notifyMinSeverity)
 	}
 	var notifiers []notify.Notifier
 	if url := os.Getenv("NOTIFY_WEBHOOK_URL"); url != "" {
@@ -1438,6 +1510,6 @@ func runAPIServer() {
 
 	log.Printf("monitor-api listening on %s", listenAddr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("server error: %v", err)
+		fatal("server error", "err", err)
 	}
 }

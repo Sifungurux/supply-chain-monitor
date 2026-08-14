@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 )
@@ -47,7 +47,7 @@ func (s *SlackNotifier) Notify(ctx context.Context, event ScanEvent) error {
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		log.Printf("notify: slack delivery failed for artifact %s: %v", event.ArtifactID, err)
+		slog.Error("notify: slack delivery failed", "artifact_id", event.ArtifactID, "err", err)
 		return fmt.Errorf("post to slack: %w", err)
 	}
 	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -59,7 +59,7 @@ func (s *SlackNotifier) Notify(ctx context.Context, event ScanEvent) error {
 	// message from a rejected one.
 	if resp.StatusCode != http.StatusOK || strings.TrimSpace(string(payload)) != "ok" {
 		err := fmt.Errorf("slack returned %d: %s", resp.StatusCode, strings.TrimSpace(string(payload)))
-		log.Printf("notify: slack delivery failed for artifact %s: %v", event.ArtifactID, err)
+		slog.Error("notify: slack delivery failed", "artifact_id", event.ArtifactID, "err", err)
 		return err
 	}
 	return nil

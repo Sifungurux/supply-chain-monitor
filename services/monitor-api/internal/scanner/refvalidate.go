@@ -3,7 +3,7 @@ package scanner
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -124,12 +124,12 @@ func validateRefHost(ctx context.Context, ref, host string) error {
 		// air-gapped, or simply not resolvable from this pod is routine
 		// (see findDuplicate's comment in internal/api/artifacts.go),
 		// and the fetch/scan that follows fails honestly on its own.
-		log.Printf("ref host %q did not resolve (%v) -- allowing registration, the fetch will fail on its own if it stays unresolvable", host, err)
+		slog.Warn("ref host did not resolve -- allowing registration, the fetch will fail on its own if it stays unresolvable", "host", host, "err", err)
 		return nil
 	}
 	for _, a := range addrs {
 		if class := blockedAddrClass(a.IP); class != "" {
-			log.Printf("refused ref %q: host %q resolves to %s (%s)", ref, host, a.IP, class)
+			slog.Warn("refused ref", "ref", ref, "host", host, "ip", a.IP, "class", class)
 			return fmt.Errorf("ref host %q resolves to a %s address -- refused (set %s to permit it)", host, class, RefHostAllowlistEnv)
 		}
 	}

@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -220,7 +220,7 @@ func (t *TrivyScanner) ScanRaw(ctx context.Context, ref string) ([]byte, error) 
 	// tried to touch trivy's *default* cache location (not the mounted
 	// --cache-dir), which sits on the scan-worker Job's deliberately
 	// read-only root filesystem, so the cleanup itself failed every
-	// time -- and cleanScanCache's log.Printf about that failure landed
+	// time -- and cleanScanCache's log line about that failure landed
 	// on the same combined stdout+stderr stream runScanWorker's
 	// WorkerResult JSON is printed to, which IsolatedTrivyScanner reads
 	// back via the pod's logs expecting *only* that one JSON document.
@@ -347,6 +347,7 @@ func cleanScanCache() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if out, err := exec.CommandContext(ctx, "trivy", "clean", "--scan-cache").CombinedOutput(); err != nil {
-		log.Printf("trivy clean --scan-cache failed (non-fatal, scan result unaffected -- but the scan cache will keep growing until this succeeds): %v (%s)", err, string(out))
+		slog.Warn("trivy clean --scan-cache failed (non-fatal, scan result unaffected -- but the scan cache will keep growing until this succeeds)",
+			"scanner", "trivy", "output", string(out), "err", err)
 	}
 }
