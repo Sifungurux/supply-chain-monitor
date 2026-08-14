@@ -295,9 +295,19 @@ to start (`CreateContainerConfigError`, missing key/Secret) — the
 normal, expected Kubernetes failure mode for this pattern, not
 something this chart adds extra validation on top of.
 
-The `dockerAuth.accounts.*.password` values (registry auth) are a
-separate, still-plaintext-only set of credentials — none of the above
-covers them yet; see docs/architecture.md's "Known limitations".
+The three `dockerAuth.accounts.*.password` values (registry auth) work
+the same way as of this change: empty in `values.yaml`, sourced from
+`make chart-secrets` (which generates one per account), `--set`/`-f`,
+or `dockerAuth.existingSecret: true` if you manage docker_auth's config
+and monitor-api's registry credentials yourself.
+
+An account left empty is **omitted from docker_auth's config entirely**
+— no user entry, no ACL rule — so it cannot authenticate at all. That
+is deliberate and is not the same as rendering an empty password:
+piping `""` through Helm's `bcrypt` produces a perfectly valid hash
+that *accepts an empty password*, so an unconfigured account would have
+become an open one. Leave them all empty and the registry refuses
+everyone, which is the right direction for a credential nobody set.
 
 ## API
 
@@ -1249,9 +1259,9 @@ oras` if you don't already have it, same as for
 ```bash
 # push a SARIF file as a single-blob OCI artifact -- scm-registry now
 # requires auth (see "Registry authentication" below); scm-writer can
-# push, scm-reader can only pull. Credentials are the plaintext
-# dev-placeholder values.yaml sets under dockerAuth.accounts.*.
-oras push --plain-http -u scm-writer -p changeme-writer localhost:30500/scans/app-sarif:1 results.sarif
+# push, scm-reader can only pull. The password is whatever you
+# configured (see "Registry authentication" for how to read it back).
+oras push --plain-http -u scm-writer -p "$SCM_WRITER_PASSWORD" localhost:30500/scans/app-sarif:1 results.sarif
 
 # register it -- ref is the registry reference, not a local path
 curl -s -X POST localhost:8080/api/v1/artifacts \
@@ -1333,15 +1343,25 @@ single shared registry):
 | `scm-writer` | read-write | pull, push |
 | `scm-admin` | admin | pull, push, delete — no restrictions |
 
-Credentials are the plaintext dev placeholders `values.yaml`'s
-`dockerAuth.accounts.*.password` sets — change before this points at
-anything shared. `docker`/`oras` pick up a token automatically once
-you've logged in or passed `-u`/`-p`:
+`values.yaml` ships **no passwords** for these accounts — see
+"Bringing your own secrets" above for where a real one comes from, and
+what happens to an account you leave unset (it is omitted, so it cannot
+log in at all).
+
+With `make chart-secrets`, one is generated per account. Read one back:
 
 ```bash
-docker login localhost:30500 -u scm-writer -p changeme-writer
+SCM_WRITER_PASSWORD=$(kubectl get secret scm-chart-secrets -n flux-system \
+  -o jsonpath='{.data.registry-writer-password}' | base64 --decode)
+```
+
+`docker`/`oras` pick up a token automatically once you've logged in or
+passed `-u`/`-p`:
+
+```bash
+docker login localhost:30500 -u scm-writer -p "$SCM_WRITER_PASSWORD"
 # or, per-command, no login needed:
-oras push --plain-http -u scm-writer -p changeme-writer localhost:30500/myapp:1 ./myapp.tar
+oras push --plain-http -u scm-writer -p "$SCM_WRITER_PASSWORD" localhost:30500/myapp:1 ./myapp.tar
 ```
 
 `monitor-api` itself only ever pulls (never pushes) — it authenticates

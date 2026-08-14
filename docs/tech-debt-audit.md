@@ -44,7 +44,7 @@ Scoring per item follows the brief: **Impact** (1–5, how much this slows the t
   existing fail-closed startup checks covering the "nothing configured"
   case. See "### 6." below for the full writeup, including what the
   first pass got wrong, and what's deliberately still out of scope
-  (`dockerAuth.accounts.*.password`). #7 (single
+  (`dockerAuth.accounts.*.password`, since fixed -- see "### 6." below). #7 (single
   shared key, no per-client identity) is a separate, still-open problem
   -- see its own writeup.
 - **#9 (Two large files)**: `handlers.go` half fixed -- split from
@@ -261,7 +261,9 @@ Every place that referenced the old default values as a fallback got fixed too, 
 
 Verified with `helm lint`/`helm template` against default values (confirms `POSTGRES_PASSWORD: ""` renders, i.e. the fail-closed path is real) and against `existingSecret: true` for both, added as a third scenario to `cluster/check-helm-manifests.sh` alongside the two existing ones. `shellcheck` clean on the new script. Documented in README's rewritten "Bringing your own secrets" section covering all three paths.
 
-Deliberately **not** covered: `dockerAuth.accounts.*.password` (the registry's own reader/writer/admin accounts) is a separate, still-plaintext-only set of credentials -- same class of gap, just not in scope for this pass; a natural follow-up if it's ever needed.
+Deliberately **not** covered at the time: `dockerAuth.accounts.*.password` (the registry's own reader/writer/admin accounts). **Since fixed** -- the three passwords are empty in `values.yaml`, sourced from `make chart-secrets` (Flux `valuesFrom`, one generated per account), `--set`/`-f`, or the new `dockerAuth.existingSecret` for externally-managed Secrets.
+
+That fix needed one thing the postgres/apiKey pass did not. Those two values are consumed as-is, so emptying them fails closed on its own (Postgres refuses to start, monitor-api refuses to run). A docker_auth password is `bcrypt`-hashed by the chart at render time, and Sprig's `bcrypt` hashes an empty string into a perfectly valid hash **that authenticates an empty password** -- verified directly against the rendered hash with `bcrypt.CompareHashAndPassword`. Emptying the defaults alone would therefore have turned three unconfigured accounts into three open ones. An account with no password is now omitted from the rendered config entirely (no user entry, no ACL rule), and `cluster/check-helm-manifests.sh` asserts both directions.
 
 ### 7. Single shared API key, no per-client identity — priority 12
 
@@ -289,7 +291,6 @@ The original version of this plan was framed around "Phase 2: a Tekton pipeline 
 
 **Do incrementally, not blocking:**
 1. Per-client API keys (#7) — a real auth-model change (today: one shared key, no revocation, no rotation window), do before this serves more than one trusted team.
-2. `dockerAuth.accounts.*.password` — the one plaintext-secret gap #6's fix didn't cover; same `existingSecret` pattern would apply.
 3. Split `postgres_store.go` by concern, if it keeps growing (the remaining half of #9) — not urgent today.
 
 Findings #1, #2, #3, #4, #5, #6, #8, #9 (handlers.go half), #10, #11 are resolved — see the Status section above.
