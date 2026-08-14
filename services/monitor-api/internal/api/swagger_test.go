@@ -51,6 +51,7 @@ func TestOpenAPISpec_DescribesEveryRegisteredRoute(t *testing.T) {
 	wantPaths := []string{
 		"/healthz",
 		"/readyz",
+		"/metrics",
 		"/api/v1/pipeline/stages",
 		"/api/v1/stats",
 		"/api/v1/artifacts:",

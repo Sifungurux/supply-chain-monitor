@@ -1,0 +1,44 @@
+{{- if .Values.monitorApi.serviceMonitor.enabled }}
+# Tells a Prometheus Operator to scrape monitor-api's /metrics.
+#
+# OFF by default, and that is not timidity: ServiceMonitor is a CRD that
+# only exists if prometheus-operator (or kube-prometheus-stack) is
+# installed. Rendering it unconditionally would make `helm install` fail
+# outright on every cluster that has no Prometheus -- including this
+# project's own k3d dev cluster -- with an error about an unknown kind
+# rather than anything that explains itself. So it is opt-in for the
+# clusters that can actually consume it.
+#
+# The endpoint itself is always served; this resource only arranges for
+# something to come and read it. `curl monitor-api:8080/metrics` works
+# with or without this.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: monitor-api
+  labels:
+    app: monitor-api
+    {{- with .Values.monitorApi.serviceMonitor.labels }}
+    # Most Prometheus Operator installs select ServiceMonitors by label
+    # (kube-prometheus-stack defaults to `release: <its own release
+    # name>`). Without the label its Prometheus expects, this object is
+    # created and then silently ignored -- which looks exactly like a
+    # broken exporter. Hence a passthrough rather than a guess.
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app: monitor-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.monitorApi.serviceMonitor.interval }}
+      # No auth: /metrics is deliberately unauthenticated because it
+      # exposes process state only -- request/scan counts, goroutines,
+      # heap -- and never fleet security posture. That is what
+      # /api/v1/stats is for, and it requires the API key. If a fleet
+      # gauge is ever added to /metrics, this needs a bearerTokenSecret
+      # and that endpoint needs to stop being open.
+      # See services/monitor-api/internal/api/metrics.go.
+{{- end }}

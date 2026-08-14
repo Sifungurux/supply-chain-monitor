@@ -72,6 +72,10 @@ type handler struct {
 	// GET /readyz. nil means "nothing to check, always ready" -- see
 	// Config.Ready for why this is a func rather than a Store method.
 	ready func(context.Context) error
+	// metrics holds the process counters GET /metrics exposes. Always
+	// non-nil (NewRouter constructs one), so hot paths increment
+	// without a nil check.
+	metrics *metrics
 }
 
 // scanRetryAfter is the Retry-After (seconds) sent with the 429 a

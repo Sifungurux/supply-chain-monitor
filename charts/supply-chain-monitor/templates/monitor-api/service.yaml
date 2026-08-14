@@ -3,6 +3,14 @@ kind: Service
 metadata:
   name: monitor-api
   namespace: {{ .Release.Namespace }}
+  # Labels on the SERVICE itself, which is a different thing from the
+  # spec.selector below (that one picks pods). A ServiceMonitor selects
+  # Services by these metadata labels, so without them the scrape
+  # config matches nothing and reports no error -- it just silently
+  # collects no data, which looks exactly like a broken exporter.
+  # See templates/monitor-api/servicemonitor.yaml.
+  labels:
+    app: monitor-api
 spec:
   selector:
     app: monitor-api

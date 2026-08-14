@@ -88,6 +88,7 @@ type Config struct {
 // See Config for what each field does and what its zero value means.
 func NewRouter(cfg Config) http.Handler {
 	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready}
+	h.metrics = newMetrics()
 	if cfg.ScanLimits.Concurrency > 0 {
 		h.scanSlots = make(chan struct{}, cfg.ScanLimits.Concurrency)
 	}
@@ -95,6 +96,14 @@ func NewRouter(cfg Config) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /readyz", h.readyz)
+	// Unauthenticated, like the probes -- and unlike /api/v1/stats,
+	// which reports the same fleet in security terms. What this exposes
+	// is PROCESS state only: request/scan counts, goroutines, heap.
+	// Nothing here says which artifacts carry malware, which is what
+	// makes leaving it open defensible at all. Adding a fleet gauge
+	// changes that calculus, so it needs this exemption revisited in
+	// the same change -- see metrics.go.
+	mux.HandleFunc("GET /metrics", h.metricsHandler)
 	mux.HandleFunc("GET /swagger", h.swaggerUI)
 	mux.HandleFunc("GET /openapi.yaml", h.openapiSpec)
 	mux.HandleFunc("GET /api/v1/pipeline/stages", h.listStages)
@@ -133,11 +142,13 @@ func NewRouter(cfg Config) http.Handler {
 	// all), so it has to be short-circuited before auth ever runs, or
 	// every cross-origin call from the dashboard would fail preflight
 	// with a 401 before the browser even attempts the real request.
-	return withCORS(withAuth(top, cfg.APIKey))
+	// withMetrics is outside withAuth so a 401 gets counted -- see its
+	// own comment.
+	return withMetrics(withCORS(withAuth(top, cfg.APIKey)), h.metrics)
 }
 
 // withAuth requires `Authorization: Bearer <apiKey>` on every request
-// except /healthz, /readyz, /swagger, and /openapi.yaml. Uses
+// except /healthz, /readyz, /metrics, /swagger, and /openapi.yaml. Uses
 // crypto/subtle.ConstantTimeCompare rather than == specifically to avoid
 // a timing side-channel that could let an attacker guess the key one
 // byte at a time -- overkill for a single-shared-key scheme against most
@@ -155,7 +166,7 @@ func NewRouter(cfg Config) http.Handler {
 func withAuth(next http.Handler, apiKey string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/healthz", "/readyz", "/swagger", "/openapi.yaml":
+		case "/healthz", "/readyz", "/metrics", "/swagger", "/openapi.yaml":
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -231,7 +242,7 @@ func withRateLimit(next http.Handler, limiter *rateLimiter) http.Handler {
 		// Authorization header (see limiter.allow below) shouldn't be able
 		// to lock other anonymous callers out of the API docs page.
 		switch r.URL.Path {
-		case "/healthz", "/readyz", "/swagger", "/openapi.yaml":
+		case "/healthz", "/readyz", "/metrics", "/swagger", "/openapi.yaml":
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -29,11 +29,18 @@ paths:
   /healthz:
     get:
       tags: [meta]
-      summary: Liveness/readiness probe
+      summary: Liveness probe — the process only, never its dependencies
+      description: >-
+        Answers 200 as long as this process is serving HTTP. It
+        deliberately does not check the database: a liveness failure
+        makes the kubelet kill the container, so checking a dependency
+        here would turn a Postgres outage into every pod restarting on a
+        loop for its whole duration. Use `/readyz` for "can this pod
+        actually serve a request".
       security: []
       responses:
         "200":
-          description: Service is up.
+          description: The process is up.
           content:
             application/json:
               schema:
@@ -82,6 +89,35 @@ paths:
                 properties:
                   status: { type: string, example: unavailable }
                   error: { type: string }
+
+  /metrics:
+    get:
+      tags: [meta]
+      summary: Prometheus metrics (text exposition format)
+      description: >-
+        Process and scan counters for scraping: requests by status
+        class, scans started/succeeded/failed, goroutines, heap,
+        uptime.
+
+
+        Unauthenticated, like the probes, because it exposes PROCESS
+        state only and never fleet security posture — nothing here says
+        which artifacts carry malware. `/api/v1/stats` is where fleet
+        counts live, and it requires the API key. A fleet gauge added
+        here would have to come with authentication.
+
+
+        Nothing in this response touches the database, deliberately: a
+        scrape endpoint that queried Postgres would fail exactly when
+        the database is down, which is when the scrape data matters
+        most.
+      security: []
+      responses:
+        "200":
+          description: Metrics in the Prometheus text exposition format.
+          content:
+            text/plain:
+              schema: { type: string }
 
   /api/v1/pipeline/stages:
     get:

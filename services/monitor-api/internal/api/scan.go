@@ -118,6 +118,10 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 // shrinks the cap, and enough of them would stop scanning entirely.
 func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, release func()) {
 	defer release()
+	// Counted here rather than in scanArtifact: this is the funnel every
+	// scan actually passes through, and a request that was rejected
+	// (bad type, saturated cap) never started a scan to count.
+	h.metrics.recordScanStarted()
 	defer func() {
 		if rec := recover(); rec != nil {
 			// Nothing is listening on an HTTP response any more, so an
@@ -125,6 +129,11 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 			// rather than failing one request. Mark the artifact failed
 			// and keep serving.
 			log.Printf("scan for artifact %s panicked: %v", a.ID, rec)
+			// A panic short-circuits the normal outcome below, so it has
+			// to record its own -- otherwise started would outrun
+			// succeeded+failed by exactly the number of panics, which is
+			// the one failure mode nobody would think to look for.
+			h.metrics.recordScanResult(true)
 			if _, err := h.store.Update(a.ID, func(art *artifact.Artifact) {
 				art.Status = artifact.StatusFailed
 				art.LastScanErrors = []string{"scan panicked -- see server logs"}
@@ -232,6 +241,12 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 	if len(scanErrors) == len(scanners) {
 		status = artifact.StatusFailed
 	}
+	// "Failed" here means EVERY scanner failed, matching the status the
+	// artifact gets -- a partial failure is a successful scan that
+	// recorded scan errors, and counting it as failed would make the
+	// failure rate track "any scanner had a bad day" instead of "this
+	// scan produced nothing".
+	h.metrics.recordScanResult(status == artifact.StatusFailed)
 
 	// Every scan error, from whichever layer it originated at (an
 	// in-process scanner, a scan-worker Job's own orchestration

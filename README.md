@@ -206,7 +206,7 @@ dashboard pod unable to mount its own HTML at all).
 
 ## Authentication
 
-Every endpoint except `/healthz` and `/readyz` requires
+Every endpoint except `/healthz`, `/readyz` and `/metrics` requires
 `Authorization: Bearer <key>` (a kubelet probe can't present one).
 The key is sourced from `API_KEY`, which `monitor-api` reads from the
 `scm-monitor-api-auth` Secret (rendered from
@@ -311,6 +311,7 @@ request/response shapes.
 |--------|-----------------------------------|--------------------------------------------|
 | GET    | `/healthz`                        | liveness — the process only, never the database (a liveness failure kills the pod) |
 | GET    | `/readyz`                         | readiness — pings Postgres; 503 when it is unreachable, so the pod leaves the Service instead of serving 500s |
+| GET    | `/metrics`                        | Prometheus metrics — process and scan counters only, never fleet data (which is why it needs no key) |
 | GET    | `/api/v1/pipeline/stages`         | list configured pipeline stages            |
 | GET    | `/api/v1/stats`                   | fleet-wide counts: artifacts by status/type/stage, plus how many carry active findings per bucket — what the dashboard's summary cards read, since `/api/v1/artifacts` is paginated |
 | POST   | `/api/v1/artifacts`                | register an artifact `{ref, type}`         |
