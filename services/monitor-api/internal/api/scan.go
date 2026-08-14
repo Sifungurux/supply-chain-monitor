@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -372,6 +373,27 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 		"artifact_id", id, "ref", updated.Ref,
 		"status", updated.Status, "scan_errors", len(updated.LastScanErrors))
 
+	// An artifact whose own TYPE is sbom never had its components
+	// indexed. Indexing has only ever been triggered by an SBOM arriving
+	// at POST /artifacts/{id}/documents/sbom -- which is how an IMAGE
+	// gets one (the scan-worker generates a CycloneDX document from the
+	// trivy report and uploads it back, see GenerateImageDocuments). An
+	// sbom-type artifact IS the document: nothing generates one for it
+	// and nothing uploads one, so it stayed invisible to component
+	// search and to the diff endpoint, despite being the one artifact
+	// type that is definitionally a component inventory.
+	//
+	// Deliberately here in the API rather than in the scan-worker's own
+	// sbom branch, where the bytes are already in hand: that branch only
+	// runs for ISOLATED scans. With DISABLE_SCAN_ISOLATION the
+	// in-process FetchingScanner fetches, scans and discards -- which is
+	// the local dev path and the one cluster/test-swagger-docs.sh
+	// exercises, so the gap would have survived exactly where it gets
+	// run most.
+	if updated.Status != artifact.StatusFailed {
+		h.indexSBOMTypeComponents(ctx, updated)
+	}
+
 	// a is the pre-scan snapshot taken before this scan started, so
 	// a.LastScanAt == nil means this was the artifact's first ever scan
 	// -- see notifyNewFindings for why that suppresses notification.
@@ -475,6 +497,48 @@ func (h *handler) notifyNewFindings(a *artifact.Artifact, roundStamp time.Time, 
 // internal retry. Comfortably above the per-attempt HTTP timeout in
 // internal/notify so a retry isn't cut off mid-flight.
 const notifyTimeout = 30 * time.Second
+
+// indexSBOMTypeComponents fetches an sbom-type artifact's own document
+// and indexes it through the same path an uploaded SBOM takes.
+//
+// Best-effort throughout, matching indexSBOMComponents' own contract:
+// the scan already succeeded and has been persisted by the time this
+// runs, so nothing here may turn a good scan into a visible failure.
+// A ref that will not fetch, or bytes that will not parse, are logged
+// and dropped.
+//
+// Deliberately does NOT store the fetched bytes as the artifact's sbom
+// document. artifact_documents keeps a latest-document contract fed by
+// uploads, and writing one here would flip HasSBOM -- surfacing a
+// download button for a whole artifact type that has never had one --
+// which is a bigger change than indexing needs. The diff endpoint reads
+// components_history, not documents.
+func (h *handler) indexSBOMTypeComponents(ctx context.Context, a *artifact.Artifact) {
+	if a.Type != artifact.TypeSBOM {
+		return
+	}
+	if h.fetcher == nil {
+		// No fetcher configured (most tests, and any deployment that
+		// never set one up) -- nothing to do, and not an error.
+		return
+	}
+
+	path, cleanup, err := h.fetcher.Fetch(ctx, a.Ref)
+	// Always called, including on error, per Fetcher's own contract.
+	defer cleanup()
+	if err != nil {
+		slog.Warn("could not fetch an sbom-type artifact to index its components (the scan itself succeeded)",
+			"artifact_id", a.ID, "ref", a.Ref, "err", err)
+		return
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		slog.Warn("could not read a fetched sbom-type artifact to index its components (the scan itself succeeded)",
+			"artifact_id", a.ID, "ref", a.Ref, "err", err)
+		return
+	}
+	h.indexSBOMComponents(a.ID, content)
+}
 
 // classifyBucket decides which of the five finding buckets (cve,
 // malware, misconfiguration, secret, other) a scanner's finding

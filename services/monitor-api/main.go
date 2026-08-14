@@ -1578,6 +1578,11 @@ func runAPIServer() {
 		// precisely so the Store interface doesn't have to grow a second
 		// context-taking method to expose it.
 		Ready: store.Ping,
+		// Lets a scan of an sbom-type artifact index that artifact's own
+		// component inventory -- see internal/api/scan.go's
+		// indexSBOMTypeComponents. Same fetcher the file/sbom/sarif
+		// scanners are already wrapped with.
+		Fetcher: fetcher,
 	})
 
 	srv := &http.Server{

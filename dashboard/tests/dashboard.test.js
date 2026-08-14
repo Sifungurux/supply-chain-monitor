@@ -2138,3 +2138,96 @@ test('choosing a status filter sends it to the server and returns to the first p
 
   dom.window.close();
 });
+
+// The "SBOM changes" section on the detail page. It loads on its own,
+// after the page is already rendered, so these wait for it to fill in.
+const SAMPLE_DIFF = {
+  from: '2026-08-14T10:00:00Z',
+  to: '2026-08-15T10:00:00Z',
+  added: [{ purl: 'pkg:apk/alpine/curl@8.5.0-r0', name: 'curl', version: '8.5.0-r0' }],
+  removed: [{ purl: 'pkg:apk/alpine/apk-tools@2.14.4-r0', name: 'apk-tools', version: '2.14.4-r0' }],
+  version_changed: [{ purl: 'pkg:apk/alpine/openssl@3.1.4-r6', from: '3.1.4-r5', to: '3.1.4-r6' }]
+};
+
+function diffDom(diffBody) {
+  return buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (url.includes('/components/diff')) return jsonResponse(diffBody);
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, { error: 'not found' });
+    }
+  });
+}
+
+test('the detail page shows SBOM changes, with upgrades separate from adds and removes', async () => {
+  const dom = diffDom(SAMPLE_DIFF);
+  await tick(20);
+  const doc = dom.window.document;
+
+  doc.querySelector('button[data-action="toggle"][data-id="a1"]').click();
+  await tick(20);
+
+  const section = doc.getElementById('sbom-changes');
+  assert.ok(section, 'no #sbom-changes section on the detail page');
+  const text = section.textContent;
+
+  // An upgrade is ONE entry under its own heading -- not an add plus a
+  // remove, which is what a purl-keyed diff would show (a purl embeds
+  // its version).
+  assert.match(text, /Upgraded/);
+  assert.match(text, /3\.1\.4-r5 → 3\.1\.4-r6/);
+  assert.match(text, /Added/);
+  assert.match(text, /curl/);
+  assert.match(text, /Removed/);
+  assert.match(text, /apk-tools/);
+
+  dom.window.close();
+});
+
+// Two different empty states, and conflating them would mislead: an
+// SBOM that genuinely didn't change vs. one that has never had two
+// snapshots to compare.
+test('SBOM changes distinguishes "no changes" from "not enough history"', async () => {
+  const unchanged = diffDom({ from: '2026-08-14T10:00:00Z', to: '2026-08-15T10:00:00Z', added: [], removed: [], version_changed: [] });
+  await tick(20);
+  unchanged.window.document.querySelector('button[data-action="toggle"][data-id="a1"]').click();
+  await tick(20);
+  assert.match(unchanged.window.document.getElementById('sbom-changes').textContent, /No component changes/);
+  unchanged.window.close();
+
+  const noHistory = diffDom({ from: null, to: null, added: [], removed: [], version_changed: [] });
+  await tick(20);
+  noHistory.window.document.querySelector('button[data-action="toggle"][data-id="a1"]').click();
+  await tick(20);
+  assert.match(noHistory.window.document.getElementById('sbom-changes').textContent, /Not enough SBOM history/);
+  noHistory.window.close();
+});
+
+// A failure here must stay inside the section: the rest of the detail
+// page loaded fine and should not be replaced by an error.
+test('a failing SBOM-changes request does not break the rest of the detail page', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (url.includes('/components/diff')) return errorResponse(500, { error: 'boom' });
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, { error: 'not found' });
+    }
+  });
+  await tick(20);
+  const doc = dom.window.document;
+  doc.querySelector('button[data-action="toggle"][data-id="a1"]').click();
+  await tick(20);
+
+  assert.match(doc.getElementById('sbom-changes').textContent, /Could not load SBOM changes/);
+  // The rest of the page is still there.
+  assert.match(doc.getElementById('detail-body').textContent, /alpine:3\.19/);
+  assert.equal(doc.getElementById('status').className, '', 'a section-level failure must not flag the whole page');
+
+  dom.window.close();
+});

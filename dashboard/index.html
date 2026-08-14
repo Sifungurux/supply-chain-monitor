@@ -287,6 +287,9 @@
   .risk-neutral { background: var(--steel-400); }
   .risk-label { margin-top: 6px; font-family: var(--font-mono); font-size: 12.5px; color: var(--text-muted); }
   .detail-section-title { font-size: 12px; color: var(--text-muted); font-weight: 600; margin: 0 0 8px; }
+  .sbom-diff-group { margin-bottom: 12px; }
+  .sbom-diff-label { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+  .sbom-diff-range { font-size: 11px; margin-bottom: 8px; }
   .pipeline-track { display: flex; align-items: center; gap: 6px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 26px; }
   .pipeline-arrow { color: var(--text-muted); flex: 0 0 auto; }
   .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
@@ -1130,6 +1133,10 @@
       return;
     }
     els.detailBody.innerHTML = renderDetailPage(a);
+    // Deliberately not awaited: the detail page is already on screen and
+    // useful, and the SBOM diff is one more request that should not hold
+    // it up or fail it. loadComponentDiff fills its own placeholder.
+    loadComponentDiff(a.id);
   }
 
   function renderCards() {
@@ -1364,6 +1371,82 @@
     return '<div class="risk-spectrum"><div class="risk-bar">' + bar + '</div><div class="risk-label">' + esc(label) + '</div></div>';
   }
 
+  // renderComponentDiff turns GET .../components/diff into the "SBOM
+  // changes" section: what packages appeared, disappeared, and moved
+  // version between the two most recent SBOM snapshots.
+  //
+  // version_changed is rendered as its own group rather than folded
+  // into added/removed, because that is the whole point of the endpoint:
+  // a purl embeds its version, so an upgrade looks like an unrelated
+  // removal plus addition to anything comparing purls, and an upgrade is
+  // the change people actually look for.
+  function renderComponentDiff(diff) {
+    var added = diff.added || [];
+    var removed = diff.removed || [];
+    var changed = diff.version_changed || [];
+
+    if (!added.length && !removed.length && !changed.length) {
+      // Two different "nothing to show" states, and conflating them
+      // would be a lie in one direction or the other: a genuinely
+      // unchanged SBOM vs. never having had two to compare.
+      return diff.from
+        ? '<span class="muted">No component changes between the last two scans.</span>'
+        : '<span class="muted">Not enough SBOM history yet — a snapshot is taken each time an SBOM is indexed for this artifact.</span>';
+    }
+
+    function list(label, items, render) {
+      if (!items.length) return '';
+      return '<div class="sbom-diff-group">' +
+        '<div class="sbom-diff-label">' + esc(label) + ' <span class="count-nonzero">' + items.length + '</span></div>' +
+        items.map(render).join('') +
+        '</div>';
+    }
+
+    var body =
+      list('Upgraded', changed, function (c) {
+        return '<div class="finding badge-neutral">' +
+          '<span class="finding-label" title="' + esc(c.purl) + '">' + esc(c.purl) + '</span>' +
+          '<span class="muted">' + esc(c.from) + ' → ' + esc(c.to) + '</span>' +
+          '</div>';
+      }) +
+      list('Added', added, function (c) {
+        return '<div class="finding badge-neutral">' +
+          '<span class="finding-label" title="' + esc(c.purl) + '">' + esc(c.name || c.purl) + '</span>' +
+          '<span class="muted">' + esc(c.version || '') + '</span>' +
+          '</div>';
+      }) +
+      list('Removed', removed, function (c) {
+        return '<div class="finding badge-neutral finding-fixed">' +
+          '<span class="finding-label" title="' + esc(c.purl) + '">' + esc(c.name || c.purl) + '</span>' +
+          '<span class="muted">' + esc(c.version || '') + '</span>' +
+          '</div>';
+      });
+
+    // Say which two snapshots this is, so "no changes" and "these
+    // changes" are both attributable to a specific pair of scans.
+    var when = diff.from && diff.to
+      ? '<div class="muted sbom-diff-range">Comparing ' + esc(timeAgo(diff.from)) + ' → ' + esc(timeAgo(diff.to)) + '</div>'
+      : '';
+    return when + body;
+  }
+
+  // loadComponentDiff fills the "SBOM changes" placeholder. Failures
+  // land in the section itself rather than the page-level status line:
+  // the rest of the detail view loaded fine, and this is one section of
+  // it that did not.
+  async function loadComponentDiff(id) {
+    var el = document.getElementById('sbom-changes');
+    if (!el) return;
+    try {
+      var diff = await fetchJSON('/api/v1/artifacts/' + encodeURIComponent(id) + '/components/diff');
+      el.innerHTML = renderComponentDiff(diff || {});
+      el.className = '';
+    } catch (err) {
+      el.className = 'muted';
+      el.textContent = 'Could not load SBOM changes — ' + err.message;
+    }
+  }
+
   // pipelineTracker reuses the .stage-pill look from the "Pipeline
   // stages" summary above the table -- the same visual language for the
   // same concept (a stage), just one artifact's history instead of the
@@ -1450,6 +1533,11 @@
       riskSpectrum(a) +
       '<h3 class="detail-section-title">Pipeline</h3>' +
       pipelineTracker(a) +
+      '<h3 class="detail-section-title">SBOM changes</h3>' +
+      // Filled in asynchronously by loadComponentDiff once this markup
+      // is in the DOM -- renderDetailPage builds a string synchronously
+      // and the diff needs its own request.
+      '<div id="sbom-changes" class="muted">Loading…</div>' +
       '<h3 class="detail-section-title">Findings</h3>' +
       renderFindingsTabs(a) +
       (a.last_scan_errors && a.last_scan_errors.length ? '<div class="errs">' + a.last_scan_errors.map(esc).join('<br>') + '</div>' : '')

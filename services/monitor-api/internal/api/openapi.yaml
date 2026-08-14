@@ -570,6 +570,55 @@ paths:
                         items: { $ref: "#/components/schemas/ComponentMatch" }
         "400": { $ref: "#/components/responses/BadRequest" }
 
+  /api/v1/artifacts/{id}/components/diff:
+    get:
+      tags: [artifacts]
+      summary: What changed in this artifact's SBOM between two scans
+      description: >-
+        Compares two component snapshots and reports what was added,
+        removed, and upgraded. Every scan that indexes an SBOM writes a
+        snapshot; the last 10 per artifact are kept.
+
+
+        With no parameters this compares the two most recent snapshots.
+        `from` and `to` select a specific pair and must be given
+        together — timestamps as returned in this endpoint's own
+        `from`/`to` fields.
+
+
+        `version_changed` exists because a purl embeds its version, so
+        an upgrade changes the purl: a diff keyed on purl alone reports
+        every upgrade as an unrelated removal plus addition, which is
+        the one thing anyone comparing two SBOMs is actually looking
+        for. Packages are matched on exact purl first, then by package
+        identity with the version stripped.
+
+
+        Fewer than two snapshots is a 200 with null `from`/`to` and
+        three empty lists, not a 404 — an artifact indexed only once has
+        genuinely had nothing change yet.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: from
+          in: query
+          description: The older snapshot. Requires `to`.
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          description: The newer snapshot. Requires `from`.
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: The difference between the two snapshots.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ComponentDiff" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/artifacts/{id}/documents/{kind}:
     parameters:
       - $ref: "#/components/parameters/ArtifactID"
@@ -759,6 +808,60 @@ components:
             could collide with a real configured stage, and "" cannot.
             Stages nothing has reached are absent -- read as 0.
           example: { build: 300, scan: 402, deploy: 40, "": 70 }
+
+    Component:
+      type: object
+      required: [purl]
+      properties:
+        purl:
+          type: string
+          description: >-
+            The Package URL — the identity that makes "which artifacts
+            contain this exact package" answerable across ecosystems.
+          example: pkg:apk/alpine/openssl@3.1.4-r5
+        name: { type: string, example: openssl }
+        version: { type: string, example: 3.1.4-r5 }
+
+    ComponentDiff:
+      type: object
+      required: [from, to, added, removed, version_changed]
+      properties:
+        from:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            The older snapshot compared, or null when there were fewer
+            than two to compare.
+        to:
+          type: string
+          format: date-time
+          nullable: true
+          description: The newer snapshot compared, or null.
+        added:
+          type: array
+          description: Packages present in `to` and not in `from`.
+          items: { $ref: "#/components/schemas/Component" }
+        removed:
+          type: array
+          description: Packages present in `from` and not in `to`.
+          items: { $ref: "#/components/schemas/Component" }
+        version_changed:
+          type: array
+          description: >-
+            The same package at a different version. Reported separately
+            from added/removed because an upgrade is one event, not a
+            removal plus an unrelated addition.
+          items:
+            type: object
+            required: [purl, from, to]
+            properties:
+              purl:
+                type: string
+                description: The NEW purl — what the artifact contains now.
+                example: pkg:apk/alpine/openssl@3.1.4-r6
+              from: { type: string, example: 3.1.4-r5 }
+              to: { type: string, example: 3.1.4-r6 }
 
     ArtifactPage:
       type: object

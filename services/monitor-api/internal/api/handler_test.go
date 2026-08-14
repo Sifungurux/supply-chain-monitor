@@ -241,3 +241,16 @@ func waitForScan(t *testing.T, store *artifact.MemStore, id string) *artifact.Ar
 		time.Sleep(2 * time.Millisecond)
 	}
 }
+
+// newTestRouterWithFetcher is newTestRouter plus a Fetcher, for the
+// sbom-type component-indexing tests specifically -- kept separate for
+// the same reason newTestRouterWithDigestResolver is: every other test
+// should keep behaving as though this feature isn't configured.
+func newTestRouterWithFetcher(fetcher scanner.Fetcher, scanners scanner.Registry) (http.Handler, *artifact.MemStore) {
+	store := artifact.NewMemStore()
+	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
+	return api.NewRouter(api.Config{
+		Store: store, Tracker: tracker, Scanners: scanners, APIKey: testAPIKey,
+		Fetcher: fetcher,
+	}), store
+}

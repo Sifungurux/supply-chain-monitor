@@ -1,6 +1,7 @@
 package artifact
 
 import (
+	"sort"
 	"strings"
 	"time"
 )
@@ -285,6 +286,170 @@ type ComponentMatch struct {
 	// of rows only by coincidence of the unique constraint -- counted
 	// distinctly anyway, so it stays correct if that ever changes.
 	Artifacts int `json:"artifacts"`
+}
+
+// ComponentDiff is what changed between two component snapshots (see
+// Store.ComponentsAt) -- the answer GET
+// /api/v1/artifacts/{id}/components/diff returns.
+//
+// All three lists are always non-nil, so "nothing changed" serializes as
+// three empty arrays rather than three nulls.
+type ComponentDiff struct {
+	Added   []Component `json:"added"`
+	Removed []Component `json:"removed"`
+	// VersionChanged is the same package at a different version. It is
+	// separate from Added/Removed because an upgrade is one event, not a
+	// removal plus an unrelated addition -- which is what a naive diff
+	// reports, and the only interesting thing most SBOM comparisons
+	// contain.
+	VersionChanged []ComponentVersionChange `json:"version_changed"`
+}
+
+// ComponentVersionChange is one package whose version moved. PURL is
+// the NEW purl (what the artifact contains now); From/To are the old
+// and new versions.
+type ComponentVersionChange struct {
+	PURL string `json:"purl"`
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// purlCoordinates strips the version and everything after it from a
+// purl, leaving what identifies the PACKAGE rather than the release:
+// "pkg:apk/alpine/openssl@3.1.4-r5?arch=x86_64" -> "pkg:apk/alpine/openssl".
+//
+// This is the whole reason DiffComponents can report a version change
+// at all. A purl embeds its version, so an upgrade changes the purl --
+// meaning a diff keyed on purl alone sees openssl@3.1.4-r5 disappear
+// and openssl@3.1.4-r6 appear, reports one removal and one unrelated
+// addition, and never finds a single version change. Which is exactly
+// the thing anyone comparing two SBOMs is looking for.
+//
+// Qualifiers ("?arch=") and subpaths ("#") are cut first, since both
+// may contain an "@" that is not the version separator. The version is
+// then whatever follows the LAST remaining "@" -- purl namespaces can
+// contain "@" (a scoped npm package, "pkg:npm/%40angular/core@17.0.0",
+// though the spec percent-encodes it), so the last one is the safe
+// choice.
+func purlCoordinates(purl string) string {
+	s := purl
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.LastIndex(s, "@"); i > 0 {
+		s = s[:i]
+	}
+	return s
+}
+
+// DiffComponents compares two component snapshots, oldest first.
+//
+// Deliberately a pure function over two slices rather than SQL or a
+// Store method: MemStore and PostgresStore have disagreed twice in this
+// codebase's history (one scanned three of five finding buckets while
+// the other queried all five; one grouped components by purl while the
+// other grouped by purl+name+version), and both times the disagreement
+// was invisible until production. There is exactly one implementation
+// of these semantics and both backends feed it.
+//
+// Matching runs in two passes, which is what makes multiple concurrent
+// versions of one package behave sanely:
+//
+//  1. Exact purl matches are unchanged, and drop out of both sides.
+//  2. Of what remains, a package identity (purlCoordinates) with
+//     exactly one entry left on each side is a version change.
+//
+// Anything still unmatched is a genuine addition or removal. So an
+// artifact that legitimately ships two versions of the same library,
+// and drops one, reports a removal rather than inventing a version
+// change between the two survivors.
+func DiffComponents(from, to []Component) ComponentDiff {
+	diff := ComponentDiff{
+		Added:          []Component{},
+		Removed:        []Component{},
+		VersionChanged: []ComponentVersionChange{},
+	}
+
+	// Pass 1: drop exact purl matches.
+	inFrom := map[string]Component{}
+	for _, c := range from {
+		inFrom[c.PURL] = c
+	}
+	remainingTo := make([]Component, 0, len(to))
+	seenTo := map[string]bool{}
+	for _, c := range to {
+		seenTo[c.PURL] = true
+		if _, unchanged := inFrom[c.PURL]; unchanged {
+			continue
+		}
+		remainingTo = append(remainingTo, c)
+	}
+	remainingFrom := make([]Component, 0, len(from))
+	for _, c := range from {
+		if !seenTo[c.PURL] {
+			remainingFrom = append(remainingFrom, c)
+		}
+	}
+
+	// Pass 2: pair what's left by package identity.
+	fromByCoord := map[string][]Component{}
+	for _, c := range remainingFrom {
+		k := purlCoordinates(c.PURL)
+		fromByCoord[k] = append(fromByCoord[k], c)
+	}
+	toByCoord := map[string][]Component{}
+	for _, c := range remainingTo {
+		k := purlCoordinates(c.PURL)
+		toByCoord[k] = append(toByCoord[k], c)
+	}
+
+	matched := map[string]bool{}
+	for _, c := range remainingTo {
+		k := purlCoordinates(c.PURL)
+		if len(fromByCoord[k]) == 1 && len(toByCoord[k]) == 1 {
+			matched[k] = true
+			diff.VersionChanged = append(diff.VersionChanged, ComponentVersionChange{
+				PURL: c.PURL,
+				From: versionOf(fromByCoord[k][0]),
+				To:   versionOf(c),
+			})
+			continue
+		}
+		diff.Added = append(diff.Added, c)
+	}
+	for _, c := range remainingFrom {
+		if matched[purlCoordinates(c.PURL)] {
+			continue
+		}
+		diff.Removed = append(diff.Removed, c)
+	}
+
+	// Stable order, so two calls on the same data -- and the two
+	// backends feeding this -- can't produce differently-ordered JSON.
+	sort.Slice(diff.Added, func(i, j int) bool { return diff.Added[i].PURL < diff.Added[j].PURL })
+	sort.Slice(diff.Removed, func(i, j int) bool { return diff.Removed[i].PURL < diff.Removed[j].PURL })
+	sort.Slice(diff.VersionChanged, func(i, j int) bool {
+		return diff.VersionChanged[i].PURL < diff.VersionChanged[j].PURL
+	})
+	return diff
+}
+
+// versionOf prefers the parsed Version field and falls back to the
+// version embedded in the purl -- some SBOM formats populate one and
+// not the other, and a version change reported as "" -> "" would be
+// worse than useless.
+func versionOf(c Component) string {
+	if c.Version != "" {
+		return c.Version
+	}
+	s := c.PURL
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.LastIndex(s, "@"); i > 0 {
+		return s[i+1:]
+	}
+	return ""
 }
 
 // VEXStatement is one VEX statement reduced to what merging a finding
