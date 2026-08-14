@@ -145,16 +145,18 @@ func TestBuildImageScanners(t *testing.T) {
 	grypeIsolated := &namedScanner{"grype-isolated"}
 	inProcess := &namedScanner{"in-process-unpacker"}
 	isolated := &namedScanner{"isolated-unpacker"}
+	malcontentInProcess := &namedScanner{"in-process-malcontent"}
+	malcontentIsolated := &namedScanner{"isolated-malcontent"}
 
 	t.Run("isolation enabled (default): uses the isolated CVE scanner(s)", func(t *testing.T) {
-		got := buildImageScanners(false, "trivy", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcess, isolated)
+		got := buildImageScanners(false, "trivy", "clamav", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcess, isolated, malcontentInProcess, malcontentIsolated)
 		if len(got) != 2 || got[0] != scanner.Scanner(trivyIsolated) || got[1] != scanner.Scanner(isolated) {
 			t.Fatalf("scanners = %+v, want [trivy-isolated, isolated-unpacker]", got)
 		}
 	})
 
 	t.Run("DISABLE_SCAN_ISOLATION=true: uses both in-process scanners instead", func(t *testing.T) {
-		got := buildImageScanners(true, "trivy", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcess, isolated)
+		got := buildImageScanners(true, "trivy", "clamav", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcess, isolated, malcontentInProcess, malcontentIsolated)
 		if len(got) != 2 || got[0] != scanner.Scanner(trivyInProcess) || got[1] != scanner.Scanner(inProcess) {
 			t.Fatalf("scanners = %+v, want [trivy-in-process, in-process-unpacker]", got)
 		}
@@ -169,14 +171,14 @@ func TestBuildImageScanners(t *testing.T) {
 	})
 
 	t.Run(`cveScanner="grype": trivy is dropped entirely`, func(t *testing.T) {
-		got := buildImageScanners(false, "grype", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcess, isolated)
+		got := buildImageScanners(false, "grype", "clamav", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcess, isolated, malcontentInProcess, malcontentIsolated)
 		if len(got) != 2 || got[0] != scanner.Scanner(grypeIsolated) || got[1] != scanner.Scanner(isolated) {
 			t.Fatalf("scanners = %+v, want [grype-isolated, isolated-unpacker]", got)
 		}
 	})
 
 	t.Run(`cveScanner="both": both CVE scanners run alongside the malware scanner`, func(t *testing.T) {
-		got := buildImageScanners(false, "both", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcess, isolated)
+		got := buildImageScanners(false, "both", "clamav", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcess, isolated, malcontentInProcess, malcontentIsolated)
 		if len(got) != 3 || got[0] != scanner.Scanner(trivyIsolated) || got[1] != scanner.Scanner(grypeIsolated) || got[2] != scanner.Scanner(isolated) {
 			t.Fatalf("scanners = %+v, want [trivy-isolated, grype-isolated, isolated-unpacker]", got)
 		}
@@ -197,9 +199,11 @@ func TestBuildImageScanners_CVEScannerTrivyIsUnchanged(t *testing.T) {
 	grypeIsolated := &namedScanner{"grype-isolated"}
 	inProcess := &namedScanner{"in-process-unpacker"}
 	isolated := &namedScanner{"isolated-unpacker"}
+	malcontentInProcess := &namedScanner{"in-process-malcontent"}
+	malcontentIsolated := &namedScanner{"isolated-malcontent"}
 
 	for _, isolationDisabled := range []bool{false, true} {
-		got := buildImageScanners(isolationDisabled, "trivy", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcess, isolated)
+		got := buildImageScanners(isolationDisabled, "trivy", "clamav", trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcess, isolated, malcontentInProcess, malcontentIsolated)
 		want := []scanner.Scanner{trivyIsolated, isolated}
 		if isolationDisabled {
 			want = []scanner.Scanner{trivyInProcess, inProcess}
@@ -427,3 +431,79 @@ func TestPickArtifactsToSweep(t *testing.T) {
 // instead of waiting for a slot. httpWriteTimeout still bounds how long
 // a handler has to write a response; nothing in this service now takes
 // anywhere near it.
+
+// TestMalwareScannersFor_ClamAVIsUnchanged is the test that makes this
+// feature safe to merge: with MALWARE_SCANNER unset (or set to anything
+// unrecognized), the malware half of the image scanner list is exactly
+// what it was before malcontent existed. Same guarantee, and the same
+// reasoning, as TestBuildImageScanners' cveScanner="trivy" case.
+func TestMalwareScannersFor_ClamAVIsUnchanged(t *testing.T) {
+	clamav := &namedScanner{"clamav"}
+	malcontent := &namedScanner{"malcontent"}
+
+	for _, setting := range []string{"", "clamav", "CLAMAV", "nonsense"} {
+		t.Run("setting="+setting, func(t *testing.T) {
+			got := malwareScannersFor(setting, clamav, malcontent)
+			if len(got) != 1 || got[0] != scanner.Scanner(clamav) {
+				t.Fatalf("scanners = %+v, want ClamAV alone -- an unrecognized value must not silently enable a second scanner", got)
+			}
+		})
+	}
+}
+
+func TestMalwareScannersFor_Selection(t *testing.T) {
+	clamav := &namedScanner{"clamav"}
+	malcontent := &namedScanner{"malcontent"}
+
+	t.Run(`"malcontent" replaces ClamAV`, func(t *testing.T) {
+		got := malwareScannersFor("malcontent", clamav, malcontent)
+		if len(got) != 1 || got[0] != scanner.Scanner(malcontent) {
+			t.Fatalf("scanners = %+v, want malcontent alone", got)
+		}
+	})
+
+	t.Run(`"both" runs them together`, func(t *testing.T) {
+		got := malwareScannersFor("both", clamav, malcontent)
+		if len(got) != 2 || got[0] != scanner.Scanner(clamav) || got[1] != scanner.Scanner(malcontent) {
+			t.Fatalf("scanners = %+v, want [clamav, malcontent]", got)
+		}
+	})
+}
+
+// The selector has to reach the actual image scanner list, and pick the
+// isolated or in-process malcontent to match the isolation setting --
+// mixing those would run an isolated CVE scan next to an in-process
+// image unpack, which is the arrangement isolation exists to prevent.
+func TestBuildImageScanners_MalwareSelectorReachesTheList(t *testing.T) {
+	trivyInProcess := &namedScanner{"trivy-in-process"}
+	trivyIsolated := &namedScanner{"trivy-isolated"}
+	grypeInProcess := &namedScanner{"grype-in-process"}
+	grypeIsolated := &namedScanner{"grype-isolated"}
+	inProcess := &namedScanner{"in-process-unpacker"}
+	isolated := &namedScanner{"isolated-unpacker"}
+	malcontentInProcess := &namedScanner{"in-process-malcontent"}
+	malcontentIsolated := &namedScanner{"isolated-malcontent"}
+
+	t.Run("both, isolated", func(t *testing.T) {
+		got := buildImageScanners(false, "trivy", "both",
+			trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated,
+			inProcess, isolated, malcontentInProcess, malcontentIsolated)
+		if len(got) != 3 || got[1] != scanner.Scanner(isolated) || got[2] != scanner.Scanner(malcontentIsolated) {
+			t.Fatalf("scanners = %+v, want [trivy-isolated, isolated-unpacker, isolated-malcontent]", got)
+		}
+	})
+
+	t.Run("both, DISABLE_SCAN_ISOLATION", func(t *testing.T) {
+		got := buildImageScanners(true, "trivy", "both",
+			trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated,
+			inProcess, isolated, malcontentInProcess, malcontentIsolated)
+		if len(got) != 3 || got[2] != scanner.Scanner(malcontentInProcess) {
+			t.Fatalf("scanners = %+v, want the in-process malcontent", got)
+		}
+		for _, s := range got {
+			if s == scanner.Scanner(malcontentIsolated) || s == scanner.Scanner(isolated) {
+				t.Fatal("an isolated scanner leaked into the in-process list")
+			}
+		}
+	})
+}

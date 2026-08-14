@@ -795,6 +795,33 @@ func cveScannersFor(cveScanner string, trivy, grype scanner.Scanner) []scanner.S
 	}
 }
 
+// malwareScannersFor picks which malware-bucket scanner(s) a given
+// malwareScanner setting selects, the direct counterpart of
+// cveScannersFor above: "malcontent" swaps ClamAV out, "both" runs the
+// two together, and anything else (including "clamav" and, as a
+// fail-safe, an unrecognized value) is ClamAV alone.
+//
+// That default is what makes this feature inert on every existing
+// deployment: with malwareScanner unset, the image scanner list is
+// byte-for-byte what it was before malcontent existed -- see
+// TestMalwareScannersFor_ClamAVIsUnchanged.
+//
+// The two answer different questions and are worth running together
+// rather than instead of each other: ClamAV matches signatures of known
+// malware, malcontent matches behaviours a compromised package would
+// exhibit. See scanner.MalcontentScanner's own comment, including the
+// measured false-positive profile that decides the minRisk default.
+func malwareScannersFor(malwareScanner string, clamav, malcontent scanner.Scanner) []scanner.Scanner {
+	switch malwareScanner {
+	case "malcontent":
+		return []scanner.Scanner{malcontent}
+	case "both":
+		return []scanner.Scanner{clamav, malcontent}
+	default:
+		return []scanner.Scanner{clamav}
+	}
+}
+
 // buildImageScanners picks the `image` artifact type's full scanner
 // list -- cveScannersFor's pick of trivy/grype/both, plus the malware
 // scanner (unpack + ClamAV) -- consistently: the isolated, Kubernetes-
@@ -808,11 +835,17 @@ func cveScannersFor(cveScanner string, trivy, grype scanner.Scanner) []scanner.S
 // real Kubernetes API client or real trivy/grype binaries -- none of
 // the scanner arguments is ever actually invoked by this function,
 // just selected.
-func buildImageScanners(disableScanIsolation bool, cveScanner string, trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcessUnpacker, isolatedUnpacker scanner.Scanner) []scanner.Scanner {
+func buildImageScanners(disableScanIsolation bool, cveScanner, malwareScanner string, trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated, inProcessUnpacker, isolatedUnpacker, inProcessMalcontent, isolatedMalcontent scanner.Scanner) []scanner.Scanner {
 	if disableScanIsolation {
-		return append(cveScannersFor(cveScanner, trivyInProcess, grypeInProcess), inProcessUnpacker)
+		return append(
+			cveScannersFor(cveScanner, trivyInProcess, grypeInProcess),
+			malwareScannersFor(malwareScanner, inProcessUnpacker, inProcessMalcontent)...,
+		)
 	}
-	return append(cveScannersFor(cveScanner, trivyIsolated, grypeIsolated), isolatedUnpacker)
+	return append(
+		cveScannersFor(cveScanner, trivyIsolated, grypeIsolated),
+		malwareScannersFor(malwareScanner, isolatedUnpacker, isolatedMalcontent)...,
+	)
 }
 
 // buildSBOMScanners picks the sbom artifact type's CVE scanner(s) the
@@ -949,6 +982,16 @@ func runAPIServer() {
 	// same "fail closed, fail loud" convention scanTimeoutSeconds'
 	// validation below uses.
 	cveScanner := getenv("CVE_SCANNER", "trivy")
+	// MALWARE_SCANNER is cveScanner's counterpart for the malware
+	// bucket: "clamav" (the default, and what every deployment did
+	// before this existed), "malcontent", or "both". MALCONTENT_MIN_RISK
+	// defaults to "critical" rather than the tool's own "low" -- a stock
+	// alpine reports four HIGH behaviours, so anything below critical
+	// puts malware findings on most of a normal fleet. See
+	// scanner.MalcontentScanner.
+	malwareScanner := getenv("MALWARE_SCANNER", "clamav")
+	malcontentBin := getenv("MALCONTENT_BIN", "mal")
+	malcontentMinRisk := getenv("MALCONTENT_MIN_RISK", "critical")
 	switch cveScanner {
 	case "trivy", "grype", "both":
 	default:
@@ -1053,6 +1096,19 @@ func runAPIServer() {
 		grypeDockerConfigDir = filepath.Dir(dockerConfigPath)
 	}
 	inProcessGrype := scanner.NewGrypeScanner(grypeDB, fetchPlainHTTP, grypeDockerConfigDir)
+	// The second malware scanner, inert unless MALWARE_SCANNER selects
+	// it (malwareScannersFor). Shares grype's dockerconfig dir for the
+	// same reason: both pull the image themselves rather than being
+	// handed a local path.
+	inProcessMalcontent := scanner.NewMalcontentScanner(malcontentBin, malcontentMinRisk, grypeDockerConfigDir)
+	// The in-process path needs a `mal` binary this image does not ship
+	// (glibc vs musl -- see the Dockerfile). Said out loud at startup
+	// rather than left to surface as an exec error on the first scan,
+	// since the fix is to build a derived image, not to retry.
+	if disableScanIsolation && (malwareScanner == "malcontent" || malwareScanner == "both") {
+		log.Printf("MALWARE_SCANNER=%q with DISABLE_SCAN_ISOLATION=true requires a %q binary on PATH -- this image does not ship one (see the Dockerfile's malcontent note); scans will report an exec failure until you provide it in a derived image",
+			malwareScanner, malcontentBin)
+	}
 
 	// SCAN_WORKER_ACTIVE_DEADLINE_SECONDS bounds how long Kubernetes lets
 	// each scan-worker Job's pod run before killing it outright (both the
@@ -1080,6 +1136,10 @@ func runAPIServer() {
 	scanTimeout := time.Duration(scanTimeoutSeconds) * time.Second
 
 	var isolatedUnpacker scanner.Scanner
+	// nil unless isolation is on, exactly like isolatedUnpacker above --
+	// and only ever reached when MALWARE_SCANNER selects it, so a
+	// DISABLE_SCAN_ISOLATION deployment never touches it.
+	var isolatedMalcontent scanner.Scanner
 	var isolatedTrivyImage scanner.Scanner
 	var isolatedTrivySBOM scanner.Scanner
 	var isolatedGrypeImage scanner.Scanner
@@ -1107,6 +1167,16 @@ func runAPIServer() {
 			ActiveDeadlineSeconds:         int64(scanWorkerActiveDeadlineSeconds),
 			RegistryAddr:                  registryAddr,
 			RegistryCredentialsSecretName: registryCredentialsSecretName,
+		})
+		// Note the Image: upstream's malcontent, NOT workerImage. Every
+		// other isolated scanner runs `monitor-api scan-worker` out of
+		// this project's own image; malcontent's binary is glibc-linked
+		// and cannot live in it (see the Dockerfile's note), so its Job
+		// runs Chainguard's image directly.
+		isolatedMalcontent = scanner.NewIsolatedMalcontentScanner(k8sClient, scanner.IsolatedMalcontentConfig{
+			Image:                 getenv("MALCONTENT_IMAGE", scanner.DefaultMalcontentImage),
+			MinRisk:               malcontentMinRisk,
+			ActiveDeadlineSeconds: int64(scanWorkerActiveDeadlineSeconds),
 		})
 		// Shares the same Kubernetes API client and worker image as
 		// isolatedUnpacker above -- both are just different scan-worker
@@ -1189,7 +1259,9 @@ func runAPIServer() {
 		// isolated into their own scan-worker Job by default, all
 		// falling back in-process together under DISABLE_SCAN_ISOLATION.
 		// See buildImageScanners/cveScannersFor.
-		artifact.TypeImage: buildImageScanners(disableScanIsolation, cveScanner, inProcessTrivy, isolatedTrivyImage, inProcessGrype, isolatedGrypeImage, inProcessUnpacker, isolatedUnpacker),
+		artifact.TypeImage: buildImageScanners(disableScanIsolation, cveScanner, malwareScanner,
+			inProcessTrivy, isolatedTrivyImage, inProcessGrype, isolatedGrypeImage,
+			inProcessUnpacker, isolatedUnpacker, inProcessMalcontent, isolatedMalcontent),
 		artifact.TypeFile: {
 			scanner.NewFetchingScanner(fetcher, scanner.NewClamAVScanner(clamAddr)),
 		},

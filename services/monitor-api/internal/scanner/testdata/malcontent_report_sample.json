@@ -1,0 +1,113 @@
+{
+    "Files": {
+        "/busybox-1.36.1-r20.Q1RI9NwsyLEtG8mZamu5JLEp6qkuk=.post-install": {
+            "Path": "/tmp/alpine-3.191858813611/lib/apk/db/scripts.tar ∴ /busybox-1.36.1-r20.Q1RI9NwsyLEtG8mZamu5JLEp6qkuk=.post-install",
+            "SHA256": "3927be853572aec31eeb44e10e876a9a7c4a39454796bcd7b59f1372033f12ac",
+            "Size": 139,
+            "Behaviors": [
+                {
+                    "Description": "small program that runs atypical busybox programs",
+                    "MatchStrings": [
+                        "/bin/busybox mkdir"
+                    ],
+                    "RiskScore": 3,
+                    "RiskLevel": "HIGH",
+                    "RuleURL": "https://github.com/chainguard-dev/malcontent/blob/b179da9543db37ba5d5ae9a4475de80c1c2757d6/rules/exec/shell/busybox-exec.yara#L12",
+                    "ID": "exec/shell/busybox_exec",
+                    "RuleName": "busybox_runner_high"
+                }
+            ],
+            "RiskScore": 3,
+            "RiskLevel": "HIGH"
+        },
+        "/busybox-1.36.1-r20.Q1RI9NwsyLEtG8mZamu5JLEp6qkuk=.trigger": {
+            "Path": "/tmp/alpine-3.191858813611/lib/apk/db/scripts.tar ∴ /busybox-1.36.1-r20.Q1RI9NwsyLEtG8mZamu5JLEp6qkuk=.trigger",
+            "SHA256": "0d63b08ed79c5a2348548852c9674c5c947abe2c97691162bd94a887ebd7d1f0",
+            "Size": 546,
+            "Behaviors": [
+                {
+                    "Description": "small program that runs atypical busybox programs",
+                    "MatchStrings": [
+                        "/bin/busybox depmod"
+                    ],
+                    "RiskScore": 3,
+                    "RiskLevel": "HIGH",
+                    "RuleURL": "https://github.com/chainguard-dev/malcontent/blob/b179da9543db37ba5d5ae9a4475de80c1c2757d6/rules/exec/shell/busybox-exec.yara#L12",
+                    "ID": "exec/shell/busybox_exec",
+                    "RuleName": "busybox_runner_high"
+                }
+            ],
+            "RiskScore": 3,
+            "RiskLevel": "HIGH"
+        },
+        "/tmp/alpine-3.191858813611/bin/busybox": {
+            "Path": "alpine:3.19 ∴ /bin/busybox",
+            "SHA256": "50707975da5fe01460bb7bf0be1c082b4e533263cb69600fcf6559e0e59b31f3",
+            "Size": 808712,
+            "Behaviors": [
+                {
+                    "Description": "gets network route information",
+                    "MatchStrings": [
+                        "/proc/net/route",
+                        "route address",
+                        "host route"
+                    ],
+                    "RiskScore": 3,
+                    "RiskLevel": "HIGH",
+                    "RuleURL": "https://github.com/chainguard-dev/malcontent/blob/b179da9543db37ba5d5ae9a4475de80c1c2757d6/rules/fs/proc/net_route.yara#L12",
+                    "ID": "fs/proc/net_route",
+                    "RuleName": "proc_net_route_high"
+                }
+            ],
+            "RiskScore": 3,
+            "RiskLevel": "HIGH",
+            "Overrides": [
+                {
+                    "Description": "busybox",
+                    "RiskScore": -1,
+                    "RiskLevel": "NONE",
+                    "RuleURL": "https://github.com/chainguard-dev/malcontent/blob/b179da9543db37ba5d5ae9a4475de80c1c2757d6/rules/false_positives/busybox.yara#L14",
+                    "ID": "false-positives/busybox",
+                    "RuleName": "busybox",
+                    "Override": [
+                        "possible_reverse_shell"
+                    ]
+                }
+            ]
+        },
+        "/tmp/alpine-3.191858813611/lib/ld-musl-x86_64.so.1": {
+            "Path": "alpine:3.19 ∴ /lib/ld-musl-x86_64.so.1",
+            "SHA256": "4e5f9d95fbf01b1375090a257faf28d5f00436e20a4f054d1ee80ff5750f166c",
+            "Size": 649832,
+            "Behaviors": [
+                {
+                    "Description": "reference file within /dev/shm (world writeable)",
+                    "MatchStrings": [
+                        "/dev/shm/tmp-"
+                    ],
+                    "RiskScore": 3,
+                    "RiskLevel": "HIGH",
+                    "RuleURL": "https://github.com/chainguard-dev/malcontent/blob/b179da9543db37ba5d5ae9a4475de80c1c2757d6/rules/evasion/file/location/dev-shm.yara#L23",
+                    "ID": "evasion/file/location/dev_shm",
+                    "RuleName": "dev_shm_file"
+                },
+                {
+                    "Description": "userland rootkit designed to hide files (readdir64+readlink)",
+                    "MatchStrings": [
+                        "readdir64",
+                        "readlink",
+                        "/proc",
+                        "dlsym"
+                    ],
+                    "RiskScore": 3,
+                    "RiskLevel": "HIGH",
+                    "RuleURL": "https://github.com/chainguard-dev/malcontent/blob/b179da9543db37ba5d5ae9a4475de80c1c2757d6/rules/evasion/rootkit/userspace.yara#L49",
+                    "ID": "evasion/rootkit/userspace",
+                    "RuleName": "readdir_dlsym_interceptor"
+                }
+            ],
+            "RiskScore": 3,
+            "RiskLevel": "HIGH"
+        }
+    }
+}

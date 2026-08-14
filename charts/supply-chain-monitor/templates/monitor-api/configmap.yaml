@@ -133,6 +133,13 @@ data:
   # values.yaml's monitorApi.cveScanner comment and main.go's
   # runAPIServer.
   CVE_SCANNER: {{ .Values.monitorApi.cveScanner | quote }}
+  # Selects which malware scanner(s) run for image artifacts -- the
+  # counterpart to CVE_SCANNER above. "clamav" (the default) is exactly
+  # what every deployment did before malcontent existed; see
+  # values.yaml's monitorApi.malwareScanner.
+  MALWARE_SCANNER: {{ .Values.monitorApi.malwareScanner | quote }}
+  MALCONTENT_IMAGE: {{ .Values.monitorApi.malcontent.image | quote }}
+  MALCONTENT_MIN_RISK: {{ .Values.monitorApi.malcontent.minRisk | quote }}
   # Lets an "image"-mode scan-worker Job upload a generated SBOM/SARIF
   # document back to this Service -- see monitorApi.scanWorker.apiBaseURL's
   # own comment in values.yaml.
