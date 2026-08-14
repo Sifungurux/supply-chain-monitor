@@ -1411,7 +1411,20 @@ scans, nothing to clean up) with a StorageClass's capacity behind it.
 Empty (the default) keeps today's `emptyDir`, so nothing changes until
 you set it.
 
-Two things to know:
+The setting is process-wide, and `"none"` is how a single Job opts back
+out of it — an `emptyDir`, explicitly, even where a StorageClass is
+configured. That exists because the sensible arrangement is usually a
+mix: PVCs for image scans, which extract gigabytes, and `emptyDir` for
+`sbom`-mode Jobs, which fetch one JSON document and spill nothing (hence
+their much smaller 128Mi/256Mi ephemeral sizing). Without it, enabling
+the feature would hand every SBOM scan a PVC and charge it provisioning
+latency for storage it never writes to.
+
+So the setting has three non-default values, and they mean three
+different things: a class name, `"-"` for the cluster default, and
+`"none"` for an explicit `emptyDir`.
+
+Two more things to know:
 
 - **The chart grants extra RBAC only when you set it.** A pod requesting
   a generic ephemeral volume creates a PVC indirectly, so monitor-api

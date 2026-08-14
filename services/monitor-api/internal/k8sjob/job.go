@@ -263,9 +263,15 @@ type ScanJobConfig struct {
 	// the emptyDir every scan Job has always had, so this changes
 	// nothing until it is set.
 	//
-	// ScratchStorageClass = "-" is the Kubernetes convention for "use
-	// the cluster default StorageClass" -- it renders as an empty
-	// storageClassName, which is not the same as omitting the field.
+	// Three values mean three different things:
+	//
+	//	""      not configured here -- use the process-wide default
+	//	"-"     the cluster's default StorageClass (an empty but present
+	//	        storageClassName, which Kubernetes reads differently
+	//	        from an absent one)
+	//	"none"  an emptyDir, explicitly, even if a class is configured
+	//	        process-wide (ScratchNone)
+	//
 	// ScratchSize defaults to defaultScratchSize when a class is set.
 	ScratchStorageClass string
 	ScratchSize         string
@@ -287,6 +293,11 @@ var (
 	ScratchSize         string
 )
 
+// ScratchNone opts a Job (or a whole deployment) back into the
+// node-disk emptyDir even when a StorageClass is configured. See
+// scratchVolume.
+const ScratchNone = "none"
+
 // defaultScratchSize is what a scan scratch volume gets when a
 // StorageClass is configured without a size. Sized against the same
 // measurements the ephemeral-storage limits use (see
@@ -303,7 +314,19 @@ func scratchVolume(cfg ScanJobConfig) Volume {
 	if class == "" {
 		class = ScratchStorageClass
 	}
-	if class == "" {
+	// "none" is the opt-OUT: an emptyDir, explicitly, even when a
+	// StorageClass is configured process-wide. It exists because the
+	// setting is one global decision and not every Job wants the same
+	// answer -- an "sbom"-mode Job fetches a single JSON document and
+	// has nothing to spill (hence its 128Mi/256Mi ephemeral sizing),
+	// so provisioning a PVC for it would add per-scan provisioning
+	// latency to buy nothing.
+	//
+	// Distinct from "" (unset -> fall back to the global) and from "-"
+	// (the cluster's default StorageClass). Three states, because "no
+	// volume class", "whatever the cluster prefers" and "not
+	// configured here" are three different intentions.
+	if class == "" || class == ScratchNone {
 		return Volume{Name: "scratch", EmptyDir: &EmptyDirVolume{}}
 	}
 	size := cfg.ScratchSize

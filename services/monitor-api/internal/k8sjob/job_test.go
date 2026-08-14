@@ -218,3 +218,48 @@ func TestNewScanJob_PackageLevelScratchDefault(t *testing.T) {
 		t.Fatalf("per-Job StorageClass must win over the package default, got %q", *spec.StorageClassName)
 	}
 }
+
+// "none" is the opt-out: a Job that wants the node-disk emptyDir even
+// though the deployment has moved scratch space onto a StorageClass.
+// Without it the setting is all-or-nothing, and the mix that actually
+// makes sense -- PVCs for image scans, emptyDir for "sbom"-mode Jobs
+// that fetch one JSON document and spill nothing -- is unreachable.
+func TestNewScanJob_ScratchNoneOptsBackIntoEmptyDir(t *testing.T) {
+	ScratchStorageClass, ScratchSize = "ceph-rbd", "10Gi"
+	defer func() { ScratchStorageClass, ScratchSize = "", "" }()
+
+	// Sanity: the global default is in force for a Job that says nothing.
+	def := NewScanJob(ScanJobConfig{Name: "j", Namespace: "n", Image: "i", Command: []string{"x"}}).
+		Spec.Template.Spec.Volumes[0]
+	if def.Ephemeral == nil {
+		t.Fatal("setup: the process-wide StorageClass should apply to a Job that does not opt out")
+	}
+
+	opted := NewScanJob(ScanJobConfig{
+		Name: "j", Namespace: "n", Image: "i", Command: []string{"x"},
+		ScratchStorageClass: ScratchNone,
+	}).Spec.Template.Spec.Volumes[0]
+	if opted.EmptyDir == nil {
+		t.Fatal(`ScratchStorageClass "none" must produce an emptyDir even when a class is configured process-wide`)
+	}
+	if opted.Ephemeral != nil {
+		t.Fatal("an opted-out Job must not also carry a volume claim template")
+	}
+	if opted.Name != "scratch" {
+		t.Errorf("volume name = %q, want scratch either way", opted.Name)
+	}
+}
+
+// The same value works as the deployment-wide setting, so an operator
+// can disable the feature without hunting for the difference between
+// "none" and "".
+func TestNewScanJob_ScratchNoneAsTheProcessWideValue(t *testing.T) {
+	ScratchStorageClass, ScratchSize = ScratchNone, "10Gi"
+	defer func() { ScratchStorageClass, ScratchSize = "", "" }()
+
+	vol := NewScanJob(ScanJobConfig{Name: "j", Namespace: "n", Image: "i", Command: []string{"x"}}).
+		Spec.Template.Spec.Volumes[0]
+	if vol.EmptyDir == nil || vol.Ephemeral != nil {
+		t.Fatalf(`process-wide "none" must mean emptyDir, got %+v`, vol)
+	}
+}

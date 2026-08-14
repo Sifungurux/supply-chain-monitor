@@ -728,6 +728,13 @@ monitorApi:
   # local-path (PVC created per Job, deleted with the pod), which proves
   # the plumbing but not the relief.
   scanScratch:
+    # "" (default) -- the emptyDir every scan Job has always had.
+    # "<class>"    -- a per-Job PVC from that StorageClass.
+    # "-"          -- the cluster's default StorageClass.
+    # "none"       -- an emptyDir, explicitly. Same as "" here, and the
+    #                 value a single scanner can set to opt back out
+    #                 when the deployment has moved scratch space onto
+    #                 storage (see k8sjob.ScratchNone).
     storageClass: ""
     # Per-Job volume size. Defaults to 3Gi, matching the
     # ephemeral-storage limit these Jobs already carry (see
