@@ -2,6 +2,7 @@ package artifact_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/notify"
@@ -551,5 +552,154 @@ func TestMemStore_SearchComponentsCountsEveryArtifactWithThePURL(t *testing.T) {
 	}
 	if len(containing) != matches[0].Artifacts {
 		t.Fatalf("search promised %d artifacts, the exact lookup returned %d", matches[0].Artifacts, len(containing))
+	}
+}
+
+// mustCreateStore is Create with the error handling these retention
+// tests would otherwise repeat at every call.
+func mustCreateStore(t *testing.T, s *artifact.MemStore, ref string) *artifact.Artifact {
+	t.Helper()
+	a, err := s.Create(ref, artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create(%s): %v", ref, err)
+	}
+	return a
+}
+
+// Retention tests use a cutoff in the FUTURE rather than aging
+// artifacts into the past. Update() stamps UpdatedAt = now after
+// running its mutate callback, so there is no way to make an artifact
+// old through the Store interface at all -- and a cutoff of now+1h
+// means "everything is older than this", which exercises the same
+// comparison without reaching into the store's internals or waiting.
+func futureCutoff() time.Time { return time.Now().UTC().Add(time.Hour) }
+
+func TestMemStore_CountAndDeleteOlderThan(t *testing.T) {
+	s := artifact.NewMemStore()
+	mustCreateStore(t, s, "one:1.0")
+	mustCreateStore(t, s, "two:1.0")
+
+	n, err := s.CountOlderThan(futureCutoff())
+	if err != nil {
+		t.Fatalf("CountOlderThan: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("CountOlderThan = %d, want 2", n)
+	}
+	// Counting must not delete -- the dry run depends on exactly this.
+	if all, _ := s.List(); len(all) != 2 {
+		t.Fatalf("after CountOlderThan there are %d artifacts, want 2 -- counting must not delete", len(all))
+	}
+
+	// Nothing is older than a cutoff in the distant past.
+	if n, err := s.CountOlderThan(time.Now().UTC().Add(-365 * 24 * time.Hour)); err != nil || n != 0 {
+		t.Fatalf("CountOlderThan(a year ago) = %d, %v -- want 0", n, err)
+	}
+
+	deleted, err := s.DeleteOlderThan(futureCutoff(), 100)
+	if err != nil {
+		t.Fatalf("DeleteOlderThan: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("DeleteOlderThan = %d, want 2", deleted)
+	}
+	if all, _ := s.List(); len(all) != 0 {
+		t.Fatalf("%d artifacts survived, want 0", len(all))
+	}
+}
+
+// A capped run must take the OLDEST first. One that deleted an
+// arbitrary subset would still report a plausible number while leaving
+// the actually-stale rows behind and removing newer ones instead.
+func TestMemStore_DeleteOlderThanTakesOldestFirst(t *testing.T) {
+	s := artifact.NewMemStore()
+	// Created in order, so their UpdatedAt increases in the same order.
+	oldest := mustCreateStore(t, s, "oldest:1.0")
+	middle := mustCreateStore(t, s, "middle:1.0")
+	newest := mustCreateStore(t, s, "newest:1.0")
+
+	deleted, err := s.DeleteOlderThan(futureCutoff(), 1)
+	if err != nil {
+		t.Fatalf("DeleteOlderThan: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1 (the cap)", deleted)
+	}
+	if _, err := s.Get(oldest.ID); err == nil {
+		t.Error("the oldest artifact should have been the one deleted")
+	}
+	for _, id := range []string{middle.ID, newest.ID} {
+		if _, err := s.Get(id); err != nil {
+			t.Errorf("artifact %s should have survived a limit-1 prune: %v", id, err)
+		}
+	}
+}
+
+// A limit of zero or less deletes NOTHING. It must not read as
+// "unlimited" the way a zero does elsewhere in this codebase (rate
+// limits, quotas) -- here that convention would empty the store.
+func TestMemStore_DeleteOlderThanZeroLimitDeletesNothing(t *testing.T) {
+	s := artifact.NewMemStore()
+	mustCreateStore(t, s, "keep-me:1.0")
+
+	for _, limit := range []int{0, -1} {
+		deleted, err := s.DeleteOlderThan(futureCutoff(), limit)
+		if err != nil || deleted != 0 {
+			t.Fatalf("DeleteOlderThan(limit=%d) = %d, %v -- want 0 deleted", limit, deleted, err)
+		}
+	}
+	if all, _ := s.List(); len(all) != 1 {
+		t.Fatalf("%d artifacts remain, want 1 -- a non-positive limit must never delete", len(all))
+	}
+}
+
+// Retention keys on UpdatedAt, not CreatedAt: an artifact registered
+// two years ago that is still being re-scanned is in active use, and
+// deleting it would be the worst bug this feature could have.
+func TestMemStore_DeleteOlderThanIgnoresOldButActiveArtifacts(t *testing.T) {
+	s := artifact.NewMemStore()
+	a := mustCreateStore(t, s, "ancient-but-busy:1.0")
+	if _, err := s.Update(a.ID, func(art *artifact.Artifact) {
+		art.CreatedAt = time.Now().UTC().Add(-700 * 24 * time.Hour)
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Cutoff well in the past: this artifact was CREATED long before it
+	// and UPDATED just now, so it must not be eligible.
+	n, err := s.CountOlderThan(time.Now().UTC().Add(-90 * 24 * time.Hour))
+	if err != nil {
+		t.Fatalf("CountOlderThan: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("CountOlderThan = %d, want 0 -- a two-year-old artifact updated today is not stale", n)
+	}
+}
+
+// Deleting an artifact takes its documents and components with it (the
+// cascade Delete already relies on), so a pruned artifact must not keep
+// answering component searches from a map nothing else can reach.
+func TestMemStore_DeleteOlderThanCascades(t *testing.T) {
+	s := artifact.NewMemStore()
+	a := mustCreateStore(t, s, "with-children:1.0")
+	if err := s.SaveComponents(a.ID, []artifact.Component{{PURL: "pkg:apk/alpine/openssl@3.1.4-r5", Name: "openssl"}}); err != nil {
+		t.Fatalf("SaveComponents: %v", err)
+	}
+	if err := s.SaveDocument(a.ID, artifact.DocumentKindSBOM, "application/json", []byte("{}")); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+
+	if _, err := s.DeleteOlderThan(futureCutoff(), 10); err != nil {
+		t.Fatalf("DeleteOlderThan: %v", err)
+	}
+	found, err := s.FindByComponentPURL("pkg:apk/alpine/openssl@3.1.4-r5")
+	if err != nil {
+		t.Fatalf("FindByComponentPURL: %v", err)
+	}
+	if len(found) != 0 {
+		t.Errorf("a pruned artifact still answers component search: %+v", found)
+	}
+	if doc, _ := s.GetDocument(a.ID, artifact.DocumentKindSBOM); doc != nil {
+		t.Error("a pruned artifact still has its SBOM document")
 	}
 }

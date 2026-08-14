@@ -1,0 +1,87 @@
+# Runs `monitor-api prune` (main.go) on a schedule -- deletes artifacts
+# nothing has touched in monitorApi.retention.days, oldest first, up to
+# maxPerRun each time. Mirrors sweep-registered-cronjob.yaml's shape;
+# see that file for the general pattern.
+#
+# OFF by default, and doubly so: this template renders nothing unless
+# retention.enabled, and even when it renders, `monitor-api prune`
+# treats RETENTION_DAYS <= 0 as "retention is disabled" and exits
+# without touching anything. Deleting is irreversible -- an artifact
+# takes its findings, stage history, documents and components with it
+# (ON DELETE CASCADE) -- so both the operator and the binary have to
+# agree that it should happen.
+#
+# Unlike sweep-registered, this talks to Postgres DIRECTLY rather than
+# through the API: there is no bulk-delete endpoint, and pruning is a
+# pure data operation with no scan orchestration to route through. That
+# is why this Job carries the Postgres env/Secret wiring the sweep Job
+# does not.
+#
+# concurrencyPolicy: Forbid -- two overlapping prunes would race on the
+# same rows. Harmless in outcome (the second deletes fewer) but there is
+# no reason to allow it.
+{{- if .Values.monitorApi.retention.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scm-prune
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: scm-prune
+spec:
+  schedule: {{ .Values.monitorApi.retention.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: scm-prune
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app: scm-prune
+        spec:
+          restartPolicy: Never
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+          containers:
+            - name: prune
+              image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              args: ["prune"]
+              envFrom:
+                # POSTGRES_HOST/PORT/USER/DB, and LOG_LEVEL so this Job's
+                # output is structured the same way everything else is.
+                - configMapRef:
+                    name: monitor-api-config
+              env:
+                - name: RETENTION_DAYS
+                  value: {{ .Values.monitorApi.retention.days | quote }}
+                - name: RETENTION_MAX_PER_RUN
+                  value: {{ .Values.monitorApi.retention.maxPerRun | quote }}
+                - name: RETENTION_DRY_RUN
+                  value: {{ .Values.monitorApi.retention.dryRun | quote }}
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      # Fixed name, matching monitor-api's own Deployment
+                      # -- with postgres.credentials.existingSecret the
+                      # operator supplies a Secret under this same name,
+                      # which is what makes every consumer in this chart
+                      # able to reference it without a conditional.
+                      name: scm-postgres-credentials
+                      key: POSTGRES_PASSWORD
+              resources:
+                {{- toYaml .Values.monitorApi.retention.resources | nindent 16 }}
+{{- end }}

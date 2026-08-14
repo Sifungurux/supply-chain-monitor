@@ -310,6 +310,13 @@ func main() {
 		runSweepRegistered()
 		return
 	}
+	// `monitor-api prune` is a fourth mode: delete artifacts nothing has
+	// touched in RETENTION_DAYS, then exit. Intended as a CronJob, off
+	// unless configured -- see runPrune.
+	if len(os.Args) > 1 && os.Args[1] == "prune" {
+		runPrune()
+		return
+	}
 	runAPIServer()
 }
 
@@ -566,6 +573,78 @@ func captureImageDocuments(ctx context.Context, rawReport []byte) {
 // type, etc.) is logged and skipped -- never fatal to the rest of the
 // batch, the same "one bad entry shouldn't block everything else"
 // reasoning bulkCreateArtifacts already uses.
+// retentionMinDays is the floor `monitor-api prune` refuses to go
+// below. Retention is expressed in days and deletes irreversibly, so
+// the difference between "1" and "0" is the difference between a
+// conservative setting and deleting everything -- and a value that low
+// is far more likely to be a mistake (a units mix-up, an unset variable
+// expanding to nothing, a template rendering "0") than a real intent to
+// keep one day of history. Refusing is recoverable; deleting is not.
+const retentionMinDays = 1
+
+func runPrune() {
+	days := getenvInt("RETENTION_DAYS", 0)
+	// Unset or zero means retention is OFF, not "delete everything with
+	// a cutoff of now". This is the single most important line in this
+	// function: the CronJob that runs it can be scheduled before anyone
+	// sets a period, and the failure mode of guessing wrong here is an
+	// empty database.
+	if days <= 0 {
+		slog.Info("prune: RETENTION_DAYS is unset or zero -- retention is disabled, nothing to do")
+		return
+	}
+	if days < retentionMinDays {
+		fatal("prune: RETENTION_DAYS is below the minimum and looks like a mistake -- refusing to run",
+			"retention_days", days, "minimum", retentionMinDays)
+	}
+	maxPerRun := getenvInt("RETENTION_MAX_PER_RUN", 500)
+	if maxPerRun <= 0 {
+		fatal("prune: RETENTION_MAX_PER_RUN must be positive", "retention_max_per_run", maxPerRun)
+	}
+	dryRun := getenvBool("RETENTION_DRY_RUN", false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	store, err := connectStoreWithRetry(ctx, buildPostgresDSN(), 12, 5*time.Second)
+	if err != nil {
+		fatal("prune: could not connect to postgres", "err", err)
+	}
+	defer store.Close()
+
+	// Truncated to the day the cutoff is expressed in, so two runs on
+	// the same day agree on what "90 days old" means regardless of what
+	// time the CronJob happened to fire.
+	cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
+
+	eligible, err := store.CountOlderThan(cutoff)
+	if err != nil {
+		fatal("prune: could not count stale artifacts", "err", err)
+	}
+	slog.Info("prune: artifacts eligible for deletion",
+		"count", eligible, "retention_days", days,
+		"cutoff", cutoff.Format(time.RFC3339), "max_per_run", maxPerRun, "dry_run", dryRun)
+
+	if dryRun {
+		slog.Info("prune: RETENTION_DRY_RUN=true -- nothing deleted")
+		return
+	}
+	if eligible == 0 {
+		return
+	}
+
+	deleted, err := store.DeleteOlderThan(cutoff, maxPerRun)
+	if err != nil {
+		fatal("prune: delete failed", "err", err)
+	}
+	// Deliberately loud about the remainder: a run that hit its cap has
+	// not finished the job, and silence would read as "everything old is
+	// gone" when the next run still has work.
+	slog.Info("prune: done",
+		"deleted", deleted, "remaining", eligible-deleted,
+		"capped", deleted >= maxPerRun)
+}
+
 func runSweepRegistered() {
 	apiBase := getenv("SWEEP_API_BASE_URL", "http://monitor-api:8080")
 	apiKey := os.Getenv("SWEEP_API_KEY")
