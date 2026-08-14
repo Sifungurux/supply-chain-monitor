@@ -1583,6 +1583,9 @@ func runAPIServer() {
 		// indexSBOMTypeComponents. Same fetcher the file/sbom/sarif
 		// scanners are already wrapped with.
 		Fetcher: fetcher,
+		// LICENSE_DENYLIST, e.g. "AGPL-3.0-only,SSPL-1.0". Empty (the
+		// default) denies nothing and skips the evaluation entirely.
+		LicenseDenylist: scanner.NewLicenseDenylist(os.Getenv("LICENSE_DENYLIST")),
 	})
 
 	srv := &http.Server{

@@ -11,6 +11,10 @@ data:
   # falls back to info rather than refusing to start: a typo in a
   # verbosity setting is not a reason to fail a deployment.
   LOG_LEVEL: {{ .Values.monitorApi.logLevel | quote }}
+  # Comma-separated SPDX identifiers this deployment refuses -- see
+  # values.yaml for the matching rule, which is exact per identifier
+  # rather than a substring.
+  LICENSE_DENYLIST: {{ .Values.monitorApi.licenseDenylist | quote }}
   CLAMAV_ADDR: {{ printf "%s.%s.svc.cluster.local:%s" .Values.monitorApi.clamav.service .Release.Namespace .Values.monitorApi.clamav.port | quote }}
   REGISTRY_ADDR: {{ printf "%s.%s.svc.cluster.local:%s" .Values.monitorApi.registry.service .Release.Namespace .Values.monitorApi.registry.port | quote }}
   # Postgres holds every artifact/finding/stage-history record -- see

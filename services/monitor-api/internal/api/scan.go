@@ -357,7 +357,19 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 		art.MalwareFindings = artifact.MergeFindings(art.MalwareFindings, malwareFindings, now, detectFixedFor("malware"), vex)
 		art.MisconfigFindings = artifact.MergeFindings(art.MisconfigFindings, misconfigFindings, now, detectFixedFor("misconfiguration"), vex)
 		art.SecretFindings = artifact.MergeFindings(art.SecretFindings, secretFindings, now, detectFixedFor("secret"), vex)
-		art.OtherFindings = artifact.MergeFindings(art.OtherFindings, otherFindings, now, detectFixedFor("other"), vex)
+		// A PARTITION of the bucket, not the whole of it: license
+		// findings are produced when an SBOM is indexed, never by a
+		// scanner, so they are absent from otherFindings every single
+		// scan. Merging against the whole bucket would therefore mark
+		// every license finding "fixed" on the next scan of the
+		// artifact -- silently, since the findings remain visible and
+		// simply claim to be resolved. The complementary half lives in
+		// documents.go's applyLicenseDenylist; between them the bucket
+		// is partitioned exactly once. See artifact.MergePartition.
+		art.OtherFindings = artifact.MergePartition(
+			art.OtherFindings, otherFindings,
+			func(f artifact.Finding) bool { return f.Source != artifact.LicenseFindingSource },
+			now, detectFixedFor("other"), vex)
 		art.LastScanErrors = scanErrors
 		art.LastScanFailureReason = failureReason
 		art.LastScanAt = &now

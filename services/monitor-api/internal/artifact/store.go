@@ -146,6 +146,15 @@ type Store interface {
 	// likely meant, and the tie-break keeps the order stable between
 	// backends and between calls.
 	SearchComponents(query string, limit int) ([]ComponentMatch, int, error)
+	// FindByLicense returns every artifact containing a component
+	// licensed under this exact identifier -- the ?license= half of GET
+	// /api/v1/components. EXACT and case-insensitive against one entry
+	// of a component's comma-joined list, never a substring of the
+	// whole: "GPL-3.0-only" must not match "LGPL-3.0-only", and must
+	// not match inside "MIT OR AGPL-3.0-only" where the OR is the
+	// permissive escape. Empty slice when nothing matches, like
+	// FindByComponentPURL.
+	FindByLicense(license string) ([]*Artifact, error)
 	// Stats returns fleet-wide counts in one call -- see Stats itself
 	// for what each map means. The point is that it aggregates in the
 	// backend: the dashboard holds one page of artifacts and its summary
@@ -509,7 +518,7 @@ func (s *MemStore) SearchComponents(query string, limit int) ([]ComponentMatch, 
 			}
 			m, ok := byPURL[c.PURL]
 			if !ok {
-				m = &ComponentMatch{PURL: c.PURL, Name: c.Name, Version: c.Version}
+				m = &ComponentMatch{PURL: c.PURL, Name: c.Name, Version: c.Version, Licenses: c.Licenses}
 				byPURL[c.PURL] = m
 			}
 			// Alphabetically first name/version wins, matching the
@@ -518,7 +527,7 @@ func (s *MemStore) SearchComponents(query string, limit int) ([]ComponentMatch, 
 			// happened to reach first" would differ between two calls on
 			// the same data.
 			if c.Name < m.Name {
-				m.Name, m.Version = c.Name, c.Version
+				m.Name, m.Version, m.Licenses = c.Name, c.Version, c.Licenses
 			}
 			m.Artifacts++
 		}
@@ -545,6 +554,50 @@ func (s *MemStore) SearchComponents(query string, limit int) ([]ComponentMatch, 
 // FindByComponentPURL answers with a linear scan, the same way
 // FindByFindingID does here -- PostgresStore uses the components.purl
 // index for the same query.
+// FindByLicense scans and compares per-identifier, matching
+// PostgresStore's unnest-based query rather than a substring test on
+// the joined string -- see the Store interface for why that difference
+// matters.
+func (s *MemStore) FindByLicense(license string) ([]*Artifact, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]*Artifact, 0)
+	want := strings.ToLower(strings.TrimSpace(license))
+	if want == "" {
+		return out, nil
+	}
+	for id, components := range s.components {
+		a, ok := s.data[id]
+		if !ok {
+			continue
+		}
+		if anyComponentLicensed(components, want) {
+			out = append(out, copyArtifact(a))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].ID > out[j].ID
+	})
+	return out, nil
+}
+
+// anyComponentLicensed reports whether any component carries want as one
+// of its comma-separated identifiers (already lowercased and trimmed).
+func anyComponentLicensed(components []Component, want string) bool {
+	for _, c := range components {
+		for _, one := range strings.Split(c.Licenses, ",") {
+			if strings.ToLower(strings.TrimSpace(one)) == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (s *MemStore) FindByComponentPURL(purl string) ([]*Artifact, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

@@ -268,6 +268,18 @@ type Component struct {
 	PURL    string `json:"purl"`
 	Name    string `json:"name,omitempty"`
 	Version string `json:"version,omitempty"`
+	// Licenses is the package's license identifiers, comma-joined --
+	// "MIT" or "MIT,Apache-2.0". SPDX ids where the document gave one,
+	// otherwise whatever free-text name or SPDX expression it carried
+	// (see scanner.ParseSBOMComponents). Empty is extremely common and
+	// means "this SBOM said nothing usable", not "unlicensed": SPDX's
+	// NOASSERTION/NONE placeholders are dropped rather than stored.
+	//
+	// A single string rather than a slice because it is one column, one
+	// filter (?license=) and one dashboard cell -- nothing in this
+	// service asks a question that needs them individually addressable,
+	// and a join table for a display field would be its own migration.
+	Licenses string `json:"licenses,omitempty"`
 }
 
 // ComponentMatch is one distinct package found by a component search
@@ -281,12 +293,32 @@ type ComponentMatch struct {
 	PURL    string `json:"purl"`
 	Name    string `json:"name,omitempty"`
 	Version string `json:"version,omitempty"`
+	// Licenses for the same representative row Name/Version come from
+	// -- see SearchComponents' DISTINCT ON.
+	Licenses string `json:"licenses,omitempty"`
 	// Artifacts is the number of DISTINCT artifacts containing this
 	// purl. The same purl has one row per artifact, so this is a count
 	// of rows only by coincidence of the unique constraint -- counted
 	// distinctly anyway, so it stays correct if that ever changes.
 	Artifacts int `json:"artifacts"`
 }
+
+// LicenseFindingSource is the Source every denylisted-license finding
+// carries, and the key that partitions the "other" bucket between the
+// license evaluator and the scanners that also write there -- see
+// MergePartition, which is what keeps the two from resolving each
+// other's findings.
+const LicenseFindingSource = "license"
+
+// LicenseFindingID is the finding ID for a denylisted license on one
+// package: "license:" plus the purl.
+//
+// Keyed on the full purl, which embeds the version -- so upgrading a
+// denylisted package closes the old finding and opens a new one rather
+// than silently carrying the old one forward against a release nobody
+// re-assessed. The trade is that a package bumping versions weekly
+// produces a new finding weekly.
+func LicenseFindingID(purl string) string { return "license:" + purl }
 
 // ComponentDiff is what changed between two component snapshots (see
 // Store.ComponentsAt) -- the answer GET

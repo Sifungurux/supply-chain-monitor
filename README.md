@@ -336,6 +336,7 @@ request/response shapes.
 | GET    | `/api/v1/findings?q=...`           | search finding ids/titles ("log4j") — returns matching ids with artifact counts |
 | GET    | `/api/v1/findings/{findingID}/artifacts` | every artifact still affected by a given finding ID (e.g. a CVE) |
 | GET    | `/api/v1/components?purl=...`      | every artifact whose ingested SBOM lists that component |
+| GET    | `/api/v1/components?license=...`   | every artifact containing a component under that exact SPDX identifier |
 | GET    | `/api/v1/artifacts/{id}/components/diff` | what changed in this artifact's SBOM between two scans — added, removed, and upgraded packages (optional `?from=&to=`) |
 
 `type` is one of `image`, `file`, `sbom`, `sarif`.
@@ -622,6 +623,37 @@ Set `monitorApi.serviceMonitor.enabled=true` to have a Prometheus
 Operator scrape it. Off by default because `ServiceMonitor` is a CRD:
 enabling it without prometheus-operator installed makes the install
 fail on an unknown kind.
+
+### Component licenses and the denylist
+
+`ParseSBOMComponents` captures license identifiers from both formats —
+CycloneDX `components[].licenses[]` (`license.id`, `license.name`, or an
+`expression`) and SPDX `packages[].licenseConcluded`/`licenseDeclared`
+— stored comma-joined on each component and shown in the dashboard's
+package picker. SPDX's `NOASSERTION`/`NONE` placeholders are dropped, so
+empty means "the document said nothing usable", not "unlicensed".
+
+`monitorApi.licenseDenylist` (`LICENSE_DENYLIST`, e.g.
+`"AGPL-3.0-only,SSPL-1.0"`) turns a denied license into a
+**medium-severity finding in the artifact's "other" bucket**, with the
+same open/fixed lifecycle as any scanner finding — it resolves on its
+own once the package is removed or relicensed. Empty by default, which
+denies nothing.
+
+**Matching is exact per identifier, case-insensitive, never a
+substring**, for both the denylist and `?license=`:
+
+- `GPL-3.0-only` does **not** match a component licensed
+  `LGPL-3.0-only` — a different license.
+- `AGPL-3.0-only` does **not** match the expression
+  `MIT OR AGPL-3.0-only`. The `OR` is exactly the permissive escape
+  that makes such a package usable, so flagging it would be a false
+  positive. Add the whole expression as its own denylist entry to
+  refuse those too; expressions are stored verbatim.
+
+The finding ID is `license:<purl>`, and a purl embeds its version — so
+upgrading a denylisted package resolves the old finding and opens a new
+one against the release nobody has re-assessed yet.
 
 ### SBOM component diffing
 

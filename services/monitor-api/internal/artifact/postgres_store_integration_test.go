@@ -1570,3 +1570,88 @@ func TestPostgresStore_ComponentHistory(t *testing.T) {
 		t.Errorf("component history survived the artifact: %v (%v)", gone, err)
 	}
 }
+
+// Licenses have to survive the round trip through both component
+// tables, and FindByLicense's per-identifier matching is SQL
+// (unnest + string_to_array) that no MemStore test exercises.
+func TestPostgresStore_ComponentLicenses(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	prefix := fmt.Sprintf("lic-%d", time.Now().UnixNano())
+	a, err := s.Create(prefix+":1.0", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Delete(a.ID) })
+
+	components := []artifact.Component{
+		{PURL: prefix + "/bad@1", Name: "bad", Version: "1", Licenses: "AGPL-3.0-only"},
+		{PURL: prefix + "/dual@1", Name: "dual", Version: "1", Licenses: "MIT,Apache-2.0"},
+		{PURL: prefix + "/expr@1", Name: "expr", Version: "1", Licenses: "MIT OR AGPL-3.0-only"},
+		{PURL: prefix + "/none@1", Name: "none", Version: "1"},
+	}
+	if err := s.SaveComponents(a.ID, components); err != nil {
+		t.Fatalf("SaveComponents: %v", err)
+	}
+
+	// Round trip through components_history, so a diff's entries carry
+	// licenses too rather than being silently license-less.
+	snaps, err := s.ComponentSnapshots(a.ID, 1)
+	if err != nil || len(snaps) != 1 {
+		t.Fatalf("ComponentSnapshots = %v, %v", snaps, err)
+	}
+	at, err := s.ComponentsAt(a.ID, snaps[0])
+	if err != nil {
+		t.Fatalf("ComponentsAt: %v", err)
+	}
+	var sawDual bool
+	for _, c := range at {
+		if c.PURL == prefix+"/dual@1" {
+			sawDual = true
+			if c.Licenses != "MIT,Apache-2.0" {
+				t.Errorf("history licenses = %q, want MIT,Apache-2.0", c.Licenses)
+			}
+		}
+	}
+	if !sawDual {
+		t.Error("the dual-licensed component is missing from the snapshot")
+	}
+
+	// Exact, per-identifier, case-insensitive.
+	for _, tc := range []struct {
+		license string
+		want    int
+		why     string
+	}{
+		{"AGPL-3.0-only", 1, "exact"},
+		{"agpl-3.0-only", 1, "case-insensitive"},
+		{"Apache-2.0", 1, "one entry of a comma-joined list"},
+		{"MIT", 1, "the other entry"},
+		{"GPL-3.0-only", 0, "must not match AGPL-3.0-only as a substring"},
+		{"Zlib", 0, "nothing carries it"},
+	} {
+		got, err := s.FindByLicense(tc.license)
+		if err != nil {
+			t.Fatalf("FindByLicense(%s): %v", tc.license, err)
+		}
+		// Scoped to this test's artifact -- the database is shared.
+		n := 0
+		for _, x := range got {
+			if x.ID == a.ID {
+				n++
+			}
+		}
+		if n != tc.want {
+			t.Errorf("FindByLicense(%q) matched this artifact %d times, want %d -- %s", tc.license, n, tc.want, tc.why)
+		}
+	}
+
+	// The picker carries them too.
+	matches, _, err := s.SearchComponents(prefix+"/dual", 10)
+	if err != nil {
+		t.Fatalf("SearchComponents: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Licenses != "MIT,Apache-2.0" {
+		t.Errorf("SearchComponents = %+v, want one match carrying its licenses", matches)
+	}
+}

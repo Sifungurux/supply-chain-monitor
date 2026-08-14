@@ -50,8 +50,18 @@ type componentSearchResponse struct {
 // answer means -- rather than being softened into a fuzzy match that
 // might quietly include a package you didn't ask about.
 //
-// purl wins if both are supplied: it's the more specific request, and a
-// caller sending both has already made its choice.
+//   - ?license=AGPL-3.0-only -- EXACT, by license: every artifact
+//     containing a component carrying that identifier. Matched per
+//     identifier and case-insensitively, never as a substring of the
+//     comma-joined column: "GPL-3.0-only" must not match
+//     "LGPL-3.0-only", and must not match inside the expression
+//     "MIT OR AGPL-3.0-only", where the OR is the permissive escape.
+//     Same rule scanner.LicenseDenylist applies, so what this finds is
+//     what the denylist would flag.
+//
+// purl wins if more than one is supplied, then license, then q: each is
+// more specific than the next, and a caller sending several has already
+// made its choice.
 //
 // The purl/query arrives as a query parameter rather than a path
 // segment: a purl contains slashes, "@", and often a query string of its
@@ -61,6 +71,16 @@ func (h *handler) listByComponent(w http.ResponseWriter, r *http.Request) {
 	purl := r.URL.Query().Get("purl")
 	if purl != "" {
 		list, err := h.store.FindByComponentPURL(purl)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, list)
+		return
+	}
+
+	if license := r.URL.Query().Get("license"); license != "" {
+		list, err := h.store.FindByLicense(license)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -80,7 +100,7 @@ func (h *handler) listByComponent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeError(w, http.StatusBadRequest,
-		`one of "purl" (exact, returns artifacts) or "q" (substring, returns matching packages) is required, e.g. ?q=openssl`)
+		`one of "purl" (exact, returns artifacts), "license" (exact SPDX identifier, returns artifacts) or "q" (substring, returns matching packages) is required, e.g. ?q=openssl`)
 }
 
 // componentDiffResponse is the /components/diff answer. From/To are the

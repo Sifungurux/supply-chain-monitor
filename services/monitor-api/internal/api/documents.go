@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
@@ -94,6 +95,48 @@ func (h *handler) indexSBOMComponents(id string, content []byte) {
 		return
 	}
 	slog.Info("indexed components from the uploaded SBOM", "artifact_id", id, "count", len(components))
+	h.applyLicenseDenylist(id, components)
+}
+
+// applyLicenseDenylist records a finding per component carrying a
+// denied license, and resolves the ones that no longer apply.
+//
+// Merged as a PARTITION of the "other" bucket, not against the whole of
+// it. The bucket has two independent producers -- SARIF/pluggable
+// scanners during a scan, and this during an SBOM index -- and
+// MergeFindings treats `reported` as a complete picture of whatever it
+// is merged against. Merging this against the whole bucket would mark
+// every SARIF finding fixed, because the license evaluator reports
+// none of them. See artifact.MergePartition, and scan.go for the
+// complementary half.
+//
+// detectFixed is true: this inventory IS the complete current answer
+// for license findings, so a package that is gone, or whose license is
+// no longer denied, is genuinely resolved and should say so.
+//
+// Best-effort like the indexing it follows -- a failure here is logged
+// and never turned into a failed upload or a failed scan.
+func (h *handler) applyLicenseDenylist(id string, components []artifact.Component) {
+	if !h.licenseDenylist.Enabled() {
+		return
+	}
+	findings := h.licenseDenylist.Findings(components)
+	now := time.Now().UTC()
+	vex := h.vexFor(id)
+
+	updated, err := h.store.Update(id, func(art *artifact.Artifact) {
+		art.OtherFindings = artifact.MergePartition(
+			art.OtherFindings, findings,
+			func(f artifact.Finding) bool { return f.Source == artifact.LicenseFindingSource },
+			now, true, vex)
+	})
+	if err != nil {
+		slog.Error("could not record license findings", "artifact_id", id, "err", err)
+		return
+	}
+	slog.Info("evaluated component licenses against the denylist",
+		"artifact_id", id, "count", len(findings), "components", len(components),
+		"other_findings", len(updated.OtherFindings))
 }
 
 // downloadDocument returns a captured document's raw bytes -- the

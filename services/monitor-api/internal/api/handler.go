@@ -82,6 +82,10 @@ type handler struct {
 	// doesn't care about it, and any deployment without a registry
 	// fetcher configured, behaves exactly as before it existed.
 	fetcher scanner.Fetcher
+	// licenseDenylist flags components whose license this deployment
+	// refuses (LICENSE_DENYLIST). The zero value denies nothing, which
+	// is what every caller that doesn't configure it gets.
+	licenseDenylist scanner.LicenseDenylist
 }
 
 // scanRetryAfter is the Retry-After (seconds) sent with the 429 a

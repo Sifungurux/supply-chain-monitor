@@ -2231,3 +2231,42 @@ test('a failing SBOM-changes request does not break the rest of the detail page'
 
   dom.window.close();
 });
+
+// Licenses in the component picker. Shown only when the SBOM carried
+// any -- a column of blanks on every row would be noise, since most
+// packages in a real inventory have none recorded.
+test('the component picker shows licenses when a package has them', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (url.includes('/api/v1/components?q=')) {
+        return jsonResponse({
+          total: 2,
+          packages: [
+            { purl: 'pkg:npm/bad@1.0.0', name: 'bad', version: '1.0.0', licenses: 'AGPL-3.0-only', artifacts: 3 },
+            { purl: 'pkg:npm/plain@1.0.0', name: 'plain', version: '1.0.0', artifacts: 1 }
+          ]
+        });
+      }
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, { error: 'not found' });
+    }
+  });
+  await tick(20);
+  const doc = dom.window.document;
+
+  const input = doc.getElementById('component-input');
+  input.value = 'a';
+  input.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await tick(20);
+
+  const rows = [...doc.querySelectorAll('#component-picker .pkg-row')];
+  assert.equal(rows.length, 2, 'expected both packages in the picker');
+  assert.match(rows[0].textContent, /AGPL-3\.0-only/);
+  // The package with no licenses gets no license cell at all.
+  assert.equal(rows[1].querySelectorAll('.pkg-license').length, 0);
+
+  dom.window.close();
+});
