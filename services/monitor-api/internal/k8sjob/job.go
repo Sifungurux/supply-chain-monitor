@@ -146,9 +146,44 @@ type Capabilities struct {
 }
 
 type Volume struct {
-	Name                  string           `json:"name"`
-	EmptyDir              *EmptyDirVolume  `json:"emptyDir,omitempty"`
-	PersistentVolumeClaim *PVCVolumeSource `json:"persistentVolumeClaim,omitempty"`
+	Name                  string                 `json:"name"`
+	EmptyDir              *EmptyDirVolume        `json:"emptyDir,omitempty"`
+	PersistentVolumeClaim *PVCVolumeSource       `json:"persistentVolumeClaim,omitempty"`
+	Ephemeral             *EphemeralVolumeSource `json:"ephemeral,omitempty"`
+}
+
+// EphemeralVolumeSource is a generic ephemeral volume: a PVC created
+// from an inline template when the pod starts and deleted with it. The
+// right shape for scan scratch space specifically -- it has an
+// emptyDir's lifecycle (per-pod, nothing to clean up, no sharing
+// between concurrent scans) while being backed by a StorageClass
+// instead of the node's own filesystem.
+//
+// That distinction is the whole point: scan Jobs extract whole images
+// to /tmp -- measured up to 2395Mi -- and with an emptyDir every one of
+// those bytes lands on the node's disk, competing with the kubelet, the
+// container images, and every other pod on that node. On a cluster
+// where storage can be added but memory cannot, moving that traffic
+// onto a StorageClass is the one lever that actually exists.
+type EphemeralVolumeSource struct {
+	VolumeClaimTemplate *PVCTemplate `json:"volumeClaimTemplate"`
+}
+
+type PVCTemplate struct {
+	Spec PVCTemplateSpec `json:"spec"`
+}
+
+type PVCTemplateSpec struct {
+	AccessModes []string `json:"accessModes"`
+	// StorageClassName is a pointer so an explicitly empty string (which
+	// means "use the default StorageClass") stays distinguishable from
+	// "not set" -- the field is omitted entirely when nil.
+	StorageClassName *string                 `json:"storageClassName,omitempty"`
+	Resources        PVCResourceRequirements `json:"resources"`
+}
+
+type PVCResourceRequirements struct {
+	Requests map[string]string `json:"requests"`
 }
 
 // EmptyDirVolume has no fields yet -- its presence is what matters
@@ -221,6 +256,85 @@ type ScanJobConfig struct {
 	// isolated scanner turns out to need.
 	ExtraVolumes      []Volume
 	ExtraVolumeMounts []VolumeMount
+
+	// ScratchStorageClass and ScratchSize move the /tmp scratch space
+	// off the node's disk and onto a StorageClass, as a generic
+	// ephemeral volume. Empty ScratchStorageClass (the default) keeps
+	// the emptyDir every scan Job has always had, so this changes
+	// nothing until it is set.
+	//
+	// ScratchStorageClass = "-" is the Kubernetes convention for "use
+	// the cluster default StorageClass" -- it renders as an empty
+	// storageClassName, which is not the same as omitting the field.
+	// ScratchSize defaults to defaultScratchSize when a class is set.
+	ScratchStorageClass string
+	ScratchSize         string
+}
+
+// ScratchStorageClass and ScratchSize are the process-wide default for
+// every scan Job's scratch volume, applied when a ScanJobConfig does
+// not set its own. Package-level for the same reason
+// scanner.VerboseScanLogs is: this is one cluster-wide "where does scan
+// scratch space live" decision, and threading two more fields through
+// four isolated-scanner config structs and their constructors would be
+// a lot of plumbing for a knob nobody sets per-scanner. main.go's
+// runAPIServer sets these once at startup from
+// SCAN_SCRATCH_STORAGE_CLASS / SCAN_SCRATCH_SIZE.
+//
+// Empty (the default) keeps the emptyDir every scan Job has always had.
+var (
+	ScratchStorageClass string
+	ScratchSize         string
+)
+
+// defaultScratchSize is what a scan scratch volume gets when a
+// StorageClass is configured without a size. Sized against the same
+// measurements the ephemeral-storage limits use (see
+// internal/scanner/isolated.go): the largest observed image extraction
+// was 2395Mi, and the limit that covers it is 3Gi.
+const defaultScratchSize = "3Gi"
+
+// scratchVolume is the writable /tmp every scan Job gets: an emptyDir
+// on the node's disk by default, or a per-pod PVC from a StorageClass
+// when one is configured. Same name, same mount path, same lifecycle
+// either way -- nothing above this function needs to know which it got.
+func scratchVolume(cfg ScanJobConfig) Volume {
+	class := cfg.ScratchStorageClass
+	if class == "" {
+		class = ScratchStorageClass
+	}
+	if class == "" {
+		return Volume{Name: "scratch", EmptyDir: &EmptyDirVolume{}}
+	}
+	size := cfg.ScratchSize
+	if size == "" {
+		size = ScratchSize
+	}
+	if size == "" {
+		size = defaultScratchSize
+	}
+	// "-" means the cluster default StorageClass: an empty (but
+	// present) storageClassName, which Kubernetes reads differently
+	// from an absent one.
+	if class == "-" {
+		class = ""
+	}
+	return Volume{
+		Name: "scratch",
+		Ephemeral: &EphemeralVolumeSource{
+			VolumeClaimTemplate: &PVCTemplate{
+				Spec: PVCTemplateSpec{
+					// ReadWriteOnce: one pod writes it, and it dies with
+					// that pod. Nothing shares scan scratch space, by
+					// design -- two concurrent scans of the same image
+					// must not see each other's extracted files.
+					AccessModes:      []string{"ReadWriteOnce"},
+					StorageClassName: &class,
+					Resources:        PVCResourceRequirements{Requests: map[string]string{"storage": size}},
+				},
+			},
+		},
+	}
 }
 
 // NewScanJob builds a hardened, single-container, single-run Job spec
@@ -302,7 +416,7 @@ func NewScanJob(cfg ScanJobConfig) *Job {
 						},
 					},
 					Volumes: append([]Volume{
-						{Name: "scratch", EmptyDir: &EmptyDirVolume{}},
+						scratchVolume(cfg),
 					}, cfg.ExtraVolumes...),
 				},
 			},

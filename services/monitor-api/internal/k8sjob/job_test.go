@@ -120,3 +120,101 @@ func TestNewScanJob(t *testing.T) {
 		t.Fatal("expected a top-level spec object in the marshaled JSON")
 	}
 }
+
+// The scratch volume is where scan Jobs extract whole images -- up to
+// 2395Mi measured. By default that lands on the node's own disk, which
+// is the arrangement that has evicted monitor-api during a load test
+// before. These tests cover both shapes, because "it still works
+// unchanged" matters as much as the new behaviour.
+func TestNewScanJob_ScratchIsAnEmptyDirByDefault(t *testing.T) {
+	ScratchStorageClass, ScratchSize = "", ""
+
+	job := NewScanJob(ScanJobConfig{Name: "j", Namespace: "n", Image: "i", Command: []string{"x"}})
+	vols := job.Spec.Template.Spec.Volumes
+	if len(vols) != 1 || vols[0].Name != "scratch" {
+		t.Fatalf("volumes = %+v, want one named scratch", vols)
+	}
+	if vols[0].EmptyDir == nil {
+		t.Fatal("scratch must default to an emptyDir -- every deployment that never sets a StorageClass depends on it")
+	}
+	if vols[0].Ephemeral != nil {
+		t.Fatal("scratch must not become a PVC unless one is configured")
+	}
+}
+
+func TestNewScanJob_ScratchUsesAStorageClassWhenConfigured(t *testing.T) {
+	job := NewScanJob(ScanJobConfig{
+		Name: "j", Namespace: "n", Image: "i", Command: []string{"x"},
+		ScratchStorageClass: "ceph-rbd", ScratchSize: "10Gi",
+	})
+
+	vol := job.Spec.Template.Spec.Volumes[0]
+	if vol.EmptyDir != nil {
+		t.Fatal("a configured StorageClass must replace the emptyDir, not sit beside it")
+	}
+	spec := vol.Ephemeral.VolumeClaimTemplate.Spec
+	if got := *spec.StorageClassName; got != "ceph-rbd" {
+		t.Errorf("storageClassName = %q, want ceph-rbd", got)
+	}
+	if got := spec.Resources.Requests["storage"]; got != "10Gi" {
+		t.Errorf("storage request = %q, want 10Gi", got)
+	}
+	// ReadWriteOnce, not RWX: two concurrent scans must never share
+	// extracted files.
+	if len(spec.AccessModes) != 1 || spec.AccessModes[0] != "ReadWriteOnce" {
+		t.Errorf("accessModes = %v, want [ReadWriteOnce]", spec.AccessModes)
+	}
+	// The mount is unchanged either way -- nothing above this knows
+	// which volume it got.
+	mount := job.Spec.Template.Spec.Containers[0].VolumeMounts[0]
+	if mount.Name != "scratch" || mount.MountPath != "/tmp" {
+		t.Errorf("mount = %+v, want scratch at /tmp", mount)
+	}
+}
+
+// "-" is the Kubernetes convention for "use the cluster default
+// StorageClass": an empty but PRESENT storageClassName, which is not
+// the same as omitting the field (that means "whatever the admission
+// default is", and on some clusters, nothing).
+func TestNewScanJob_ScratchDashMeansTheDefaultStorageClass(t *testing.T) {
+	job := NewScanJob(ScanJobConfig{
+		Name: "j", Namespace: "n", Image: "i", Command: []string{"x"},
+		ScratchStorageClass: "-",
+	})
+
+	spec := job.Spec.Template.Spec.Volumes[0].Ephemeral.VolumeClaimTemplate.Spec
+	if spec.StorageClassName == nil {
+		t.Fatal(`"-" must render an empty storageClassName, not omit the field`)
+	}
+	if *spec.StorageClassName != "" {
+		t.Errorf("storageClassName = %q, want empty", *spec.StorageClassName)
+	}
+	// No size configured: falls back to the measured default rather
+	// than requesting zero.
+	if got := spec.Resources.Requests["storage"]; got != defaultScratchSize {
+		t.Errorf("storage request = %q, want the %s default", got, defaultScratchSize)
+	}
+}
+
+// The package-level default is what main.go sets once at startup, so
+// every isolated scanner picks it up without threading two fields
+// through four config structs.
+func TestNewScanJob_PackageLevelScratchDefault(t *testing.T) {
+	ScratchStorageClass, ScratchSize = "local-path", "5Gi"
+	defer func() { ScratchStorageClass, ScratchSize = "", "" }()
+
+	spec := NewScanJob(ScanJobConfig{Name: "j", Namespace: "n", Image: "i", Command: []string{"x"}}).
+		Spec.Template.Spec.Volumes[0].Ephemeral.VolumeClaimTemplate.Spec
+	if *spec.StorageClassName != "local-path" || spec.Resources.Requests["storage"] != "5Gi" {
+		t.Fatalf("package default not applied: %+v", spec)
+	}
+
+	// An explicit per-Job value still wins over it.
+	spec = NewScanJob(ScanJobConfig{
+		Name: "j", Namespace: "n", Image: "i", Command: []string{"x"},
+		ScratchStorageClass: "ceph-rbd",
+	}).Spec.Template.Spec.Volumes[0].Ephemeral.VolumeClaimTemplate.Spec
+	if *spec.StorageClassName != "ceph-rbd" {
+		t.Fatalf("per-Job StorageClass must win over the package default, got %q", *spec.StorageClassName)
+	}
+}
