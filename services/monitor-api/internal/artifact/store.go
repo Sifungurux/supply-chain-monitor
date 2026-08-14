@@ -1,6 +1,7 @@
 package artifact
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -145,6 +146,22 @@ type Store interface {
 	// likely meant, and the tie-break keeps the order stable between
 	// backends and between calls.
 	SearchComponents(query string, limit int) ([]ComponentMatch, int, error)
+	// Stats returns fleet-wide counts in one call -- see Stats itself
+	// for what each map means. The point is that it aggregates in the
+	// backend: the dashboard holds one page of artifacts and its summary
+	// cards are about all of them, so every one of these numbers was
+	// either wrong or unavailable before this existed.
+	//
+	// This is the only method here that takes a context, which is a wart
+	// -- every other one calls context.Background() internally (see
+	// PostgresStore). It takes one anyway because it's the only method
+	// that scans two whole tables to answer, and its only caller is a
+	// handler the dashboard polls every 10 seconds: a client that hung
+	// up should cancel the query rather than have Postgres finish
+	// counting for nobody. The rest of this interface should grow a
+	// context the same way eventually; that's a mechanical change worth
+	// doing on its own rather than smuggling in here.
+	Stats(ctx context.Context) (Stats, error)
 }
 
 // MemStore is a thread-safe, in-memory Store implementation.
@@ -489,16 +506,46 @@ func (s *MemStore) FindByFindingID(findingID string) ([]*Artifact, error) {
 	return out, nil
 }
 
-// allBuckets is every finding slice on an artifact. Written once so a
-// whole-artifact scan can't miss a bucket: this used to check CVE,
-// malware and other only, so a misconfiguration or secret finding --
-// both real buckets since SARIF classification landed -- was invisible
-// to FindByFindingID here while PostgresStore (which queries one table
-// with a bucket column) found it. Two backends disagreeing about
-// whether an artifact is affected is the kind of difference that only
-// shows up in production.
+// namedBuckets is every finding slice on an artifact, keyed by the
+// bucket name PostgresStore stores in findings.bucket. THE list of
+// buckets, written once so a whole-artifact scan can't miss one: the
+// old hand-written list checked CVE, malware and other only, so a
+// misconfiguration or secret finding -- both real buckets since SARIF
+// classification landed -- was invisible to FindByFindingID here while
+// PostgresStore (which queries one table with a bucket column) found
+// it. Two backends disagreeing about whether an artifact is affected is
+// the kind of difference that only shows up in production.
+//
+// Keyed rather than a bare slice because Stats reports per-bucket
+// counts and so needs to know which slice is which; allBuckets below
+// drops the keys for the callers that only need "all of them".
+func namedBuckets(a *Artifact) map[string][]Finding {
+	return map[string][]Finding{
+		bucketCVE:              a.CVEFindings,
+		bucketMalware:          a.MalwareFindings,
+		bucketMisconfiguration: a.MisconfigFindings,
+		bucketSecret:           a.SecretFindings,
+		bucketOther:            a.OtherFindings,
+	}
+}
+
+// bucketNames is the five buckets in a fixed order. Ranging a map
+// directly would hand allBuckets' callers a different order on every
+// call; none of them looks like it would care (each scans every bucket
+// and either breaks on the first match or aggregates all of them), but
+// "looks like it wouldn't care" is a claim about three call sites that
+// has to be re-checked every time a fourth appears, and a stable order
+// costs one slice.
+var bucketNames = []string{bucketCVE, bucketMalware, bucketMisconfiguration, bucketSecret, bucketOther}
+
+// allBuckets is namedBuckets without the names, in bucketNames order.
 func allBuckets(a *Artifact) [][]Finding {
-	return [][]Finding{a.CVEFindings, a.MalwareFindings, a.MisconfigFindings, a.SecretFindings, a.OtherFindings}
+	byName := namedBuckets(a)
+	out := make([][]Finding, 0, len(bucketNames))
+	for _, name := range bucketNames {
+		out = append(out, byName[name])
+	}
+	return out
 }
 
 // findingIDMatches reports whether this bucket has findingID ACTIVE --
@@ -602,6 +649,50 @@ func (s *MemStore) Count() (int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.data), nil
+}
+
+// Stats counts the whole map in one pass. ctx is accepted to satisfy
+// the interface and ignored: there is nothing to cancel: this never
+// blocks on anything, and returning ctx.Err() from a pure in-memory
+// walk would make a test with an already-cancelled context fail in a
+// way PostgresStore's timing wouldn't reproduce.
+func (s *MemStore) Stats(_ context.Context) (Stats, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	stats := Stats{
+		Total:        len(s.data),
+		ByStatus:     map[string]int{},
+		ByType:       map[string]int{},
+		WithFindings: map[string]int{},
+		ByStage:      map[string]int{},
+	}
+	// The five buckets are pre-seeded to zero, unlike the other three
+	// maps -- see Stats' own comment for why this one reports its whole
+	// closed set rather than only what it saw.
+	for _, name := range bucketNames {
+		stats.WithFindings[name] = 0
+	}
+
+	for _, a := range s.data {
+		stats.ByStatus[string(a.Status)]++
+		stats.ByType[string(a.Type)]++
+		// Unstaged artifacts land under "" rather than a placeholder --
+		// see Stats.ByStage.
+		stats.ByStage[a.CurrentStage]++
+		for name, findings := range namedBuckets(a) {
+			// At most one per bucket per artifact: these count AFFECTED
+			// ARTIFACTS, so an artifact with nine active CVEs is still one.
+			// Mirrors PostgresStore's count(DISTINCT artifact_id).
+			for _, f := range findings {
+				if f.IsActive() {
+					stats.WithFindings[name]++
+					break
+				}
+			}
+		}
+	}
+	return stats, nil
 }
 
 func (s *MemStore) FindByRef(ref string) (*Artifact, error) {

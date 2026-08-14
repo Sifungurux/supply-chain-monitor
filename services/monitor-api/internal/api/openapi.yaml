@@ -23,7 +23,7 @@ tags:
   - name: pipeline
     description: Pipeline stage configuration and per-artifact stage history.
   - name: meta
-    description: Service health.
+    description: Service health and fleet-wide counts.
 
 paths:
   /healthz:
@@ -57,6 +57,35 @@ paths:
                     type: array
                     items: { type: string }
                     example: [source, build, test, scan, sign, publish, deploy]
+
+  /api/v1/stats:
+    get:
+      tags: [meta]
+      summary: Fleet-wide artifact and finding counts
+      description: >-
+        Aggregate counts across every artifact in the store, in one
+        call. This is what the dashboard's summary cards and pipeline
+        strip read: /api/v1/artifacts is paginated, so counting a page
+        of it answers "of these 50", not "of all 812".
+
+
+        Every number counts ARTIFACTS, never findings --
+        `with_findings.cve: 3` means three artifacts each have at least
+        one active CVE, not that three CVEs exist. "Active" means
+        neither fixed nor VEX-suppressed, the same population
+        /api/v1/findings and /api/v1/findings/{findingID}/artifacts
+        report.
+
+
+        Takes no filters deliberately: it is the one number set for the
+        whole store. A filtered view's own size already comes back as
+        `total` on /api/v1/artifacts.
+      responses:
+        "200":
+          description: Fleet-wide counts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stats" }
 
   /api/v1/artifacts:
     get:
@@ -606,6 +635,52 @@ components:
       type: object
       properties:
         error: { type: string }
+
+    Stats:
+      type: object
+      required: [total, by_status, by_type, with_findings, by_stage]
+      properties:
+        total:
+          type: integer
+          description: Artifacts in the store.
+          example: 812
+        by_status:
+          type: object
+          additionalProperties: { type: integer }
+          description: >-
+            Artifacts per status. Only statuses something is actually in
+            appear -- read a missing key as 0.
+          example: { registered: 12, scanning: 3, scanned: 780, failed: 17 }
+        by_type:
+          type: object
+          additionalProperties: { type: integer }
+          description: >-
+            Artifacts per type. Only types something is actually of
+            appear -- read a missing key as 0.
+          example: { image: 640, file: 120, sbom: 40, sarif: 12 }
+        with_findings:
+          type: object
+          additionalProperties: { type: integer }
+          description: >-
+            Artifacts with at least one ACTIVE finding in each bucket --
+            neither fixed nor VEX-suppressed. One artifact with nine
+            open CVEs counts once, not nine times. Unlike the other
+            three maps, all five buckets are always present, zero
+            included: "no artifact has malware" is a statement worth
+            making rather than leaving a caller to infer from a missing
+            key.
+          example: { cve: 214, malware: 2, misconfiguration: 61, secret: 4, other: 33 }
+        by_stage:
+          type: object
+          additionalProperties: { type: integer }
+          description: >-
+            Artifacts per current pipeline stage. Artifacts that have
+            not been staged yet are counted under the EMPTY-STRING key,
+            not a placeholder name -- the stage list is deployment
+            configuration (PIPELINE_STAGES), so any name invented here
+            could collide with a real configured stage, and "" cannot.
+            Stages nothing has reached are absent -- read as 0.
+          example: { build: 300, scan: 402, deploy: 40, "": 70 }
 
     ArtifactPage:
       type: object

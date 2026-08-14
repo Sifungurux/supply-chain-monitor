@@ -436,6 +436,16 @@
     apiKey: localStorage.getItem('scm-api-key') || injected.apiKey || '',
     stages: [],
     artifacts: [],
+    // stats is GET /api/v1/stats -- the fleet-wide counts behind the
+    // summary cards and the stage strip. It has to come from the server
+    // because state.artifacts is ONE PAGE (see limit/offset below): a
+    // card computed from that read like a fleet number and meant "of
+    // these 50", which understated every risk count on a store bigger
+    // than one page, and said nothing about which population it was
+    // counting. null until the first fetch lands, which is the only
+    // reason renderCards/renderStages default to 0 rather than assuming
+    // it's there.
+    stats: null,
     busy: {},
     searchQuery: '',
     detailTab: 'cve_findings',
@@ -832,6 +842,16 @@
       var stagesRes = await fetchJSON('/api/v1/pipeline/stages');
       state.stages = (stagesRes && stagesRes.stages) || [];
 
+      // Fetched here, above every early return below, so the cards and
+      // the stage strip keep showing the WHOLE fleet even while a
+      // component or finding search has narrowed the table. That's the
+      // same call the "Artifacts" card's total already made (see the
+      // comments on those branches): searching for a package doesn't
+      // change how many artifacts exist or how many carry malware, so
+      // the summary shouldn't start answering a different question just
+      // because the table below it did.
+      state.stats = await fetchJSON('/api/v1/stats');
+
       // A component search answers with a bare array of every artifact
       // containing that purl -- no paging, because the answer is "the
       // artifacts that ship this package", which is a complete set by
@@ -1113,30 +1133,43 @@
   }
 
   function renderCards() {
-    // Everything except the first card counts the artifacts on THIS
-    // page -- the server only sends one page now, so a store-wide
-    // "with CVEs" number isn't available without an aggregate endpoint.
-    // The Artifacts card uses state.total (all pages) because "how many
-    // artifacts are there" is the one number that reading as
-    // "50, always" would be actively misleading.
-    var total = state.total;
-    var scanning = state.artifacts.filter(function (a) { return a.status === 'scanning'; }).length;
-    var withCVEs = state.artifacts.filter(function (a) { return openFindings(a.cve_findings).length > 0; }).length;
-    var withMalware = state.artifacts.filter(function (a) { return openFindings(a.malware_findings).length > 0; }).length;
-    var withOther = state.artifacts.filter(function (a) { return openFindings(a.other_findings).length > 0; }).length;
-    // These two are appended after the original five rather than
-    // inserted among them, so the existing cards keep their positions
-    // (some tests index into this array by position).
-    var withMisconfig = state.artifacts.filter(function (a) { return openFindings(a.misconfiguration_findings).length > 0; }).length;
-    var withSecrets = state.artifacts.filter(function (a) { return openFindings(a.secret_findings).length > 0; }).length;
+    // Every one of these is fleet-wide, straight from /api/v1/stats.
+    // They used to be counted out of state.artifacts, which holds one
+    // page: "With CVEs" then meant "with CVEs among these 50" while
+    // reading like a total, so a store of 800 artifacts reported a
+    // number that was capped at the page size and quietly understated
+    // every risk count on the page. The server can answer this properly
+    // in two aggregate queries, so it does.
+    //
+    // These are the WHOLE STORE even when a status/type filter or a
+    // component/finding search has narrowed the table below -- so with
+    // ?status=failed the "Artifacts" card reads the fleet while the
+    // pager reads "1-17 of 17". Deliberate, and the same rule the
+    // search branches in loadAll already followed: the cards answer
+    // "how much is there and how much of it is a problem", which a
+    // filter doesn't change. The filtered count has its own place to
+    // live, in the pager line.
+    //
+    // The "|| 0" defaults cover two cases: the very first render, which
+    // happens before the first fetch resolves (state.stats is null),
+    // and a key the API legitimately omitted -- by_status/by_stage
+    // carry only the values something is actually in, so a status
+    // nothing is in is absent rather than 0 (see artifact.Stats).
+    var stats = state.stats || {};
+    var byStatus = stats.by_status || {};
+    var withFindings = stats.with_findings || {};
+    // Card order is load-bearing: some tests index into this by
+    // position, and misconfigurations/secrets were appended after the
+    // original five rather than slotted in beside the other buckets so
+    // that stayed true.
     var cards = [
-      ['Artifacts', total],
-      ['Scanning now', scanning],
-      ['With CVEs', withCVEs],
-      ['With malware', withMalware],
-      ['With other findings', withOther],
-      ['With misconfigurations', withMisconfig],
-      ['With secrets', withSecrets]
+      ['Artifacts', stats.total || 0],
+      ['Scanning now', byStatus.scanning || 0],
+      ['With CVEs', withFindings.cve || 0],
+      ['With malware', withFindings.malware || 0],
+      ['With other findings', withFindings.other || 0],
+      ['With misconfigurations', withFindings.misconfiguration || 0],
+      ['With secrets', withFindings.secret || 0]
     ];
     els.cards.innerHTML = cards.map(function (c) {
       return '<div class="card"><div class="n">' + c[1] + '</div><div class="l">' + c[0] + '</div></div>';
@@ -1148,16 +1181,21 @@
       els.stages.innerHTML = '<span class="muted">No pipeline stages configured.</span>';
       return;
     }
-    var counts = {};
-    var unassigned = 0;
-    state.artifacts.forEach(function (a) {
-      if (a.current_stage) counts[a.current_stage] = (counts[a.current_stage] || 0) + 1;
-      else unassigned++;
-    });
+    // Fleet-wide, from /api/v1/stats, for the same reason the cards
+    // above are: counted from state.artifacts these pills described one
+    // page of the pipeline while looking like the whole of it.
+    //
+    // Artifacts that haven't been staged yet come back under the EMPTY
+    // STRING key, not an "unassigned" one -- the stage list is
+    // deployment config, so the API refuses to invent a name that could
+    // collide with a real configured stage (see artifact.Stats). The
+    // label below is this dashboard's choice, made here where it can't
+    // be mistaken for data.
+    var counts = (state.stats && state.stats.by_stage) || {};
     var pills = state.stages.map(function (s) {
       return '<div class="stage-pill">' + esc(s) + '<span class="count">' + (counts[s] || 0) + '</span></div>';
     });
-    pills.push('<div class="stage-pill">unassigned<span class="count">' + unassigned + '</span></div>');
+    pills.push('<div class="stage-pill">unassigned<span class="count">' + (counts[''] || 0) + '</span></div>');
     els.stages.innerHTML = pills.join('');
   }
 

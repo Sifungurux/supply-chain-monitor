@@ -69,6 +69,12 @@ func NewRouter(store artifact.Store, tracker *pipeline.Tracker, scanners scanner
 	mux.HandleFunc("GET /swagger", h.swaggerUI)
 	mux.HandleFunc("GET /openapi.yaml", h.openapiSpec)
 	mux.HandleFunc("GET /api/v1/pipeline/stages", h.listStages)
+	// Not exempted in withAuth below, so it requires the API key like
+	// every other /api/v1 route -- deliberate: unlike /healthz and the
+	// swagger pages (which describe the API's shape), this reports how
+	// many artifacts carry active malware and CVE findings, which is
+	// data about the fleet, not documentation.
+	mux.HandleFunc("GET /api/v1/stats", h.getStats)
 	mux.HandleFunc("POST /api/v1/artifacts", h.createArtifact)
 	mux.HandleFunc("POST /api/v1/artifacts/bulk", h.bulkCreateArtifacts)
 	mux.HandleFunc("GET /api/v1/artifacts", h.listArtifacts)

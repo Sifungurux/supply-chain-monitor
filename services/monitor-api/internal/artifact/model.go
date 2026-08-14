@@ -391,6 +391,46 @@ type FindingMatch struct {
 	Artifacts int `json:"artifacts"`
 }
 
+// Stats is the fleet-wide aggregate behind GET /api/v1/stats -- the
+// numbers the dashboard's summary cards and pipeline strip show. It
+// exists because those numbers are about the whole store and the
+// dashboard only ever holds one page of artifacts: computing them from
+// state.artifacts made "With CVEs" mean "with CVEs on this page", which
+// is a different and much smaller number than the card claims.
+//
+// Every map counts artifacts, never findings: "3" under
+// WithFindings["cve"] means three artifacts each have at least one
+// active CVE, not that three CVEs exist.
+//
+// The maps carry only the keys they observed -- a status nothing is in,
+// or a stage nothing has reached, is absent rather than present as 0, so
+// a client reads them with a "|| 0" default. WithFindings is the one
+// exception: its five buckets are a closed set fixed in code (they're
+// the five Finding slices on Artifact), and "0 artifacts with malware"
+// is a statement this endpoint should make out loud rather than leave a
+// caller to infer from a missing key.
+type Stats struct {
+	Total int `json:"total"`
+	// ByStatus and ByType are keyed by Status/Type values
+	// ("scanned", "image", ...).
+	ByStatus map[string]int `json:"by_status"`
+	ByType   map[string]int `json:"by_type"`
+	// WithFindings is keyed by bucket name ("cve", "malware",
+	// "misconfiguration", "secret", "other" -- the same strings
+	// PostgresStore stores in findings.bucket) and counts artifacts with
+	// at least one ACTIVE finding in that bucket, i.e. neither fixed nor
+	// VEX-suppressed (Finding.IsActive). Same population every other
+	// count in this service reports -- see FindByFindingID.
+	WithFindings map[string]int `json:"with_findings"`
+	// ByStage is keyed by Artifact.CurrentStage, which means artifacts
+	// that have not been staged yet are counted under the EMPTY string
+	// key rather than a made-up "unassigned" one. Deliberate: the stage
+	// list is deployment configuration (PIPELINE_STAGES), so any
+	// placeholder name this invented could collide with a real stage
+	// somebody configured. "" cannot, because it's never a valid stage.
+	ByStage map[string]int `json:"by_stage"`
+}
+
 // severityRank orders severities for "worst seen" aggregation. A
 // deliberate duplicate of internal/notify's identical table: notify
 // imports this package (ScanEvent carries []Finding), so importing it

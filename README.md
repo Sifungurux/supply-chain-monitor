@@ -310,6 +310,7 @@ request/response shapes.
 |--------|-----------------------------------|--------------------------------------------|
 | GET    | `/healthz`                        | liveness/readiness                         |
 | GET    | `/api/v1/pipeline/stages`         | list configured pipeline stages            |
+| GET    | `/api/v1/stats`                   | fleet-wide counts: artifacts by status/type/stage, plus how many carry active findings per bucket — what the dashboard's summary cards read, since `/api/v1/artifacts` is paginated |
 | POST   | `/api/v1/artifacts`                | register an artifact `{ref, type}`         |
 | POST   | `/api/v1/artifacts/bulk`           | register many artifacts in one request `{artifacts: [{ref, type}, ...]}`, max 500 |
 | GET    | `/api/v1/artifacts`                | list tracked artifacts, newest first — paginated (`?limit=50&offset=0`, max 200) with optional `?status=`/`?type=` filters |

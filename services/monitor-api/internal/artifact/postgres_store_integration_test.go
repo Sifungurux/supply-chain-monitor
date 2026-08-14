@@ -1227,3 +1227,125 @@ func TestPostgresStore_SearchFindings(t *testing.T) {
 		t.Fatalf("blank query = %+v (total %d), %v", m, total, err)
 	}
 }
+
+// TestPostgresStore_Stats mirrors internal/api's MemStore stats tests
+// against real SQL, where the aggregation risk lives: the two GROUP BYs,
+// the active-finding predicate, and count(DISTINCT artifact_id). The two
+// backends feed the same dashboard cards, so a disagreement between them
+// is a number that changes meaning depending on which store is wired up.
+//
+// Everything is asserted as a DELTA, like TestPostgresStore_Count above:
+// this database is shared with every other test in this file, so the
+// only stable claim is how much this test's own rows moved each number.
+func TestPostgresStore_Stats(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	before, err := s.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats (before): %v", err)
+	}
+
+	// A stage name nothing else in this file uses, so the by_stage
+	// assertions below can't be confused by another test's leftovers.
+	stage := fmt.Sprintf("statstest-%d", time.Now().UnixNano())
+
+	mk := func(ref string, ty artifact.Type, mutate func(*artifact.Artifact)) string {
+		t.Helper()
+		a, err := s.Create(ref, ty)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if mutate != nil {
+			if _, err := s.Update(a.ID, mutate); err != nil {
+				t.Fatalf("Update: %v", err)
+			}
+		}
+		return a.ID
+	}
+
+	// Three open CVEs on ONE artifact: the case that separates
+	// count(DISTINCT artifact_id) from count(*). Also carries a malware
+	// finding, so the per-bucket split can't be right by accident.
+	mk(fmt.Sprintf("stats-multi-%d:1.0", time.Now().UnixNano()), artifact.TypeImage, func(a *artifact.Artifact) {
+		a.Status = artifact.StatusScanned
+		a.CurrentStage = stage
+		a.CVEFindings = []artifact.Finding{
+			{ID: "CVE-2024-STATS-1", Status: artifact.FindingStatusOpen},
+			{ID: "CVE-2024-STATS-2", Status: artifact.FindingStatusOpen},
+			{ID: "CVE-2024-STATS-3", Status: artifact.FindingStatusOpen},
+		}
+		a.MalwareFindings = []artifact.Finding{{ID: "Eicar-Stats-Test", Status: artifact.FindingStatusOpen}}
+	})
+
+	// Only resolved findings: on record, but not something this artifact
+	// is still affected by, so it must not appear in with_findings at
+	// all -- the case a missing active-finding predicate gets wrong.
+	mk(fmt.Sprintf("stats-resolved-%d:1.0", time.Now().UnixNano()), artifact.TypeFile, func(a *artifact.Artifact) {
+		a.Status = artifact.StatusScanned
+		a.CurrentStage = stage
+		a.CVEFindings = []artifact.Finding{
+			{ID: "CVE-2024-STATS-4", Status: artifact.FindingStatusFixed},
+			{ID: "CVE-2024-STATS-5", Status: artifact.FindingStatusNotAffected},
+		}
+	})
+
+	// Left exactly as registered: no findings, no stage. Proves an
+	// unstaged artifact lands under the empty-string key rather than
+	// being dropped from by_stage entirely.
+	mk(fmt.Sprintf("stats-bare-%d:1.0", time.Now().UnixNano()), artifact.TypeImage, nil)
+
+	after, err := s.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats (after): %v", err)
+	}
+
+	if got := after.Total - before.Total; got != 3 {
+		t.Fatalf("total moved by %d, want 3", got)
+	}
+	if got := after.ByStatus["scanned"] - before.ByStatus["scanned"]; got != 2 {
+		t.Errorf("by_status[scanned] moved by %d, want 2", got)
+	}
+	if got := after.ByStatus["registered"] - before.ByStatus["registered"]; got != 1 {
+		t.Errorf("by_status[registered] moved by %d, want 1", got)
+	}
+	if got := after.ByType["image"] - before.ByType["image"]; got != 2 {
+		t.Errorf("by_type[image] moved by %d, want 2", got)
+	}
+	if got := after.ByType["file"] - before.ByType["file"]; got != 1 {
+		t.Errorf("by_type[file] moved by %d, want 1", got)
+	}
+
+	// A stage nobody else used, so this is an absolute, not a delta.
+	if after.ByStage[stage] != 2 {
+		t.Errorf("by_stage[%q] = %d, want 2 (got %v)", stage, after.ByStage[stage], after.ByStage)
+	}
+	// current_stage is NOT NULL DEFAULT '', so the unstaged artifact is
+	// counted under "" -- the same key MemStore uses, and deliberately
+	// not a placeholder name that could collide with a configured stage.
+	if got := after.ByStage[""] - before.ByStage[""]; got != 1 {
+		t.Errorf("by_stage[\"\"] moved by %d, want 1 -- an unstaged artifact belongs under the empty key", got)
+	}
+
+	// One artifact with three open CVEs is ONE artifact with CVEs.
+	if got := after.WithFindings["cve"] - before.WithFindings["cve"]; got != 1 {
+		t.Errorf("with_findings[cve] moved by %d, want 1 -- three open CVEs on one artifact is one affected artifact", got)
+	}
+	if got := after.WithFindings["malware"] - before.WithFindings["malware"]; got != 1 {
+		t.Errorf("with_findings[malware] moved by %d, want 1", got)
+	}
+	// The fixed/not_affected artifact contributed nothing, even though
+	// both of its findings are still on record.
+	for _, bucket := range []string{"misconfiguration", "secret", "other"} {
+		if got := after.WithFindings[bucket] - before.WithFindings[bucket]; got != 0 {
+			t.Errorf("with_findings[%s] moved by %d, want 0", bucket, got)
+		}
+	}
+
+	// All five buckets are always present, zero included -- the one
+	// closed set this endpoint reports in full. See artifact.Stats.
+	for _, bucket := range []string{"cve", "malware", "misconfiguration", "secret", "other"} {
+		if _, ok := after.WithFindings[bucket]; !ok {
+			t.Errorf("with_findings has no %q key: %v", bucket, after.WithFindings)
+		}
+	}
+}
