@@ -233,6 +233,8 @@ func (s *IsolatedGrypeScanner) Scan(ctx context.Context, ref string) ([]artifact
 		CPULimit:                s.cfg.CPULimit,
 		MemoryLimit:             s.cfg.MemoryLimit,
 		EphemeralStorageLimit:   s.cfg.EphemeralStorageLimit,
+		// "sbom" mode opts back into an emptyDir -- see scratchClassFor.
+		ScratchStorageClass: scratchClassFor(s.cfg.SubCommand),
 	})
 
 	// See IsolatedTrivyScanner.ScanForArtifact's identical comment: must

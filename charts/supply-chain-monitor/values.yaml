@@ -735,6 +735,11 @@ monitorApi:
     #                 value a single scanner can set to opt back out
     #                 when the deployment has moved scratch space onto
     #                 storage (see k8sjob.ScratchNone).
+    #
+    # Note "sbom"-mode scan Jobs (trivy sbom / grype sbom) opt out on
+    # their own: they fetch one JSON document and spill nothing, so a
+    # PVC would cost provisioning latency for storage they never write
+    # to. Only image scans take the class configured here.
     storageClass: ""
     # Per-Job volume size. Defaults to 3Gi, matching the
     # ephemeral-storage limit these Jobs already carry (see

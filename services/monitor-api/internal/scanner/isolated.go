@@ -1,5 +1,7 @@
 package scanner
 
+import "github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/k8sjob"
+
 // Ephemeral-storage sizing shared by the isolated trivy and grype
 // scan-worker Jobs (isolated_trivy.go, isolated_grype.go).
 //
@@ -52,4 +54,27 @@ func ephemeralStorageLimitFor(subCommand string) string {
 		return "256Mi"
 	}
 	return "3Gi"
+}
+
+// scratchClassFor decides where one Job's /tmp comes from, and it is
+// the same "sbom mode spills nothing" judgement the sizing helpers
+// above already make -- kept beside them so the two cannot drift into
+// disagreeing about which modes touch disk.
+//
+// An "image"-mode Job pulls and extracts the whole image (up to 2395Mi
+// measured), so it takes whatever the deployment configured -- an
+// emptyDir on the node by default, or a per-Job PVC where scan scratch
+// space has been moved onto storage.
+//
+// An "sbom"-mode Job fetches a single JSON document and scans it. It
+// already carries the small 128Mi/256Mi sizing for that reason, and
+// giving it a PVC would add per-scan provisioning latency and a
+// volume-attach round trip to buy storage it never writes to. So it
+// opts out explicitly (k8sjob.ScratchNone), even where a StorageClass
+// is configured process-wide.
+func scratchClassFor(subCommand string) string {
+	if subCommand == "sbom" {
+		return k8sjob.ScratchNone
+	}
+	return ""
 }
