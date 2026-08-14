@@ -200,3 +200,68 @@ func TestMalcontentScanner_BucketAffinity(t *testing.T) {
 		t.Fatalf("bucket = %q, want malware", ba.Bucket())
 	}
 }
+
+// The severity floor is ours, not the tool's. Measured against a real
+// image, `mal --format json --min-risk {critical,high,any} scan --image
+// alpine:3.19` returns byte-identical output every time -- the flag
+// does not filter in scan mode. A chart default that reads like a
+// filter and filters nothing is worse than no default at all, so the
+// threshold is applied to the parsed findings here.
+func TestFilterBySeverity(t *testing.T) {
+	findings := []artifact.Finding{
+		{ID: "crit", Severity: "critical"},
+		{ID: "high", Severity: "high"},
+		{ID: "med", Severity: "medium"},
+		{ID: "none", Severity: ""},
+	}
+
+	tests := []struct {
+		threshold string
+		want      []string
+	}{
+		{"critical", []string{"crit"}},
+		{"high", []string{"crit", "high"}},
+		{"medium", []string{"crit", "high", "med"}},
+		// Empty or unrecognized keeps everything: the safe direction for
+		// a filter, and the same convention the scanner selectors use.
+		{"", []string{"crit", "high", "med", "none"}},
+		{"not-a-severity", []string{"crit", "high", "med", "none"}},
+	}
+	for _, tt := range tests {
+		t.Run("threshold="+tt.threshold, func(t *testing.T) {
+			got := FilterBySeverity(findings, tt.threshold)
+			if len(got) != len(tt.want) {
+				t.Fatalf("kept %+v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i].ID != tt.want[i] {
+					t.Fatalf("kept %+v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// The live trial's own output, at the chart's default threshold: every
+// behaviour a stock alpine reports is HIGH, so "critical" yields
+// nothing -- which is what the default is FOR, and what it silently
+// failed to do while the tool's flag was trusted to enforce it.
+func TestFilterBySeverity_AlpineFixtureIsQuietAtCritical(t *testing.T) {
+	raw, err := os.ReadFile("testdata/malcontent_report_sample.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	findings, err := ParseMalcontentReport(raw)
+	if err != nil {
+		t.Fatalf("ParseMalcontentReport: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("fixture should produce findings before filtering")
+	}
+	if kept := FilterBySeverity(findings, "critical"); len(kept) != 0 {
+		t.Fatalf("kept %+v at threshold critical, want none -- a stock alpine must not grow malware findings by default", kept)
+	}
+	if kept := FilterBySeverity(findings, "high"); len(kept) != len(findings) {
+		t.Fatalf("kept %d of %d at threshold high, want all", len(kept), len(findings))
+	}
+}

@@ -41,10 +41,17 @@ type MalcontentScanner struct {
 	// bin is the malcontent binary. The upstream container's entrypoint
 	// is /usr/bin/mal, and that is the name the Dockerfile copies in.
 	bin string
-	// minRisk is passed through as --min-risk (any, low, medium, high,
-	// critical). Empty means the binary's own default, which is "low" --
-	// far too noisy for this to be worth reading, hence the chart's
-	// "critical".
+	// minRisk is the severity floor: findings below it are dropped.
+	//
+	// Enforced HERE, not by the tool. --min-risk is still passed (it is
+	// documented upstream and may matter in other modes), but measured
+	// against a real image it changes nothing in `scan` mode: `mal
+	// --format json --min-risk {critical,high,any} scan --image
+	// alpine:3.19` returns byte-identical output, 5216 bytes with five
+	// HIGH behaviours, at every level. `scan` is documented as returning
+	// "findings of the highest severity" and appears to mean it
+	// literally. Relying on the flag alone would have shipped a chart
+	// default that reads like a filter and filters nothing.
 	minRisk string
 	// dockerConfigDir, when set, is exported as DOCKER_CONFIG so
 	// malcontent's own image pull authenticates against a private
@@ -99,7 +106,32 @@ func (s *MalcontentScanner) Scan(ctx context.Context, ref string) ([]artifact.Fi
 		// "findings were present".
 		return nil, fmt.Errorf("malcontent scan %q: %w (%s)", ref, err, truncateForError(stderr.String()))
 	}
-	return ParseMalcontentReport(stdout.Bytes())
+	findings, err := ParseMalcontentReport(stdout.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	return FilterBySeverity(findings, s.minRisk), nil
+}
+
+// FilterBySeverity drops findings below threshold, using the same
+// severity ranking the rest of this service uses
+// (artifact.SeverityRank). An empty or unrecognized threshold filters
+// nothing -- the same "unrecognized value keeps today's behaviour"
+// convention CVE_SCANNER and MALWARE_SCANNER follow, and the safe
+// direction for a filter (showing too much beats silently hiding a
+// critical finding because someone typoed a threshold).
+func FilterBySeverity(findings []artifact.Finding, threshold string) []artifact.Finding {
+	min := artifact.SeverityRank(threshold)
+	if min == 0 {
+		return findings
+	}
+	kept := make([]artifact.Finding, 0, len(findings))
+	for _, f := range findings {
+		if artifact.SeverityRank(f.Severity) >= min {
+			kept = append(kept, f)
+		}
+	}
+	return kept
 }
 
 // ParseMalcontentReport turns malcontent's `--format json` output into

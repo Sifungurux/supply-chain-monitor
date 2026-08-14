@@ -183,7 +183,14 @@ func (s *IsolatedMalcontentScanner) Scan(ctx context.Context, ref string) ([]art
 	if err != nil {
 		return nil, fmt.Errorf("malcontent scan job %q: %w (output: %s)", name, err, truncateForError(logs))
 	}
-	return ParseMalcontentReport(report)
+	findings, err := ParseMalcontentReport(report)
+	if err != nil {
+		return nil, err
+	}
+	// The severity floor is applied here, not by the flag the Job was
+	// given -- see MalcontentScanner.minRisk for the measurement showing
+	// --min-risk changes nothing in scan mode.
+	return FilterBySeverity(findings, s.cfg.MinRisk), nil
 }
 
 // malcontentBinPath is where the binary lives in Chainguard's image
