@@ -2476,6 +2476,55 @@ test('the refresh poll does not close the maintainer editor mid-edit', async () 
   dom.window.close();
 });
 
+// THE BUG THIS ENCODES. The dashboard used to derive its API address as
+// protocol + host + ':30300', so a page served over HTTPS asked for
+// https://<host>:30300 -- a port speaking plain HTTP, which fails the
+// TLS handshake outright. Every API call failed, and enabling the
+// HTTP->HTTPS redirect made that the default way in.
+//
+// Served through the Gateway the API shares the page's origin (the
+// Gateway routes /api/ to monitor-api); served from the dashboard's own
+// NodePort it does not, because that nginx has static files only.
+test('the API address follows the origin the page was served from', async () => {
+  const seen = [];
+  const domFor = (url) => buildDom({
+    url,
+    fetchImpl(u) {
+      seen.push(u);
+      if (u.includes('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (u.includes('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (u.includes('/components/diff')) return jsonResponse({ from: null, to: null, added: [], removed: [], version_changed: [] });
+      if (isArtifactsList(u)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, { error: 'not found' });
+    }
+  });
+
+  // Through the Gateway over HTTPS: same origin, no port rewrite. The
+  // old code produced https://localhost:30300 here, which cannot connect.
+  const viaGateway = domFor('https://localhost:30443/');
+  await tick(20);
+  const gatewayCalls = seen.filter((u) => u.startsWith('http'));
+  assert.ok(gatewayCalls.length > 0, 'the page must have called the API at all');
+  for (const u of gatewayCalls) {
+    assert.ok(u.startsWith('https://localhost:30443/'),
+      `called ${u} — over the Gateway the API shares the page origin; :30300 does not speak TLS`);
+  }
+  viaGateway.window.close();
+
+  // From the dashboard's own NodePort: that nginx proxies nothing, so
+  // the API has to be reached on its own port.
+  seen.length = 0;
+  const direct = domFor('http://localhost:30301/');
+  await tick(20);
+  const directCalls = seen.filter((u) => u.startsWith('http'));
+  assert.ok(directCalls.length > 0, 'the page must have called the API at all');
+  for (const u of directCalls) {
+    assert.ok(u.startsWith('http://localhost:30300/'),
+      `called ${u} — served from the dashboard NodePort, the API is on 30300`);
+  }
+  direct.window.close();
+});
+
 // Failed scans, fleet-wide. The per-row badge only ever showed failures
 // on the page in front of you, so a few scattered through a large store
 // were invisible without going looking for them.
