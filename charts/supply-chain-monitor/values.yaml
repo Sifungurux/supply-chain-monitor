@@ -1222,6 +1222,23 @@ gateway:
     # trusts once in a browser or OS trust store, and re-trusting it
     # quarterly would be user-hostile for no security gain in a private
     # cluster.
+    # redirectHTTP sends plain-HTTP traffic to HTTPS (308), so a bearer
+    # token cannot travel unencrypted because someone typed the wrong
+    # scheme. Only affects traffic through the GATEWAY, which routes to
+    # the dashboard -- monitor-api's own NodePort (30300) and the
+    # dashboard's (30301) are direct and unaffected.
+    #
+    # Turn this OFF if the HTTPS path is not actually reachable from
+    # where your clients are: the redirect would then send every visitor
+    # somewhere they cannot connect, turning a working dashboard into a
+    # broken one. Verify https first, redirect second.
+    redirectHTTP: true
+    # The port a CLIENT dials, which is the NodePort -- NOT
+    # listenerPort above. The redirect goes into a Location header that
+    # a browser follows, so it must name an address the browser can
+    # reach; listenerPort names Traefik's internal EntryPoint instead.
+    # Same two numbers, opposite meanings, both failures silent.
+    redirectPort: 30443
     duration: 2160h # 90d
     renewBefore: 720h # 30d
     caDuration: 87600h # 10y

@@ -12,8 +12,15 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   parentRefs:
+{{- if not (and .Values.gateway.tls.enabled .Values.gateway.tls.redirectHTTP) }}
+    # Only serves the dashboard over plain HTTP when it is NOT being
+    # redirected. With the redirect on, the http listener gets the
+    # redirect route below instead -- attaching both here would mean two
+    # routes matching the same path on the same listener, and which one
+    # wins is not something to leave to tie-breaking rules.
     - name: scm-gateway
       sectionName: http
+{{- end }}
 {{- if .Values.gateway.tls.enabled }}
     # ATTACHES TO THE https LISTENER TOO, and it has to be said
     # explicitly. sectionName pins a route to ONE named listener, so the
@@ -37,3 +44,42 @@ spec:
       backendRefs:
         - name: scm-dashboard
           port: 80
+{{- if and .Values.gateway.tls.enabled .Values.gateway.tls.redirectHTTP }}
+---
+# Sends plain HTTP to HTTPS, so a bearer token cannot be handed over an
+# unencrypted connection just because someone typed the wrong scheme.
+#
+# THE PORT HERE IS THE EXTERNAL ONE, and that is the exact opposite of
+# the listener's rule -- which is why it is stated twice rather than
+# left to be inferred. A listener port names Traefik's INTERNAL
+# EntryPoint (8443), because Traefik is wiring its own plumbing. This
+# port goes into a Location header that a BROWSER dials, so it must be
+# the address a client can actually reach (NodePort 30443). Using 8443
+# here would redirect every visitor to a port nothing listens on, and
+# using 30443 on the listener programs no route at all. Same two
+# numbers, opposite places, and both failures are silent.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: scm-https-redirect
+  namespace: {{ .Release.Namespace }}
+spec:
+  parentRefs:
+    - name: scm-gateway
+      sectionName: http
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            port: {{ .Values.gateway.tls.redirectPort }}
+            # 308, not 301: 308 is the permanent redirect that REQUIRES
+            # the method and body to be preserved. A 301 lets a client
+            # turn a POST into a GET, which would silently drop the body
+            # of any write that arrived over http.
+            statusCode: 308
+{{- end }}
