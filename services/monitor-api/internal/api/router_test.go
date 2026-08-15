@@ -241,3 +241,128 @@ func doRaw(t *testing.T, h http.Handler, method, path, contentType string, body 
 	h.ServeHTTP(rec, req)
 	return rec
 }
+
+// authRouter builds a router with a known key, for the auth-failure
+// throttle tests below.
+func authRouter() http.Handler {
+	return api.NewRouter(api.Config{
+		Store:   artifact.NewMemStore(),
+		Tracker: pipeline.NewTracker([]string{"build", "scan"}),
+		APIKey:  testAPIKey,
+	})
+}
+
+// req issues one GET with the given key and source address.
+func req(h http.Handler, key, xff string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts", nil)
+	r.Header.Set("Authorization", "Bearer "+key)
+	if xff != "" {
+		r.Header.Set("X-Forwarded-For", xff)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	return rec
+}
+
+// Blind credential stuffing has to stop being free. The burst is 10, so
+// the eleventh consecutive wrong key from one address is throttled.
+func TestAuthThrottle_SustainedWrongKeysGet429(t *testing.T) {
+	h := authRouter()
+
+	var got429At int
+	for i := 1; i <= 20; i++ {
+		rec := req(h, "wrong-key", "203.0.113.9")
+		if rec.Code == http.StatusTooManyRequests {
+			got429At = i
+			if rec.Header().Get("Retry-After") == "" {
+				t.Error("429 without Retry-After -- a client cannot tell how long to wait")
+			}
+			break
+		}
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: got %d, want 401 before the limit trips", i, rec.Code)
+		}
+	}
+	if got429At == 0 {
+		t.Fatal("20 consecutive wrong keys were never throttled")
+	}
+	if got429At <= 10 {
+		t.Errorf("throttled at attempt %d, expected the burst of 10 to be allowed first", got429At)
+	}
+}
+
+// The limiter is consulted ONLY on the rejection path, so a valid key
+// cannot be throttled by it -- including from an address that has just
+// been throttled into the ground.
+func TestAuthThrottle_CorrectKeyUnaffected(t *testing.T) {
+	h := authRouter()
+
+	for i := 0; i < 30; i++ {
+		req(h, "wrong-key", "203.0.113.10")
+	}
+	if rec := req(h, "wrong-key", "203.0.113.10"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("precondition: this address should be throttled, got %d", rec.Code)
+	}
+
+	// Same address, right key, far more requests than the failure burst.
+	for i := 0; i < 50; i++ {
+		if rec := req(h, testAPIKey, "203.0.113.10"); rec.Code != http.StatusOK {
+			t.Fatalf("request %d with the CORRECT key got %d, want 200 -- failed-auth throttling must never touch valid traffic", i+1, rec.Code)
+		}
+	}
+}
+
+// One noisy source must not lock out everyone else, which is the whole
+// reason this is keyed per address rather than globally.
+func TestAuthThrottle_IsPerAddress(t *testing.T) {
+	h := authRouter()
+
+	for i := 0; i < 30; i++ {
+		req(h, "wrong-key", "203.0.113.11")
+	}
+	if rec := req(h, "wrong-key", "203.0.113.11"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("precondition: first address should be throttled, got %d", rec.Code)
+	}
+
+	if rec := req(h, "wrong-key", "198.51.100.7"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("a different address got %d, want 401 -- one attacker must not lock out other callers", rec.Code)
+	}
+}
+
+// X-Forwarded-For carries a proxy chain; the ORIGINAL client is first.
+// Keying on the whole header, or on the last hop, would put everyone
+// behind one proxy in the same bucket.
+func TestAuthThrottle_UsesFirstForwardedForValue(t *testing.T) {
+	h := authRouter()
+
+	for i := 0; i < 30; i++ {
+		req(h, "wrong-key", "203.0.113.12, 10.0.0.1, 10.0.0.2")
+	}
+	if rec := req(h, "wrong-key", "203.0.113.12, 10.0.0.1, 10.0.0.2"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("precondition: throttling should apply, got %d", rec.Code)
+	}
+
+	// Same proxy chain, different original client: must be its own bucket.
+	if rec := req(h, "wrong-key", "203.0.113.13, 10.0.0.1, 10.0.0.2"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("a different original client behind the same proxies got %d, want 401", rec.Code)
+	}
+}
+
+// Probes and docs skip auth entirely, so they can never be throttled by
+// it -- a liveness probe must not be able to trip a security limiter.
+func TestAuthThrottle_ExemptPathsUnaffected(t *testing.T) {
+	h := authRouter()
+
+	for i := 0; i < 30; i++ {
+		req(h, "wrong-key", "203.0.113.14")
+	}
+	for _, path := range []string{"/healthz", "/readyz"} {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.Header.Set("X-Forwarded-For", "203.0.113.14")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s got %d, want 200 even from a throttled address", path, rec.Code)
+		}
+	}
+}

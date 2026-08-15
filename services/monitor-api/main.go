@@ -1326,6 +1326,20 @@ func runAPIServer() {
 	if apiKey == "" && !apiKeys.Enabled() {
 		fatal("no API key configured -- set API_KEY, or API_KEYS as \"name:key,name:key\"")
 	}
+	// A SHORT KEY IS A WARNING, NOT A REFUSAL. Fataling here would brick
+	// a running deployment on upgrade over a key that is weak but
+	// working -- turning a security note into an outage, which is a
+	// worse outcome than the weakness. It is loud, and it says what to
+	// do about it.
+	//
+	// 32 bytes because that is what chart-secrets.sh generates
+	// (openssl rand -hex 32 -> 64 characters) and roughly where guessing
+	// stops being arithmetic worth doing. Named keys are generated the
+	// same way, so they are not checked individually here.
+	if apiKey != "" && len(apiKey) < 32 {
+		slog.Warn("API_KEY is shorter than 32 characters -- weak against guessing; regenerate with `make chart-secrets`",
+			"length", len(apiKey), "recommended_minimum", 32)
+	}
 	if apiKeys.Enabled() {
 		// Names only, never the keys themselves: a key logged once
 		// lives in the log aggregator forever.
