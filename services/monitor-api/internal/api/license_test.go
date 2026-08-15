@@ -3,6 +3,7 @@ package api_test
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/api"
@@ -63,7 +64,9 @@ func findByID(findings []artifact.Finding, id string) *artifact.Finding {
 func TestLicenseDenylist_FindingLifecycle(t *testing.T) {
 	h, store := newLicenseRouter(t, "AGPL-3.0-only", scanner.Registry{})
 	a := mustCreate(t, store, "app:1.0", artifact.TypeImage)
-	const findingID = "license:pkg:npm/bad@1.0.0"
+	// Version-stripped: one finding per package -- see
+	// artifact.LicenseFindingID.
+	const findingID = "license:pkg:npm/bad"
 
 	// 1. Indexed with a denied license -> one open finding.
 	uploadSBOM(t, h, a.ID, licensedSBOM("AGPL-3.0-only"))
@@ -141,7 +144,7 @@ func TestLicenseFindings_SurviveAScanAndViceVersa(t *testing.T) {
 		artifact.TypeImage: {sarif},
 	})
 	a := mustCreate(t, store, "app:1.0", artifact.TypeImage)
-	const licenseID = "license:pkg:npm/bad@1.0.0"
+	const licenseID = "license:pkg:npm/bad"
 
 	// A license finding exists first.
 	uploadSBOM(t, h, a.ID, licensedSBOM("AGPL-3.0-only"))
@@ -250,5 +253,103 @@ func TestComponents_SearchCarriesLicenses(t *testing.T) {
 	}
 	if out.Packages[0].Licenses != "AGPL-3.0-only" {
 		t.Errorf("licenses = %q, want AGPL-3.0-only", out.Packages[0].Licenses)
+	}
+}
+
+// licensedSBOMAt is licensedSBOM with the denied package at a chosen
+// version, for exercising an upgrade.
+func licensedSBOMAt(version, badLicense string) []byte {
+	return []byte(`{
+	  "bomFormat": "CycloneDX",
+	  "components": [
+	    {"name":"bad","version":"` + version + `","purl":"pkg:npm/bad@` + version + `",
+	      "licenses":[{"license":{"id":"` + badLicense + `"}}]}
+	  ]
+	}`)
+}
+
+// THE REASON THE ID IS VERSION-STRIPPED. A denylisted package that
+// bumps version is still the same unresolved compliance problem. Keyed
+// on the full purl it resolved the old finding and opened a new one on
+// every bump -- so a weekly-bumping dependency left a year of dimmed
+// "fixed" rows for something nobody ever fixed, and FirstSeenAt read
+// "since Tuesday" instead of "for eight months".
+func TestLicenseFinding_SurvivesAVersionBump(t *testing.T) {
+	h, store := newLicenseRouter(t, "AGPL-3.0-only", scanner.Registry{})
+	a := mustCreate(t, store, "app:1.0", artifact.TypeImage)
+
+	uploadSBOM(t, h, a.ID, licensedSBOMAt("1.0.0", "AGPL-3.0-only"))
+	first := otherFindings(t, store, a.ID)
+	if len(first) != 1 {
+		t.Fatalf("got %d findings, want 1: %+v", len(first), first)
+	}
+	firstSeen := first[0].FirstSeenAt
+
+	// Three upgrades, still the same denied license.
+	for _, v := range []string{"1.1.0", "1.2.0", "1.3.0"} {
+		uploadSBOM(t, h, a.ID, licensedSBOMAt(v, "AGPL-3.0-only"))
+	}
+
+	after := otherFindings(t, store, a.ID)
+	if len(after) != 1 {
+		t.Fatalf("three version bumps produced %d findings, want 1 -- the problem never changed: %+v", len(after), after)
+	}
+	if after[0].Status != artifact.FindingStatusOpen {
+		t.Errorf("status = %q, want open -- the package is still denylisted", after[0].Status)
+	}
+	if !after[0].FirstSeenAt.Equal(firstSeen) {
+		t.Errorf("FirstSeenAt moved from %s to %s across version bumps -- it should say how long this has been true",
+			firstSeen, after[0].FirstSeenAt)
+	}
+	// The Title tracks the CURRENT release, so the finding still says
+	// which version is in there now.
+	if !strings.Contains(after[0].Title, "AGPL-3.0-only") {
+		t.Errorf("title = %q, want it to name the denied license", after[0].Title)
+	}
+
+	// And it still resolves when the package is actually relicensed.
+	uploadSBOM(t, h, a.ID, licensedSBOMAt("2.0.0", "MIT"))
+	resolved := otherFindings(t, store, a.ID)
+	if len(resolved) != 1 || resolved[0].Status != artifact.FindingStatusFixed {
+		t.Errorf("after relicensing: %+v, want the single finding marked fixed", resolved)
+	}
+}
+
+// The other reason: VEX suppression keys on the finding ID, so an
+// accepted exception ("this AGPL tool is dev-only, we accept it") used
+// to evaporate at the next version bump. An exception that expires when
+// the version changes is not an exception.
+func TestLicenseFinding_VEXExceptionSurvivesAVersionBump(t *testing.T) {
+	h, store := newLicenseRouter(t, "AGPL-3.0-only", scanner.Registry{})
+	a := mustCreate(t, store, "app:1.0", artifact.TypeImage)
+
+	uploadSBOM(t, h, a.ID, licensedSBOMAt("1.0.0", "AGPL-3.0-only"))
+
+	// Accept it, keyed on the finding id the API reports.
+	vexDoc := []byte(`{
+	  "@context": "https://openvex.dev/ns/v0.2.0",
+	  "statements": [
+	    {"vulnerability": {"name": "license:pkg:npm/bad"},
+	     "status": "not_affected",
+	     "justification": "component_not_present"}
+	  ]
+	}`)
+	if rec := doRaw(t, h, http.MethodPost, "/api/v1/artifacts/"+a.ID+"/vex", "application/json", vexDoc); rec.Code != http.StatusOK {
+		t.Fatalf("vex upload status = %d: %s", rec.Code, rec.Body.String())
+	}
+	suppressed := otherFindings(t, store, a.ID)
+	if len(suppressed) != 1 || suppressed[0].Status != artifact.FindingStatusNotAffected {
+		t.Fatalf("setup: finding not suppressed by VEX: %+v", suppressed)
+	}
+
+	// Bump the version. The exception must still hold.
+	uploadSBOM(t, h, a.ID, licensedSBOMAt("1.1.0", "AGPL-3.0-only"))
+
+	after := otherFindings(t, store, a.ID)
+	if len(after) != 1 {
+		t.Fatalf("got %d findings after a bump, want 1: %+v", len(after), after)
+	}
+	if after[0].Status != artifact.FindingStatusNotAffected {
+		t.Errorf("status = %q after a version bump, want the accepted exception to still hold", after[0].Status)
 	}
 }

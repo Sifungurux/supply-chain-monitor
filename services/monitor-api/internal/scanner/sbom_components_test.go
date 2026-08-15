@@ -315,8 +315,10 @@ func TestLicenseDenylist_Findings(t *testing.T) {
 		t.Fatalf("got %d findings, want 1: %+v", len(findings), findings)
 	}
 	f := findings[0]
-	if f.ID != "license:pkg:npm/bad@1.0.0" {
-		t.Errorf("ID = %q, want license:<purl>", f.ID)
+	// The VERSION-STRIPPED identity: one finding per package, not per
+	// release -- see artifact.LicenseFindingID.
+	if f.ID != "license:pkg:npm/bad" {
+		t.Errorf("ID = %q, want the version-stripped license:pkg:npm/bad", f.ID)
 	}
 	if f.Severity != "medium" {
 		t.Errorf("Severity = %q, want medium", f.Severity)
@@ -326,5 +328,42 @@ func TestLicenseDenylist_Findings(t *testing.T) {
 	}
 	if scanner.NewLicenseDenylist("").Findings([]artifact.Component{{Licenses: "AGPL-3.0-only"}}) != nil {
 		t.Error("a disabled denylist must produce no findings")
+	}
+}
+
+// Two versions of one package can legitimately coexist in an inventory
+// (the component diff handles exactly that case). With the version
+// stripped they share a finding ID, so emitting both would hand
+// MergeFindings duplicate IDs in one `reported` slice, where one
+// silently overwrites the other and which one wins depends on inventory
+// order. They are deduped, stably.
+func TestLicenseDenylist_CoexistingVersionsProduceOneFinding(t *testing.T) {
+	deny := scanner.NewLicenseDenylist("AGPL-3.0-only")
+	inventory := []artifact.Component{
+		{PURL: "pkg:npm/dual@2.0.0", Name: "dual", Licenses: "AGPL-3.0-only"},
+		{PURL: "pkg:npm/dual@1.0.0", Name: "dual", Licenses: "AGPL-3.0-only"},
+		{PURL: "pkg:npm/other@1.0.0", Name: "other", Licenses: "AGPL-3.0-only"},
+	}
+
+	findings := deny.Findings(inventory)
+	if len(findings) != 2 {
+		t.Fatalf("got %d findings, want 2 (the two versions of dual are one package): %+v", len(findings), findings)
+	}
+	ids := []string{findings[0].ID, findings[1].ID}
+	if ids[0] != "license:pkg:npm/dual" || ids[1] != "license:pkg:npm/other" {
+		t.Errorf("ids = %v, want the two version-stripped ids in sorted order", ids)
+	}
+
+	// Stable across runs and across input order -- the map this walks
+	// internally has none of its own.
+	reversed := []artifact.Component{inventory[2], inventory[1], inventory[0]}
+	for i := 0; i < 20; i++ {
+		again := deny.Findings(reversed)
+		if len(again) != 2 || again[0].ID != ids[0] || again[1].ID != ids[1] {
+			t.Fatalf("unstable output: %+v vs %+v", again, findings)
+		}
+		if again[0].Title != findings[0].Title {
+			t.Fatalf("Title flickers between coexisting versions: %q vs %q", again[0].Title, findings[0].Title)
+		}
 	}
 }

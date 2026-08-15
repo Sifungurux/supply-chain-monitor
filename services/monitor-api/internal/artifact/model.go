@@ -356,14 +356,39 @@ type ScanSlotResult struct {
 const LicenseFindingSource = "license"
 
 // LicenseFindingID is the finding ID for a denylisted license on one
-// package: "license:" plus the purl.
+// package: "license:" plus the package identity, VERSION STRIPPED
+// (purlCoordinates) -- "license:pkg:npm/foo", never
+// "license:pkg:npm/foo@1.2.3".
 //
-// Keyed on the full purl, which embeds the version -- so upgrading a
-// denylisted package closes the old finding and opens a new one rather
-// than silently carrying the old one forward against a release nobody
-// re-assessed. The trade is that a package bumping versions weekly
-// produces a new finding weekly.
-func LicenseFindingID(purl string) string { return "license:" + purl }
+// This started out keyed on the full purl, justified as "a new release
+// is one nobody re-assessed". That justification does not survive
+// contact with how the evaluation actually works: LicenseDenylist
+// re-derives findings from the current inventory on every index, with
+// no human in the loop, so a package that relicenses to something
+// allowed resolves whichever way the ID is keyed. Version-keying bought
+// no re-assessment -- it just renamed the same unresolved problem on
+// every version bump, and that has three real costs:
+//
+//   - Findings are never deleted and "fixed" ones stay visible, so a
+//     weekly-bumping dependency leaves a year of dimmed rows for ONE
+//     compliance problem that was never actually fixed.
+//   - VEX suppression keys on the finding ID (see MergeFindings), so an
+//     accepted exception -- "this AGPL tool is dev-only, we accept it"
+//     -- silently evaporated at the next bump. An exception that
+//     expires when the version changes is not an exception.
+//   - FirstSeenAt read "since Tuesday's bump" rather than "we have
+//     shipped this for eight months", which is the compliance-relevant
+//     fact.
+//
+// The audit trail version-keying did provide -- which releases carried
+// the denied license, and when -- is kept better by components_history,
+// which records per-scan inventory WITH licenses and is queryable
+// through the diff endpoint instead of accumulating in a findings list.
+//
+// Because the version is stripped, two coexisting versions of one
+// package map to ONE id. LicenseDenylist.Findings dedupes on that
+// deliberately; see its own comment.
+func LicenseFindingID(purl string) string { return "license:" + purlCoordinates(purl) }
 
 // ComponentDiff is what changed between two component snapshots (see
 // Store.ComponentsAt) -- the answer GET
