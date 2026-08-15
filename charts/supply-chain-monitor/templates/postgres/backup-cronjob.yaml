@@ -66,14 +66,70 @@ spec:
               command: ["sh", "-c"]
               args:
                 - |
-                  set -eu
+                  # pipefail is LOAD-BEARING, not tidiness. Without it a
+                  # pipeline reports the exit status of its LAST command --
+                  # gzip -- and gzip succeeds perfectly well compressing an
+                  # empty stream. So a pg_dump that could not connect
+                  # produced a 20-byte file, "set -e" saw a clean exit, the
+                  # job printed "backup complete" and exited 0, and the
+                  # prune below then counted that empty file toward
+                  # retention and deleted a REAL backup to make room.
+                  #
+                  # That is not hypothetical: it ran nightly for three days
+                  # against this cluster, destroying good backups with
+                  # empty ones while reporting success every time.
+                  set -euo pipefail
                   ts=$(date -u +%Y%m%dT%H%M%SZ)
                   out="/backups/scm-postgres-${ts}.sql.gz"
                   echo "backing up ${POSTGRES_DB} to ${out}"
+                  # Remove a partial file on ANY early exit. set -e aborts
+                  # at the failing pg_dump pipeline itself, before the
+                  # verification below can clean up after it, so a failed
+                  # run would otherwise leave a corpse in the backup
+                  # directory for the next operator to puzzle over.
+                  # Cleared once the file has verified as a real dump.
+                  trap 'rm -f "${out:-}"' EXIT
                   export PGPASSWORD="$POSTGRES_PASSWORD"
                   pg_dump -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" | gzip > "$out"
+
+                  # Second line of defence: prove the file is a dump before
+                  # it is allowed to count as one. pipefail catches a
+                  # failing pg_dump; this catches everything else that can
+                  # yield a well-formed but useless file. Note gzip -t is
+                  # NOT enough on its own -- an empty gzip is perfectly
+                  # valid, which is exactly what the broken runs produced.
+                  #
+                  # Read into a variable rather than piping into grep: with
+                  # pipefail, grep -q or head closing the pipe early sends
+                  # SIGPIPE to gzip and the pipeline reports failure on a
+                  # perfectly good backup.
+                  head_bytes="$(gzip -dc "$out" 2>/dev/null | head -c 512 || true)"
+                  case "$head_bytes" in
+                    *"PostgreSQL database dump"*) ;;
+                    *)
+                      echo "ERROR: ${out} is not a valid dump -- removing it and pruning nothing." >&2
+                      echo "ERROR: every existing backup is left untouched." >&2
+                      rm -f "$out"
+                      exit 1
+                      ;;
+                  esac
+                  trap - EXIT
                   echo "backup complete: $(du -h "$out" | cut -f1)"
+
                   cd /backups
+                  # Sweep out any invalid file BEFORE counting, so a
+                  # worthless one can never evict a real backup. This is
+                  # what cleans up empties left by earlier broken runs.
+                  for f in scm-postgres-*.sql.gz; do
+                    [ -e "$f" ] || continue
+                    [ "$f" = "$(basename "$out")" ] && continue
+                    bytes="$(gzip -dc "$f" 2>/dev/null | head -c 512 || true)"
+                    case "$bytes" in
+                      *"PostgreSQL database dump"*) ;;
+                      *) echo "discarding ${f}: not a valid dump"; rm -f "$f" ;;
+                    esac
+                  done
+
                   count=$(ls -1t scm-postgres-*.sql.gz 2>/dev/null | wc -l)
                   if [ "$count" -gt "$KEEP_BACKUPS" ]; then
                     echo "pruning to the newest $KEEP_BACKUPS backups (had $count)"
