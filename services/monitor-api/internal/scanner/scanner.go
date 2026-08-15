@@ -86,6 +86,31 @@ type ArtifactAwareScanner interface {
 	ScanForArtifact(ctx context.Context, ref, artifactID string) ([]artifact.Finding, error)
 }
 
+// RawImageScanner is an optional interface for a scanner that can hand
+// back the raw tool report alongside its findings, so the caller can
+// derive documents from it (scanner.GenerateImageDocuments).
+//
+// Deliberately NOT a new method anywhere: TrivyScanner already has
+// ScanWithRaw, so this names a shape that exists rather than adding one
+// to keep in sync across ten scanners.
+//
+// It exists because document capture used to live ONLY in the scan
+// worker's image branch (main.go's captureImageDocuments), so a
+// deployment running scans in-process (DISABLE_SCAN_ISOLATION, which is
+// the local dev path) generated no SBOM document for an image at all --
+// and since component indexing is triggered BY that document's upload,
+// those artifacts also accumulated no component inventory, no snapshot
+// history, and no license findings. The scan itself looked completely
+// healthy.
+//
+// Only meaningful for image-type artifacts: the report this returns is
+// an image trivy report, which is what GenerateImageDocuments converts.
+// Callers gate on the artifact's type, not just on this interface.
+type RawImageScanner interface {
+	Scanner
+	ScanWithRaw(ctx context.Context, ref string) ([]artifact.Finding, []byte, error)
+}
+
 // Registry maps an artifact type to the scanners that apply to it. An
 // artifact type can have more than one scanner registered against it --
 // e.g. a container image gets both a CVE scan (Trivy) and a malware
