@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -176,10 +177,16 @@ func NewRouter(cfg Config) http.Handler {
 	// withAuth has exactly one code path and there is no "which kind of
 	// key is this" branch to get wrong.
 	keys := cfg.APIKeys.WithKey(legacyClientName, cfg.APIKey)
+	// Always on, and not configurable: a deployment has no legitimate
+	// reason to want unlimited credential guessing, and a knob here
+	// would only ever be turned the wrong way. Correct keys never touch
+	// it (see withAuth), so it cannot throttle real traffic no matter
+	// how busy that traffic is.
+	failures := newBoundedRateLimiter(authFailureRate, authFailureBurst, authFailureMaxKeys)
 	// withAudit sits INSIDE withAuth, because it reports the
 	// authenticated client and that only exists in the context after
 	// withAuth has put it there.
-	return withMetrics(withCORS(withAuth(withAudit(top), keys)), h.metrics)
+	return withMetrics(withCORS(withAuth(withAudit(top), keys, failures)), h.metrics)
 }
 
 // withAuth requires `Authorization: Bearer <apiKey>` on every request
@@ -235,7 +242,67 @@ func withAudit(next http.Handler) http.Handler {
 // logs rather than a blank client field.
 const legacyClientName = "default"
 
-func withAuth(next http.Handler, keys APIKeys) http.Handler {
+// Throttling for FAILED authentication only.
+//
+// 10 failures then 1/second sustained: generous enough that a
+// misconfigured client retrying, or a human fumbling a key, never
+// notices, and slow enough that guessing a 64-character key stops being
+// arithmetic worth doing.
+//
+// 10k tracked addresses at ~48 bytes of bucket each is well under a
+// megabyte -- small enough not to matter, bounded so that it cannot
+// stop being small.
+const (
+	authFailureRate    = 1.0
+	authFailureBurst   = 10.0
+	authFailureMaxKeys = 10_000
+)
+
+// clientIP identifies the caller for throttling purposes.
+//
+// X-Forwarded-For's FIRST value when present, otherwise RemoteAddr's
+// host.
+//
+// THE SPOOFING TRADE-OFF, stated plainly because it decides what this
+// limiter is worth: X-Forwarded-For is set by the client and only
+// becomes trustworthy when a proxy overwrites it. Trusting it means an
+// attacker can rotate the header and get a fresh bucket per request,
+// evading the limit entirely. NOT trusting it means every request
+// through the Gateway arrives with Traefik's pod IP, all callers share
+// one bucket, and a single attacker locks out every legitimate client
+// from behind the proxy -- turning a throttle into a denial of service
+// against everyone else.
+//
+// The second failure is worse than the first, so the header wins. The
+// honest consequence is that THIS IS A SPEED BUMP, NOT A SECURITY
+// BOUNDARY: it raises the cost of blind credential stuffing and does
+// nothing against an attacker who bothers to vary a header. The actual
+// defence is that keys are 32 bytes of entropy compared in constant
+// time; this only makes the cheap attack uneconomic.
+//
+// If Traefik is ever configured to overwrite (not append) XFF, this
+// becomes trustworthy and the comment should say so.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// First value is the original client; the rest are proxies that
+		// appended themselves on the way.
+		if i := strings.IndexByte(xff, ','); i >= 0 {
+			xff = xff[:i]
+		}
+		if trimmed := strings.TrimSpace(xff); trimmed != "" {
+			return trimmed
+		}
+	}
+	// RemoteAddr is "host:port"; the port makes every connection from
+	// one host look like a different client, which would defeat the
+	// whole limiter.
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func withAuth(next http.Handler, keys APIKeys, failures *rateLimiter) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/healthz", "/readyz", "/metrics", "/swagger", "/openapi.yaml":
@@ -255,6 +322,18 @@ func withAuth(next http.Handler, keys APIKeys) http.Handler {
 		}
 
 		if !ok {
+			// Consulted ONLY on the rejection path, so a valid key can
+			// never be throttled by this no matter how fast it calls --
+			// the existing per-key limiter (withRateLimit) is what
+			// governs authenticated traffic.
+			if failures != nil && !failures.allow(clientIP(r)) {
+				w.Header().Set("Retry-After", "1")
+				// Deliberately NOT distinguishable from the 401 below in
+				// what it reveals: this says "you have failed too often",
+				// never "that key was close" or "that key exists".
+				writeError(w, http.StatusTooManyRequests, "too many failed authentication attempts, slow down")
+				return
+			}
 			w.Header().Set("WWW-Authenticate", `Bearer realm="supply-chain-monitor"`)
 			writeError(w, http.StatusUnauthorized, "missing or invalid API key")
 			return

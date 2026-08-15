@@ -318,6 +318,43 @@ kubectl -n supply-chain-monitor get secret scm-ca-tls \
   -o jsonpath='{.data.tls\.crt}' | base64 -d > scm-ca.crt
 ```
 
+### Failed-authentication throttling
+
+Repeated wrong keys from one address are throttled: **10 failures, then
+1 per second**, answered with `429` and `Retry-After`. A correct key
+**never touches this limiter**, so no amount of legitimate traffic can
+be slowed by it — authenticated traffic is governed separately by
+`monitorApi.rateLimit`.
+
+Not configurable, deliberately: no deployment wants unlimited
+credential guessing, and a knob here would only ever be turned the
+wrong way.
+
+**This is a speed bump, not a security boundary**, and the reason is
+worth knowing. Callers are identified by `X-Forwarded-For`'s first
+value, falling back to the socket address. That header is set by the
+client and only becomes trustworthy once a proxy overwrites it — so an
+attacker can rotate it and get a fresh allowance per request. The
+alternative is worse: without it every request through the Gateway
+arrives with Traefik's pod IP, all callers share one bucket, and a
+single attacker locks out everyone behind the proxy. A throttle that
+becomes a denial-of-service against legitimate users is the worse
+failure, so the header wins.
+
+What actually protects the API is that keys are 32 bytes of entropy
+compared in constant time. This only makes the cheap attack uneconomic.
+
+The bucket map is capped at 10k addresses and evicts least-recently-used
+first, because the key space is chosen by strangers and an unbounded map
+is a more reliable way to take the process down than guessing keys is. A
+*sustained* attacker is never evicted — every attempt refreshes their
+entry — while idle ones are dropped.
+
+`monitor-api` also **warns at startup** if `API_KEY` is under 32
+characters. A warning rather than a refusal: fataling would brick a
+running deployment on upgrade over a key that is weak but working,
+turning a security note into an outage.
+
 ### Per-client API keys
 
 `monitorApi.apiKey` is a single shared credential. `monitorApi.apiKeys`
