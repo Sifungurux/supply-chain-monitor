@@ -1,0 +1,117 @@
+{{- if .Values.monitorApi.prometheusRule.enabled }}
+# Alerts for the signals this service already exposes.
+#
+# OFF by default for the same reason the ServiceMonitor is: PrometheusRule
+# is a CRD that only exists where prometheus-operator is installed, and
+# rendering it unconditionally makes `helm install` fail on an unknown
+# kind rather than explaining itself. Enable it wherever a Prometheus is
+# actually running.
+#
+# WHAT THESE ARE FOR, stated once. Every incident in this project's
+# history so far was a thing that reported success while being broken:
+# a backup job writing empty files and exiting 0, a restore that had
+# never been run, a TLS handshake verifying in front of a 404. Alerts
+# help with only half of that -- they catch the failures that are
+# LOUD ONCE SOMETHING FAILS CLOSED. That is why the code fixes came
+# first and these come after: an alert on a job that never fails is
+# worth nothing.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: monitor-api
+  labels:
+    app: monitor-api
+    {{- with .Values.monitorApi.prometheusRule.labels }}
+    # Same trap as the ServiceMonitor: most Prometheus instances select
+    # rules by label, and without the one it expects this object is
+    # created and silently ignored.
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: supply-chain-monitor.recovery
+      rules:
+        # THE ALERT THIS PROJECT MOST NEEDED AND DID NOT HAVE. The
+        # nightly backup wrote 20-byte empty files for three days and
+        # exited 0 every time, then pruned real backups to make room.
+        #
+        # It only became alertable once the job was fixed to FAIL on a
+        # bad dump (pipefail plus a content check). Before that, no
+        # alert on job failure could have fired, because the job never
+        # failed. Worth remembering when adding alerts elsewhere: the
+        # alert is the second half of the fix, never the first.
+        - alert: ScmPostgresBackupFailed
+          expr: kube_job_status_failed{namespace="{{ .Release.Namespace }}", job_name=~"scm-postgres-backup.*"} > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Postgres backup job failed"
+            description: "A scm-postgres-backup Job has failed. No new backup was written and nothing was pruned. Check `kubectl -n {{ .Release.Namespace }} logs job/<name>`."
+        # Catches the case a failure alert cannot: the job not running at
+        # all. A suspended CronJob, a deleted schedule, or a cluster that
+        # never scheduled it produce no failed Job to alert on -- they
+        # produce silence, which looks identical to everything being fine.
+        #
+        # This is not hypothetical: the CronJob was suspended by hand
+        # during an incident, and nothing would have reported that it
+        # stayed suspended.
+        - alert: ScmPostgresBackupStale
+          expr: time() - max(kube_job_status_completion_time{namespace="{{ .Release.Namespace }}", job_name=~"scm-postgres-backup.*"}) > {{ .Values.monitorApi.prometheusRule.backupStaleAfterHours }} * 3600
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No successful Postgres backup in over {{ .Values.monitorApi.prometheusRule.backupStaleAfterHours }}h"
+            description: "The most recent successful scm-postgres-backup completed more than {{ .Values.monitorApi.prometheusRule.backupStaleAfterHours }}h ago. The CronJob may be suspended or failing to schedule."
+
+    - name: supply-chain-monitor.availability
+      rules:
+        - alert: ScmMonitorApiDown
+          expr: up{job=~".*monitor-api.*"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "monitor-api is not being scraped"
+            description: "Prometheus cannot reach monitor-api's /metrics. The API may be down, or the ServiceMonitor may be selecting nothing."
+        - alert: ScmServerErrors
+          expr: rate(scm_http_responses_total{class="5xx"}[10m]) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "monitor-api is returning 5xx responses"
+            description: "Sustained server errors. 5xx is this service's own fault by definition -- 4xx is the caller's and is deliberately not alerted on here."
+
+    - name: supply-chain-monitor.security
+      rules:
+        # scm_auth_throttled_total only moves when an address has already
+        # failed authentication 10 times, so any sustained rate is
+        # someone guessing rather than someone fumbling. This is the
+        # reason the counter exists separately from the 4xx class, which
+        # cannot distinguish credential stuffing from a typo'd URL.
+        - alert: ScmCredentialStuffing
+          expr: rate(scm_auth_throttled_total[15m]) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Sustained failed-authentication throttling"
+            description: "Clients are being throttled for repeated bad API keys. Note the throttle keys on X-Forwarded-For, which a determined attacker can rotate -- treat this as a floor on the real rate, not a measurement of it."
+
+    - name: supply-chain-monitor.scanning
+      rules:
+        # A scan "fails" only when EVERY scanner for that artifact
+        # failed, so this is not scanner flakiness -- it means nothing
+        # scanned that artifact at all and its findings are stale
+        # without saying so.
+        - alert: ScmScansFailing
+          expr: rate(scm_scans_failed_total[30m]) > rate(scm_scans_succeeded_total[30m])
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "More scans are failing than succeeding"
+            description: "Every scanner failed for the majority of recent scans. Check scanner Jobs and the grype/trivy DB caches."
+{{- end }}

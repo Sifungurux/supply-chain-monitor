@@ -60,7 +60,7 @@ ifeq ($(SCM_RUNTIME),podman)
 export DOCKER_HOST := $(shell (podman system connection ls --format json | jq -r '.[] | select(.Default==true) | .URI') 2>/dev/null)
 endif
 
-.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build test-image vulncheck trivy-config deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap helm-lint helm-template db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
+.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build test-image vulncheck trivy-config deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap check-alert-rules helm-lint helm-template db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -342,7 +342,7 @@ test-artifact:
 		-H 'Content-Type: application/json' \
 		-d '{"ref":"alpine:3.19","type":"image"}' | tee /tmp/scm-artifact.json
 
-test: test-api test-dashboard check-dashboard-configmap check-openapi-spec
+test: test-api test-dashboard check-dashboard-configmap check-openapi-spec check-alert-rules
 
 # Runs services/monitor-api's Go test suite (handlers, store, pipeline)
 # via a containerized golang image -- no local Go install needed, just
@@ -433,6 +433,25 @@ check-dashboard-configmap:
 # no gem install, no lockfile, nothing to keep current.
 check-openapi-spec:
 	docker run --rm -v "$(CURDIR)":/src -w /src ruby:3.4-alpine ruby cluster/check-openapi-spec.rb
+
+# promtool over the chart's alert rules. A PromQL expression that does
+# not parse means Prometheus REFUSES THE WHOLE RULE FILE and alerts
+# that look configured never evaluate -- silence that is
+# indistinguishable from nothing being wrong, which is the failure mode
+# this project keeps meeting. helm-lint and helm-template both pass on
+# a rule file full of invalid PromQL, because to them it is just
+# strings in a CRD.
+#
+# Piped to the container rather than bind-mounted: on podman the host's
+# /tmp is not shared with the VM, and a missing path silently becomes
+# an empty directory rather than an error.
+check-alert-rules:
+	@helm template scm-ci charts/supply-chain-monitor \
+		--set monitorApi.prometheusRule.enabled=true \
+		-s templates/monitor-api/prometheusrule.yaml \
+		| python3 -c "import sys,yaml; print(yaml.safe_dump({'groups': yaml.safe_load(sys.stdin)['spec']['groups']}))" \
+		| docker run --rm -i --entrypoint sh prom/prometheus:v3.7.3 \
+			-c 'cat > /tmp/r.yaml && promtool check rules /tmp/r.yaml' 
 
 # Structural lint against the chart's own conventions (required fields,
 # indentation, etc.). Does NOT validate that a rendered document is a

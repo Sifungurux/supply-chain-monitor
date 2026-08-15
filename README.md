@@ -337,6 +337,40 @@ kubectl -n supply-chain-monitor get secret scm-ca-tls \
   -o jsonpath='{.data.tls\.crt}' | base64 -d > scm-ca.crt
 ```
 
+### Alerting
+
+`monitorApi.prometheusRule` ships alert rules for the signals this
+service exposes. **Off by default**, like `serviceMonitor` and for the
+same reason: `PrometheusRule` is a CRD, so rendering it without
+prometheus-operator installed fails the install on an unknown kind.
+
+| alert | fires when |
+|---|---|
+| `ScmPostgresBackupFailed` | a backup Job failed |
+| `ScmPostgresBackupStale` | no successful backup in 36h — catches a **suspended or unscheduled** CronJob, which produces no failed Job to alert on |
+| `ScmMonitorApiDown` | Prometheus cannot scrape `/metrics` |
+| `ScmServerErrors` | sustained 5xx (this service's fault; 4xx is the caller's and is deliberately not alerted on) |
+| `ScmCredentialStuffing` | sustained failed-auth throttling |
+| `ScmScansFailing` | more scans failing than succeeding — meaning *every* scanner failed, not scanner flakiness |
+
+**An alert is the second half of a fix, never the first.** The backup
+bug that motivated these wrote empty files and **exited 0** for three
+days: no alert on job failure could have fired, because the job never
+failed. It only became alertable once the job was fixed to fail closed.
+Worth remembering before adding an alert anywhere — ask whether the
+broken state is one the system actually reports.
+
+The two recovery alerts read `kube_job_status_*` from
+kube-state-metrics, which `kube-prometheus-stack` installs. Without it
+they evaluate against nothing and stay permanently silent, which looks
+exactly like healthy.
+
+`make check-alert-rules` runs `promtool` over the rendered rules, in CI
+too. Invalid PromQL makes Prometheus reject the **whole rule file**, so
+alerts that look configured never evaluate — and `helm lint` and
+`helm template` both pass on it, because to them a rule is a string in
+a CRD.
+
 ### Failed-authentication throttling
 
 Repeated wrong keys from one address are throttled: **10 failures, then

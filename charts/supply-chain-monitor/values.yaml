@@ -377,6 +377,25 @@ monitorApi:
   # because ServiceMonitor is a CRD: enabling it on a cluster without
   # prometheus-operator installed makes the install fail on an unknown
   # kind.
+  # Alert rules for the metrics above. Off by default for exactly the
+  # reason serviceMonitor is -- PrometheusRule is a CRD, and rendering
+  # it without prometheus-operator installed fails the install on an
+  # unknown kind.
+  #
+  # The recovery alerts read kube_job_status_* from kube-state-metrics,
+  # which kube-prometheus-stack installs; without it those two rules
+  # evaluate against nothing and stay silent, which is worth knowing
+  # before trusting them.
+  prometheusRule:
+    enabled: false
+    # Same label passthrough as serviceMonitor: most Prometheus
+    # instances select rules by label, and without the one it expects
+    # the rules are created and silently ignored.
+    labels: {}
+    # 36h rather than 24h: the backup runs daily, so 24h would alert on
+    # ordinary jitter between runs. This fires when a run has genuinely
+    # been missed.
+    backupStaleAfterHours: 36
   serviceMonitor:
     enabled: false
     interval: 30s
