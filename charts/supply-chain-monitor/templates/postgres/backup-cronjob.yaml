@@ -90,6 +90,39 @@ spec:
                   # Cleared once the file has verified as a real dump.
                   trap 'rm -f "${out:-}"' EXIT
                   export PGPASSWORD="$POSTGRES_PASSWORD"
+
+                  # WAIT FOR THE NETWORK, not just for Postgres.
+                  #
+                  # A brand-new pod's IP is not yet in the CNI's
+                  # NetworkPolicy allow-set when its container starts, and
+                  # kube-router REJECTs until it is -- so the first
+                  # connections come back "Connection refused", which reads
+                  # exactly like a dead server and is why this was
+                  # originally misdiagnosed. Measured on this cluster:
+                  # refused immediately, connecting normally ~45s later
+                  # from the SAME pod.
+                  #
+                  # A long-lived Deployment never notices this; monitor-api
+                  # is unaffected. A CronJob that dumps within a second of
+                  # starting notices every single time -- which is why
+                  # every backup failed from the night the policies were
+                  # created, and none before it.
+                  echo "waiting for ${POSTGRES_HOST}:${POSTGRES_PORT} to accept connections..."
+                  ready=""
+                  for i in $(seq 1 45); do
+                    if pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" >/dev/null 2>&1; then
+                      ready="yes"
+                      echo "reachable after ${i} attempt(s)"
+                      break
+                    fi
+                    sleep 2
+                  done
+                  if [ -z "$ready" ]; then
+                    echo "ERROR: ${POSTGRES_HOST}:${POSTGRES_PORT} unreachable after 90s -- giving up." >&2
+                    echo "ERROR: no backup written, nothing pruned, existing backups untouched." >&2
+                    exit 1
+                  fi
+
                   pg_dump -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" | gzip > "$out"
 
                   # Second line of defence: prove the file is a dump before
