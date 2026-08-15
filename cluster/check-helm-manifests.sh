@@ -221,3 +221,36 @@ case "$rendered_keys" in
 	exit 1
 	;;
 esac
+
+# == API_KEYS is safe to carry through Flux valuesFrom ==
+#
+# Flux resolves a valuesFrom entry with a targetPath through Helm's
+# strvals parser, where "," and "=" are DELIMITERS. A value containing
+# either is torn apart before Helm sees it, and the HelmRelease stops
+# reconciling entirely ("key ... has no value") -- which happened on a
+# live cluster, took the whole application release down to
+# not-reconciling, and was invisible to every existing test because they
+# all exercised the chart or the binary but never the layer between.
+echo "== API_KEYS survives Flux's strvals parsing =="
+strvals_value="$(helm template scm-ci charts/supply-chain-monitor \
+	--set monitorApi.apiKey=shared \
+	--set monitorApi.apiKeys.ci=k1 \
+	--set monitorApi.apiKeys.dashboard=k2 \
+	-s templates/monitor-api/auth-secret.yaml | awk -F': ' '/API_KEYS:/ { print $2 }')"
+case "$strvals_value" in
+*,* | *=*)
+	echo "ERROR: rendered API_KEYS contains a strvals delimiter (',' or '='):" >&2
+	echo "       ${strvals_value}" >&2
+	echo "       Flux would tear this apart resolving valuesFrom, and the whole" >&2
+	echo "       HelmRelease would stop reconciling. Join with ';' -- see" >&2
+	echo "       templates/_helpers.tpl's supply-chain-monitor.apiKeys." >&2
+	exit 1
+	;;
+esac
+case "$strvals_value" in
+*"ci:k1"*) ;;
+*)
+	echo "ERROR: rendered API_KEYS lost a configured key (got: ${strvals_value})." >&2
+	exit 1
+	;;
+esac
