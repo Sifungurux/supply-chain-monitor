@@ -71,6 +71,7 @@ is_placeholder() {
 # the warning below would never fire.
 placeholders_replaced=()
 
+existing_api_keys="$(read_existing api-keys)"
 existing_postgres_password="$(read_existing postgres-password)"
 existing_api_key="$(read_existing api-key)"
 existing_registry_reader="$(read_existing registry-reader-password)"
@@ -106,6 +107,33 @@ API_KEY="${API_KEY:-${existing_api_key:-$(openssl rand -hex 32)}}"
 # account entirely, so monitor-api could not pull from scm-registry at
 # all -- which is the correct failure for an unconfigured credential and
 # a pointless one for a cluster this script is setting up.
+# API_KEY_NAMES is the DESIRED SET of named clients, not an addition to
+# it: a name present here keeps its existing key (or gets a fresh one),
+# and a name absent from it is dropped. Dropping is how a consumer is
+# revoked, so it has to be expressible.
+#
+# Unset leaves the existing named keys exactly as they are. Without that
+# rule, running this script to rotate an unrelated credential would
+# silently revoke every named client -- the same carry-over trap that
+# left postgres-password on a placeholder for weeks, in the opposite
+# direction.
+if [ -n "${API_KEY_NAMES:-}" ]; then
+	API_KEYS=""
+	for name in $(printf '%s' "$API_KEY_NAMES" | tr ',' ' '); do
+		[ -n "$name" ] || continue
+		# Reuse this client's current key if it already has one, so
+		# adding a second consumer does not re-key the first.
+		current="$(printf '%s' "$existing_api_keys" | tr ',' '\n' | while IFS=: read -r n k; do
+			[ "$n" = "$name" ] && printf '%s' "$k"
+		done)"
+		[ -n "$current" ] || current="$(openssl rand -hex 32)"
+		[ -n "$API_KEYS" ] && API_KEYS="${API_KEYS},"
+		API_KEYS="${API_KEYS}${name}:${current}"
+	done
+else
+	API_KEYS="$existing_api_keys"
+fi
+
 REGISTRY_READER_PASSWORD="${REGISTRY_READER_PASSWORD:-${existing_registry_reader:-$(openssl rand -hex 24)}}"
 REGISTRY_WRITER_PASSWORD="${REGISTRY_WRITER_PASSWORD:-${existing_registry_writer:-$(openssl rand -hex 24)}}"
 REGISTRY_ADMIN_PASSWORD="${REGISTRY_ADMIN_PASSWORD:-${existing_registry_admin:-$(openssl rand -hex 24)}}"
@@ -116,12 +144,13 @@ kubectl create secret generic "$SECRET_NAME" \
 	--namespace "$NAMESPACE" \
 	--from-literal=postgres-password="$POSTGRES_PASSWORD" \
 	--from-literal=api-key="$API_KEY" \
+	--from-literal=api-keys="$API_KEYS" \
 	--from-literal=registry-reader-password="$REGISTRY_READER_PASSWORD" \
 	--from-literal=registry-writer-password="$REGISTRY_WRITER_PASSWORD" \
 	--from-literal=registry-admin-password="$REGISTRY_ADMIN_PASSWORD" \
 	--dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-unset POSTGRES_PASSWORD API_KEY
+unset POSTGRES_PASSWORD API_KEY API_KEYS
 unset REGISTRY_READER_PASSWORD REGISTRY_WRITER_PASSWORD REGISTRY_ADMIN_PASSWORD
 
 if [ ${#placeholders_replaced[@]} -gt 0 ]; then

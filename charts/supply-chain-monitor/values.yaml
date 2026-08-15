@@ -456,6 +456,35 @@ monitorApi:
   # real value (Flux valuesFrom, --set, existingSecret, etc.) -- same
   # options apply here.
   apiKey: ""
+  # apiKeys: NAMED per-client keys, so more than one consumer can call
+  # this API without all of them sharing one credential.
+  #
+  # What naming buys, none of which a shared key can offer: each request
+  # is attributed to a client in the audit log ("client":"ci-pipeline"
+  # on every mutation), and one consumer can be revoked by deleting its
+  # entry -- without re-keying every other consumer, which is what makes
+  # rotating a shared key something nobody wants to do.
+  #
+  # Accepts either a map, which is the readable form when editing this
+  # file directly:
+  #
+  #   apiKeys:
+  #     ci-pipeline: <key>
+  #     dashboard: <key>
+  #
+  # or the flat "name:key,name:key" string that Flux valuesFrom injects
+  # from the scm-chart-secrets Secret (generate with
+  # API_KEY_NAMES="ci-pipeline,dashboard" ./cluster/chart-secrets.sh).
+  #
+  # apiKey above stays valid ALONGSIDE these, authenticating as the
+  # client "default". That is deliberate: enabling named keys must never
+  # lock out a running deployment mid-upgrade. Once every consumer has
+  # its own key, set apiKey to "" to retire the shared one.
+  #
+  # An entry with an empty key is DROPPED rather than accepted -- an
+  # empty key would match the empty string a caller presents with a bare
+  # "Bearer ", authenticating every anonymous request as that client.
+  apiKeys: ""
   # When true, this chart does NOT render
   # templates/monitor-api/auth-secret.yaml at all -- you're expected to
   # have already created a Secret named scm-monitor-api-auth yourself

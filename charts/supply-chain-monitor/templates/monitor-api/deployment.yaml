@@ -104,6 +104,16 @@ spec:
                 secretKeyRef:
                   name: scm-monitor-api-auth
                   key: API_KEY
+            - name: API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: scm-monitor-api-auth
+                  key: API_KEYS
+                  # Optional so an operator-supplied secret
+                  # (apiKeyExistingSecret) that predates named keys
+                  # still starts -- the binary treats absent as "no
+                  # named keys", which is the pre-feature behaviour.
+                  optional: true
             # Authenticates this pod's own in-process pull paths
             # (RegistryFetcher, UnpackerScanner's generated
             # dockerconfig.json, trivy's native TRIVY_USERNAME/PASSWORD)

@@ -1314,8 +1314,22 @@ func runAPIServer() {
 	// (charts/supply-chain-monitor/templates/monitor-api/auth-secret.yaml), the same pattern
 	// already used for POSTGRES_PASSWORD.
 	apiKey := os.Getenv("API_KEY")
-	if apiKey == "" {
-		fatal("API_KEY is required and was not set")
+	// API_KEYS holds additional NAMED keys as "name:key,name:key" -- one
+	// per consumer, so each authenticates as itself, appears by name in
+	// the audit log, and can be revoked without re-keying every other
+	// client. See internal/api.ParseAPIKeys.
+	apiKeys := api.ParseAPIKeys(os.Getenv("API_KEYS"))
+	// EITHER satisfies the requirement. Demanding API_KEY even when
+	// named keys are configured would force every deployment to keep a
+	// shared key alive forever, which is the thing named keys exist to
+	// retire.
+	if apiKey == "" && !apiKeys.Enabled() {
+		fatal("no API key configured -- set API_KEY, or API_KEYS as \"name:key,name:key\"")
+	}
+	if apiKeys.Enabled() {
+		// Names only, never the keys themselves: a key logged once
+		// lives in the log aggregator forever.
+		slog.Info("named API keys configured", "clients", apiKeys.Names(), "shared_key_also_active", apiKey != "")
 	}
 
 	// Artifacts are persisted in Postgres (Percona Distribution for
@@ -1704,6 +1718,7 @@ func runAPIServer() {
 		Tracker:        stageTracker,
 		Scanners:       scanners,
 		APIKey:         apiKey,
+		APIKeys:        apiKeys,
 		RateLimitRPS:   rateLimitRPS,
 		RateLimitBurst: rateLimitBurst,
 		DigestResolver: digestResolver,
