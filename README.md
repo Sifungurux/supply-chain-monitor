@@ -702,6 +702,32 @@ The current inventory (`/api/v1/components?purl=`) is still
 latest-only: a package that only ever appeared in an old snapshot does
 not answer component search.
 
+### Scan freshness
+
+`monitorApi.scanFreshness.warnAfterDays` (**7**, `0` disables) marks an
+artifact whose last scan is older than that as **stale** — a `STALE`
+badge on the row and detail page, plus a "Not scanned recently" summary
+card. `GET /api/v1/stats` carries both the threshold and the count, so
+the dashboard gets them in a request it already makes.
+
+`monitorApi.scanFreshness.autoRescan` (**false**) additionally has the
+sweep CronJob rescan stale artifacts. The warning is **independent** and
+shows either way — a backlogged or failing auto-rescan stays visible
+rather than hiding behind the feature meant to fix it. Rescans are paced
+by `sweep.batchSize`, which matters: enabling it against a fleet that
+has never been swept finds nearly all of it stale at once, and those
+rescans then age out together on the same future day.
+
+Two rules worth knowing, applied identically by the API count and the
+dashboard badge so they cannot contradict each other:
+
+- **Never-scanned artifacts are not stale.** They sit at `registered`
+  and the sweep already collects them.
+- **A failed scan still counts as a scan.** `last_scan_at` is set when a
+  scan *completes*, including one that failed — so an artifact failing
+  every scan stays "fresh" here. `last_scan_failure_reason` is the
+  signal for that case.
+
 ### Retention: deleting old artifacts
 
 `monitorApi.retention` runs `monitor-api prune` as a CronJob, deleting

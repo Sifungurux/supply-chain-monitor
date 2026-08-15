@@ -72,6 +72,10 @@ data:
   # simultaneous scan-worker Jobs from exhausting a node's disk between
   # them. See monitorApi.scanConcurrency's own comment in values.yaml.
   SCAN_CONCURRENCY: {{ .Values.monitorApi.scanConcurrency | quote }}
+  # Scan freshness -- see monitorApi.scanFreshness. The API reports
+  # staleness; the sweep CronJob acts on it only when autoRescan is on,
+  # which is why the two are separate variables from one value.
+  SCAN_STALE_AFTER_DAYS: {{ .Values.monitorApi.scanFreshness.warnAfterDays | quote }}
   # Per-scanner caps -- see monitorApi.scanConcurrencyPerKind. Rendered
   # only for kinds actually set, so an unset one inherits the global cap
   # in main.go rather than being pinned to 0 here (which would mean

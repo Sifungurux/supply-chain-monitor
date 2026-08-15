@@ -2344,3 +2344,92 @@ test('SBOM changes still reports non-404 failures as errors', async () => {
 
   dom.window.close();
 });
+
+// Scan freshness. The per-row badge is computed in the dashboard while
+// the "Not scanned recently" card comes from the server's own count, so
+// the two must apply the SAME rule or they contradict each other.
+const NOW = Date.now();
+const daysAgo = (n) => new Date(NOW - n * 24 * 60 * 60 * 1000).toISOString();
+
+function freshnessDom(staleAfterDays, staleCount, artifacts) {
+  return buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) {
+        return jsonResponse(Object.assign({}, SAMPLE_STATS, {
+          total: artifacts.length,
+          stale_after_days: staleAfterDays,
+          stale: staleCount
+        }));
+      }
+      if (url.includes('/components/diff')) return jsonResponse({ from: null, to: null, added: [], removed: [], version_changed: [] });
+      if (isArtifactsList(url)) return artifactsPage(artifacts);
+      return errorResponse(404, { error: 'not found' });
+    }
+  });
+}
+
+const staleArtifact = Object.assign({}, SAMPLE_ARTIFACTS[0], { id: 'old', ref: 'stale:1', last_scan_at: daysAgo(30) });
+const freshArtifact = Object.assign({}, SAMPLE_ARTIFACTS[0], { id: 'new', ref: 'fresh:1', last_scan_at: daysAgo(1) });
+// Never scanned: last_scan_at absent entirely.
+const neverScanned = Object.assign({}, SAMPLE_ARTIFACTS[0], { id: 'never', ref: 'never:1', status: 'registered' });
+delete neverScanned.last_scan_at;
+
+test('a stale artifact is badged, a fresh one is not', async () => {
+  const dom = freshnessDom(7, 1, [staleArtifact, freshArtifact]);
+  await tick(20);
+  const doc = dom.window.document;
+
+  const stale = doc.querySelector('#artifact-rows tr[data-id="old"]');
+  const fresh = doc.querySelector('#artifact-rows tr[data-id="new"]');
+  assert.match(stale.textContent, /STALE/);
+  assert.doesNotMatch(fresh.textContent, /STALE/);
+
+  // And the card, appended last so existing positional assertions hold.
+  const cards = [...doc.querySelectorAll('#cards .n')].map((n) => n.textContent);
+  assert.equal(cards[cards.length - 1], '1');
+  assert.match(doc.getElementById('cards').textContent, /Not scanned recently/);
+
+  dom.window.close();
+});
+
+// The rule that keeps the badge and the server's count in agreement. In
+// JS a missing date compares as older than any cutoff, so without the
+// explicit guard a never-scanned artifact badges as stale while the SQL
+// count excludes it — the card and the rows would contradict.
+test('a never-scanned artifact is not badged stale', async () => {
+  const dom = freshnessDom(7, 0, [neverScanned]);
+  await tick(20);
+  const doc = dom.window.document;
+
+  const row = doc.querySelector('#artifact-rows tr[data-id="never"]');
+  assert.doesNotMatch(row.textContent, /STALE/,
+    'never-scanned is a different state — already swept as "registered", and excluded from the server count');
+
+  dom.window.close();
+});
+
+// 0 means the warning is switched off, not that everything is stale.
+test('freshness disabled shows no badge and no card', async () => {
+  const dom = freshnessDom(0, 0, [staleArtifact]);
+  await tick(20);
+  const doc = dom.window.document;
+
+  assert.doesNotMatch(doc.querySelector('#artifact-rows tr[data-id="old"]').textContent, /STALE/);
+  assert.doesNotMatch(doc.getElementById('cards').textContent, /Not scanned recently/);
+
+  dom.window.close();
+});
+
+// The detail page carries it too, next to the status badge.
+test('the detail page badges a stale artifact', async () => {
+  const dom = freshnessDom(7, 1, [staleArtifact]);
+  await tick(20);
+  const doc = dom.window.document;
+  doc.querySelector('button[data-action="toggle"][data-id="old"]').click();
+  await tick(20);
+
+  assert.match(doc.getElementById('detail-body').textContent, /STALE/);
+  dom.window.close();
+});

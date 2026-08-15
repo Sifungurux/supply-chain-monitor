@@ -1431,6 +1431,20 @@ func (s *PostgresStore) ReleaseScanSlots(holderID string) error {
 	return nil
 }
 
+// CountStaleScans counts artifacts last scanned before cutoff. The
+// `last_scan_at IS NOT NULL` is the whole subtlety -- see the Store
+// interface for why a never-scanned artifact is a different state
+// rather than an infinitely old one.
+func (s *PostgresStore) CountStaleScans(cutoff time.Time) (int, error) {
+	var n int
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM artifacts WHERE last_scan_at IS NOT NULL AND last_scan_at < $1`,
+		cutoff).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count stale scans before %s: %w", cutoff.Format(time.RFC3339), err)
+	}
+	return n, nil
+}
+
 // CountOlderThan answers the dry run: how many artifacts have not been
 // touched since cutoff. See the Store interface for why this is
 // separate from deleting them.

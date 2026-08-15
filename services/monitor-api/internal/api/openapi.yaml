@@ -809,6 +809,25 @@ components:
             making rather than leaving a caller to infer from a missing
             key.
           example: { cve: 214, malware: 2, misconfiguration: 61, secret: 4, other: 33 }
+        stale_after_days:
+          type: integer
+          description: >-
+            Days since an artifact's last scan before it counts as
+            stale. 0 means the freshness warning is switched off
+            entirely — clients should render no warning rather than
+            treating everything as stale.
+          example: 7
+        stale:
+          type: integer
+          description: >-
+            Artifacts last scanned longer ago than that. NEVER-scanned
+            artifacts are excluded: they sit at status `registered` and
+            the sweep CronJob already collects them, so counting them
+            here would double-report them. Keyed on when a scan last
+            COMPLETED, which includes a failed one — an artifact failing
+            every scan therefore stays "fresh" here, and
+            `last_scan_failure_reason` is the signal for that case.
+          example: 12
         by_stage:
           type: object
           additionalProperties: { type: integer }
