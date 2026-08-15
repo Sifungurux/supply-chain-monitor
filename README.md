@@ -238,6 +238,62 @@ single shared key, why the probe endpoints and CORS preflight `OPTIONS` are
 exempt, and what's still missing (per-client keys, rotation, rate
 limiting).
 
+### TLS at the Gateway
+
+Every request to this API carries a bearer token. Over plain HTTP that
+token crosses the network in cleartext — and combined with a shared key
+it compounds rather than adds, since one packet capture is then full
+fleet access. `gateway.tls.enabled` (**on**) terminates TLS at the
+Gateway with a certificate cert-manager issues and **renews**.
+
+The certificate chain is three objects, and the shape is the point:
+
+```
+selfSigned Issuer  ->  CA Certificate  ->  CA Issuer  ->  leaf cert
+```
+
+The naive version is a single self-signed leaf, which means every client
+must trust that exact certificate — and trust it *again* on every
+reissue or added hostname. With a CA there is **one** thing to trust, it
+stays stable across reissues, and any further certificate this cluster
+needs is already trusted by anyone who trusted the CA once. The leaf
+rotates on a 90-day schedule with its key (`rotationPolicy: Always`);
+the CA does not.
+
+This is a **private** CA. Browsers warn until it is trusted, and it is
+not a substitute for a real certificate on anything public. That is the
+honest option for a cluster with no public DNS name and no reachable
+ACME endpoint — which is why no ACME issuer is offered here rather than
+being configured and silently failing.
+
+**Reaching HTTPS from your host needs two things this chart does not
+control:**
+
+1. Traefik must expose its `websecure` entrypoint — done in
+   `k8s/releases/traefik-helmrelease.yaml` (NodePort 30443).
+2. The k3d cluster must map a host port to it. `cluster/k3d-config.yaml`
+   does **not**, and k3d fixes host port mappings at cluster-create
+   time, so adding one means editing or recreating the cluster.
+
+Until (2), HTTPS works in-cluster and through `kubectl port-forward`.
+The plain-HTTP listener keeps working throughout — enabling TLS cannot
+break a cluster that hasn't done the other two steps, which is why both
+listeners exist rather than HTTP redirecting to HTTPS. Redirecting is
+the right end state once the path works end to end.
+
+**The listener port is 8443, not 30443**, and that distinction has bitten
+this project before: a Gateway listener must name Traefik's *internal*
+EntryPoint port, not the externally-exposed NodePort. Using the external
+port programs no route at all and surfaces as a silent 404. There is a
+CI guard that fails the build if the port lands in the NodePort range.
+
+To trust the CA locally:
+
+```bash
+kubectl -n supply-chain-monitor get secret scm-ca-tls \
+  -o jsonpath='{.data.tls\.crt}' | base64 -d > scm-ca.crt
+```
+
 ### Per-client API keys
 
 `monitorApi.apiKey` is a single shared credential. `monitorApi.apiKeys`

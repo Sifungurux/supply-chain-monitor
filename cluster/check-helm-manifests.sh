@@ -254,3 +254,40 @@ case "$strvals_value" in
 	exit 1
 	;;
 esac
+# == the Gateway's TLS listener uses an EntryPoint port, not a NodePort ==
+#
+# A Gateway listener's port must match one of Traefik's actual internal
+# EntryPoint ports (websecure = 8443), NOT the externally-exposed
+# NodePort. This project has already been bitten by exactly this once:
+# the http listener used 80 (the external port) instead of 8000, Traefik
+# silently programmed no route at all, and every request landed on its
+# default "404 page not found" handler. Nothing errored -- see
+# templates/gateway/gateway.yaml's comment for the full story.
+#
+# A NodePort-range value here is that same mistake, so it fails the build
+# rather than being discovered through a 404 later.
+echo "== gateway TLS listener uses an EntryPoint port, not a NodePort =="
+tls_port="$(helm template scm-ci charts/supply-chain-monitor \
+	-s templates/gateway/gateway.yaml | awk '/name: https/ { found=1 } found && /port:/ { print $2; exit }')"
+if [ -z "$tls_port" ]; then
+	echo "ERROR: gateway.tls is enabled by default but no https listener rendered." >&2
+	exit 1
+fi
+if [ "$tls_port" -ge 30000 ] && [ "$tls_port" -le 32767 ]; then
+	echo "ERROR: the https listener port ${tls_port} is in the NodePort range." >&2
+	echo "       A Gateway listener must name Traefik's INTERNAL EntryPoint port" >&2
+	echo "       (websecure = 8443), not the externally-exposed NodePort. Using the" >&2
+	echo "       external port programs no route at all and fails as a silent 404." >&2
+	exit 1
+fi
+
+# ... and disabling TLS must remove the listener AND the certificates,
+# so a cluster without cert-manager can still render this chart.
+echo "== gateway.tls.enabled=false renders no TLS objects =="
+disabled_tls="$(helm template scm-ci charts/supply-chain-monitor --set gateway.tls.enabled=false \
+	-s templates/gateway/gateway.yaml -s templates/gateway/certificates.yaml 2>/dev/null | grep -cE "name: https|kind: Certificate|kind: Issuer" || true)"
+if [ "$disabled_tls" != "0" ]; then
+	echo "ERROR: gateway.tls.enabled=false still rendered ${disabled_tls} TLS object(s)." >&2
+	echo "       A cluster without cert-manager CRDs must be able to render this chart." >&2
+	exit 1
+fi

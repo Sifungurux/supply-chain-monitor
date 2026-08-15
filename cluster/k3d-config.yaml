@@ -39,6 +39,25 @@ ports:
   - port: 30301:30301
     nodeFilters:
       - server:0
+  # NodePort for Traefik's websecure EntryPoint, so https://localhost:30443
+  # reaches the Gateway's TLS listener
+  # (charts/supply-chain-monitor/templates/gateway/gateway.yaml, and
+  # k8s/releases/traefik-helmrelease.yaml which exposes this NodePort).
+  #
+  # k3d fixes host port mappings when the cluster is CREATED, so adding
+  # this here only affects clusters created from now on. An already
+  # running cluster needs the mapping added live:
+  #
+  #   k3d cluster edit supply-chain-monitor --port-add 30443:30443@server:0
+  #
+  # which recreates only the serverlb container -- every node, and so
+  # every PVC and all data, is untouched. Despite the nodeFilters below,
+  # k3d publishes these mappings on that load balancer rather than on the
+  # node containers (confirmed with `docker ps`), which is why the live
+  # edit is non-destructive.
+  - port: 30443:30443
+    nodeFilters:
+      - server:0
 options:
   k3s:
     extraArgs:

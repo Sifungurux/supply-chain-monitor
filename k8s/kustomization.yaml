@@ -31,3 +31,11 @@ resources:
   - traefik-namespace.yaml
   - sources/traefik-helmrepository.yaml
   - releases/traefik-helmrelease.yaml
+  # cert-manager issues the Gateway's TLS certificate from a self-signed
+  # CA -- see releases/cert-manager-helmrelease.yaml and the application
+  # chart's templates/gateway/certificates.yaml. Third-party infra like
+  # Traefik, so it follows the same namespace + HelmRepository + release
+  # shape rather than folding into the application chart.
+  - cert-manager-namespace.yaml
+  - sources/cert-manager-helmrepository.yaml
+  - releases/cert-manager-helmrelease.yaml

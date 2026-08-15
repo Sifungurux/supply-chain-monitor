@@ -36,3 +36,24 @@ spec:
       allowedRoutes:
         namespaces:
           from: Same
+{{- if .Values.gateway.tls.enabled }}
+    # HTTPS, terminating with the certificate cert-manager issues in
+    # certificates.yaml. Added ALONGSIDE the http listener rather than
+    # replacing it: this chart cannot know whether Traefik's websecure
+    # EntryPoint is exposed or whether the k3d cluster maps a host port
+    # to it, and turning off plain HTTP before those exist would make
+    # the dashboard unreachable with no way to notice from here.
+    # Redirecting HTTP to HTTPS is the right end state, once the path
+    # actually works end to end.
+    - name: https
+      port: {{ .Values.gateway.tls.listenerPort }}
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: scm-gateway-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+{{- end }}

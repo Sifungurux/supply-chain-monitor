@@ -27,6 +27,14 @@ metadata:
   name: supply-chain-monitor
   namespace: flux-system
 spec:
+  # The application chart renders cert-manager CRs (Issuer/Certificate)
+  # when gateway.tls.enabled is on, so it must not install before
+  # cert-manager's CRDs exist. Flux would eventually converge by
+  # retrying, but a dependency states the ordering rather than relying
+  # on a failure loop to discover it.
+  dependsOn:
+    - name: cert-manager
+      namespace: flux-system
   interval: 5m
   chart:
     spec:

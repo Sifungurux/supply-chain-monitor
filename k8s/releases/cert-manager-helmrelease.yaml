@@ -1,0 +1,41 @@
+# cert-manager, so the Gateway can terminate TLS with a certificate that
+# is issued and RENEWED automatically rather than generated once by a
+# script and quietly expiring a year later.
+#
+# It issues from a self-signed CA created in the application chart
+# (templates/gateway/certificates.yaml), not from a public ACME issuer:
+# this cluster has no public DNS name and no reachable ACME endpoint, so
+# a real certificate is not obtainable. The trade-off is explicit --
+# browsers warn until the CA is trusted, and the CA is a single
+# certificate you can trust once rather than a new self-signed leaf per
+# service.
+#
+# Version pinned rather than floating, same reproducibility reasoning as
+# every other pin in this project.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cert-manager
+  namespace: flux-system
+spec:
+  interval: 10m
+  chart:
+    spec:
+      chart: cert-manager
+      version: v1.19.1
+      sourceRef:
+        kind: HelmRepository
+        name: jetstack
+        namespace: flux-system
+  targetNamespace: cert-manager
+  install:
+    crds: Create
+  upgrade:
+    crds: CreateReplace
+  values:
+    # The CRDs are what the application chart's Certificate/Issuer
+    # resources need; without them that chart fails to render anything
+    # TLS-related. install.crds above is what installs them.
+    crds:
+      enabled: true
+      keep: true

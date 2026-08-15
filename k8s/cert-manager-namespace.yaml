@@ -1,0 +1,8 @@
+# cert-manager gets its own namespace for the same reason Traefik does:
+# it is third-party cluster infra, not part of this application, and
+# keeping it out of supply-chain-monitor means the application's
+# NetworkPolicies and RBAC describe only the application.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
