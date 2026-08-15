@@ -123,11 +123,15 @@ if [ -n "${API_KEY_NAMES:-}" ]; then
 		[ -n "$name" ] || continue
 		# Reuse this client's current key if it already has one, so
 		# adding a second consumer does not re-key the first.
-		current="$(printf '%s' "$existing_api_keys" | tr ',' '\n' | while IFS=: read -r n k; do
+		current="$(printf '%s' "$existing_api_keys" | tr ',;' '\n' | while IFS=: read -r n k; do
 			[ "$n" = "$name" ] && printf '%s' "$k"
 		done)"
 		[ -n "$current" ] || current="$(openssl rand -hex 32)"
-		[ -n "$API_KEYS" ] && API_KEYS="${API_KEYS},"
+		# Semicolon, not comma: Flux parses a targetPath valuesFrom
+		# value through Helm's strvals, where a comma is a delimiter --
+		# a comma-separated value breaks the HelmRelease reconcile
+		# outright ("key ... has no value").
+		[ -n "$API_KEYS" ] && API_KEYS="${API_KEYS};"
 		API_KEYS="${API_KEYS}${name}:${current}"
 	done
 else

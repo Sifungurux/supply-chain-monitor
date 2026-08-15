@@ -9,6 +9,13 @@ map iteration has no inherent order, and an unstable value here would
 change the Secret's checksum on every reconcile and roll monitor-api
 for no reason (the deployment carries a checksum/api-key annotation).
 
+Joined with SEMICOLONS, not commas. Flux resolves a valuesFrom entry
+with a targetPath through Helm's strvals parser, where a comma is a
+delimiter -- a comma-separated value arriving that way is torn apart
+before Helm sees it and the HelmRelease fails to reconcile with
+"key ... has no value". That happened on a live cluster; the binary
+accepts both separators so a hand-set API_KEYS still works.
+
 Entries with an empty key are dropped here as well as in the binary.
 Doing it in both places is deliberate: the chart should not emit a
 credential-shaped blank, and the binary must not trust that it didn't.
@@ -22,7 +29,7 @@ credential-shaped blank, and the binary must not trust that it didn't.
 {{- $pairs = append $pairs (printf "%s:%s" $name $key) -}}
 {{- end -}}
 {{- end -}}
-{{- join "," (sortAlpha $pairs) -}}
+{{- join ";" (sortAlpha $pairs) -}}
 {{- else -}}
 {{- $value -}}
 {{- end -}}
