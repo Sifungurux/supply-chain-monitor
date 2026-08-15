@@ -1,0 +1,59 @@
+# Routes the API through the same Gateway as the dashboard, so a browser
+# holding the dashboard over HTTPS calls the API on its OWN ORIGIN.
+#
+# Two problems, one route.
+#
+# 1. THE BEARER TOKEN. Terminating TLS in front of the dashboard
+#    encrypted its HTML and nothing else: monitor-api was a bare
+#    NodePort, so the token every request carries still crossed the
+#    network in cleartext. That was the entire justification for adding
+#    TLS, and it was not addressed by adding TLS to the dashboard alone.
+#
+# 2. THE DASHBOARD BROKE OVER HTTPS. It derives its API address from
+#    window.location.protocol, so served over https it asked for
+#    https://<host>:30300 -- a port speaking plain HTTP, which fails the
+#    handshake outright. Every API call failed, and the HTTP->HTTPS
+#    redirect made that the default path in.
+#
+# Path precedence does the rest: Gateway API gives a longer PathPrefix
+# precedence over a shorter one, so "/api/" wins over the dashboard
+# route's "/" without either needing to know about the other.
+{{- if .Values.gateway.api.enabled }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: scm-api
+  namespace: {{ .Release.Namespace }}
+spec:
+  parentRefs:
+{{- if not (and .Values.gateway.tls.enabled .Values.gateway.tls.redirectHTTP) }}
+    # Same rule as the dashboard route: with the redirect on, the http
+    # listener belongs to the redirect. An API request over http then
+    # matches the redirect's "/" prefix and is sent to https, which is
+    # the intended outcome -- a token must not be served a working
+    # plain-HTTP path just because the caller asked for one.
+    - name: scm-gateway
+      sectionName: http
+{{- end }}
+{{- if .Values.gateway.tls.enabled }}
+    - name: scm-gateway
+      sectionName: https
+{{- end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+        # The docs describe this API and are served by the same process,
+        # so they belong on the same origin rather than stranded on a
+        # NodePort. Both are unauthenticated by design (see withAuth).
+        - path:
+            type: PathPrefix
+            value: /swagger
+        - path:
+            type: Exact
+            value: /openapi.yaml
+      backendRefs:
+        - name: monitor-api
+          port: 8080
+{{- end }}

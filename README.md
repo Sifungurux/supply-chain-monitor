@@ -290,6 +290,25 @@ clients are: it would otherwise send every visitor somewhere they can't
 connect, turning a working dashboard into a broken one. Verify HTTPS
 first, redirect second.
 
+**The API is routed through the Gateway too** (`gateway.api.enabled`,
+on): `/api/`, `/swagger` and `/openapi.yaml` go to `monitor-api`, so the
+bearer token is covered by the Gateway's TLS and the dashboard reaches
+the API on its **own origin**.
+
+That second part is not cosmetic. The dashboard derives its API address
+from `window.location.protocol`, so before this route existed a page
+served over HTTPS asked for `https://<host>:30300` — a port speaking
+plain HTTP, which fails the TLS handshake outright. Every API call
+failed, and enabling the HTTP→HTTPS redirect made that the default way
+in. Terminating TLS in front of the dashboard alone encrypted its HTML
+and left the token in cleartext, which was the whole thing TLS was
+added to fix.
+
+`monitor-api`'s direct NodePort (30300) still works and is still plain
+HTTP — an additional path in, not a replacement. A page loaded from the
+dashboard's own NodePort (30301) reaches the API there, because that
+nginx serves static files and proxies nothing.
+
 **Reaching HTTPS from your host needs two things this chart does not
 control:**
 

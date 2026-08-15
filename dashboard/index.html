@@ -423,7 +423,27 @@
   // Colima VM address (colima runtime, where NodePorts aren't reachable
   // via "localhost" at all) -- a hardcoded "localhost" default broke
   // the colima path outright. Still overridable and remembered below.
-  var DEFAULT_API_BASE = window.location.protocol + '//' + window.location.hostname + ':30300';
+  // Where the API lives when nothing has been configured explicitly.
+  //
+  // SAME ORIGIN by default, because the Gateway now routes /api/ to
+  // monitor-api (templates/gateway/httproute-api.yaml). That is what
+  // makes the dashboard work over HTTPS at all: this used to be
+  // protocol + host + ':30300', so a page served over https asked for
+  // https://<host>:30300 -- a port speaking plain HTTP, which fails the
+  // TLS handshake outright rather than degrading. Every API call failed,
+  // and it looked like an application bug rather than an address bug.
+  //
+  // The exception is the dashboard's OWN NodePort: that nginx serves
+  // static files only and proxies nothing, so a page loaded from it has
+  // to reach across to monitor-api's NodePort. Coupling to that port
+  // number is not lovely, and it is the same coupling this line already
+  // had -- an explicit DASHBOARD_API_BASE (env.js) overrides all of it
+  // for any deployment where neither assumption holds.
+  var DASHBOARD_NODEPORT = '30301';
+  var API_NODEPORT = '30300';
+  var DEFAULT_API_BASE = window.location.port === DASHBOARD_NODEPORT
+    ? window.location.protocol + '//' + window.location.hostname + ':' + API_NODEPORT
+    : window.location.origin;
   // window.SCM_CONFIG is set by env.js (see the comment above this
   // script tag) -- rendered at container startup from the
   // scm-monitor-api-auth Secret and scm-dashboard-config ConfigMap, so

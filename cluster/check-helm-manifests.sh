@@ -352,3 +352,30 @@ if [ "$http_claims" != "0" ]; then
 	echo "       http listener -- two routes match the same path there." >&2
 	exit 1
 fi
+
+# == the API is routed through the Gateway, on the TLS listener ==
+#
+# Without this route the Gateway fronts only the dashboard's HTML, and
+# monitor-api stays a bare plain-HTTP NodePort -- so the bearer token
+# every request carries still crosses the network in cleartext, which is
+# the entire reason TLS was added. It also breaks the dashboard over
+# HTTPS, which derives its API address from its own protocol.
+echo "== the API is routed through the Gateway on the https listener =="
+api_route="$(helm template scm-ci charts/supply-chain-monitor -s templates/gateway/httproute-api.yaml)"
+case "$api_route" in
+*"name: monitor-api"*) ;;
+*)
+	echo "ERROR: no Gateway route to monitor-api rendered." >&2
+	echo "       The API would be reachable only as a plain-HTTP NodePort." >&2
+	exit 1
+	;;
+esac
+case "$api_route" in
+*"sectionName: https"*) ;;
+*)
+	echo "ERROR: the API route does not attach to the 'https' listener." >&2
+	echo "       TLS would terminate and API calls would 404 -- see the same" >&2
+	echo "       failure documented for the dashboard route." >&2
+	exit 1
+	;;
+esac

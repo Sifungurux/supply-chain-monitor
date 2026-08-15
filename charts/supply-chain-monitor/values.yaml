@@ -1185,6 +1185,20 @@ gateway:
   # (this exact mismatch caused a real "404 page not found" on first
   # deploy).
   listenerPort: 8000
+  api:
+    # Routes /api/, /swagger and /openapi.yaml through the Gateway to
+    # monitor-api, so the dashboard reaches the API on its own origin
+    # and the bearer token is covered by the Gateway's TLS.
+    #
+    # Without this the API is only a bare NodePort (30300) speaking
+    # plain HTTP: the token crosses the network in cleartext, and a
+    # dashboard served over HTTPS cannot call it at all, because it
+    # derives the API address from its own protocol and asks for https
+    # on a port that does not speak it.
+    #
+    # monitor-api's direct NodePort keeps working either way -- this is
+    # an additional path in, not a replacement.
+    enabled: true
   tls:
     # TLS termination at the Gateway, with a certificate issued and
     # RENEWED by cert-manager from a private CA created in this chart
