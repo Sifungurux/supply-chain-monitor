@@ -44,6 +44,20 @@ type metrics struct {
 	// actually asks of this number. Per-route/per-code breakdowns are
 	// what a real metrics library is for -- see the note above.
 	httpResponses [6]atomic.Int64
+	// authFailures and authThrottled are DISJOINT, and both exist
+	// because httpResponses cannot answer the question either one is
+	// for: a 401 from credential guessing and a 404 from a typo are the
+	// same "4xx" there, so a spike that matters is indistinguishable
+	// from routine client error.
+	//
+	// authFailures counts credentials that were checked and rejected.
+	// authThrottled counts attempts refused BEFORE the key was checked,
+	// because that address had already failed too often -- so a rising
+	// authThrottled means someone is being slowed down, which is the
+	// signal the throttle exists to produce and the only place it is
+	// visible outside the pod logs.
+	authFailures  atomic.Int64
+	authThrottled atomic.Int64
 	startedAt     time.Time
 }
 
@@ -61,6 +75,11 @@ func (m *metrics) recordScanResult(failed bool) {
 	}
 	m.scansSucceeded.Add(1)
 }
+
+// recordAuth* are called from withAuth's rejection path only -- a
+// successful authentication touches neither.
+func (m *metrics) recordAuthFailure()   { m.authFailures.Add(1) }
+func (m *metrics) recordAuthThrottled() { m.authThrottled.Add(1) }
 
 func (m *metrics) recordResponse(status int) {
 	class := status / 100
@@ -152,6 +171,9 @@ func (h *handler) metricsHandler(w http.ResponseWriter, r *http.Request) {
 	for class := 1; class < len(h.metrics.httpResponses); class++ {
 		fmt.Fprintf(w, "scm_http_responses_total{class=\"%dxx\"} %d\n", class, h.metrics.httpResponses[class].Load())
 	}
+
+	counter("scm_auth_failures_total", "Requests rejected with 401 because the API key was missing or wrong.", h.metrics.authFailures.Load())
+	counter("scm_auth_throttled_total", "Requests refused with 429 because that client address had already failed authentication too often.", h.metrics.authThrottled.Load())
 
 	gauge("scm_process_uptime_seconds", "Seconds since this process started.", time.Since(h.metrics.startedAt).Seconds())
 	gauge("go_goroutines", "Goroutines currently running.", float64(runtime.NumGoroutine()))

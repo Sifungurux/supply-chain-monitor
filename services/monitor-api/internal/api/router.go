@@ -186,7 +186,7 @@ func NewRouter(cfg Config) http.Handler {
 	// withAudit sits INSIDE withAuth, because it reports the
 	// authenticated client and that only exists in the context after
 	// withAuth has put it there.
-	return withMetrics(withCORS(withAuth(withAudit(top), keys, failures)), h.metrics)
+	return withMetrics(withCORS(withAuth(withAudit(top), keys, failures, h.metrics)), h.metrics)
 }
 
 // withAuth requires `Authorization: Bearer <apiKey>` on every request
@@ -302,7 +302,7 @@ func clientIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
-func withAuth(next http.Handler, keys APIKeys, failures *rateLimiter) http.Handler {
+func withAuth(next http.Handler, keys APIKeys, failures *rateLimiter, m *metrics) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/healthz", "/readyz", "/metrics", "/swagger", "/openapi.yaml":
@@ -327,12 +327,18 @@ func withAuth(next http.Handler, keys APIKeys, failures *rateLimiter) http.Handl
 			// the existing per-key limiter (withRateLimit) is what
 			// governs authenticated traffic.
 			if failures != nil && !failures.allow(clientIP(r)) {
+				if m != nil {
+					m.recordAuthThrottled()
+				}
 				w.Header().Set("Retry-After", "1")
 				// Deliberately NOT distinguishable from the 401 below in
 				// what it reveals: this says "you have failed too often",
 				// never "that key was close" or "that key exists".
 				writeError(w, http.StatusTooManyRequests, "too many failed authentication attempts, slow down")
 				return
+			}
+			if m != nil {
+				m.recordAuthFailure()
 			}
 			w.Header().Set("WWW-Authenticate", `Bearer realm="supply-chain-monitor"`)
 			writeError(w, http.StatusUnauthorized, "missing or invalid API key")
