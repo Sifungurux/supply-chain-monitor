@@ -421,10 +421,10 @@ func TestPickArtifactsToSweep(t *testing.T) {
 	// reached. Ordering by last attempt sends it to the back.
 	t.Run("least recently attempted first, so a broken artifact cannot hog the batch", func(t *testing.T) {
 		at := func(id string, since time.Duration) artifact.Artifact {
-			t := now.Add(-since)
+			ts := now.Add(-since)
 			// Registered long before any of them were scanned, so
 			// CreatedAt alone would order these exactly backwards.
-			return artifact.Artifact{ID: id, Status: artifact.StatusFailed, CreatedAt: now.Add(-99 * time.Hour), LastScanAt: &t}
+			return artifact.Artifact{ID: id, Status: artifact.StatusFailed, CreatedAt: now.Add(-99 * time.Hour), LastScanAt: &ts}
 		}
 		all := []artifact.Artifact{
 			at("retried-just-now", time.Minute),

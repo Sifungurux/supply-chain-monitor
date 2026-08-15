@@ -825,8 +825,11 @@ components:
             the sweep CronJob already collects them, so counting them
             here would double-report them. Keyed on when a scan last
             COMPLETED, which includes a failed one — an artifact failing
-            every scan therefore stays "fresh" here, and
-            `last_scan_failure_reason` is the signal for that case.
+            every scan therefore stays "fresh" here and is never counted
+            stale. Failures are handled separately rather than through
+            this count: `last_scan_failure_reason` reports the cause,
+            `by_status.failed` the fleet total, and the sweep CronJob
+            retries every failed artifact on each run regardless of age.
           example: 12
         by_stage:
           type: object
