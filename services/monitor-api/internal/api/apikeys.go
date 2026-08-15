@@ -30,7 +30,20 @@ type APIKeys struct {
 	keys []namedKey
 }
 
-// ParseAPIKeys reads a comma-separated "name:key" list.
+// ParseAPIKeys reads a "name:key" list separated by SEMICOLONS or
+// commas.
+//
+// Semicolon is canonical, and the reason is Flux rather than taste:
+// Flux resolves a valuesFrom entry with a targetPath through Helm's
+// strvals parser, where a COMMA IS A DELIMITER. A comma-separated value
+// arriving that way is split apart before Helm ever sees it, and the
+// HelmRelease fails to reconcile with "key ... has no value" -- observed
+// on a live cluster, which is why this is documented here rather than
+// discovered again.
+//
+// Commas are still accepted so that an API_KEYS set by hand, or by
+// anything that did not read this comment, works rather than silently
+// parsing into one unusable entry.
 //
 // An entry with an EMPTY KEY IS SKIPPED, and that is a security
 // property, not tidiness: an empty key would otherwise be compared
@@ -46,7 +59,7 @@ type APIKeys struct {
 func ParseAPIKeys(raw string) APIKeys {
 	var keys []namedKey
 	seen := make(map[string]bool)
-	for _, entry := range strings.Split(raw, ",") {
+	for _, entry := range strings.FieldsFunc(raw, func(r rune) bool { return r == ';' || r == ',' }) {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue

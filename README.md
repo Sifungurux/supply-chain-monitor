@@ -258,6 +258,14 @@ Generate them with the desired set of client names:
 API_KEY_NAMES="ci-pipeline,dashboard,kirk-laptop" ./cluster/chart-secrets.sh
 ```
 
+The generated Secret holds them as `name:key;name:key`. **Semicolons,
+not commas** — Flux resolves a `valuesFrom` entry with a `targetPath`
+through Helm's `strvals` parser, where a comma is a delimiter, so a
+comma-separated value is torn apart before Helm sees it and the
+HelmRelease fails to reconcile with `key ... has no value`. That is not
+theoretical; it broke a live reconcile. The binary accepts either
+separator, so an `API_KEYS` set by hand still works.
+
 `API_KEY_NAMES` is the **desired set**, not an addition to it: a name
 present keeps its existing key (adding a consumer never re-keys the
 others), and a name absent is dropped — that is how you revoke. Running

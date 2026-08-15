@@ -472,7 +472,10 @@ monitorApi:
   #     ci-pipeline: <key>
   #     dashboard: <key>
   #
-  # or the flat "name:key,name:key" string that Flux valuesFrom injects
+  # or the flat "name:key;name:key" string that Flux valuesFrom injects
+  # (SEMICOLON-separated -- Flux parses a targetPath value through
+  # Helm's strvals, where a comma is a delimiter and would tear the
+  # value apart before Helm sees it; the binary accepts either)
   # from the scm-chart-secrets Secret (generate with
   # API_KEY_NAMES="ci-pipeline,dashboard" ./cluster/chart-secrets.sh).
   #
