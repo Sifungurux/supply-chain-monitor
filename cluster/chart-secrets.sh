@@ -46,11 +46,58 @@ read_existing() {
 	kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" -o jsonpath="{.data.$1}" 2>/dev/null | base64 --decode 2>/dev/null || true
 }
 
+# is_placeholder -- true for values that are obviously not credentials.
+#
+# Carrying values over is the whole point of read_existing, but it means
+# the generate-a-random-one branch below only ever fires on a FIRST run,
+# against no Secret at all. So a placeholder that got in once is
+# preserved by every subsequent run, and re-running this script to
+# "rotate credentials" faithfully re-applies it.
+#
+# Not theoretical: postgres-password sat at "changeme123" in a live
+# cluster across several runs of this script. The CI guard could not see
+# it either -- that guard greps charts/, where the value correctly is
+# not, while the placeholder lived in cluster state.
+is_placeholder() {
+	case "$1" in
+	changeme* | CHANGEME* | ChangeMe* | password | secret | admin | test) return 0 ;;
+	esac
+	return 1
+}
+
+# Recorded here in the PARENT shell, deliberately. Doing this inside
+# read_existing would not work: it is called as "$(read_existing ...)",
+# which runs in a subshell, so any array append is discarded with it and
+# the warning below would never fire.
+placeholders_replaced=()
+
 existing_postgres_password="$(read_existing postgres-password)"
 existing_api_key="$(read_existing api-key)"
 existing_registry_reader="$(read_existing registry-reader-password)"
 existing_registry_writer="$(read_existing registry-writer-password)"
 existing_registry_admin="$(read_existing registry-admin-password)"
+
+# Blanking it is what makes the generate branch below fire.
+if is_placeholder "$existing_postgres_password"; then
+	placeholders_replaced+=("postgres-password")
+	existing_postgres_password=""
+fi
+if is_placeholder "$existing_api_key"; then
+	placeholders_replaced+=("api-key")
+	existing_api_key=""
+fi
+if is_placeholder "$existing_registry_reader"; then
+	placeholders_replaced+=("registry-reader-password")
+	existing_registry_reader=""
+fi
+if is_placeholder "$existing_registry_writer"; then
+	placeholders_replaced+=("registry-writer-password")
+	existing_registry_writer=""
+fi
+if is_placeholder "$existing_registry_admin"; then
+	placeholders_replaced+=("registry-admin-password")
+	existing_registry_admin=""
+fi
 
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-${existing_postgres_password:-$(openssl rand -hex 24)}}"
 API_KEY="${API_KEY:-${existing_api_key:-$(openssl rand -hex 32)}}"
@@ -76,6 +123,16 @@ kubectl create secret generic "$SECRET_NAME" \
 
 unset POSTGRES_PASSWORD API_KEY
 unset REGISTRY_READER_PASSWORD REGISTRY_WRITER_PASSWORD REGISTRY_ADMIN_PASSWORD
+
+if [ ${#placeholders_replaced[@]} -gt 0 ]; then
+	echo
+	echo "!! Replaced placeholder credential(s): ${placeholders_replaced[*]}"
+	echo "!! A placeholder is not a credential, so it was regenerated rather than"
+	echo "!! carried over. If postgres-password is in that list the database role"
+	echo "!! still has the OLD password -- follow the ALTER ROLE step below, or"
+	echo "!! monitor-api will fail to connect on its next restart."
+	echo
+fi
 
 echo "Secret '${SECRET_NAME}' created/updated in namespace '${NAMESPACE}'."
 echo "Next: 'flux reconcile helmrelease supply-chain-monitor -n flux-system --with-source'"
