@@ -104,6 +104,12 @@ spec:
                 secretKeyRef:
                   name: scm-monitor-api-auth
                   key: API_KEY
+            - name: TRUSTED_PROXY_CIDRS
+              # Falls back to networkPolicy.nodeCIDRs so the cluster's
+              # trusted address space is defined once. See
+              # values.yaml's monitorApi.trustedProxyCIDRs for what that
+              # default does and does not protect against.
+              value: {{ join "," (default .Values.networkPolicy.nodeCIDRs .Values.monitorApi.trustedProxyCIDRs) | quote }}
             - name: API_KEYS
               valueFrom:
                 secretKeyRef:

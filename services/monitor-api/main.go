@@ -1340,6 +1340,26 @@ func runAPIServer() {
 		slog.Warn("API_KEY is shorter than 32 characters -- weak against guessing; regenerate with `make chart-secrets`",
 			"length", len(apiKey), "recommended_minimum", 32)
 	}
+	// TRUSTED_PROXY_CIDRS decides whether X-Forwarded-For is believed
+	// when keying the failed-auth throttle. Empty keeps the original
+	// behaviour (every peer's header honoured) -- see
+	// api.ClientAddress for the trade-off that represents.
+	//
+	// A parse error is FATAL rather than skipped: silently dropping a
+	// malformed entry could empty the set, and an empty set means
+	// "trust everyone's header". A typo would then widen trust while
+	// reading like a narrowing, which is the one way a security setting
+	// must not fail.
+	trustedProxies, err := api.ParseTrustedProxies(os.Getenv("TRUSTED_PROXY_CIDRS"))
+	if err != nil {
+		fatal("TRUSTED_PROXY_CIDRS is invalid", "err", err)
+	}
+	if trustedProxies.Configured() {
+		slog.Info("X-Forwarded-For is honoured only from trusted proxy CIDRs", "trusted_proxy_cidrs", os.Getenv("TRUSTED_PROXY_CIDRS"))
+	} else {
+		slog.Warn("TRUSTED_PROXY_CIDRS is unset -- X-Forwarded-For is honoured from ANY peer, so the failed-auth throttle can be evaded by rotating that header")
+	}
+
 	if apiKeys.Enabled() {
 		// Names only, never the keys themselves: a key logged once
 		// lives in the log aggregator forever.
@@ -1733,6 +1753,7 @@ func runAPIServer() {
 		Scanners:       scanners,
 		APIKey:         apiKey,
 		APIKeys:        apiKeys,
+		TrustedProxies: trustedProxies,
 		RateLimitRPS:   rateLimitRPS,
 		RateLimitBurst: rateLimitBurst,
 		DigestResolver: digestResolver,

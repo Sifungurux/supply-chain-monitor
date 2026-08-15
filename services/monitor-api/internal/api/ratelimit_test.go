@@ -1,6 +1,8 @@
 package api
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -152,4 +154,129 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// ClientAddress decides what the failed-auth throttle buckets on, and
+// getting it wrong fails in one of two directions: honour a forged
+// header and the throttle catches nobody; ignore a real one and every
+// caller behind the proxy shares one bucket, so a single attacker locks
+// the rest out.
+func TestClientAddress(t *testing.T) {
+	const proxyCIDR = "10.42.0.0/16"
+
+	cases := []struct {
+		name  string
+		cidrs string
+		peer  string // RemoteAddr
+		xff   string
+		want  string
+		why   string
+	}{
+		{
+			name:  "trusted peer, XFF honoured",
+			cidrs: proxyCIDR,
+			peer:  "10.42.0.7:54321", // Traefik's pod
+			xff:   "203.0.113.9",
+			want:  "203.0.113.9",
+			why:   "the real client behind a proxy this deployment put there",
+		},
+		{
+			// THE ATTACK. Without conditional trust this returns the
+			// forged value and the attacker gets a fresh bucket per
+			// request simply by changing a header.
+			name:  "untrusted peer, forged XFF ignored",
+			cidrs: proxyCIDR,
+			peer:  "198.51.100.66:40000",
+			xff:   "203.0.113.9",
+			want:  "198.51.100.66",
+			why:   "a header from a non-proxy buys nothing; it is throttled on the address it actually connected from",
+		},
+		{
+			// Rotating the forgery must not rotate the bucket either.
+			name:  "untrusted peer, rotated forgery still one bucket",
+			cidrs: proxyCIDR,
+			peer:  "198.51.100.66:40001",
+			xff:   "192.0.2.77",
+			want:  "198.51.100.66",
+			why:   "same socket peer as above, so the same bucket despite a different forged header",
+		},
+		{
+			name:  "empty setting preserves today's behaviour",
+			cidrs: "",
+			peer:  "198.51.100.66:40000",
+			xff:   "203.0.113.9",
+			want:  "203.0.113.9",
+			why:   "unconfigured deployments behave exactly as they did before this setting existed",
+		},
+		{
+			name:  "trusted peer, no XFF, falls back to socket",
+			cidrs: proxyCIDR,
+			peer:  "10.42.0.7:54321",
+			want:  "10.42.0.7",
+		},
+		{
+			name:  "trusted peer, XFF chain uses the FIRST value",
+			cidrs: proxyCIDR,
+			peer:  "10.42.0.7:54321",
+			xff:   "203.0.113.9, 10.42.0.7, 10.42.0.8",
+			want:  "203.0.113.9",
+			why:   "the original client is first; later entries are proxies that appended themselves",
+		},
+		{
+			name:  "trusted peer, blank XFF falls back to socket",
+			cidrs: proxyCIDR,
+			peer:  "10.42.0.7:54321",
+			xff:   "   ",
+			want:  "10.42.0.7",
+		},
+		{
+			name:  "multiple trusted CIDRs, peer in the second",
+			cidrs: "10.42.0.0/16, 172.16.0.0/12",
+			peer:  "172.16.5.4:1234",
+			xff:   "203.0.113.9",
+			want:  "203.0.113.9",
+		},
+		{
+			// Conservative direction: share a bucket rather than escape one.
+			name:  "unparseable RemoteAddr is not trusted",
+			cidrs: proxyCIDR,
+			peer:  "not-an-address",
+			xff:   "203.0.113.9",
+			want:  "not-an-address",
+			why:   "cannot prove the peer is a proxy, so the header is ignored",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			trusted, err := ParseTrustedProxies(tc.cidrs)
+			if err != nil {
+				t.Fatalf("ParseTrustedProxies(%q): %v", tc.cidrs, err)
+			}
+			r := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts", nil)
+			r.RemoteAddr = tc.peer
+			if tc.xff != "" {
+				r.Header.Set("X-Forwarded-For", tc.xff)
+			}
+			if got := ClientAddress(r, trusted); got != tc.want {
+				t.Errorf("ClientAddress = %q, want %q\n  %s", got, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// A malformed entry must not silently empty the set: an empty set means
+// "trust every peer", so a typo would WIDEN trust while reading like a
+// narrowing.
+func TestParseTrustedProxies_RejectsMalformed(t *testing.T) {
+	if _, err := ParseTrustedProxies("10.42.0.0/16, nonsense"); err == nil {
+		t.Fatal("a malformed CIDR was accepted; a typo must not silently disable the trust boundary")
+	}
+	empty, err := ParseTrustedProxies("  ,  ")
+	if err != nil {
+		t.Fatalf("whitespace-only should parse as unconfigured, got %v", err)
+	}
+	if empty.Configured() {
+		t.Error("whitespace-only should be unconfigured")
+	}
 }
