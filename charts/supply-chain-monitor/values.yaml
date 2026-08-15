@@ -1185,3 +1185,44 @@ gateway:
   # (this exact mismatch caused a real "404 page not found" on first
   # deploy).
   listenerPort: 8000
+  tls:
+    # TLS termination at the Gateway, with a certificate issued and
+    # RENEWED by cert-manager from a private CA created in this chart
+    # (templates/gateway/certificates.yaml).
+    #
+    # Why this matters here specifically: every request to this API
+    # carries a bearer token, and over plain HTTP that token crosses the
+    # network in cleartext. A shared token over cleartext means one
+    # packet capture is full fleet access -- the two weaknesses compound
+    # rather than add.
+    #
+    # ON BY DEFAULT, but reaching it from OUTSIDE the cluster needs two
+    # more things this chart does not control: Traefik must expose its
+    # websecure entrypoint (k8s/releases/traefik-helmrelease.yaml), and
+    # the k3d cluster must map a host port to that NodePort
+    # (cluster/k3d-config.yaml). Without those, HTTPS works in-cluster
+    # and through `kubectl port-forward`, and the plain-HTTP listener
+    # keeps working exactly as before -- so enabling this cannot break a
+    # cluster that has not done the other two.
+    enabled: true
+    # Must match one of Traefik's actual EntryPoint ports, NOT the
+    # externally-exposed NodePort -- the same trap documented at length
+    # in templates/gateway/gateway.yaml, where using the external port
+    # silently programmed no route at all. Traefik's websecure
+    # EntryPoint is container port 8443.
+    listenerPort: 8443
+    # Names the certificate is valid for. A request whose SNI matches
+    # none of these gets a certificate error rather than a wrong-name
+    # warning, so add the names you actually browse to.
+    dnsNames:
+      - localhost
+      - scm.localhost
+      - scm-gateway.supply-chain-monitor.svc.cluster.local
+    # The leaf rotates often; the CA does not. The CA is what a human
+    # trusts once in a browser or OS trust store, and re-trusting it
+    # quarterly would be user-hostile for no security gain in a private
+    # cluster.
+    duration: 2160h # 90d
+    renewBefore: 720h # 30d
+    caDuration: 87600h # 10y
+    caRenewBefore: 8760h # 1y

@@ -84,9 +84,22 @@ spec:
     ports:
       web:
         nodePort: 30080
-      # No TLS termination configured yet (see docs/architecture.md's
-      # Known limitations) -- disabling this port rather than exposing
-      # a 443 that can't actually complete a TLS handshake.
+      # TLS now terminates at the Gateway, with a cert-manager-issued
+      # certificate (charts/supply-chain-monitor/templates/gateway/
+      # certificates.yaml), so this port can complete a real handshake
+      # and is exposed rather than disabled.
+      #
+      # The Gateway's https listener must name Traefik's INTERNAL
+      # EntryPoint port (8443), not this NodePort -- the same distinction
+      # that silently programmed no route at all when the http listener
+      # first used 80 instead of 8000. See gateway.yaml's comment.
+      #
+      # Reaching https://localhost:30443 from the HOST additionally
+      # requires cluster/k3d-config.yaml to map that port, which it does
+      # not by default -- k3d fixes host port mappings at cluster-create
+      # time, so adding one means editing or recreating the cluster.
+      # Until then this is reachable in-cluster and via port-forward.
       websecure:
+        nodePort: 30443
         expose:
-          default: false
+          default: true

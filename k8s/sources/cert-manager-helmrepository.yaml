@@ -1,0 +1,11 @@
+# Same reasoning as sources/traefik-helmrepository.yaml: cert-manager is
+# well-maintained third-party infra, so it comes from upstream rather
+# than being vendored into charts/.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: jetstack
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: https://charts.jetstack.io

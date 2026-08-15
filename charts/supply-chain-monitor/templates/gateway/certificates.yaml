@@ -1,0 +1,90 @@
+{{- if .Values.gateway.tls.enabled }}
+# TLS for the Gateway, issued by cert-manager
+# (k8s/releases/cert-manager-helmrelease.yaml).
+#
+# THREE OBJECTS, NOT ONE, and the shape is the point. The naive version
+# is a single self-signed leaf certificate, which means every client has
+# to trust that exact certificate, and trust it again the moment it is
+# reissued or a second hostname is added. Instead:
+#
+#   selfSigned Issuer  ->  CA Certificate  ->  CA Issuer  ->  leaf cert
+#
+# so there is ONE certificate to trust (the CA), it stays stable across
+# every reissue of the leaf, and any further certificate this cluster
+# needs is already trusted by anyone who trusted the CA once.
+#
+# This is a private CA: browsers warn until it is trusted, and it is not
+# a substitute for a real certificate on anything public. It is the
+# honest option for a cluster with no public DNS name and no reachable
+# ACME endpoint -- which is why an ACME/Let's Encrypt issuer is not
+# offered here rather than being configured and silently failing.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: scm-selfsigned
+  namespace: {{ .Release.Namespace }}
+spec:
+  selfSigned: {}
+---
+# The CA itself. isCA plus a long duration deliberately: this is the
+# certificate a human trusts once in a browser or an OS trust store, and
+# re-trusting it every 90 days would be user-hostile for zero security
+# benefit in a private cluster. The LEAF below rotates on cert-manager's
+# normal schedule; this does not.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: scm-ca
+  namespace: {{ .Release.Namespace }}
+spec:
+  isCA: true
+  commonName: supply-chain-monitor local CA
+  secretName: scm-ca-tls
+  duration: {{ .Values.gateway.tls.caDuration | quote }}
+  renewBefore: {{ .Values.gateway.tls.caRenewBefore | quote }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: scm-selfsigned
+    kind: Issuer
+    group: cert-manager.io
+---
+# Issues leaf certificates FROM the CA above.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: scm-ca-issuer
+  namespace: {{ .Release.Namespace }}
+spec:
+  ca:
+    secretName: scm-ca-tls
+---
+# The Gateway's own certificate. Referenced by gateway.yaml's https
+# listener via certificateRefs -- the listener names this Secret, and
+# cert-manager keeps it populated and renewed.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: scm-gateway-tls
+  namespace: {{ .Release.Namespace }}
+spec:
+  secretName: scm-gateway-tls
+  duration: {{ .Values.gateway.tls.duration | quote }}
+  renewBefore: {{ .Values.gateway.tls.renewBefore | quote }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    # Rotate the key on every renewal rather than reusing it. A renewed
+    # certificate over the same key is a weaker guarantee than a genuinely
+    # new one, and nothing here pins the key.
+    rotationPolicy: Always
+  dnsNames:
+    {{- range .Values.gateway.tls.dnsNames }}
+    - {{ . | quote }}
+    {{- end }}
+  issuerRef:
+    name: scm-ca-issuer
+    kind: Issuer
+    group: cert-manager.io
+{{- end }}
