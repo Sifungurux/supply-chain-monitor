@@ -66,6 +66,34 @@ func (h *handler) uploadDocument(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved", "id": id, "kind": kind})
 }
 
+// storeGeneratedDocument persists a document this process derived
+// itself (an in-process image scan -- see scan.go's captureDocuments)
+// through exactly the steps an uploaded one goes through: store it,
+// and if it is an SBOM, index its components, which in turn snapshots
+// them and evaluates the license denylist.
+//
+// Shared with uploadDocument above deliberately. A generated SBOM that
+// stored but never indexed would leave the component search, the diff
+// endpoint and the license findings silently empty for every artifact
+// scanned in-process -- which is the exact bug this whole change
+// exists to fix, so reintroducing it via a parallel path would be
+// unfortunate.
+//
+// Errors are logged, never returned: the caller has already persisted
+// the scan result and must not fail it over a document.
+func (h *handler) storeGeneratedDocument(id, kind, contentType string, content []byte) {
+	if err := h.store.SaveDocument(id, kind, contentType, content); err != nil {
+		slog.Error("could not store a document generated from the scan report",
+			"artifact_id", id, "kind", kind, "err", err)
+		return
+	}
+	if kind == artifact.DocumentKindSBOM {
+		h.indexSBOMComponents(id, content)
+	}
+	slog.Info("stored a document generated from the scan report",
+		"artifact_id", id, "kind", kind, "bytes", len(content))
+}
+
 // indexSBOMComponents parses an uploaded SBOM into the normalized
 // components table, so "which artifacts contain this package" is
 // answerable (see listByComponent in components.go) instead of the

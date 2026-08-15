@@ -184,6 +184,9 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 	type scanResult struct {
 		findings []artifact.Finding
 		err      error
+		// raw is the scanner's own report, kept only when this scan can
+		// derive documents from it -- see captureDocuments below.
+		raw []byte
 	}
 	results := make([]scanResult, len(scanners))
 	var wg sync.WaitGroup
@@ -208,12 +211,28 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 			}()
 			var findings []artifact.Finding
 			var scanErr error
-			if aware, ok := s.(scanner.ArtifactAwareScanner); ok {
-				findings, scanErr = aware.ScanForArtifact(ctx, a.Ref, a.ID)
-			} else {
+			var rawReport []byte
+			switch impl := s.(type) {
+			case scanner.ArtifactAwareScanner:
+				// Isolated scanners: the Job uploads its own documents
+				// back through POST /documents (main.go's
+				// captureImageDocuments), so nothing to capture here.
+				findings, scanErr = impl.ScanForArtifact(ctx, a.Ref, a.ID)
+			case scanner.RawImageScanner:
+				// In-process, image only. Gated on the artifact TYPE as
+				// well as the interface: this report is an image trivy
+				// report, and GenerateImageDocuments converts nothing
+				// else. A file/sbom/sarif scanner reaching here would
+				// produce garbage documents rather than none.
+				if a.Type == artifact.TypeImage {
+					findings, rawReport, scanErr = impl.ScanWithRaw(ctx, a.Ref)
+				} else {
+					findings, scanErr = impl.Scan(ctx, a.Ref)
+				}
+			default:
 				findings, scanErr = s.Scan(ctx, a.Ref)
 			}
-			results[i] = scanResult{findings: findings, err: scanErr}
+			results[i] = scanResult{findings: findings, err: scanErr, raw: rawReport}
 		}(i, s)
 	}
 	wg.Wait()
@@ -407,6 +426,11 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 	// run most.
 	if updated.Status != artifact.StatusFailed {
 		h.indexSBOMTypeComponents(ctx, updated)
+		for _, res := range results {
+			if res.err == nil && len(res.raw) > 0 {
+				h.captureDocuments(ctx, updated, res.raw)
+			}
+		}
 	}
 
 	// a is the pre-scan snapshot taken before this scan started, so
@@ -512,6 +536,42 @@ func (h *handler) notifyNewFindings(a *artifact.Artifact, roundStamp time.Time, 
 // internal retry. Comfortably above the per-attempt HTTP timeout in
 // internal/notify so a retry isn't cut off mid-flight.
 const notifyTimeout = 30 * time.Second
+
+// captureDocuments derives a CycloneDX SBOM and a SARIF report from an
+// in-process image scan's raw trivy report and stores them, exactly as
+// an isolated scan-worker Job does by uploading them back.
+//
+// This closes a gap that made a whole feature invisible on one
+// deployment path. Document capture lived only in the worker's image
+// branch (main.go's captureImageDocuments), so with
+// DISABLE_SCAN_ISOLATION -- the local dev path, and the one
+// cluster/test-swagger-docs.sh runs -- an image scan produced no SBOM
+// document at all. And because component indexing is triggered BY that
+// document arriving, those artifacts also got no component inventory,
+// no snapshot history for the diff endpoint, and no license findings.
+// Every scan looked completely healthy while three features silently
+// did nothing.
+//
+// Persisted through the same helper the upload endpoint uses rather
+// than a parallel path, so an SBOM captured here indexes components,
+// snapshots them, and runs the license denylist identically to one
+// somebody uploaded. A second path would drift from that within a
+// release.
+//
+// Best-effort, matching the worker's own contract: the scan is already
+// persisted by the time this runs, so a conversion or store failure is
+// logged and nothing more. A document problem must never turn a good
+// scan into a failed one.
+func (h *handler) captureDocuments(ctx context.Context, a *artifact.Artifact, rawReport []byte) {
+	docs, genErrs := scanner.GenerateImageDocuments(ctx, rawReport, os.TempDir())
+	for _, err := range genErrs {
+		slog.Warn("could not generate a document from the scan report (the scan itself succeeded)",
+			"artifact_id", a.ID, "err", err)
+	}
+	for _, doc := range docs {
+		h.storeGeneratedDocument(a.ID, doc.Kind, doc.ContentType, doc.Content)
+	}
+}
 
 // indexSBOMTypeComponents fetches an sbom-type artifact's own document
 // and indexes it through the same path an uploaded SBOM takes.
