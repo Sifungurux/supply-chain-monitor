@@ -2,7 +2,7 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -33,6 +33,14 @@ type Config struct {
 	// CORS preflight OPTIONS requests (browsers never attach custom
 	// headers to those).
 	APIKey string
+
+	// APIKeys are additional NAMED keys (API_KEYS /
+	// monitorApi.apiKeys). Each authenticates as its own client, whose
+	// name reaches the access log, so "who called this" and "revoke
+	// just this consumer" have answers. APIKey above stays valid
+	// alongside these -- see NewRouter -- so enabling named keys can
+	// never lock out a deployment mid-upgrade.
+	APIKeys APIKeys
 	// RateLimitRPS/RateLimitBurst configure the per-key rate limiter (see
 	// withRateLimit below). RateLimitRPS <= 0 disables rate limiting
 	// entirely -- a nonsensical zero-or-negative rate reads more
@@ -164,7 +172,14 @@ func NewRouter(cfg Config) http.Handler {
 	// with a 401 before the browser even attempts the real request.
 	// withMetrics is outside withAuth so a 401 gets counted -- see its
 	// own comment.
-	return withMetrics(withCORS(withAuth(top, cfg.APIKey)), h.metrics)
+	// The legacy single key joins the named set as client "default", so
+	// withAuth has exactly one code path and there is no "which kind of
+	// key is this" branch to get wrong.
+	keys := cfg.APIKeys.WithKey(legacyClientName, cfg.APIKey)
+	// withAudit sits INSIDE withAuth, because it reports the
+	// authenticated client and that only exists in the context after
+	// withAuth has put it there.
+	return withMetrics(withCORS(withAuth(withAudit(top), keys)), h.metrics)
 }
 
 // withAuth requires `Authorization: Bearer <apiKey>` on every request
@@ -183,7 +198,44 @@ func NewRouter(cfg Config) http.Handler {
 // annoyance with no corresponding security benefit. Swagger UI's own
 // "Authorize" button is still where a real API key goes before "Try it
 // out" against any actual endpoint works.
-func withAuth(next http.Handler, apiKey string) http.Handler {
+// withAudit records who changed what.
+//
+// Named API keys are only half of attribution -- without a line naming
+// the client, "which consumer deleted that artifact" is still
+// unanswerable. This is that line.
+//
+// MUTATIONS ONLY. Logging reads too would bury these under dashboard
+// polling: the dashboard alone issues several GETs every ten seconds
+// per open tab, and an audit trail nobody can grep is not an audit
+// trail. Reads are already counted in /metrics, which is the right
+// place for volume.
+//
+// Logged after the handler runs, with the status, so a rejected
+// mutation (409, 429, 400) is as visible as an accepted one -- a
+// consumer repeatedly failing to register is exactly the kind of thing
+// this is for.
+func withAudit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			next.ServeHTTP(w, r)
+			return
+		}
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		slog.Info("request",
+			"client", ClientFromContext(r.Context()),
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rec.status)
+	})
+}
+
+// legacyClientName is what the single API_KEY authenticates as, so a
+// deployment that never configures named keys still produces attributed
+// logs rather than a blank client field.
+const legacyClientName = "default"
+
+func withAuth(next http.Handler, keys APIKeys) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/healthz", "/readyz", "/metrics", "/swagger", "/openapi.yaml":
@@ -193,17 +245,21 @@ func withAuth(next http.Handler, apiKey string) http.Handler {
 
 		const prefix = "Bearer "
 		got := r.Header.Get("Authorization")
-		validLength := len(got) == len(prefix)+len(apiKey)
-		hasPrefix := strings.HasPrefix(got, prefix)
-		match := validLength && hasPrefix &&
-			subtle.ConstantTimeCompare([]byte(got[len(prefix):]), []byte(apiKey)) == 1
+		client := ""
+		ok := false
+		if strings.HasPrefix(got, prefix) {
+			// Lookup compares against every configured key without
+			// exiting early -- see APIKeys.Lookup for why that matters
+			// more once keys are named.
+			client, ok = keys.Lookup(got[len(prefix):])
+		}
 
-		if !match {
+		if !ok {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="supply-chain-monitor"`)
 			writeError(w, http.StatusUnauthorized, "missing or invalid API key")
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(WithClient(r.Context(), client)))
 	})
 }
 

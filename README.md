@@ -238,6 +238,48 @@ single shared key, why the probe endpoints and CORS preflight `OPTIONS` are
 exempt, and what's still missing (per-client keys, rotation, rate
 limiting).
 
+### Per-client API keys
+
+`monitorApi.apiKey` is a single shared credential. `monitorApi.apiKeys`
+adds **named** keys — one per consumer — which is what makes three
+otherwise-unanswerable questions answerable:
+
+- **Who made this request.** Every mutation is logged with the client
+  that made it: `{"msg":"request","client":"ci-pipeline","method":"POST",...}`.
+- **Can I revoke one consumer.** Delete its entry and reconcile. With a
+  shared key, revoking anyone re-keys everyone, which is why nobody
+  does it.
+- **Which consumer is misbehaving.** A client failing repeatedly shows
+  up by name, including the rejected status.
+
+Generate them with the desired set of client names:
+
+```bash
+API_KEY_NAMES="ci-pipeline,dashboard,kirk-laptop" ./cluster/chart-secrets.sh
+```
+
+`API_KEY_NAMES` is the **desired set**, not an addition to it: a name
+present keeps its existing key (adding a consumer never re-keys the
+others), and a name absent is dropped — that is how you revoke. Running
+the script *without* `API_KEY_NAMES` leaves named keys untouched, so
+rotating an unrelated credential can't silently revoke every client.
+
+Two rules worth knowing:
+
+- **The shared `apiKey` stays valid alongside named keys**, as the
+  client `default`. Enabling this must never lock out a running
+  deployment mid-upgrade. Once every consumer has its own key, set
+  `apiKey: ""` to retire the shared one.
+- **An entry with an empty key is dropped**, by both the chart and the
+  binary. An empty key would match the empty string a caller presents
+  with a bare `Bearer `, authenticating every *anonymous* request as
+  that client — so removing a consumer would otherwise open the API to
+  the world. There is a CI guard and a test on each side.
+
+Only mutations are audited. The dashboard issues several GETs every ten
+seconds per open tab, and an audit trail nobody can grep is not an audit
+trail — read volume belongs in `/metrics`, where it already is.
+
 ### Bringing your own secrets
 
 `postgres.credentials.password` and `monitorApi.apiKey` are **empty**

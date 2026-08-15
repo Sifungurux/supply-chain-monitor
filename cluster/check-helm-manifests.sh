@@ -187,3 +187,37 @@ helm template scm-ci charts/supply-chain-monitor \
 
 expect_policies "enabled by default" 3
 expect_policies "networkPolicy.enabled=false" 0 --set networkPolicy.enabled=false
+
+# == a named API key with no value never reaches API_KEYS ==
+#
+# An empty key would be compared against the empty string a caller
+# presents with a bare "Bearer ", match, and authenticate every
+# anonymous request as that client -- so removing a consumer would
+# silently open the API to the world. The binary drops these too
+# (internal/api.ParseAPIKeys); this asserts the chart never emits one in
+# the first place, because a credential-shaped blank in a rendered
+# Secret is worth catching at template time.
+echo "== a named API key with no value is dropped =="
+rendered_keys="$(helm template scm-ci charts/supply-chain-monitor \
+	--set monitorApi.apiKey=shared \
+	--set monitorApi.apiKeys.retired= \
+	--set monitorApi.apiKeys.live=realkey \
+	-s templates/monitor-api/auth-secret.yaml | awk -F': ' '/API_KEYS:/ { print $2 }')"
+case "$rendered_keys" in
+*retired*)
+	echo "ERROR: a named API key with an EMPTY value was rendered into API_KEYS:" >&2
+	echo "       ${rendered_keys}" >&2
+	echo "       An empty key matches a bare 'Bearer ' and would authenticate every" >&2
+	echo "       anonymous request as that client. See templates/_helpers.tpl's" >&2
+	echo "       supply-chain-monitor.apiKeys." >&2
+	exit 1
+	;;
+esac
+case "$rendered_keys" in
+*live:realkey*) ;;
+*)
+	echo "ERROR: a VALID named API key did not reach API_KEYS (got: ${rendered_keys})." >&2
+	echo "       The blank-key filter must drop blanks without dropping real keys." >&2
+	exit 1
+	;;
+esac

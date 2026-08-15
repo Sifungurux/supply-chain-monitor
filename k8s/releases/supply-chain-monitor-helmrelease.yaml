@@ -86,6 +86,16 @@ spec:
       name: scm-chart-secrets
       valuesKey: api-key
       targetPath: monitorApi.apiKey
+    # Named per-client keys, as the flat "name:key,name:key" string the
+    # chart and binary both parse. optional, because a cluster whose
+    # scm-chart-secrets predates this feature has no api-keys entry and
+    # must keep reconciling rather than fail closed on a missing key --
+    # the shared apiKey above still authenticates in that case.
+    - kind: Secret
+      name: scm-chart-secrets
+      valuesKey: api-keys
+      targetPath: monitorApi.apiKeys
+      optional: true
     # The three docker_auth registry accounts. Same reasoning as the two
     # above -- values.yaml ships them empty, and an account with no
     # password is omitted from docker_auth's config entirely rather than
