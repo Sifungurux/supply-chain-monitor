@@ -291,3 +291,24 @@ if [ "$disabled_tls" != "0" ]; then
 	echo "       A cluster without cert-manager CRDs must be able to render this chart." >&2
 	exit 1
 fi
+
+# == the HTTPRoute attaches to the https listener, not just http ==
+#
+# sectionName pins a route to ONE named listener. A route attached only
+# to "http" leaves the https listener with no routes at all: the TLS
+# handshake completes, Traefik finds nothing to route to, and every
+# HTTPS request returns 404 from its default handler.
+#
+# Nothing errors in that state -- the Gateway reports both listeners
+# Programmed, both Certificates report Ready, and the chart looks
+# entirely healthy. It shipped that way and was caught only by
+# completing a real request over HTTPS.
+echo "== the HTTPRoute attaches to the https listener =="
+helm template scm-ci charts/supply-chain-monitor \
+	-s templates/gateway/httproute.yaml | grep -q "sectionName: https" || {
+	echo "ERROR: the HTTPRoute does not attach to the 'https' listener." >&2
+	echo "       TLS would terminate and then every request would 404, with" >&2
+	echo "       nothing reporting an error anywhere. See" >&2
+	echo "       templates/gateway/httproute.yaml." >&2
+	exit 1
+}
