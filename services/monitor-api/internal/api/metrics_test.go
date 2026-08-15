@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -200,5 +201,74 @@ func TestMetrics_EveryScanRecordsExactlyOneOutcome(t *testing.T) {
 	}
 	if failed != 1 {
 		t.Errorf("scm_scans_failed_total = %v, want 1", failed)
+	}
+}
+
+// scrape reads /metrics and returns the value of a named counter.
+func scrapeCounter(t *testing.T, h http.Handler, name string) int64 {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/metrics got %d, want 200", rec.Code)
+	}
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if strings.HasPrefix(line, name+" ") {
+			var v int64
+			if _, err := fmt.Sscanf(strings.TrimPrefix(line, name+" "), "%d", &v); err != nil {
+				t.Fatalf("could not parse %q: %v", line, err)
+			}
+			return v
+		}
+	}
+	t.Fatalf("counter %q not present in /metrics", name)
+	return 0
+}
+
+// The whole reason these counters exist: scm_http_responses_total buckets
+// by class, so a 401 from credential guessing and a 404 from a typo are
+// the same number there. These separate the two, and separate a
+// throttled attempt from a merely rejected one.
+func TestMetrics_AuthFailuresAndThrottlingAreCountedSeparately(t *testing.T) {
+	h := authRouter()
+
+	if got := scrapeCounter(t, h, "scm_auth_failures_total"); got != 0 {
+		t.Fatalf("precondition: failures start at %d, want 0", got)
+	}
+
+	// 10 rejections, then the 11th is refused before the key is checked.
+	for i := 0; i < 10; i++ {
+		if rec := req(h, "wrong-key", "203.0.113.60"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d got %d, want 401", i+1, rec.Code)
+		}
+	}
+	if rec := req(h, "wrong-key", "203.0.113.60"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("attempt 11 got %d, want 429", rec.Code)
+	}
+
+	if got := scrapeCounter(t, h, "scm_auth_failures_total"); got != 10 {
+		t.Errorf("scm_auth_failures_total = %d, want 10", got)
+	}
+	// DISJOINT: a throttled attempt never had its key checked, so it is
+	// not also a failure.
+	if got := scrapeCounter(t, h, "scm_auth_throttled_total"); got != 1 {
+		t.Errorf("scm_auth_throttled_total = %d, want 1", got)
+	}
+}
+
+// A valid key must move neither counter, however much traffic it sends.
+func TestMetrics_SuccessfulAuthTouchesNeitherCounter(t *testing.T) {
+	h := authRouter()
+
+	for i := 0; i < 20; i++ {
+		if rec := req(h, testAPIKey, "203.0.113.61"); rec.Code != http.StatusOK {
+			t.Fatalf("request %d got %d, want 200", i+1, rec.Code)
+		}
+	}
+	if got := scrapeCounter(t, h, "scm_auth_failures_total"); got != 0 {
+		t.Errorf("scm_auth_failures_total = %d after only valid requests, want 0", got)
+	}
+	if got := scrapeCounter(t, h, "scm_auth_throttled_total"); got != 0 {
+		t.Errorf("scm_auth_throttled_total = %d after only valid requests, want 0", got)
 	}
 }

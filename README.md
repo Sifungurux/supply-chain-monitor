@@ -330,6 +330,18 @@ Not configurable, deliberately: no deployment wants unlimited
 credential guessing, and a knob here would only ever be turned the
 wrong way.
 
+Two counters on `/metrics` make it visible, because
+`scm_http_responses_total` buckets by status *class* — a 401 from
+credential guessing and a 404 from a typo are the same number there:
+
+| metric | means |
+|---|---|
+| `scm_auth_failures_total` | a key was checked and rejected (401) |
+| `scm_auth_throttled_total` | refused **before** the key was checked, because that address had already failed too often (429) |
+
+They are **disjoint**. A rising `scm_auth_throttled_total` is the signal
+that someone is being slowed down — alert on that rather than on 4xx.
+
 **This is a speed bump, not a security boundary**, and the reason is
 worth knowing. Callers are identified by `X-Forwarded-For`'s first
 value, falling back to the socket address. That header is set by the
