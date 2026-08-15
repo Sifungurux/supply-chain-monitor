@@ -286,8 +286,9 @@ trail — read volume belongs in `/metrics`, where it already is.
 in the chart's own `values.yaml` — deliberately, so a real value never
 sits in plaintext in a committed file. Left empty, Postgres's own
 entrypoint refuses to start (it requires a non-empty
-`POSTGRES_PASSWORD`) and `monitor-api` refuses to start (`API_KEY must
-be set`) — a fresh `helm install` with truly default values fails
+`POSTGRES_PASSWORD`) and `monitor-api` refuses to start (`no API key
+configured`, satisfied by either `monitorApi.apiKey` or
+`monitorApi.apiKeys`) — a fresh `helm install` with truly default values fails
 loudly rather than coming up with a known, checked-in password. You
 need to supply real values one of two ways:
 

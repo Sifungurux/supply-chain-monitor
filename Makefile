@@ -168,8 +168,8 @@ test-image:
 	@docker run --rm --entrypoint sh $(IMAGE)-verify -c \
 		'ldd /usr/local/bin/monitor-api 2>&1 | grep -q "Not a valid dynamic program"' \
 		|| { echo "monitor-api is dynamically linked -- CGO_ENABLED=0 build broken" >&2; exit 1; }
-	@echo "== the binary actually starts (fails closed on missing API_KEY) =="
-	@docker run --rm $(IMAGE)-verify 2>&1 | grep -q "API_KEY is required" \
+	@echo "== the binary actually starts (fails closed with no API key) =="
+	@docker run --rm $(IMAGE)-verify 2>&1 | grep -q "no API key configured" \
 		|| { echo "monitor-api did not reach its own startup checks" >&2; exit 1; }
 	@echo "== every bundled tool runs =="
 	@docker run --rm --entrypoint sh $(IMAGE)-verify -c \
