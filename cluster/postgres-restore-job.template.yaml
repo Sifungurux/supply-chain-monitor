@@ -13,6 +13,18 @@ spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 300
   template:
+    metadata:
+      # REQUIRED, not decorative: scm-postgres-ingress admits only
+      # labelled pods, so without this the restore is denied at the
+      # network layer and fails with "Connection refused" -- which reads
+      # like a dead database rather than a policy decision.
+      #
+      # The policy's own comment used to claim restores were already
+      # covered by the backup label. They were not: this template set no
+      # labels at all, so every restore since the policies were created
+      # would have failed. See templates/networkpolicy/postgres.yaml.
+      labels:
+        app: scm-postgres-restore
     spec:
       restartPolicy: Never
       containers:
@@ -21,10 +33,59 @@ spec:
           command: ["sh", "-c"]
           args:
             - |
-              set -eu
+              # pipefail matters here for the same reason it did in the
+              # backup job: without it "gunzip | psql" reports PSQL's
+              # exit status, so a truncated or corrupt archive can feed
+              # psql a partial stream and still finish "successfully".
+              # A restore that silently half-applies is worse than one
+              # that fails, because it is discovered later.
+              set -euo pipefail
               export PGPASSWORD="$POSTGRES_PASSWORD"
               echo "restoring __BACKUP_FILE__ into ${POSTGRES_DB}@${POSTGRES_HOST} -- this overwrites existing data"
-              gunzip -c /backups/__BACKUP_FILE__ | psql -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+
+              # Refuse an archive that is not a readable dump BEFORE
+              # touching the database. gzip -t alone is not enough: an
+              # empty gzip is perfectly valid, and that is exactly what
+              # the backup job produced for three days while reporting
+              # success.
+              head_bytes="$(gunzip -c /backups/__BACKUP_FILE__ 2>/dev/null | head -c 512 || true)"
+              case "$head_bytes" in
+                *"PostgreSQL database dump"*) ;;
+                *)
+                  echo "ERROR: /backups/__BACKUP_FILE__ is not a readable PostgreSQL dump." >&2
+                  echo "ERROR: nothing was written to ${POSTGRES_DB}." >&2
+                  exit 1
+                  ;;
+              esac
+
+              # WAIT FOR THE NETWORK, not just for Postgres. A new pod's
+              # IP is not yet in the CNI's NetworkPolicy allow-set when
+              # its container starts, and kube-router REJECTs until it
+              # is -- which arrives as "Connection refused" and reads
+              # like a dead server.
+              #
+              # This job connects within a second of starting and has
+              # backoffLimit 0, so it lost that race every time: the
+              # restore path was broken from the night the policies were
+              # created, and nobody would have found out until they
+              # needed it.
+              echo "waiting for ${POSTGRES_HOST}:5432 to accept connections..."
+              ready=""
+              for i in $(seq 1 45); do
+                if pg_isready -h "$POSTGRES_HOST" -U "$POSTGRES_USER" >/dev/null 2>&1; then
+                  ready="yes"
+                  echo "reachable after ${i} attempt(s)"
+                  break
+                fi
+                sleep 2
+              done
+              if [ -z "$ready" ]; then
+                echo "ERROR: ${POSTGRES_HOST}:5432 unreachable after 90s -- nothing restored." >&2
+                exit 1
+              fi
+
+              gunzip -c /backups/__BACKUP_FILE__ | psql -v ON_ERROR_STOP=1 -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+              echo "restore finished."
           env:
             - name: POSTGRES_HOST
               value: scm-postgres.supply-chain-monitor.svc.cluster.local

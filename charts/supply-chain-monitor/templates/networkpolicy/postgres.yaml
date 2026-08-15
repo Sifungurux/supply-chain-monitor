@@ -29,10 +29,19 @@ spec:
               app: monitor-api
         # The backup CronJob (pg_dump | gzip into the backups PVC) and
         # any one-off backup Job created from the same template -- both
-        # carry this label. Restores run through the same path.
+        # carry this label.
         - podSelector:
             matchLabels:
               app: scm-postgres-backup
+        # Restores, which do NOT share the backup label -- they are a
+        # separate Job template (cluster/postgres-restore-job.template.yaml).
+        # This comment previously claimed they came through the backup
+        # entry above; they did not, and that template carried no labels
+        # at all, so every restore was denied from the day these policies
+        # were created until it was finally exercised.
+        - podSelector:
+            matchLabels:
+              app: scm-postgres-restore
       ports:
         - protocol: TCP
           port: {{ .Values.monitorApi.postgres.port | int }}
