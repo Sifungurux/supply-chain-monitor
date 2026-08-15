@@ -195,6 +195,8 @@
   }
   .card .n { font-family: var(--font-mono); font-size: 24px; font-weight: 600; color: var(--text-strong); }
   .card .l { font-size: 12px; color: var(--text-muted); }
+  .card-danger { border-color: var(--danger); }
+  .card-danger .n { color: var(--danger); }
   .stages { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
   .stage-pill {
     flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
@@ -1201,8 +1203,20 @@
     if (stats.stale_after_days > 0) {
       cards.push(['Not scanned recently', stats.stale || 0]);
     }
+    // Failed scans, and only when there ARE any -- a permanent "0
+    // failed" is wallpaper, one that appears is an alarm.
+    //
+    // This is the fleet-level half of failure reporting. The per-row
+    // badge (statusBadge) has always shown a red badge naming the
+    // reason, but only on the page you happen to be looking at, so a
+    // handful of failures scattered through a large store were
+    // invisible unless you went filtering for them. The sweep now
+    // retries these every run; this is how you see it is happening.
+    if (byStatus.failed) {
+      cards.push(['Failed scans', byStatus.failed, 'card-danger']);
+    }
     els.cards.innerHTML = cards.map(function (c) {
-      return '<div class="card"><div class="n">' + c[1] + '</div><div class="l">' + c[0] + '</div></div>';
+      return '<div class="card ' + (c[2] || '') + '"><div class="n">' + c[1] + '</div><div class="l">' + c[0] + '</div></div>';
     }).join('');
   }
 

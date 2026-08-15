@@ -413,6 +413,47 @@ func TestPickArtifactsToSweep(t *testing.T) {
 		}
 	})
 
+	// THE STARVATION THIS ORDERING EXISTS TO PREVENT. Failed artifacts
+	// are now retried on every sweep run, so without this the same
+	// old, permanently-broken artifact wins the same slot forever: it
+	// is retried, stays failed, keeps its CreatedAt, and sorts first
+	// again on the next run, while newer work behind it is never
+	// reached. Ordering by last attempt sends it to the back.
+	t.Run("least recently attempted first, so a broken artifact cannot hog the batch", func(t *testing.T) {
+		at := func(id string, since time.Duration) artifact.Artifact {
+			t := now.Add(-since)
+			// Registered long before any of them were scanned, so
+			// CreatedAt alone would order these exactly backwards.
+			return artifact.Artifact{ID: id, Status: artifact.StatusFailed, CreatedAt: now.Add(-99 * time.Hour), LastScanAt: &t}
+		}
+		all := []artifact.Artifact{
+			at("retried-just-now", time.Minute),
+			at("waiting-longest", 24*time.Hour),
+			at("waiting-a-while", time.Hour),
+		}
+		got := pickArtifactsToSweep(all, 10)
+		want := []string{"waiting-longest", "waiting-a-while", "retried-just-now"}
+		for i, id := range want {
+			if got[i].ID != id {
+				t.Fatalf("position %d: got %q, want %q -- a just-retried artifact must go to the back", i, got[i].ID, id)
+			}
+		}
+	})
+
+	t.Run("never attempted outranks a recent retry, however old the registration", func(t *testing.T) {
+		scanned := now.Add(-time.Minute)
+		all := []artifact.Artifact{
+			// Failed, retried a minute ago, registered a week ago.
+			{ID: "retried", Status: artifact.StatusFailed, CreatedAt: now.Add(-168 * time.Hour), LastScanAt: &scanned},
+			// Registered a minute ago and never scanned once.
+			{ID: "never-scanned", Status: artifact.StatusRegistered, CreatedAt: now.Add(-time.Minute)},
+		}
+		got := pickArtifactsToSweep(all, 10)
+		if got[0].ID != "never-scanned" {
+			t.Fatalf("got %q first, want \"never-scanned\" -- an artifact nobody has scanned once outranks retrying one just attempted", got[0].ID)
+		}
+	})
+
 	t.Run("truncates to batchSize", func(t *testing.T) {
 		all := []artifact.Artifact{
 			mk("a", artifact.StatusRegistered, 3*time.Hour),

@@ -676,6 +676,27 @@ func runSweepRegistered() {
 		all = append(all, stale...)
 	}
 
+	// Artifacts whose last scan FAILED, retried on every sweep run
+	// regardless of age or of whether auto-rescan is on.
+	//
+	// Staleness cannot cover this and never will: last_scan_at is set
+	// when a scan COMPLETES, including a failed one, so an artifact
+	// failing repeatedly refreshes its own freshness clock and never
+	// looks stale. Left to staleness alone, a broken artifact would be
+	// retried exactly never -- which is the opposite of what it needs.
+	//
+	// Paced by SWEEP_BATCH_SIZE like everything else, and ordered by
+	// least-recently-attempted (see pickArtifactsToSweep), so a
+	// permanently-broken artifact cannot monopolise the batch: once
+	// retried it goes to the back of the queue behind everything that
+	// has waited longer.
+	if failed, err := listByStatusFromAPI(ctx, apiBase, apiKey, artifact.StatusFailed); err != nil {
+		log.Printf("sweep-registered: could not list failed artifacts to retry (continuing): %v", err)
+	} else if len(failed) > 0 {
+		log.Printf("sweep-registered: %d artifact(s) at %q -- retrying", len(failed), artifact.StatusFailed)
+		all = append(all, failed...)
+	}
+
 	// Artifacts whose last scan has aged out (SWEEP_RESCAN_STALE_AFTER_DAYS).
 	// Off unless configured -- the staleness WARNING is independent of
 	// this and shows regardless; this only decides whether anything
@@ -696,15 +717,9 @@ func runSweepRegistered() {
 				len(stale), cutoff.Format(time.RFC3339), days)
 			all = append(all, stale...)
 		}
-		// "failed" artifacts too: one that failed long ago and was never
-		// retried is exactly as stale as a successful one, and nothing
-		// else picks it up.
-		if failed, err := listByStatusFromAPI(ctx, apiBase, apiKey, artifact.StatusFailed); err != nil {
-			log.Printf("sweep-registered: could not list failed artifacts for stale rescan (continuing): %v", err)
-		} else if stale := staleScans(failed, cutoff); len(stale) > 0 {
-			log.Printf("sweep-registered: %d failed artifact(s) last scanned before %s -- rescanning", len(stale), cutoff.Format(time.RFC3339))
-			all = append(all, stale...)
-		}
+		// No separate pass for "failed" here: every failed artifact is
+		// already collected above, on every run, rather than only once
+		// it has aged out.
 	}
 
 	toScan := pickArtifactsToSweep(all, batchSize)
@@ -759,6 +774,29 @@ func pickArtifactsToSweep(all []artifact.Artifact, batchSize int) []artifact.Art
 	}
 	eligible := append([]artifact.Artifact(nil), all...)
 	sort.Slice(eligible, func(i, j int) bool {
+		// LEAST RECENTLY ATTEMPTED first, which is what keeps a
+		// permanently-broken artifact from monopolising every batch.
+		// Ordering by CreatedAt alone would let one old, always-failing
+		// artifact win the same slot on every single run -- it is
+		// retried, stays failed, keeps its CreatedAt, and sorts first
+		// again fifteen minutes later, while newer registrations behind
+		// it are never reached.
+		//
+		// Never-attempted (nil) sorts before everything: an artifact
+		// nobody has scanned once outranks retrying one that has been
+		// scanned recently, however old the registration.
+		ai, aj := eligible[i].LastScanAt, eligible[j].LastScanAt
+		switch {
+		case ai == nil && aj != nil:
+			return true
+		case ai != nil && aj == nil:
+			return false
+		case ai != nil && aj != nil && !ai.Equal(*aj):
+			return ai.Before(*aj)
+		}
+		// Same attempt time (or both never attempted): oldest
+		// registration first, preserving the fairness this had before
+		// failed retries joined the queue.
 		if !eligible[i].CreatedAt.Equal(eligible[j].CreatedAt) {
 			return eligible[i].CreatedAt.Before(eligible[j].CreatedAt)
 		}

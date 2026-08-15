@@ -208,10 +208,12 @@ test('summary cards and stage pills come from /api/v1/stats, not the page on scr
   const doc = dom.window.document;
 
   const cardNumbers = [...doc.querySelectorAll('#cards .n')].map((n) => n.textContent);
-  // total, scanning, cve, malware, other, misconfiguration, secret --
-  // the card order is positional, so this also pins each card to the
-  // bucket it's labelled with.
-  assert.deepEqual(cardNumbers, ['812', '29', '214', '2', '33', '61', '4']);
+  // total, scanning, cve, malware, other, misconfiguration, secret,
+  // then failed -- the card order is positional, so this also pins each
+  // card to the bucket it's labelled with. "Failed scans" is last
+  // because this fleet has failures (3); it is omitted entirely when
+  // there are none.
+  assert.deepEqual(cardNumbers, ['812', '29', '214', '2', '33', '61', '4', '3']);
 
   // Stage pills read by_stage, and the empty-string key becomes the
   // "unassigned" pill -- the API won't name that bucket itself, because
@@ -2420,6 +2422,42 @@ test('freshness disabled shows no badge and no card', async () => {
   assert.doesNotMatch(doc.getElementById('cards').textContent, /Not scanned recently/);
 
   dom.window.close();
+});
+
+// Failed scans, fleet-wide. The per-row badge only ever showed failures
+// on the page in front of you, so a few scattered through a large store
+// were invisible without going looking for them.
+test('failed scans get a card, and only when there are any', async () => {
+  const withFailures = (n) => buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) {
+        return jsonResponse(Object.assign({}, SAMPLE_STATS, {
+          by_status: n ? { scanned: 2, failed: n } : { scanned: 2 }
+        }));
+      }
+      if (url.includes('/components/diff')) return jsonResponse({ from: null, to: null, added: [], removed: [], version_changed: [] });
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, { error: 'not found' });
+    }
+  });
+
+  const failing = withFailures(3);
+  await tick(20);
+  const cards = failing.window.document.getElementById('cards');
+  assert.match(cards.textContent, /Failed scans/);
+  const card = cards.querySelector('.card-danger');
+  assert.ok(card, 'the failure card must be visually distinct — an alarm styled like every other card is not a flag');
+  assert.equal(card.querySelector('.n').textContent, '3');
+  failing.window.close();
+
+  // Zero failures: no card at all. A permanent "0 failed" is wallpaper,
+  // and wallpaper is what you stop seeing before the one that matters.
+  const clean = withFailures(0);
+  await tick(20);
+  assert.doesNotMatch(clean.window.document.getElementById('cards').textContent, /Failed scans/);
+  clean.window.close();
 });
 
 // The detail page carries it too, next to the status badge.

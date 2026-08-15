@@ -725,8 +725,30 @@ dashboard badge so they cannot contradict each other:
   and the sweep already collects them.
 - **A failed scan still counts as a scan.** `last_scan_at` is set when a
   scan *completes*, including one that failed — so an artifact failing
-  every scan stays "fresh" here. `last_scan_failure_reason` is the
-  signal for that case.
+  every scan stays "fresh" here, and staleness will never retry it.
+  Failures have their own treatment instead, below.
+
+**Failed scans are retried on every sweep run**, regardless of age and
+regardless of `autoRescan`. Staleness cannot cover this and never will:
+a repeatedly-failing artifact refreshes its own freshness clock, so left
+to staleness alone it would be retried exactly never — the opposite of
+what it needs. Retries are paced by `sweep.batchSize` like everything
+else, and the sweep picks **least-recently-attempted first**, so a
+permanently-broken artifact cannot monopolise the batch: once retried it
+goes to the back, behind anything that has waited longer, and behind
+everything never scanned at all.
+
+They are flagged in two places: a red badge naming the reason on the row
+and detail page (`last_scan_failure_reason`), and a **"Failed scans"**
+summary card that appears only when the count is non-zero. A permanent
+"0 failed" card would be wallpaper; one that appears is an alarm.
+
+An artifact that is genuinely broken — a deleted upstream image, a
+permanently unreachable registry — is therefore retried indefinitely at
+the sweep interval. That is intentional: it costs one scan slot per
+sweep and keeps the failure visible. There is no backoff and no retry
+cap; if a fleet accumulates enough dead refs for that to matter, delete
+them or let `monitorApi.retention` do it.
 
 ### Retention: deleting old artifacts
 

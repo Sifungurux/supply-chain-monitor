@@ -634,8 +634,13 @@ monitorApi:
   #
   # Keyed on when a scan last COMPLETED, which includes one that FAILED.
   # So an artifact failing every scan stays "fresh" here and never goes
-  # stale -- LastScanFailureReason is the signal for that case, not this
-  # one. An artifact that has never been scanned at all is also excluded:
+  # stale. Failures do NOT rely on this: the sweep CronJob retries every
+  # failed artifact on EVERY run, regardless of age and regardless of
+  # autoRescan below, because staleness would otherwise retry a
+  # permanently-broken artifact exactly never. Retries are paced by
+  # sweep.batchSize and ordered least-recently-attempted first, so one
+  # broken artifact cannot monopolise the batch.
+  # An artifact that has never been scanned at all is also excluded:
   # it sits at status "registered" and the sweep CronJob already picks it
   # up, so counting it here would double-report it.
   #
