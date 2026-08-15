@@ -312,3 +312,43 @@ helm template scm-ci charts/supply-chain-monitor \
 	echo "       templates/gateway/httproute.yaml." >&2
 	exit 1
 }
+
+# == the HTTPS redirect targets a CLIENT-reachable port, not the EntryPoint ==
+#
+# The redirect port and the listener port mean opposite things and are
+# easy to swap. A listener port names Traefik's INTERNAL EntryPoint
+# (8443) because Traefik is wiring its own plumbing. The redirect port
+# goes into a Location header that a BROWSER follows, so it must name an
+# address a client can actually reach (the NodePort, 30443).
+#
+# Swapping them fails silently in both directions: 8443 in the redirect
+# sends every visitor to a port nothing listens on, and 30443 on the
+# listener programs no route at all.
+echo "== the HTTPS redirect port is not the internal EntryPoint port =="
+redirect_port="$(helm template scm-ci charts/supply-chain-monitor \
+	-s templates/gateway/httproute.yaml | awk '/requestRedirect:/ { f=1 } f && /port:/ { print $2; exit }')"
+listener_port="$(helm template scm-ci charts/supply-chain-monitor \
+	-s templates/gateway/gateway.yaml | awk '/name: https/ { f=1 } f && /port:/ { print $2; exit }')"
+if [ -z "$redirect_port" ]; then
+	echo "ERROR: redirectHTTP is enabled by default but no redirect route rendered." >&2
+	exit 1
+fi
+if [ "$redirect_port" = "$listener_port" ]; then
+	echo "ERROR: the redirect port (${redirect_port}) is the internal EntryPoint port." >&2
+	echo "       A browser follows this Location header, so it must name a port the" >&2
+	echo "       CLIENT can reach (the NodePort), not the one Traefik listens on" >&2
+	echo "       internally. See values.yaml's gateway.tls.redirectPort." >&2
+	exit 1
+fi
+
+# With the redirect on, the dashboard route must NOT also claim the http
+# listener -- two routes matching the same path on one listener leaves
+# which wins to tie-breaking rules rather than to intent.
+echo "== the dashboard route does not fight the redirect for the http listener =="
+http_claims="$(helm template scm-ci charts/supply-chain-monitor \
+	-s templates/gateway/httproute.yaml | awk '/name: scm-dashboard/ { d=1 } /name: scm-https-redirect/ { d=0 } d && /sectionName: http$/ { n++ } END { print n+0 }')"
+if [ "$http_claims" != "0" ]; then
+	echo "ERROR: with the redirect enabled, scm-dashboard still attaches to the" >&2
+	echo "       http listener -- two routes match the same path there." >&2
+	exit 1
+fi

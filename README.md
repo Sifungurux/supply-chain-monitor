@@ -266,6 +266,30 @@ honest option for a cluster with no public DNS name and no reachable
 ACME endpoint — which is why no ACME issuer is offered here rather than
 being configured and silently failing.
 
+`gateway.tls.redirectHTTP` (**on**) sends plain HTTP to HTTPS with a
+**308**, so a bearer token can't travel unencrypted just because
+someone typed the wrong scheme. 308 rather than 301 deliberately: 308
+requires the method and body to be preserved, while 301 lets a client
+turn a POST into a GET and silently drop the body of a write.
+
+This only affects traffic through the **Gateway**, which routes to the
+dashboard. `monitor-api`'s NodePort (30300) and the dashboard's (30301)
+are direct and unaffected.
+
+**`redirectPort` is the port a client dials (30443), not
+`listenerPort` (8443).** They mean opposite things: a listener names
+Traefik's *internal* EntryPoint, while the redirect goes into a
+`Location` header a browser follows and must name an address the
+browser can actually reach. Swapping them fails silently both ways —
+8443 in the redirect sends visitors to a port nothing listens on, and
+30443 on the listener programs no route at all. There are CI guards for
+both directions.
+
+Turn the redirect **off** if HTTPS isn't reachable from where your
+clients are: it would otherwise send every visitor somewhere they can't
+connect, turning a working dashboard into a broken one. Verify HTTPS
+first, redirect second.
+
 **Reaching HTTPS from your host needs two things this chart does not
 control:**
 
