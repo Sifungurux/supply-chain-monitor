@@ -195,6 +195,8 @@
   }
   .card .n { font-family: var(--font-mono); font-size: 24px; font-weight: 600; color: var(--text-strong); }
   .card .l { font-size: 12px; color: var(--text-muted); }
+  .card-danger { border-color: var(--danger); }
+  .card-danger .n { color: var(--danger); }
   .stages { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
   .stage-pill {
     flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
@@ -1193,8 +1195,28 @@
       ['With misconfigurations', withFindings.misconfiguration || 0],
       ['With secrets', withFindings.secret || 0]
     ];
+    // Appended last, deliberately: several dashboard tests index this
+    // array by position, and inserting among the existing cards would
+    // shift every one of them. Only shown when the threshold is
+    // configured -- a card reading 0 because the feature is off is
+    // noise, not information.
+    if (stats.stale_after_days > 0) {
+      cards.push(['Not scanned recently', stats.stale || 0]);
+    }
+    // Failed scans, and only when there ARE any -- a permanent "0
+    // failed" is wallpaper, one that appears is an alarm.
+    //
+    // This is the fleet-level half of failure reporting. The per-row
+    // badge (statusBadge) has always shown a red badge naming the
+    // reason, but only on the page you happen to be looking at, so a
+    // handful of failures scattered through a large store were
+    // invisible unless you went filtering for them. The sweep now
+    // retries these every run; this is how you see it is happening.
+    if (byStatus.failed) {
+      cards.push(['Failed scans', byStatus.failed, 'card-danger']);
+    }
     els.cards.innerHTML = cards.map(function (c) {
-      return '<div class="card"><div class="n">' + c[1] + '</div><div class="l">' + c[0] + '</div></div>';
+      return '<div class="card ' + (c[2] || '') + '"><div class="n">' + c[1] + '</div><div class="l">' + c[0] + '</div></div>';
     }).join('');
   }
 
@@ -1259,7 +1281,7 @@
           '<tr data-id="' + esc(a.id) + '">' +
             '<td class="ref" title="' + esc(a.ref) + '">' + esc(a.ref) + '</td>' +
             '<td>' + esc(a.type) + '</td>' +
-            '<td>' + statusBadge(a) + unsafeBadge(a) + '</td>' +
+            '<td>' + statusBadge(a) + unsafeBadge(a) + staleBadge(a) + '</td>' +
             '<td>' + (a.current_stage ? esc(a.current_stage) : '<span class="muted">—</span>') + '</td>' +
             '<td>' + countCell(openFindings(a.cve_findings).length) + '</td>' +
             '<td>' + countCell(openFindings(a.malware_findings).length) + '</td>' +
@@ -1287,6 +1309,36 @@
   // internal/api/handlers.go) rather than updated_at, which also moves
   // on unrelated mutations like a /stage call or the digest backfill
   // and would otherwise misreport those as a fresh scan.
+  // isScanStale mirrors Store.CountStaleScans EXACTLY, and the match
+  // matters: the "Not scanned recently" card comes from the server's
+  // count while the per-row badges are computed here, so any difference
+  // makes the two contradict and one of them look broken.
+  //
+  // Two rules to keep in step:
+  //   - Never scanned (last_scan_at null) is NOT stale. It is a
+  //     different state -- those sit at "registered" and the sweep
+  //     already collects them. In JS a null date would otherwise
+  //     compare as older than any cutoff and badge everything.
+  //   - staleAfterDays of 0 means the warning is switched off entirely,
+  //     not that everything is stale.
+  function isScanStale(a) {
+    var days = (state.stats && state.stats.stale_after_days) || 0;
+    if (days <= 0 || !a.last_scan_at) return false;
+    var cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    return new Date(a.last_scan_at).getTime() < cutoff;
+  }
+
+  // staleBadge warns that an artifact's last scan has aged out. Shown
+  // whether or not auto-rescan is enabled: if the sweep is keeping up
+  // this is rarely seen, and if it is backlogged or failing, hiding the
+  // badge would hide exactly that.
+  function staleBadge(a) {
+    if (!isScanStale(a)) return '';
+    return ' <span class="badge badge-warning" title="Last scanned ' + esc(timeAgo(a.last_scan_at)) +
+      ' — older than the ' + ((state.stats && state.stats.stale_after_days) || 0) +
+      ' day freshness threshold">STALE</span>';
+  }
+
   function lastScanText(a) {
     if (!a.last_scan_at) return 'Not yet scanned';
     return timeAgo(a.last_scan_at);
@@ -1559,7 +1611,7 @@
       '<div class="detail-digest">' + (a.digest ? esc(a.digest) : '<span class="muted">digest not resolved</span>') + '</div>' +
       '<div class="modal-meta">' +
         '<span>' + esc(a.type) + '</span>' +
-        '<span>' + statusBadge(a) + unsafeBadge(a) + '</span>' +
+        '<span>' + statusBadge(a) + unsafeBadge(a) + staleBadge(a) + '</span>' +
         '<span><strong>Last scan:</strong> ' + esc(lastScanText(a)) + '</span>' +
         '<span><strong>Maintainer:</strong> ' + maintainerText(a) +
           ' <button type="button" class="link-btn" data-action="edit-maintainer">Edit</button></span>' +

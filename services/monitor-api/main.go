@@ -676,6 +676,52 @@ func runSweepRegistered() {
 		all = append(all, stale...)
 	}
 
+	// Artifacts whose last scan FAILED, retried on every sweep run
+	// regardless of age or of whether auto-rescan is on.
+	//
+	// Staleness cannot cover this and never will: last_scan_at is set
+	// when a scan COMPLETES, including a failed one, so an artifact
+	// failing repeatedly refreshes its own freshness clock and never
+	// looks stale. Left to staleness alone, a broken artifact would be
+	// retried exactly never -- which is the opposite of what it needs.
+	//
+	// Paced by SWEEP_BATCH_SIZE like everything else, and ordered by
+	// least-recently-attempted (see pickArtifactsToSweep), so a
+	// permanently-broken artifact cannot monopolise the batch: once
+	// retried it goes to the back of the queue behind everything that
+	// has waited longer.
+	if failed, err := listByStatusFromAPI(ctx, apiBase, apiKey, artifact.StatusFailed); err != nil {
+		log.Printf("sweep-registered: could not list failed artifacts to retry (continuing): %v", err)
+	} else if len(failed) > 0 {
+		log.Printf("sweep-registered: %d artifact(s) at %q -- retrying", len(failed), artifact.StatusFailed)
+		all = append(all, failed...)
+	}
+
+	// Artifacts whose last scan has aged out (SWEEP_RESCAN_STALE_AFTER_DAYS).
+	// Off unless configured -- the staleness WARNING is independent of
+	// this and shows regardless; this only decides whether anything
+	// automatically fixes it.
+	//
+	// Paced by SWEEP_BATCH_SIZE like everything else here, which
+	// matters more than it looks: enabling this against a fleet that
+	// has never been swept finds nearly all of it stale at once, and
+	// those rescans then all age out together on the same future day.
+	// The batch is what keeps that from becoming a thundering herd
+	// against the (now cluster-wide) scan concurrency cap.
+	if days := getenvInt("SWEEP_RESCAN_STALE_AFTER_DAYS", 0); days > 0 {
+		cutoff := time.Now().UTC().AddDate(0, 0, -days)
+		if scanned, err := listByStatusFromAPI(ctx, apiBase, apiKey, artifact.StatusScanned); err != nil {
+			log.Printf("sweep-registered: could not list scanned artifacts for stale rescan (continuing): %v", err)
+		} else if stale := staleScans(scanned, cutoff); len(stale) > 0 {
+			log.Printf("sweep-registered: %d artifact(s) last scanned before %s -- rescanning (SWEEP_RESCAN_STALE_AFTER_DAYS=%d)",
+				len(stale), cutoff.Format(time.RFC3339), days)
+			all = append(all, stale...)
+		}
+		// No separate pass for "failed" here: every failed artifact is
+		// already collected above, on every run, rather than only once
+		// it has aged out.
+	}
+
 	toScan := pickArtifactsToSweep(all, batchSize)
 	log.Printf("sweep-registered: %d artifact(s) registered-but-unscanned, scanning %d (SWEEP_BATCH_SIZE=%d)", countByStatus(all, artifact.StatusRegistered), len(toScan), batchSize)
 
@@ -700,13 +746,25 @@ func runSweepRegistered() {
 	log.Printf("sweep-registered: done -- %d scanned, %d still missing a digest", len(toScan), missingDigest)
 }
 
-// pickArtifactsToSweep selects up to batchSize artifacts at status
-// "registered", oldest (by CreatedAt) first -- so a backlog bigger than
-// one batch works through fairly over successive CronJob runs instead of
-// the same few newest registrations winning every time. batchSize <= 0
-// means "nothing to do" (fails closed rather than defaulting to
-// unbounded), the same "cap rather than trust an unbounded number"
-// reasoning maxBulkArtifacts already uses in internal/api/artifacts.go.
+// pickArtifactsToSweep selects up to batchSize artifacts to rescan,
+// oldest (by CreatedAt) first -- so a backlog bigger than one batch
+// works through fairly over successive CronJob runs instead of the same
+// few newest registrations winning every time. batchSize <= 0 means
+// "nothing to do" (fails closed rather than defaulting to unbounded),
+// the same "cap rather than trust an unbounded number" reasoning
+// maxBulkArtifacts already uses in internal/api/artifacts.go.
+//
+// ELIGIBILITY IS THE CALLER'S, not this function's. It used to filter
+// to status "registered" itself, which silently broke the reclaim of
+// artifacts stuck at "scanning": runSweepRegistered listed those,
+// logged "reclaiming by re-scanning", appended them to the same
+// slice -- and then this dropped every one of them on the status
+// filter. The log line was the only evidence anything happened, and
+// nothing did. Now the caller decides what is eligible and this only
+// orders and caps it, which is also what lets stale artifacts (status
+// "scanned"/"failed", which no status filter could distinguish from
+// fresh ones) be swept at all.
+//
 // Pure and side-effect-free -- unit-tested in main_test.go without any
 // HTTP involved, the same pattern buildImageScanners/buildSBOMScanners
 // already establish for this file.
@@ -714,19 +772,61 @@ func pickArtifactsToSweep(all []artifact.Artifact, batchSize int) []artifact.Art
 	if batchSize <= 0 {
 		return nil
 	}
-	var registered []artifact.Artifact
+	eligible := append([]artifact.Artifact(nil), all...)
+	sort.Slice(eligible, func(i, j int) bool {
+		// LEAST RECENTLY ATTEMPTED first, which is what keeps a
+		// permanently-broken artifact from monopolising every batch.
+		// Ordering by CreatedAt alone would let one old, always-failing
+		// artifact win the same slot on every single run -- it is
+		// retried, stays failed, keeps its CreatedAt, and sorts first
+		// again fifteen minutes later, while newer registrations behind
+		// it are never reached.
+		//
+		// Never-attempted (nil) sorts before everything: an artifact
+		// nobody has scanned once outranks retrying one that has been
+		// scanned recently, however old the registration.
+		ai, aj := eligible[i].LastScanAt, eligible[j].LastScanAt
+		switch {
+		case ai == nil && aj != nil:
+			return true
+		case ai != nil && aj == nil:
+			return false
+		case ai != nil && aj != nil && !ai.Equal(*aj):
+			return ai.Before(*aj)
+		}
+		// Same attempt time (or both never attempted): oldest
+		// registration first, preserving the fairness this had before
+		// failed retries joined the queue.
+		if !eligible[i].CreatedAt.Equal(eligible[j].CreatedAt) {
+			return eligible[i].CreatedAt.Before(eligible[j].CreatedAt)
+		}
+		// Stable tie-break, so a batch is deterministic when several
+		// artifacts were registered in the same instant (routine in a
+		// bulk registration).
+		return eligible[i].ID < eligible[j].ID
+	})
+	if len(eligible) > batchSize {
+		eligible = eligible[:batchSize]
+	}
+	return eligible
+}
+
+// staleScans returns artifacts last scanned before cutoff -- the
+// auto-rescan population (SWEEP_RESCAN_STALE_AFTER_DAYS).
+//
+// Never-scanned artifacts are excluded: they are status "registered"
+// and this sweep already collects them separately, so including them
+// here would just double-count. Same rule Store.CountStaleScans and the
+// dashboard badge apply, so the number an operator sees and the set
+// this rescans are the same set.
+func staleScans(all []artifact.Artifact, cutoff time.Time) []artifact.Artifact {
+	var out []artifact.Artifact
 	for _, a := range all {
-		if a.Status == artifact.StatusRegistered {
-			registered = append(registered, a)
+		if a.LastScanAt != nil && a.LastScanAt.Before(cutoff) {
+			out = append(out, a)
 		}
 	}
-	sort.Slice(registered, func(i, j int) bool {
-		return registered[i].CreatedAt.Before(registered[j].CreatedAt)
-	})
-	if len(registered) > batchSize {
-		registered = registered[:batchSize]
-	}
-	return registered
+	return out
 }
 
 func countByStatus(all []artifact.Artifact, status artifact.Status) int {
@@ -1626,6 +1726,8 @@ func runAPIServer() {
 		// LICENSE_DENYLIST, e.g. "AGPL-3.0-only,SSPL-1.0". Empty (the
 		// default) denies nothing and skips the evaluation entirely.
 		LicenseDenylist: scanner.NewLicenseDenylist(os.Getenv("LICENSE_DENYLIST")),
+		// 0 switches the staleness warning off entirely.
+		StaleAfterDays: getenvInt("SCAN_STALE_AFTER_DAYS", 0),
 	})
 
 	srv := &http.Server{

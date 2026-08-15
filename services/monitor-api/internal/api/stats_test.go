@@ -2,9 +2,12 @@ package api_test
 
 import (
 	"encoding/json"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/api"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/pipeline"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
@@ -23,13 +26,21 @@ import (
 // internal/artifact/postgres_store_integration_test.go, so the two
 // backends can't quietly disagree about the numbers on the dashboard.
 
-func getStats(t *testing.T, h http.Handler) artifact.Stats {
+// statsBody is the response shape: artifact.Stats plus the two
+// scan-freshness fields the handler adds.
+type statsBody struct {
+	artifact.Stats
+	StaleAfterDays int `json:"stale_after_days"`
+	Stale          int `json:"stale"`
+}
+
+func getStats(t *testing.T, h http.Handler) statsBody {
 	t.Helper()
 	rec := doJSON(t, h, http.MethodGet, "/api/v1/stats", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("stats status = %d, want 200, body=%s", rec.Code, rec.Body.String())
 	}
-	var out artifact.Stats
+	var out statsBody
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode stats: %v (body=%s)", err, rec.Body.String())
 	}
@@ -217,5 +228,61 @@ func TestStats_RequiresAPIKey(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 without an API key", rec.Code)
+	}
+}
+
+// Scan freshness on /stats. The count and the dashboard's per-row badge
+// must apply the same rule, which is what makes never-scanned the
+// interesting case: excluded here, and excluded there.
+func TestStats_ScanFreshness(t *testing.T) {
+	store := artifact.NewMemStore()
+	h := api.NewRouter(api.Config{
+		Store:          store,
+		Tracker:        pipeline.NewTracker([]string{"build", "scan"}),
+		APIKey:         testAPIKey,
+		StaleAfterDays: 7,
+	})
+
+	old := time.Now().UTC().AddDate(0, 0, -30)
+	fresh := time.Now().UTC().Add(-time.Hour)
+
+	stale := mustCreate(t, store, "stale:1", artifact.TypeImage)
+	mustSetFindings(t, store, stale.ID, func(a *artifact.Artifact) { a.LastScanAt = &old })
+	recent := mustCreate(t, store, "fresh:1", artifact.TypeImage)
+	mustSetFindings(t, store, recent.ID, func(a *artifact.Artifact) { a.LastScanAt = &fresh })
+	// Never scanned -- must NOT count. It is status "registered" and the
+	// sweep already collects it; counting it here would double-report
+	// it, and the dashboard (which cannot compare a null date safely)
+	// excludes it too.
+	mustCreate(t, store, "never:1", artifact.TypeImage)
+
+	got := getStats(t, h)
+	if got.StaleAfterDays != 7 {
+		t.Errorf("stale_after_days = %d, want 7 -- the dashboard reads the threshold from here", got.StaleAfterDays)
+	}
+	if got.Stale != 1 {
+		t.Errorf("stale = %d, want 1 (only the 30-day-old scan; never-scanned is a different state)", got.Stale)
+	}
+	if got.Total != 3 {
+		t.Errorf("total = %d, want 3", got.Total)
+	}
+}
+
+// 0 switches the warning off: no threshold reported, and the count is
+// not even computed.
+func TestStats_ScanFreshnessDisabled(t *testing.T) {
+	store := artifact.NewMemStore()
+	h := api.NewRouter(api.Config{
+		Store:   store,
+		Tracker: pipeline.NewTracker([]string{"build", "scan"}),
+		APIKey:  testAPIKey,
+	})
+	old := time.Now().UTC().AddDate(0, 0, -365)
+	a := mustCreate(t, store, "ancient:1", artifact.TypeImage)
+	mustSetFindings(t, store, a.ID, func(art *artifact.Artifact) { art.LastScanAt = &old })
+
+	got := getStats(t, h)
+	if got.StaleAfterDays != 0 || got.Stale != 0 {
+		t.Errorf("stale_after_days=%d stale=%d, want both 0 when the feature is off", got.StaleAfterDays, got.Stale)
 	}
 }

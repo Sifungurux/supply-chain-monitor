@@ -93,13 +93,22 @@ type Config struct {
 	// documents.go's applyLicenseDenylist). The zero value denies
 	// nothing -- exactly the behaviour before this existed.
 	LicenseDenylist scanner.LicenseDenylist
+	// StaleAfterDays is how long since an artifact's last scan before
+	// GET /api/v1/stats reports it as stale and the dashboard warns on
+	// it. 0 (the default) switches the warning off entirely, which is
+	// how this behaved before the field existed.
+	//
+	// Keyed on LastScanAt, which a FAILED scan also sets -- so an
+	// artifact failing every scan stays "fresh" here. That is what
+	// LastScanFailureReason is for; see values.yaml's own comment.
+	StaleAfterDays int
 }
 
 // NewRouter wires up the v1 REST API. Uses Go 1.22's stdlib ServeMux
 // method+wildcard routing, so no external router dependency is needed.
 // See Config for what each field does and what its zero value means.
 func NewRouter(cfg Config) http.Handler {
-	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher, licenseDenylist: cfg.LicenseDenylist}
+	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher, licenseDenylist: cfg.LicenseDenylist, staleAfterDays: cfg.StaleAfterDays}
 	h.metrics = newMetrics()
 	h.scanCaps = cfg.ScanLimits.caps()
 

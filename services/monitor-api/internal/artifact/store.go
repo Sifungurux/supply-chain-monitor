@@ -226,6 +226,24 @@ type Store interface {
 	// rejected before it started, or slots already reaped), which is
 	// what lets callers release unconditionally on every path.
 	ReleaseScanSlots(holderID string) error
+	// CountStaleScans returns how many artifacts were last scanned
+	// BEFORE cutoff -- the "not scanned recently" number behind the
+	// dashboard's staleness warning.
+	//
+	// Artifacts that have NEVER been scanned are deliberately excluded.
+	// A null LastScanAt is not infinitely old, it is a different state
+	// with its own handling: those sit at status "registered" and the
+	// sweep CronJob already picks them up. Counting them here would
+	// double-report them and, worse, the dashboard computes its
+	// per-artifact badge from the same field in JavaScript -- where a
+	// null date compares as older than any cutoff, so the count and the
+	// visible badges would disagree and one of them would look broken.
+	//
+	// Keys on LastScanAt, which is set when a scan COMPLETES, including
+	// one that failed. So an artifact failing every scan stays "fresh"
+	// here forever; LastScanFailureReason is the signal for that case,
+	// not this one.
+	CountStaleScans(cutoff time.Time) (int, error)
 	CountOlderThan(cutoff time.Time) (int, error)
 	DeleteOlderThan(cutoff time.Time, limit int) (int, error)
 }
@@ -975,6 +993,21 @@ func dedupeKinds(kinds []string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+func (s *MemStore) CountStaleScans(cutoff time.Time) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	n := 0
+	for _, a := range s.data {
+		// Never scanned is excluded, not treated as infinitely old --
+		// see the Store interface.
+		if a.LastScanAt != nil && a.LastScanAt.Before(cutoff) {
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (s *MemStore) CountOlderThan(cutoff time.Time) (int, error) {

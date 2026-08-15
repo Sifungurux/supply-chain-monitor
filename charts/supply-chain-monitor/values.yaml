@@ -628,6 +628,35 @@ monitorApi:
   # PARALLELISM) should retry on 429. 0 disables the cap entirely, which
   # is the binary's own default when this isn't set.
   scanConcurrency: 8
+  # Scan freshness. An artifact last scanned longer ago than
+  # warnAfterDays is reported as stale by GET /api/v1/stats and badged
+  # on the dashboard. 0 switches the warning off entirely.
+  #
+  # Keyed on when a scan last COMPLETED, which includes one that FAILED.
+  # So an artifact failing every scan stays "fresh" here and never goes
+  # stale. Failures do NOT rely on this: the sweep CronJob retries every
+  # failed artifact on EVERY run, regardless of age and regardless of
+  # autoRescan below, because staleness would otherwise retry a
+  # permanently-broken artifact exactly never. Retries are paced by
+  # sweep.batchSize and ordered least-recently-attempted first, so one
+  # broken artifact cannot monopolise the batch.
+  # An artifact that has never been scanned at all is also excluded:
+  # it sits at status "registered" and the sweep CronJob already picks it
+  # up, so counting it here would double-report it.
+  #
+  # autoRescan makes the sweep CronJob rescan stale artifacts as well as
+  # warning about them. The warning is independent and shows either way,
+  # so a backlogged or failing auto-rescan stays visible rather than
+  # hiding behind the feature meant to fix it.
+  #
+  # Paced by sweep.batchSize: enabling autoRescan against a fleet that
+  # has never been swept finds nearly all of it stale at once, and those
+  # rescans then age out together on the same future day. The batch is
+  # what stops that becoming a thundering herd against the scan
+  # concurrency cap.
+  scanFreshness:
+    warnAfterDays: 7
+    autoRescan: false
   # Per-scanner caps, so a memory-heavy tool can be throttled without
   # throttling everything else. Unset inherits scanConcurrency, which is
   # a no-op (a scan takes the global slot too, so an equal per-kind cap

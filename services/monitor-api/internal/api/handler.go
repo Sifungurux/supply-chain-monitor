@@ -88,6 +88,10 @@ type handler struct {
 	// refuses (LICENSE_DENYLIST). The zero value denies nothing, which
 	// is what every caller that doesn't configure it gets.
 	licenseDenylist scanner.LicenseDenylist
+	// staleAfterDays is how long since an artifact's last scan before
+	// it is reported as stale (SCAN_STALE_AFTER_DAYS). 0 switches the
+	// warning off entirely.
+	staleAfterDays int
 }
 
 // scanRetryAfter is the Retry-After (seconds) sent with the 429 a

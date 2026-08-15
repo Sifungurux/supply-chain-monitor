@@ -369,7 +369,14 @@ func TestPickArtifactsToSweep(t *testing.T) {
 		return artifact.Artifact{ID: id, Status: status, CreatedAt: now.Add(-age)}
 	}
 
-	t.Run("only picks status=registered, ignores everything else", func(t *testing.T) {
+	// THE BUG THIS FUNCTION USED TO HAVE. It filtered to status
+	// "registered" itself, so runSweepRegistered's reclaim of artifacts
+	// stuck at "scanning" -- which lists them, logs "reclaiming by
+	// re-scanning", and appends them to this very slice -- had every
+	// one of them silently dropped here. The log line was the only
+	// evidence anything happened, and nothing did. Eligibility is the
+	// caller's now; this orders and caps.
+	t.Run("returns whatever the caller deemed eligible, whatever its status", func(t *testing.T) {
 		all := []artifact.Artifact{
 			mk("a", artifact.StatusRegistered, time.Hour),
 			mk("b", artifact.StatusScanning, time.Hour),
@@ -377,9 +384,15 @@ func TestPickArtifactsToSweep(t *testing.T) {
 			mk("d", artifact.StatusFailed, time.Hour),
 		}
 		got := pickArtifactsToSweep(all, 10)
-		if len(got) != 1 || got[0].ID != "a" {
-			t.Fatalf("got %+v, want only artifact \"a\" (the only status=registered one)", got)
+		if len(got) != 4 {
+			t.Fatalf("got %d artifacts, want all 4 -- the caller decides eligibility, not this", len(got))
 		}
+		for _, a := range got {
+			if a.Status == artifact.StatusScanning {
+				return // the stuck-scan reclaim survives
+			}
+		}
+		t.Fatal("a stuck-at-scanning artifact was dropped -- that is the reclaim this silently broke")
 	})
 
 	t.Run("oldest first, so a backlog works through fairly across runs", func(t *testing.T) {
@@ -397,6 +410,47 @@ func TestPickArtifactsToSweep(t *testing.T) {
 			if got[i].ID != id {
 				t.Fatalf("position %d: got %q, want %q (order = %v)", i, got[i].ID, id, got)
 			}
+		}
+	})
+
+	// THE STARVATION THIS ORDERING EXISTS TO PREVENT. Failed artifacts
+	// are now retried on every sweep run, so without this the same
+	// old, permanently-broken artifact wins the same slot forever: it
+	// is retried, stays failed, keeps its CreatedAt, and sorts first
+	// again on the next run, while newer work behind it is never
+	// reached. Ordering by last attempt sends it to the back.
+	t.Run("least recently attempted first, so a broken artifact cannot hog the batch", func(t *testing.T) {
+		at := func(id string, since time.Duration) artifact.Artifact {
+			ts := now.Add(-since)
+			// Registered long before any of them were scanned, so
+			// CreatedAt alone would order these exactly backwards.
+			return artifact.Artifact{ID: id, Status: artifact.StatusFailed, CreatedAt: now.Add(-99 * time.Hour), LastScanAt: &ts}
+		}
+		all := []artifact.Artifact{
+			at("retried-just-now", time.Minute),
+			at("waiting-longest", 24*time.Hour),
+			at("waiting-a-while", time.Hour),
+		}
+		got := pickArtifactsToSweep(all, 10)
+		want := []string{"waiting-longest", "waiting-a-while", "retried-just-now"}
+		for i, id := range want {
+			if got[i].ID != id {
+				t.Fatalf("position %d: got %q, want %q -- a just-retried artifact must go to the back", i, got[i].ID, id)
+			}
+		}
+	})
+
+	t.Run("never attempted outranks a recent retry, however old the registration", func(t *testing.T) {
+		scanned := now.Add(-time.Minute)
+		all := []artifact.Artifact{
+			// Failed, retried a minute ago, registered a week ago.
+			{ID: "retried", Status: artifact.StatusFailed, CreatedAt: now.Add(-168 * time.Hour), LastScanAt: &scanned},
+			// Registered a minute ago and never scanned once.
+			{ID: "never-scanned", Status: artifact.StatusRegistered, CreatedAt: now.Add(-time.Minute)},
+		}
+		got := pickArtifactsToSweep(all, 10)
+		if got[0].ID != "never-scanned" {
+			t.Fatalf("got %q first, want \"never-scanned\" -- an artifact nobody has scanned once outranks retrying one just attempted", got[0].ID)
 		}
 	})
 
@@ -421,12 +475,40 @@ func TestPickArtifactsToSweep(t *testing.T) {
 		}
 	})
 
-	t.Run("no registered artifacts at all", func(t *testing.T) {
-		all := []artifact.Artifact{mk("a", artifact.StatusScanned, time.Hour)}
-		if got := pickArtifactsToSweep(all, 10); len(got) != 0 {
+	t.Run("nothing eligible", func(t *testing.T) {
+		if got := pickArtifactsToSweep(nil, 10); len(got) != 0 {
 			t.Fatalf("got %d artifacts, want 0", len(got))
 		}
 	})
+}
+
+// staleScans is the auto-rescan population: last scanned before the
+// cutoff. The never-scanned exclusion is the part worth pinning, since
+// the dashboard badge and Store.CountStaleScans apply the same rule and
+// disagreeing would make the count and the visible badges contradict.
+func TestStaleScans(t *testing.T) {
+	now := time.Now().UTC()
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	at := func(d time.Duration) *time.Time { t := now.Add(-d); return &t }
+
+	all := []artifact.Artifact{
+		{ID: "stale", Status: artifact.StatusScanned, LastScanAt: at(30 * 24 * time.Hour)},
+		{ID: "fresh", Status: artifact.StatusScanned, LastScanAt: at(time.Hour)},
+		{ID: "never", Status: artifact.StatusRegistered, LastScanAt: nil},
+		{ID: "just-past", Status: artifact.StatusFailed, LastScanAt: at(8 * 24 * time.Hour)},
+	}
+
+	got := staleScans(all, cutoff)
+	if len(got) != 2 {
+		t.Fatalf("got %d stale, want 2: %+v", len(got), got)
+	}
+	ids := map[string]bool{got[0].ID: true, got[1].ID: true}
+	if !ids["stale"] || !ids["just-past"] {
+		t.Errorf("stale set = %v, want stale and just-past", ids)
+	}
+	if ids["never"] {
+		t.Error("a never-scanned artifact was counted stale -- it is a different state, already swept as \"registered\", and the dashboard excludes it too")
+	}
 }
 
 // The scan queue wait this file used to guard against

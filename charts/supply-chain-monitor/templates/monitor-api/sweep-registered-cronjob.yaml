@@ -78,6 +78,11 @@ spec:
                   value: "http://monitor-api:8080"
                 - name: SWEEP_BATCH_SIZE
                   value: {{ .Values.monitorApi.sweep.batchSize | quote }}
+                # 0 (the default) means this sweep never rescans on age
+                # alone -- the staleness WARNING is independent and shows
+                # regardless. See monitorApi.scanFreshness.
+                - name: SWEEP_RESCAN_STALE_AFTER_DAYS
+                  value: {{ if .Values.monitorApi.scanFreshness.autoRescan }}{{ .Values.monitorApi.scanFreshness.warnAfterDays | quote }}{{ else }}"0"{{ end }}
                 - name: SWEEP_API_KEY
                   valueFrom:
                     secretKeyRef:
