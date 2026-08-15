@@ -2424,6 +2424,58 @@ test('freshness disabled shows no badge and no card', async () => {
   dom.window.close();
 });
 
+// The 10s refresh used to close the maintainer editor out from under
+// you. render() rebuilds the detail page and the editor is emitted
+// hidden every pass, its open state living only in the DOM -- so a poll
+// mid-edit reverted it and threw away what had been typed.
+//
+// Driven by capturing the real interval callback rather than waiting on
+// a timer, so this asserts against the actual poll the page installs.
+test('the refresh poll does not close the maintainer editor mid-edit', async () => {
+  let poll;
+  const artifact = Object.assign({}, SAMPLE_ARTIFACTS[0], { id: 'a1', maintainer_team: '', maintainer_email: '' });
+  const dom = buildDom({
+    url: 'http://localhost:30301/#/artifacts/a1',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (url.includes('/components/diff')) return jsonResponse({ from: null, to: null, added: [], removed: [], version_changed: [] });
+      if (isArtifactsList(url)) return artifactsPage([artifact]);
+      return errorResponse(404, { error: 'not found' });
+    },
+    beforeParseExtra(window) {
+      window.setInterval = (fn, ms) => { if (ms === 10000) poll = fn; return 0; };
+    }
+  });
+  await tick(20);
+  const doc = dom.window.document;
+
+  doc.querySelector('[data-action="edit-maintainer"]').click();
+  const box = doc.getElementById('maintainer-edit');
+  assert.equal(box.hidden, false, 'precondition: Edit opens the editor');
+  doc.getElementById('maintainer-edit-team').value = 'platform';
+
+  assert.ok(poll, 'the page must install a 10s refresh for this test to mean anything');
+  poll();
+  await tick(20);
+
+  const after = doc.getElementById('maintainer-edit');
+  assert.equal(after.hidden, false, 'the poll closed the editor — this is the bug');
+  assert.equal(doc.getElementById('maintainer-edit-team').value, 'platform',
+    'the poll discarded what had been typed');
+
+  // And it must resume once the edit is over, or the page freezes.
+  doc.querySelector('[data-action="cancel-edit-maintainer"]').click();
+  let refetched = false;
+  const realFetch = dom.window.fetch;
+  dom.window.fetch = (u) => { refetched = true; return realFetch(u); };
+  poll();
+  await tick(20);
+  assert.ok(refetched, 'polling must resume after Cancel');
+
+  dom.window.close();
+});
+
 // Failed scans, fleet-wide. The per-row badge only ever showed failures
 // on the page in front of you, so a few scattered through a large store
 // were invisible without going looking for them.

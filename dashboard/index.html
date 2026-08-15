@@ -1945,7 +1945,29 @@
   });
 
   loadAll();
-  setInterval(loadAll, 10000);
+  // The 10s refresh, guarded so it cannot destroy an edit in progress.
+  //
+  // render() rebuilds the detail page from scratch, and the maintainer
+  // editor is the one piece of detail-page state that lives ONLY in the
+  // DOM -- it is rendered hidden on every pass and revealed by the Edit
+  // button, so a poll landing mid-edit re-renders it closed and discards
+  // whatever had been typed. (The findings tabs survive the same
+  // re-render because their selection is kept in state.detailTab; this
+  // box had no equivalent.) With a 10s period that gave you a handful of
+  // seconds before the box shut itself.
+  //
+  // Pausing beats persisting the values in state: the inputs would still
+  // be REPLACED on every pass, so focus and caret position would jump
+  // out of the field mid-word even with the text preserved. Nothing is
+  // lost by holding still for the few seconds an edit takes -- the poll
+  // resumes on Save or Cancel, both of which re-render anyway, and every
+  // user-initiated refresh (paging, filtering, search) still calls
+  // loadAll directly.
+  setInterval(function () {
+    var editing = document.getElementById('maintainer-edit');
+    if (editing && !editing.hidden) return;
+    loadAll();
+  }, 10000);
 })();
 </script>
 </body>
