@@ -208,6 +208,24 @@ type Store interface {
 	// asking for a snapshot that has since aged out of the retained
 	// window (MaxComponentSnapshots) is a normal race, not a fault.
 	ComponentsAt(artifactID string, scanAt time.Time) ([]Component, error)
+	// AcquireScanSlots takes one slot per requested kind, all or
+	// nothing, and reaps abandoned slots while it is in there. This is
+	// what bounds concurrent scanning ACROSS REPLICAS -- the cap used to
+	// be a buffered channel in one process, so two monitor-api pods each
+	// allowed a full SCAN_CONCURRENCY and the real limit was silently
+	// double what was configured.
+	//
+	// Reaping is part of acquisition rather than a separate sweep: a pod
+	// killed between acquiring and releasing leaves its rows behind, and
+	// the only moment anyone cares is when somebody else wants a slot.
+	// A background reaper would be a second moving part to schedule and
+	// monitor for a job that has a natural trigger.
+	AcquireScanSlots(req ScanSlotRequest) (ScanSlotResult, error)
+	// ReleaseScanSlots frees everything AcquireScanSlots took under this
+	// holder. Safe to call for a holder that has nothing (a scan
+	// rejected before it started, or slots already reaped), which is
+	// what lets callers release unconditionally on every path.
+	ReleaseScanSlots(holderID string) error
 	CountOlderThan(cutoff time.Time) (int, error)
 	DeleteOlderThan(cutoff time.Time, limit int) (int, error)
 }
@@ -240,6 +258,18 @@ type MemStore struct {
 	// endpoint, oldest first, capped at MaxComponentSnapshots. Mirrors
 	// PostgresStore's components_history table.
 	componentHistory map[string][]componentSnapshot
+	// scanSlots is the process-local equivalent of PostgresStore's
+	// scan_slots table, keyed by holder id. Process-local is the honest
+	// implementation for a store that is itself process-local: it gives
+	// every handler test exactly the cap semantics it had when this was
+	// a buffered channel, while leaving internal/api with a single code
+	// path instead of one per backend.
+	scanSlots map[string][]scanSlot
+}
+
+type scanSlot struct {
+	kind       string
+	acquiredAt time.Time
 }
 
 // componentSnapshot is one artifact's inventory as of one scan.
@@ -256,6 +286,7 @@ func NewMemStore() *MemStore {
 		documents:        make(map[string]map[string]*Document),
 		components:       make(map[string][]Component),
 		componentHistory: make(map[string][]componentSnapshot),
+		scanSlots:        make(map[string][]scanSlot),
 	}
 }
 
@@ -867,6 +898,83 @@ func (s *MemStore) Stats(_ context.Context) (Stats, error) {
 		}
 	}
 	return stats, nil
+}
+
+// AcquireScanSlots is the in-process equivalent of the SQL one -- same
+// semantics, same all-or-nothing, same reaping, no database. See the
+// Store interface.
+func (s *MemStore) AcquireScanSlots(req ScanSlotRequest) (ScanSlotResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Reap first, so an abandoned holder cannot keep a cap saturated
+	// forever -- exactly what the SQL version does inside its
+	// transaction.
+	if req.StaleAfter > 0 {
+		cutoff := time.Now().UTC().Add(-req.StaleAfter)
+		for holder, slots := range s.scanSlots {
+			kept := slots[:0]
+			for _, sl := range slots {
+				if sl.acquiredAt.After(cutoff) {
+					kept = append(kept, sl)
+				}
+			}
+			if len(kept) == 0 {
+				delete(s.scanSlots, holder)
+				continue
+			}
+			s.scanSlots[holder] = kept
+		}
+	}
+
+	held := make(map[string]int)
+	for _, slots := range s.scanSlots {
+		for _, sl := range slots {
+			held[sl.kind]++
+		}
+	}
+
+	// Check every kind BEFORE taking any, so a partial acquisition is
+	// never left behind on rejection.
+	wanted := dedupeKinds(req.Kinds)
+	for _, kind := range wanted {
+		capacity, limited := req.Caps[kind]
+		if !limited || capacity <= 0 {
+			continue
+		}
+		if held[kind] >= capacity {
+			return ScanSlotResult{BlockedKind: kind, BlockedCap: capacity}, nil
+		}
+	}
+
+	now := time.Now().UTC()
+	for _, kind := range wanted {
+		s.scanSlots[req.HolderID] = append(s.scanSlots[req.HolderID], scanSlot{kind: kind, acquiredAt: now})
+	}
+	return ScanSlotResult{Acquired: true}, nil
+}
+
+func (s *MemStore) ReleaseScanSlots(holderID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.scanSlots, holderID)
+	return nil
+}
+
+// dedupeKinds keeps the first occurrence of each kind, in order. Two
+// scanners of the same kind in one scan take ONE slot -- the cap counts
+// concurrent scans of a kind, not scanner instances.
+func dedupeKinds(kinds []string) []string {
+	seen := make(map[string]bool, len(kinds))
+	out := make([]string, 0, len(kinds))
+	for _, k := range kinds {
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	return out
 }
 
 func (s *MemStore) CountOlderThan(cutoff time.Time) (int, error) {

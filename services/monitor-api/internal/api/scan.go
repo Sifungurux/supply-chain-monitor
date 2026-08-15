@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -84,14 +85,20 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 	// any more, so either a slot is free or the caller is told to retry
 	// -- which keeps the in-flight set hard-bounded by SCAN_CONCURRENCY
 	// with no server-side backlog that a pod restart could silently drop.
-	release, ok := h.tryAcquireScanSlot()
-	if !ok {
+	release, slots, err := h.tryAcquireScanSlots(scanners)
+	if err != nil {
+		release()
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !slots.Acquired {
+		release()
 		w.Header().Set("Retry-After", strconv.Itoa(int(scanRetryAfter.Seconds())))
-		// Names the scan cap specifically: withRateLimit answers 429 too,
-		// and an operator reading a load-test log can't tell the two
-		// apart from the status code alone.
-		writeError(w, http.StatusTooManyRequests,
-			fmt.Sprintf("scan concurrency limit reached (%d scans already in flight) -- retry shortly", cap(h.scanSlots)))
+		// Names the cap that actually refused, not just "concurrency":
+		// withRateLimit answers 429 too, and an operator reading a
+		// load-test log needs to know whether to raise SCAN_CONCURRENCY
+		// or SCAN_CONCURRENCY_MALCONTENT.
+		writeError(w, http.StatusTooManyRequests, scanCapMessage(slots))
 		return
 	}
 
@@ -153,11 +160,7 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 	// connection used to mean an interrupted browser SIGKILLed whatever
 	// scanner was mid-run; now there is no connection to tie it to at
 	// all. scanTimeout is the only bound.
-	scanTimeout := h.scanTimeout
-	if scanTimeout <= 0 {
-		scanTimeout = defaultScanTimeout
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), scanTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), h.effectiveScanTimeout())
 	defer cancel()
 
 	// Every scanner registered for this artifact type runs concurrently,
@@ -550,6 +553,18 @@ func (h *handler) indexSBOMTypeComponents(ctx context.Context, a *artifact.Artif
 		return
 	}
 	h.indexSBOMComponents(a.ID, content)
+}
+
+// scanCapMessage names the cap that refused. The global cap is stored
+// under a pseudo-kind, so it needs translating back into the env var an
+// operator would actually reach for.
+func scanCapMessage(slots artifact.ScanSlotResult) string {
+	if slots.BlockedKind == artifact.GlobalScanSlotKind {
+		return fmt.Sprintf("scan concurrency limit reached (%d scans already in flight, SCAN_CONCURRENCY) -- retry shortly",
+			slots.BlockedCap)
+	}
+	return fmt.Sprintf("scan concurrency limit reached for %s (%d already in flight, SCAN_CONCURRENCY_%s) -- retry shortly",
+		slots.BlockedKind, slots.BlockedCap, strings.ToUpper(slots.BlockedKind))
 }
 
 // classifyBucket decides which of the five finding buckets (cve,

@@ -628,6 +628,27 @@ monitorApi:
   # PARALLELISM) should retry on 429. 0 disables the cap entirely, which
   # is the binary's own default when this isn't set.
   scanConcurrency: 8
+  # Per-scanner caps, so a memory-heavy tool can be throttled without
+  # throttling everything else. Unset inherits scanConcurrency, which is
+  # a no-op (a scan takes the global slot too, so an equal per-kind cap
+  # never binds first) and becomes meaningful the moment it is lowered.
+  # 0 means unlimited for that kind, the same as it means for
+  # scanConcurrency itself.
+  #
+  # malcontent is the reason this exists: it has OOMKilled at 2Gi-8Gi on
+  # ordinary language-runtime images (see README, "malcontent") where
+  # trivy on the same image is comfortable. Without per-kind caps the
+  # one global cap has to be set for malcontent's worst case, throttling
+  # every other scanner with it.
+  #
+  # These are CLUSTER-WIDE, not per replica: slots are rows in Postgres
+  # (scan_slots), so two monitor-api pods share one budget.
+  scanConcurrencyPerKind:
+    trivy: 0
+    grype: 0
+    clamav: 0
+    unpacker: 0
+    malcontent: 2
   # Maximum number of artifacts allowed to exist (MAX_ARTIFACTS).
   # 0 = unlimited, which is the default and the behaviour before this
   # existed.

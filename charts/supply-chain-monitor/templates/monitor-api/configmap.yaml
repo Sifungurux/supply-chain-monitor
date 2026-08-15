@@ -72,6 +72,13 @@ data:
   # simultaneous scan-worker Jobs from exhausting a node's disk between
   # them. See monitorApi.scanConcurrency's own comment in values.yaml.
   SCAN_CONCURRENCY: {{ .Values.monitorApi.scanConcurrency | quote }}
+  # Per-scanner caps -- see monitorApi.scanConcurrencyPerKind. Rendered
+  # only for kinds actually set, so an unset one inherits the global cap
+  # in main.go rather than being pinned to 0 here (which would mean
+  # unlimited and quietly defeat the point).
+  {{- range $kind, $limit := .Values.monitorApi.scanConcurrencyPerKind }}
+  SCAN_CONCURRENCY_{{ upper $kind }}: {{ $limit | quote }}
+  {{- end }}
   # Total artifacts allowed to exist; 0 = unlimited. See
   # monitorApi.maxArtifacts in values.yaml for why registration needed a
   # bound of its own.

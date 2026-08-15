@@ -586,9 +586,23 @@ a rebuild, so nothing else notices a new image is available.
 - Both fetch paths (`RegistryFetcher`, `UnpackerScanner`) assume
   unauthenticated, plain-HTTP access to the registry — no credentials
   wired up for a private or TLS-terminated registry.
-- The scan concurrency cap is per-process, not cluster-wide: two
-  monitor-api replicas would each allow `SCAN_CONCURRENCY` scans. Fine
-  today (the chart runs one replica), wrong the moment it doesn't.
+- Scan concurrency is now cluster-wide: slots are rows in a `scan_slots`
+  table rather than a buffered channel per process, so two monitor-api
+  replicas share one budget instead of each allowing a full
+  `SCAN_CONCURRENCY`. Acquisition takes a transaction-scoped advisory
+  lock per scanner kind before counting -- `INSERT ... SELECT WHERE
+  count < cap` does not serialize under READ COMMITTED, so without it
+  two racers both see a free slot and the cap is quietly exceeded under
+  exactly the load it exists to bound.
+
+  The new failure mode to know about: a pod killed mid-scan leaves its
+  slot rows behind. They are reaped by the next acquisition once they
+  are older than the scan timeout plus a margin -- above the timeout so
+  a slow-but-healthy scan never loses its slot, and below the sweep
+  CronJob's own 20-minute artifact reclamation so the reclaim's re-scan
+  can actually get a slot. Slots are not tied to artifacts by foreign
+  key for the same reason: deleting an artifact mid-scan must not free a
+  slot whose work is still running.
 - No TLS on the Gateway.
 - The dashboard's search box only searches the page currently loaded
   (server-side `status`/`type` filters narrow the whole set instead).

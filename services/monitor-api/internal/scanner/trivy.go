@@ -351,3 +351,7 @@ func cleanScanCache() {
 			"scanner", "trivy", "output", string(out), "err", err)
 	}
 }
+
+// Kind implements ScanKind: this scanner is capped independently of
+// the global scan cap via SCAN_CONCURRENCY_TRIVY.
+func (s *TrivyScanner) Kind() string { return "trivy" }

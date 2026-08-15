@@ -12,6 +12,38 @@ type Scanner interface {
 	Scan(ctx context.Context, ref string) ([]artifact.Finding, error)
 }
 
+// ScanKind is an optional interface a Scanner can implement to name
+// itself, so concurrent scans of that kind can be capped independently
+// of the global one (SCAN_CONCURRENCY_MALCONTENT and friends -- see
+// internal/api's scanArtifact and artifact.ScanSlotRequest).
+//
+// It exists because the memory cost of a scan is a property of the
+// TOOL, not of the artifact: malcontent has OOMKilled repeatedly at
+// 2-8Gi on ordinary language-runtime images (see README, "malcontent"),
+// while trivy on the same image is comfortable in a fraction of that.
+// One global cap has to be set for the worst case, which throttles
+// everything else for no reason.
+//
+// A scanner that does NOT implement this is counted only against the
+// global cap, which is exactly how every scanner behaved before this
+// existed.
+type ScanKind interface {
+	// Kind is a short, stable name -- "trivy", "malcontent". It is the
+	// suffix of the SCAN_CONCURRENCY_<KIND> env var (uppercased) and
+	// the scanner_kind stored per slot, so renaming one silently
+	// retires whatever cap an operator had configured.
+	Kind() string
+}
+
+// KindOf returns a scanner's declared kind, or "" when it declares
+// none.
+func KindOf(s Scanner) string {
+	if k, ok := s.(ScanKind); ok {
+		return k.Kind()
+	}
+	return ""
+}
+
 // BucketAffinity is an optional interface a Scanner can implement to
 // declare that it only ever produces findings for one specific bucket
 // ("cve", "malware", "misconfiguration", "secret", or "other" -- the

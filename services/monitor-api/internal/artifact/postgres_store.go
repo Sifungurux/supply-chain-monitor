@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -263,6 +264,33 @@ var schemaStatements = []string{
 	// on a table that does not exist yet -- which on a fresh database
 	// is every one above its own CREATE.
 	`ALTER TABLE components_history ADD COLUMN IF NOT EXISTS licenses TEXT NOT NULL DEFAULT ''`,
+	// Cluster-wide scan concurrency. One row per held slot; the cap is
+	// enforced by counting rows inside AcquireScanSlots' transaction.
+	//
+	// A table rather than a session-scoped advisory lock per slot,
+	// because a slot has to outlive the connection that took it: a scan
+	// runs for minutes in a background goroutine while the pool
+	// recycles connections underneath it, and a session-scoped lock
+	// would be released the moment its connection went back to the
+	// pool. Rows survive that; the trade is that a pod killed
+	// mid-scan leaves its rows behind, which is what the reaping in
+	// AcquireScanSlots exists to clean up.
+	//
+	// Deliberately NOT referencing artifacts(id): a slot is held by a
+	// scan, not by an artifact, and cascading a slot away when its
+	// artifact is deleted mid-scan would free a slot whose work is
+	// still running -- letting one more scan start than the cap allows,
+	// which is the single thing this table exists to prevent.
+	`CREATE TABLE IF NOT EXISTS scan_slots (
+		id          BIGSERIAL PRIMARY KEY,
+		holder_id   TEXT NOT NULL,
+		scanner_kind TEXT NOT NULL,
+		acquired_at TIMESTAMPTZ NOT NULL
+	)`,
+	// Both reads are "how many of this kind are held" and "free this
+	// holder"; both are served here.
+	`CREATE INDEX IF NOT EXISTS scan_slots_kind_idx ON scan_slots (scanner_kind)`,
+	`CREATE INDEX IF NOT EXISTS scan_slots_holder_idx ON scan_slots (holder_id)`,
 }
 
 const selectArtifactColumns = `SELECT id, ref, digest, type, status, current_stage, created_at, updated_at, last_scan_at, maintainer_team, maintainer_email, last_scan_failure_reason FROM artifacts`
@@ -1295,6 +1323,112 @@ func (s *PostgresStore) Stats(ctx context.Context) (Stats, error) {
 		return Stats{}, fmt.Errorf("stats: group findings: %w", err)
 	}
 	return stats, nil
+}
+
+// AcquireScanSlots takes one slot per kind, all or nothing, bounded
+// across every replica. See the Store interface for what it is for.
+//
+// THE ADVISORY LOCK IS THE CORRECTNESS CORE, not an optimisation. The
+// obvious implementation -- INSERT ... SELECT WHERE (SELECT count(*)
+// ...) < cap -- does NOT serialize under READ COMMITTED, which is
+// Postgres's default and this pool's. Two transactions racing for the
+// last slot each evaluate the count against their own snapshot, neither
+// sees the other's uncommitted row, both find count = cap-1, and both
+// insert. The cap is quietly exceeded, most often under exactly the
+// concurrent load it exists to bound, and nothing errors.
+//
+// pg_advisory_xact_lock serializes acquisition per kind, so the count
+// inside the lock is trustworthy. Transaction-scoped: it releases on
+// commit OR rollback with nothing to remember, unlike a session lock.
+// SERIALIZABLE isolation would also work and would push
+// serialization-failure retries onto every caller instead.
+//
+// The lock is keyed by hashing the kind, so two different kinds never
+// block each other -- a saturated malcontent cap must not slow trivy
+// acquisition down.
+func (s *PostgresStore) AcquireScanSlots(req ScanSlotRequest) (ScanSlotResult, error) {
+	kinds := dedupeKinds(req.Kinds)
+	if len(kinds) == 0 {
+		return ScanSlotResult{Acquired: true}, nil
+	}
+	// Sorted so two concurrent acquirers take the per-kind locks in the
+	// same order -- taking them in caller-supplied order is a deadlock
+	// waiting for two scans whose kind lists overlap in opposite order.
+	sorted := append([]string(nil), kinds...)
+	sort.Strings(sorted)
+
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ScanSlotResult{}, fmt.Errorf("acquire scan slots: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op once Commit has succeeded
+
+	for _, kind := range sorted {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, scanSlotLockKey+kind); err != nil {
+			return ScanSlotResult{}, fmt.Errorf("lock scan slot kind %q: %w", kind, err)
+		}
+	}
+
+	// Reap abandoned slots before counting, so a pod killed mid-scan
+	// cannot hold a cap saturated forever. Inside the same transaction
+	// and the same locks, so the count below sees the post-reap state.
+	if req.StaleAfter > 0 {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM scan_slots WHERE acquired_at < $1`,
+			time.Now().UTC().Add(-req.StaleAfter)); err != nil {
+			return ScanSlotResult{}, fmt.Errorf("reap stale scan slots: %w", err)
+		}
+	}
+
+	// Check every kind before taking any, so a rejection never leaves a
+	// partial acquisition behind.
+	for _, kind := range sorted {
+		capacity, limited := req.Caps[kind]
+		if !limited || capacity <= 0 {
+			continue
+		}
+		var held int
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM scan_slots WHERE scanner_kind = $1`, kind).Scan(&held); err != nil {
+			return ScanSlotResult{}, fmt.Errorf("count scan slots for %q: %w", kind, err)
+		}
+		if held >= capacity {
+			// Commit rather than roll back: the reap above is real work
+			// worth keeping even though this acquisition failed.
+			if err := tx.Commit(ctx); err != nil {
+				return ScanSlotResult{}, fmt.Errorf("acquire scan slots: %w", err)
+			}
+			return ScanSlotResult{BlockedKind: kind, BlockedCap: capacity}, nil
+		}
+	}
+
+	now := time.Now().UTC()
+	for _, kind := range kinds {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO scan_slots (holder_id, scanner_kind, acquired_at) VALUES ($1, $2, $3)`,
+			req.HolderID, kind, now); err != nil {
+			return ScanSlotResult{}, fmt.Errorf("take scan slot %q: %w", kind, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ScanSlotResult{}, fmt.Errorf("acquire scan slots: %w", err)
+	}
+	return ScanSlotResult{Acquired: true}, nil
+}
+
+// scanSlotLockKey namespaces the advisory lock ids so they cannot
+// collide with any other advisory lock this database might grow.
+const scanSlotLockKey = "scm-scan-slot:"
+
+// ReleaseScanSlots frees a holder's slots. A holder with none is not an
+// error -- see the Store interface.
+func (s *PostgresStore) ReleaseScanSlots(holderID string) error {
+	if _, err := s.pool.Exec(context.Background(),
+		`DELETE FROM scan_slots WHERE holder_id = $1`, holderID); err != nil {
+		return fmt.Errorf("release scan slots for %q: %w", holderID, err)
+	}
+	return nil
 }
 
 // CountOlderThan answers the dry run: how many artifacts have not been

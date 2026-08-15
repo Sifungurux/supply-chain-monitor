@@ -279,3 +279,8 @@ func (s *IsolatedGrypeScanner) Scan(ctx context.Context, ref string) ([]artifact
 func (s *IsolatedGrypeScanner) waitForCompletion(ctx context.Context, name string) error {
 	return waitForJob(ctx, s.client, name, "grype scan job", s.cfg.PollInterval)
 }
+
+// Kind implements ScanKind. Same kind as the in-process grype scanner:
+// the cap bounds concurrent runs of the TOOL, and whether it runs in a
+// Job or in this process does not change what it costs to run.
+func (s *IsolatedGrypeScanner) Kind() string { return "grype" }

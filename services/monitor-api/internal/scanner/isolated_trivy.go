@@ -345,3 +345,8 @@ func (s *IsolatedTrivyScanner) ScanForArtifact(ctx context.Context, ref, artifac
 func (s *IsolatedTrivyScanner) waitForCompletion(ctx context.Context, name string) error {
 	return waitForJob(ctx, s.client, name, "trivy scan job", s.cfg.PollInterval)
 }
+
+// Kind implements ScanKind. Same kind as the in-process trivy scanner:
+// the cap bounds concurrent runs of the TOOL, and whether it runs in a
+// Job or in this process does not change what it costs to run.
+func (s *IsolatedTrivyScanner) Kind() string { return "trivy" }

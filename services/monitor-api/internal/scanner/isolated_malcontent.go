@@ -259,3 +259,8 @@ func boolEnv(b bool) string {
 	}
 	return "false"
 }
+
+// Kind implements ScanKind. Same kind as the in-process malcontent scanner:
+// the cap bounds concurrent runs of the TOOL, and whether it runs in a
+// Job or in this process does not change what it costs to run.
+func (s *IsolatedMalcontentScanner) Kind() string { return "malcontent" }

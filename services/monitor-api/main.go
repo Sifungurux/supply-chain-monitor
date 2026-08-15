@@ -1003,6 +1003,45 @@ func buildImageScanners(disableScanIsolation bool, cveScanner, malwareScanner st
 // DISABLE_SCAN_ISOLATION. Split out for the same reason
 // buildImageScanners is: unit-testable (main_test.go) without needing
 // a real Kubernetes API client.
+// scanKinds is every scanner kind that can be capped independently --
+// the suffixes SCAN_CONCURRENCY_<KIND> accepts. Enumerated rather than
+// discovered from the registry so an unset variable can still be
+// reported at startup, and so a typo in one is a variable that visibly
+// does nothing rather than a silently-ignored setting.
+var scanKinds = []string{"trivy", "grype", "clamav", "unpacker", "malcontent"}
+
+// readPerKindScanCaps reads SCAN_CONCURRENCY_TRIVY,
+// SCAN_CONCURRENCY_MALCONTENT and friends.
+//
+// UNSET inherits the global SCAN_CONCURRENCY, which is a no-op in
+// practice (a scan takes the global slot too, so an equal per-kind cap
+// never binds first) and becomes meaningful the moment it is lowered.
+// That is the point: the memory cost of a scan belongs to the tool, and
+// malcontent has OOMKilled at 2-8Gi on ordinary language-runtime images
+// where trivy on the same image is comfortable -- so without this, the
+// one global cap has to be set for malcontent's worst case and
+// throttles every other scanner with it.
+//
+// An explicit 0 or negative means UNLIMITED for that kind, matching
+// what the same value means for SCAN_CONCURRENCY itself. So
+// SCAN_CONCURRENCY=8 with SCAN_CONCURRENCY_TRIVY=0 is "eight scans at
+// once, and trivy is never the reason one is refused".
+func readPerKindScanCaps(global int) map[string]int {
+	caps := make(map[string]int, len(scanKinds))
+	for _, kind := range scanKinds {
+		env := "SCAN_CONCURRENCY_" + strings.ToUpper(kind)
+		value := getenvInt(env, global)
+		if value <= 0 {
+			continue
+		}
+		caps[kind] = value
+		if value != global {
+			log.Printf("%s scans capped at %d concurrently (%s)", kind, value, env)
+		}
+	}
+	return caps
+}
+
 func buildSBOMScanners(disableScanIsolation bool, cveScanner string, trivyInProcess, trivyIsolated, grypeInProcess, grypeIsolated scanner.Scanner) []scanner.Scanner {
 	if disableScanIsolation {
 		return cveScannersFor(cveScanner, trivyInProcess, grypeInProcess)
@@ -1506,6 +1545,7 @@ func runAPIServer() {
 	// SCAN_TIMEOUT/ACTIVE_DEADLINE pair above, no other setting can
 	// contradict it.
 	scanConcurrency := getenvInt("SCAN_CONCURRENCY", 0)
+	perKindConcurrency := readPerKindScanCaps(scanConcurrency)
 	if scanConcurrency > 0 {
 		log.Printf("scan concurrency capped at %d concurrent scans (SCAN_CONCURRENCY)", scanConcurrency)
 	}
@@ -1570,7 +1610,7 @@ func runAPIServer() {
 		FetchPlainHTTP: fetchPlainHTTP,
 		ScanTimeout:    scanTimeout,
 		RequireDigest:  requireDigest,
-		ScanLimits:     api.ScanLimits{Concurrency: scanConcurrency},
+		ScanLimits:     api.ScanLimits{Concurrency: scanConcurrency, PerKind: perKindConcurrency},
 		Notifications:  api.Notifications{Notifiers: notifiers, MinSeverity: notifyMinSeverity, NotifyOnFirstScan: !suppressFirstScan},
 		RegLimits:      api.RegistrationLimits{MaxArtifacts: maxArtifacts},
 		// What GET /readyz actually checks. This is the only place a

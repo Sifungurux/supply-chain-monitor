@@ -290,3 +290,7 @@ func truncateForError(s string) string {
 	}
 	return s
 }
+
+// Kind implements ScanKind: this scanner is capped independently of
+// the global scan cap via SCAN_CONCURRENCY_MALCONTENT.
+func (s *MalcontentScanner) Kind() string { return "malcontent" }

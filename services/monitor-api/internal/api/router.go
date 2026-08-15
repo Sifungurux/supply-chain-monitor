@@ -101,9 +101,7 @@ type Config struct {
 func NewRouter(cfg Config) http.Handler {
 	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher, licenseDenylist: cfg.LicenseDenylist}
 	h.metrics = newMetrics()
-	if cfg.ScanLimits.Concurrency > 0 {
-		h.scanSlots = make(chan struct{}, cfg.ScanLimits.Concurrency)
-	}
+	h.scanCaps = cfg.ScanLimits.caps()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.healthz)

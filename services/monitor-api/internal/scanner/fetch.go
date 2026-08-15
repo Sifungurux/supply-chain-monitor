@@ -187,6 +187,19 @@ func (f *FetchingScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 // implement BucketAffinity at all, which is exactly what
 // FetchingScanner wraps SARIFScanner as today: no false claim either
 // way, just an honest "don't know."
+// Kind forwards the wrapped scanner's own ScanKind, for exactly the
+// reason Bucket below forwards BucketAffinity: this wrapper is what
+// file/sbom/sarif scanners are registered as, so without forwarding,
+// every one of them would report no kind and be counted only against
+// the global cap -- silently escaping whatever per-kind cap an operator
+// configured for the tool inside.
+func (f *FetchingScanner) Kind() string {
+	if k, ok := f.inner.(ScanKind); ok {
+		return k.Kind()
+	}
+	return ""
+}
+
 func (f *FetchingScanner) Bucket() string {
 	if ba, ok := f.inner.(BucketAffinity); ok {
 		return ba.Bucket()
