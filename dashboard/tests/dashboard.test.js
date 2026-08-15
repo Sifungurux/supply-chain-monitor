@@ -2270,3 +2270,77 @@ test('the component picker shows licenses when a package has them', async () => 
 
   dom.window.close();
 });
+
+// A 404 from the diff endpoint is ambiguous and the two meanings have
+// opposite fixes, so the section has to tell them apart rather than
+// showing one red error for both.
+function sbomChangesText(fetchDiffImpl) {
+  return buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (url.includes('/components/diff')) return fetchDiffImpl();
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, { error: 'not found' });
+    }
+  });
+}
+
+// The failure seen in a real deployment: the dashboard ships as a
+// ConfigMap straight from git while the API ships as an image tag, so a
+// merge can put this section in front of a binary that predates the
+// endpoint. Go's ServeMux answers an unknown route with PLAIN TEXT, so
+// there is no JSON error body -- that absence is what identifies it.
+test('SBOM changes reports a version skew when the API has no such route', async () => {
+  const dom = sbomChangesText(() => Promise.resolve({
+    ok: false,
+    status: 404,
+    statusText: 'Not Found',
+    // No JSON body -- exactly what Go's ServeMux returns.
+    json: () => Promise.reject(new Error('not json'))
+  }));
+  await tick(20);
+  const doc = dom.window.document;
+  doc.querySelector('button[data-action="toggle"][data-id="a1"]').click();
+  await tick(20);
+
+  const text = doc.getElementById('sbom-changes').textContent;
+  assert.match(text, /needs a newer monitor-api/);
+  // Not presented as a failure of the artifact or the page.
+  assert.doesNotMatch(text, /Could not load/);
+  assert.equal(doc.getElementById('status').className, '');
+
+  dom.window.close();
+});
+
+// The other 404: the endpoint exists and says the artifact does not.
+test('SBOM changes reports a deleted artifact distinctly from a version skew', async () => {
+  const dom = sbomChangesText(() => errorResponse(404, { error: 'artifact "a1" not found' }));
+  await tick(20);
+  const doc = dom.window.document;
+  doc.querySelector('button[data-action="toggle"][data-id="a1"]').click();
+  await tick(20);
+
+  const text = doc.getElementById('sbom-changes').textContent;
+  assert.match(text, /no longer exists/);
+  assert.doesNotMatch(text, /newer monitor-api/);
+
+  dom.window.close();
+});
+
+// Anything else still surfaces its message -- a 500 is a real problem
+// and must not be dressed up as a missing feature.
+test('SBOM changes still reports non-404 failures as errors', async () => {
+  const dom = sbomChangesText(() => errorResponse(500, { error: 'boom' }));
+  await tick(20);
+  const doc = dom.window.document;
+  doc.querySelector('button[data-action="toggle"][data-id="a1"]').click();
+  await tick(20);
+
+  const text = doc.getElementById('sbom-changes').textContent;
+  assert.match(text, /Could not load SBOM changes/);
+  assert.match(text, /boom/);
+
+  dom.window.close();
+});

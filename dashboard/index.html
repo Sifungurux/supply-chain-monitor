@@ -816,7 +816,16 @@
         throw new Error('Unauthorized — check the API key above');
       }
       var msg = (body && body.error) ? body.error : (res.status + ' ' + res.statusText);
-      throw new Error(msg);
+      var err = new Error(msg);
+      // Carried so a caller can tell WHICH failure it got rather than
+      // pattern-matching the message. apiError distinguishes a response
+      // this service produced (JSON, with an "error" field) from one the
+      // Go ServeMux produced for a route it does not have (plain text)
+      // -- indistinguishable by status alone, and the two have
+      // completely different fixes. See loadComponentDiff.
+      err.status = res.status;
+      err.apiError = !!(body && body.error);
+      throw err;
     }
     return body;
   }
@@ -1449,8 +1458,34 @@
       el.className = '';
     } catch (err) {
       el.className = 'muted';
-      el.textContent = 'Could not load SBOM changes — ' + err.message;
+      el.textContent = sbomChangesError(err);
     }
+  }
+
+  // sbomChangesError turns a failed diff request into something a
+  // reader can act on.
+  //
+  // A 404 here is ambiguous and the two meanings have opposite fixes:
+  //
+  //   - No JSON error body: this monitor-api does not have the route at
+  //     all, so Go's ServeMux answered with plain text. That is a
+  //     VERSION SKEW, not a broken artifact -- the dashboard ships as a
+  //     ConfigMap straight from git while the API ships as an image
+  //     tag, so a merge can put this section in front of a binary that
+  //     predates the endpoint it calls. It has happened.
+  //   - A JSON error body: the endpoint exists and is saying this
+  //     artifact does not, which in practice means it was deleted in
+  //     another tab while this page was open.
+  //
+  // Neither is worth a red error. The rest of the detail page is fine
+  // and this is one section of it that has nothing to show.
+  function sbomChangesError(err) {
+    if (err && err.status === 404) {
+      return err.apiError
+        ? 'This artifact no longer exists.'
+        : 'SBOM change history needs a newer monitor-api than this deployment is running.';
+    }
+    return 'Could not load SBOM changes — ' + (err && err.message ? err.message : 'request failed');
   }
 
   // pipelineTracker reuses the .stage-pill look from the "Pipeline
