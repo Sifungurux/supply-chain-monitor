@@ -14,6 +14,21 @@ spec:
   parentRefs:
     - name: scm-gateway
       sectionName: http
+{{- if .Values.gateway.tls.enabled }}
+    # ATTACHES TO THE https LISTENER TOO, and it has to be said
+    # explicitly. sectionName pins a route to ONE named listener, so the
+    # http entry above does not cover https -- the TLS handshake
+    # completes, Traefik finds no route attached to that listener, and
+    # every HTTPS request returns 404 from its default handler.
+    #
+    # That is the same silent-404 failure mode gateway.yaml documents
+    # for the listener port, arriving by a different road: nothing
+    # errors, the Gateway reports both listeners programmed, both
+    # Certificates report Ready, and the chart looks entirely healthy.
+    # Caught only by actually completing a request over HTTPS.
+    - name: scm-gateway
+      sectionName: https
+{{- end }}
   rules:
     - matches:
         - path:
