@@ -210,6 +210,11 @@ spec:
               mountPath: /ca
               readOnly: true
 {{- end }}
+{{- if and .Values.postgres.tls.enabled .Values.postgres.tls.verify }}
+            - name: postgres-ca
+              mountPath: /postgres-ca
+              readOnly: true
+{{- end }}
             # readOnlyRootFilesystem needs a writable /tmp: monitor-api
             # is NOT write-free the way "all persistence goes through
             # Postgres" suggests. main.go's writeDockerConfig does
@@ -237,6 +242,19 @@ spec:
             items:
               - key: ca.crt
                 path: scm-ca.crt
+{{- end }}
+{{- if and .Values.postgres.tls.enabled .Values.postgres.tls.verify }}
+        # Separate from registry-ca even though it is the same CA
+        # today. That mount is gated on registry.tls.enabled, and
+        # hanging the database path off an unrelated feature flag is
+        # how someone turns off registry TLS and takes monitor-api's
+        # connection pool down with it.
+        - name: postgres-ca
+          secret:
+            secretName: scm-ca-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
 {{- end }}
         - name: scratch
           emptyDir: {}

@@ -86,7 +86,9 @@ if [ -n "$KEYFILE" ]; then
 	echo "private key lent to the cluster for this restore -- it is deleted when this script exits."
 fi
 
-sed "s|__BACKUP_FILE__|${BACKUP}|g" "$DIR/postgres-restore-job.template.yaml" | kubectl -n "$NAMESPACE" apply -f -
+sed -e "s|__BACKUP_FILE__|${BACKUP}|g" \
+	-e "s|__PGSSLMODE__|${PGSSLMODE:-require}|g" \
+	"$DIR/postgres-restore-job.template.yaml" | kubectl -n "$NAMESPACE" apply -f -
 kubectl -n "$NAMESPACE" wait --for=condition=complete --timeout=120s job/scm-postgres-restore || {
 	echo "restore job did not complete -- logs:" >&2
 	kubectl -n "$NAMESPACE" logs job/scm-postgres-restore || true

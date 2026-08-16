@@ -42,10 +42,75 @@ spec:
       # 0700 into 0770, and postgres refuses to start on anything other
       # than 0700 or 0750 ("data directory has invalid permissions").
       # fsGroup is for volumes the runAsUser does not already own.
+{{- if .Values.postgres.tls.enabled }}
+      # Copies the server certificate somewhere postgres will accept it.
+      #
+      # Postgres REFUSES to start if the key file is readable by group
+      # or world -- it wants 0600 owned by the server user (or 0640
+      # owned by root). A Secret volume gives 0644 root:root, which it
+      # rejects.
+      #
+      # The usual fix is a pod-level fsGroup, and that is exactly what
+      # this pod must not have: see the comment above: fsGroup is
+      # applied recursively and turns PGDATA's 0700 into 0770, which
+      # postgres also refuses ("data directory has invalid
+      # permissions"). It is not selectable per volume. So the key is
+      # copied to an emptyDir instead, where this initContainer -- uid
+      # 26, the same user postgres runs as -- owns what it writes and
+      # can chmod it.
+      initContainers:
+        - name: copy-tls
+          image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              cp /tls-src/tls.crt /tls/tls.crt
+              cp /tls-src/tls.key /tls/tls.key
+              chmod 600 /tls/tls.key
+              chmod 644 /tls/tls.crt
+              # Printed because it is the single thing that decides
+              # whether postgres starts, and "CrashLoopBackOff" does
+              # not say "your key file is group-readable".
+              ls -l /tls
+          volumeMounts:
+            - name: tls-src
+              mountPath: /tls-src
+              readOnly: true
+            - name: tls
+              mountPath: /tls
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+{{- end }}
       containers:
         - name: postgres
           image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
           imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+{{- if .Values.postgres.tls.enabled }}
+          # Replaces the image's Cmd (["postgres"]), so "postgres" has
+          # to be repeated here -- the entrypoint execs whatever it is
+          # given. Verified against this exact image before it was
+          # wired up: `show ssl` returns on and a client connecting
+          # with sslmode=require negotiates TLSv1.3.
+          args:
+            - postgres
+            - -c
+            - ssl=on
+            - -c
+            - ssl_cert_file=/tls/tls.crt
+            - -c
+            - ssl_key_file=/tls/tls.key
+{{- end }}
           ports:
             - containerPort: 5432
           envFrom:
@@ -62,6 +127,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+            {{- if .Values.postgres.tls.enabled }}
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            {{- end }}
           readinessProbe:
             exec:
               command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
@@ -82,3 +152,17 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: scm-postgres-data
+        {{- if .Values.postgres.tls.enabled }}
+        - name: tls-src
+          secret:
+            secretName: scm-postgres-tls
+            # Explicit, not inherited. The initContainer runs as uid 26
+            # and has to READ this; a later "harden the secret mount"
+            # reflex setting 0600 here would make it unreadable and
+            # break startup at a layer nobody thinks to look at. World-
+            # readable inside this pod's own filesystem is not a
+            # weakening -- the copy it makes is 0600.
+            defaultMode: 0444
+        - name: tls
+          emptyDir: {}
+        {{- end }}

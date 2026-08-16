@@ -1,4 +1,4 @@
-{{- $caNeeded := or .Values.gateway.tls.enabled .Values.registry.tls.enabled }}
+{{- $caNeeded := or .Values.gateway.tls.enabled .Values.registry.tls.enabled .Values.postgres.tls.enabled }}
 {{- if $caNeeded }}
 # TLS for the Gateway, issued by cert-manager
 # (k8s/releases/cert-manager-helmrelease.yaml).
@@ -151,6 +151,39 @@ spec:
     - "scm-docker-auth"
     - {{ printf "scm-docker-auth.%s.svc" .Release.Namespace | quote }}
     - {{ printf "scm-docker-auth.%s.svc.cluster.local" .Release.Namespace | quote }}
+  issuerRef:
+    name: scm-ca-issuer
+    kind: Issuer
+    group: cert-manager.io
+{{- end }}
+{{- if .Values.postgres.tls.enabled }}
+---
+# Postgres's server certificate.
+#
+# EVERY DNS FORM OF THE SERVICE NAME, even though the default
+# sslmode=require checks none of them. The cost is nothing today, and
+# it is what makes postgres.tls.verify a one-value change later
+# instead of a certificate reissue discovered during an outage --
+# monitor-api uses the fully-qualified form, while pg_isready and the
+# backup/restore Jobs use whatever they were handed.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: scm-postgres-tls
+  namespace: {{ .Release.Namespace }}
+spec:
+  secretName: scm-postgres-tls
+  duration: {{ .Values.gateway.tls.duration | quote }}
+  renewBefore: {{ .Values.gateway.tls.renewBefore | quote }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  dnsNames:
+    - scm-postgres
+    - {{ printf "scm-postgres.%s" .Release.Namespace | quote }}
+    - {{ printf "scm-postgres.%s.svc" .Release.Namespace | quote }}
+    - {{ printf "scm-postgres.%s.svc.cluster.local" .Release.Namespace | quote }}
   issuerRef:
     name: scm-ca-issuer
     kind: Issuer

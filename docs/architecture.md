@@ -546,6 +546,22 @@ a rebuild, so nothing else notices a new image is available.
 
 ## Operational jobs
 
+- **Postgres TLS** — the database serves TLS with a certificate from
+  the same private CA as the Gateway and registry
+  (`postgres.tls.enabled`, on by default). The key cannot come
+  straight from a Secret mount: postgres refuses a group-readable key
+  file, and the usual fix — a pod-level `fsGroup` — is the one thing
+  this pod cannot have, because it applies recursively and turns
+  PGDATA's `0700` into `0770`, which postgres also refuses. An
+  initContainer running as the same uid copies the pair to an
+  `emptyDir` and chmods the key to `0600`. monitor-api's `sslmode` is
+  *derived* from this setting rather than configured separately, so
+  the server and client cannot disagree — a server serving TLS while
+  clients connect in cleartext is a failure with no runtime symptom.
+  Default `require` (encrypted, certificate unchecked);
+  `postgres.tls.verify` gives `verify-full`, which additionally needs
+  the CA mounted and is a hard startup failure if the SAN or mount is
+  wrong, which is why it is not the default.
 - **Postgres backups** — a daily (`0 2 * * *`) `CronJob` runs
   `pg_dump | gzip` into a separate PVC (`scm-postgres-backups`),
   keeping the newest `KEEP_BACKUPS` (default 7). On-demand backup,

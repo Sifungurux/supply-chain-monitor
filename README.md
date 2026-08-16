@@ -2604,6 +2604,49 @@ day, on the default schedule). See docs/architecture.md ("Postgres
 backups") for the full design and why WAL-based PITR isn't part of
 this yet.
 
+#### Postgres over TLS
+
+The database serves TLS by default (`postgres.tls.enabled`), with a
+certificate from the same private CA as the Gateway and registry. Without
+it, the database password and every row that crosses the pod network —
+artifacts, findings, SBOM documents, API-key hashes — travel in
+cleartext. `NetworkPolicy` limits *who* can connect; it does nothing
+about what a passive observer on the path can read.
+
+monitor-api's `sslmode` is **derived** from that setting, not configured
+separately:
+
+| `postgres.tls.enabled` | `postgres.tls.verify` | `POSTGRES_SSLMODE` |
+|---|---|---|
+| `true` (default) | `false` (default) | `require` |
+| `true` | `true` | `verify-full` |
+| `false` | — | `disable` |
+
+Deriving it is the point. A server serving TLS while clients connect with
+`sslmode=disable` is a failure with **no runtime symptom** — both sides
+healthy, certificate renewing on schedule, every connection in cleartext.
+`make helm-template` fails if the two halves disagree.
+
+`require` encrypts but doesn't check the server's certificate, so it
+stops passive eavesdropping and not an active in-path attacker.
+`verify-full` closes that, and is opt-in because it turns a missing CA
+mount or a certificate whose SAN doesn't match the DSN host into
+monitor-api being unable to open its pool at all — a hard outage on the
+database path rather than a degraded one. The certificate already carries
+every DNS form of the service name, so it's a one-value change.
+
+To check it's actually on — that the *connection* is encrypted, not just
+that the server offers it:
+
+```bash
+kubectl -n supply-chain-monitor exec deploy/scm-postgres -- sh -c \
+  'PGPASSWORD=$POSTGRES_PASSWORD psql -U $POSTGRES_USER -d $POSTGRES_DB -c \
+   "SELECT usename, ssl, version FROM pg_stat_ssl JOIN pg_stat_activity USING (pid) WHERE ssl"'
+```
+
+To turn it off (e.g. a cluster with no cert-manager), set
+`postgres.tls.enabled: false` — `sslmode` follows automatically.
+
 #### Encrypting backups
 
 Backups are plaintext `.sql.gz` by default. That's defensible while
@@ -2940,13 +2983,15 @@ make cluster-destroy    # stops AND deletes the VM/machine + its data
 ## Known limitations
 
 See `docs/architecture.md`'s "Known limitations" for the
-actively-maintained list of what's genuinely still open today (single
-shared API key with no rotation window, plaintext default secrets in
-`values.yaml`, no TLS on the Gateway, no `NetworkPolicy` on scan-worker
-pods, coarser fix-detection for SARIF/pluggable scanners, the untested
-`modelscan` prototype) — kept in one place rather than duplicated here,
-where a previous version of this list drifted out of sync with reality
-(see `docs/tech-debt-audit.md`, #11).
+actively-maintained list of what's genuinely still open today — kept in
+one place rather than duplicated here, where a previous version of this
+list drifted out of sync with reality (see `docs/tech-debt-audit.md`,
+#11).
+
+The summary that used to sit here is deliberately gone rather than
+updated: it had drifted again, still listing "no TLS on the Gateway"
+and "single shared API key" after both had shipped. A summary of a
+list that says it must not be duplicated is a duplicate.
 
 A few more specific to running this repo day to day, not covered there:
 
