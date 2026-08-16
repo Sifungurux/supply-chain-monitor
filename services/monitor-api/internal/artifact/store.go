@@ -226,6 +226,19 @@ type Store interface {
 	// rejected before it started, or slots already reaped), which is
 	// what lets callers release unconditionally on every path.
 	ReleaseScanSlots(holderID string) error
+
+	// CreateScanToken/ConsumeScanToken/DeleteScanTokens back the
+	// per-Job upload credential that replaced handing scan workers the
+	// master API key (report S3). Only the SHA-256 of a token is ever
+	// stored.
+	//
+	// ConsumeScanToken is scoped to one artifact and one document kind,
+	// and each kind is usable once -- so a compromised worker can
+	// upload one SBOM and one SARIF for the artifact it was already
+	// scanning, and nothing else.
+	CreateScanToken(artifactID, tokenHash string, expiresAt time.Time) error
+	ConsumeScanToken(tokenHash, artifactID, kind string) (bool, error)
+	DeleteScanTokens(artifactID string) error
 	// CountStaleScans returns how many artifacts were last scanned
 	// BEFORE cutoff -- the "not scanned recently" number behind the
 	// dashboard's staleness warning.
@@ -261,8 +274,9 @@ type Store interface {
 const MaxComponentSnapshots = 10
 
 type MemStore struct {
-	mu   sync.RWMutex
-	data map[string]*Artifact
+	scanTokens map[string]*scanToken
+	mu         sync.RWMutex
+	data       map[string]*Artifact
 	// documents is keyed by artifact ID then kind (DocumentKindSBOM/
 	// DocumentKindSARIF) -- a plain nested map is enough here since
 	// MemStore only ever backs tests, never production (see the type's
@@ -1097,4 +1111,47 @@ func (s *MemStore) FindByDigest(digest string) (*Artifact, error) {
 		}
 	}
 	return copyArtifact(match), nil
+}
+
+// scanToken is MemStore's in-memory equivalent of a scan_tokens row.
+type scanToken struct {
+	artifactID string
+	expiresAt  time.Time
+	usedKinds  map[string]bool
+}
+
+func (s *MemStore) CreateScanToken(artifactID, tokenHash string, expiresAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.scanTokens == nil {
+		s.scanTokens = make(map[string]*scanToken)
+	}
+	s.scanTokens[tokenHash] = &scanToken{artifactID: artifactID, expiresAt: expiresAt, usedKinds: map[string]bool{}}
+	return nil
+}
+
+func (s *MemStore) ConsumeScanToken(tokenHash, artifactID, kind string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.scanTokens[tokenHash]
+	// Every rejection returns the same (false, nil): unknown token,
+	// wrong artifact, expired, or this kind already used. The caller
+	// answers 401 either way, so distinguishing them here would only
+	// create something to leak.
+	if !ok || t.artifactID != artifactID || !time.Now().Before(t.expiresAt) || t.usedKinds[kind] {
+		return false, nil
+	}
+	t.usedKinds[kind] = true
+	return true, nil
+}
+
+func (s *MemStore) DeleteScanTokens(artifactID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for hash, t := range s.scanTokens {
+		if t.artifactID == artifactID || !time.Now().Before(t.expiresAt) {
+			delete(s.scanTokens, hash)
+		}
+	}
+	return nil
 }

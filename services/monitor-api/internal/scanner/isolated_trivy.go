@@ -89,6 +89,13 @@ type IsolatedTrivyConfig struct {
 	APIKeySecretName string
 	APIKeySecretKey  string
 
+	// MintScanToken issues a per-Job upload credential scoped to one
+	// artifact, replacing the master API key in the Job's environment
+	// (report S3). nil falls back to the old SCM_API_KEY behaviour,
+	// which keeps a deployment that has not migrated working rather
+	// than silently failing every document upload.
+	MintScanToken func(artifactID string) (string, error)
+
 	// RegistryCredentialsSecretName/UsernameKey/PasswordKey, when
 	// SecretName is set, forward scm-registry's read-only credentials
 	// into the Job as TRIVY_USERNAME/TRIVY_PASSWORD -- trivy's own
@@ -248,7 +255,31 @@ func (s *IsolatedTrivyScanner) ScanForArtifact(ctx context.Context, ref, artifac
 	if s.cfg.SubCommand == "image" && artifactID != "" && s.cfg.APIBaseURL != "" {
 		env["SCM_ARTIFACT_ID"] = artifactID
 		env["SCM_API_BASE_URL"] = s.cfg.APIBaseURL
-		secretEnv = append(secretEnv, k8sjob.SecretEnvVar{Name: "SCM_API_KEY", SecretName: s.cfg.APIKeySecretName, SecretKey: s.cfg.APIKeySecretKey})
+		// A per-Job token, not the master key. This pod is built to
+		// process untrusted content -- handing it the credential that
+		// can delete every artifact in the fleet defeated the isolation
+		// it is wrapped in.
+		//
+		// Passed as a plain env var rather than through a Secret: it is
+		// single-use per kind and expires with the Job, so a Secret
+		// would add a create/delete lifecycle around a value that is
+		// already worthless by the time anyone could read it back. The
+		// tradeoff is that it appears in the Pod spec, readable by
+		// anyone who can already read Pods in this namespace -- who can
+		// also read the Secret.
+		minted := false
+		if s.cfg.MintScanToken != nil {
+			if token, err := s.cfg.MintScanToken(artifactID); err == nil && token != "" {
+				env["SCM_SCAN_TOKEN"] = token
+				minted = true
+			}
+			// A minting failure falls through to the API key below
+			// rather than producing a Job that cannot upload: losing
+			// the SBOM is a worse outcome than the older credential.
+		}
+		if !minted {
+			secretEnv = append(secretEnv, k8sjob.SecretEnvVar{Name: "SCM_API_KEY", SecretName: s.cfg.APIKeySecretName, SecretKey: s.cfg.APIKeySecretKey})
+		}
 	}
 	if s.cfg.RegistryCredentialsSecretName != "" {
 		secretEnv = append(secretEnv,

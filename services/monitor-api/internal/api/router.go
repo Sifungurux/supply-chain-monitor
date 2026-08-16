@@ -42,6 +42,12 @@ type Config struct {
 	// never lock out a deployment mid-upgrade.
 	APIKeys APIKeys
 
+	// ScanTokens validates a scan worker's per-Job upload credential.
+	// nil disables the mechanism entirely, which is what the in-process
+	// (DISABLE_SCAN_ISOLATION) path wants -- it writes to the store
+	// directly and never makes an HTTP call at all.
+	ScanTokens ScanTokenConsumer
+
 	// CORSAllowedOrigins allowlists cross-origin callers
 	// (CORS_ALLOWED_ORIGINS). Empty means same-origin only: no
 	// Access-Control-Allow-Origin header is sent at all, which is what
@@ -198,7 +204,7 @@ func NewRouter(cfg Config) http.Handler {
 	// withAudit sits INSIDE withAuth, because it reports the
 	// authenticated client and that only exists in the context after
 	// withAuth has put it there.
-	return withMetrics(withCORS(withAuth(withAudit(top), keys, failures, cfg.TrustedProxies, h.metrics), cfg.CORSAllowedOrigins), h.metrics)
+	return withMetrics(withCORS(withAuth(withAudit(top), keys, failures, cfg.TrustedProxies, cfg.ScanTokens, h.metrics), cfg.CORSAllowedOrigins), h.metrics)
 }
 
 // withAuth requires `Authorization: Bearer <apiKey>` on every request
@@ -273,7 +279,7 @@ const (
 // logs rather than a blank client field.
 const legacyClientName = "default"
 
-func withAuth(next http.Handler, keys APIKeys, failures *rateLimiter, trusted TrustedProxies, m *metrics) http.Handler {
+func withAuth(next http.Handler, keys APIKeys, failures *rateLimiter, trusted TrustedProxies, scanTokens ScanTokenConsumer, m *metrics) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/healthz", "/readyz", "/metrics", "/swagger", "/openapi.yaml":
@@ -290,6 +296,22 @@ func withAuth(next http.Handler, keys APIKeys, failures *rateLimiter, trusted Tr
 			// exiting early -- see APIKeys.Lookup for why that matters
 			// more once keys are named.
 			client, ok = keys.Lookup(got[len(prefix):])
+		}
+
+		// A scan worker presents a per-Job token, not the API key. It is
+		// tried only AFTER the normal key check fails, so a real key
+		// still takes the ordinary path, and only on the single route
+		// the token is scoped to.
+		if !ok && scanTokens != nil && strings.HasPrefix(got, prefix) {
+			if id, kind, isUpload := documentUploadTarget(r.Method, r.URL.Path); isUpload {
+				if consumed, err := scanTokens(HashScanToken(got[len(prefix):]), id, kind); err == nil && consumed {
+					// Named for the audit log so an upload is
+					// attributable to the Job that made it, not to
+					// whatever key happens to exist.
+					next.ServeHTTP(w, r.WithContext(WithClient(r.Context(), "scan-worker:"+id)))
+					return
+				}
+			}
 		}
 
 		if !ok {
@@ -413,3 +435,8 @@ func originAllowed(origin string, allowed []string) bool {
 	}
 	return false
 }
+
+// ScanTokenConsumer validates and burns a scan worker's upload token for
+// one artifact and one document kind. Returns false for every failure --
+// unknown, wrong artifact, expired, or that kind already uploaded.
+type ScanTokenConsumer func(tokenHash, artifactID, kind string) (bool, error)
