@@ -155,6 +155,16 @@ spec:
           env:
             - name: POSTGRES_HOST
               value: scm-postgres.supply-chain-monitor.svc.cluster.local
+            # Substituted by cluster/postgres-restore.sh, same as
+            # __BACKUP_FILE__ above. Explicit rather than left to
+            # libpq's "prefer" default, which quietly falls back to
+            # cleartext against a server that has stopped offering
+            # TLS -- a restore streams the entire database, so that is
+            # the single largest cleartext transfer this system ever
+            # makes. Set PGSSLMODE=prefer when restoring into a
+            # deployment with postgres.tls.enabled=false.
+            - name: PGSSLMODE
+              value: "__PGSSLMODE__"
           envFrom:
             - secretRef:
                 name: scm-postgres-credentials

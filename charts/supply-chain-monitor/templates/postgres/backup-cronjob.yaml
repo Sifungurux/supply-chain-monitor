@@ -377,6 +377,18 @@ spec:
                   value: "5432"
                 - name: KEEP_BACKUPS
                   value: {{ .Values.postgres.backup.keepBackups | quote }}
+                {{- if .Values.postgres.tls.enabled }}
+                # EXPLICIT, because libpq's default is "prefer" -- it
+                # negotiates TLS when the server offers it and silently
+                # falls back to cleartext when it does not. The backup
+                # would keep succeeding, and the whole database would
+                # keep crossing the network in the clear, with nothing
+                # anywhere reporting a problem. "require" makes a
+                # server that stops offering TLS a failed backup
+                # instead of a silent downgrade.
+                - name: PGSSLMODE
+                  value: "require"
+                {{- end }}
                 {{- if .Values.postgres.backup.encryption.publicKeySecret }}
                 # Presence of this variable is what switches the job's
                 # encrypt() from `cat` to gpg -- see the script above.

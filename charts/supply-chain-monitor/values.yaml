@@ -344,6 +344,34 @@ postgres:
       cpu: "1"
       memory: 768Mi
       ephemeral-storage: 512Mi
+  # Serve Postgres over TLS, with a certificate from the same private CA
+  # the Gateway and registry use (templates/gateway/certificates.yaml).
+  #
+  # Without this, the database password and every row that crosses the
+  # pod network -- artifacts, findings, SBOM documents, API-key hashes
+  # -- travel in cleartext, readable by anything that can watch pod
+  # traffic. NetworkPolicy limits WHO can connect; it does nothing about
+  # what a passive observer on the path can read (report S4).
+  tls:
+    enabled: true
+    # verify: false means monitor-api uses sslmode=require -- the
+    # connection is encrypted, but the server's certificate is not
+    # checked, so this stops passive eavesdropping and not an active
+    # in-path attacker.
+    #
+    # Deliberately the default rather than verify-full, because
+    # verify-full makes the database path depend on the CA being
+    # mounted and on the certificate's SAN matching the DSN host: get
+    # either wrong and monitor-api cannot open its pool AT ALL, which
+    # is a hard outage on the one component that needs the database.
+    # require degrades to "encrypted but unauthenticated" instead of
+    # to "down".
+    #
+    # Set true for sslmode=verify-full. The certificate below already
+    # carries every DNS form of the service name, so this is a
+    # one-value change -- it additionally mounts the CA into
+    # monitor-api and passes sslrootcert.
+    verify: false
   backup:
     enabled: true
     schedule: "0 2 * * *" # daily at 02:00 UTC
@@ -479,7 +507,12 @@ monitorApi:
     port: "5432"
     user: "monitor_api"
     db: "monitor_api"
-    sslmode: "disable"
+    # Empty means DERIVE it from postgres.tls (see
+    # templates/monitor-api/configmap.yaml): TLS off -> "disable", TLS
+    # on -> "require", TLS on with verify -> "verify-full". Set a value
+    # here only to override that, e.g. pointing this deployment at an
+    # external Postgres whose TLS this chart does not manage.
+    sslmode: ""
     # Escape hatch for an external/managed database: the name of a
     # Secret holding a complete "postgres://..." connection string under
     # dsnSecretKey. Set, it is injected as POSTGRES_DSN and wins

@@ -47,6 +47,36 @@ func TestBuildPostgresDSN(t *testing.T) {
 		}
 	})
 
+	t.Run("sslrootcert is emitted only when set", func(t *testing.T) {
+		// An empty sslrootcert= is NOT ignored -- it reads as "the CA
+		// bundle is at the empty path", which makes verify-full
+		// unable to connect at all. Absent is the only correct
+		// representation of "not configured", so both directions are
+		// asserted here.
+		base := func() {
+			t.Setenv("POSTGRES_DSN", "")
+			t.Setenv("POSTGRES_HOST", "db")
+			t.Setenv("POSTGRES_PORT", "5432")
+			t.Setenv("POSTGRES_USER", "u")
+			t.Setenv("POSTGRES_PASSWORD", "p")
+			t.Setenv("POSTGRES_DB", "d")
+			t.Setenv("POSTGRES_SSLMODE", "verify-full")
+		}
+
+		base()
+		t.Setenv("POSTGRES_SSLROOTCERT", "")
+		if got := buildPostgresDSN(); strings.Contains(got, "sslrootcert") {
+			t.Fatalf("dsn = %q, want no sslrootcert param when the env var is empty", got)
+		}
+
+		base()
+		t.Setenv("POSTGRES_SSLROOTCERT", "/postgres-ca/ca.crt")
+		want := "postgres://u:p@db:5432/d?sslmode=verify-full&sslrootcert=/postgres-ca/ca.crt"
+		if got := buildPostgresDSN(); got != want {
+			t.Fatalf("dsn = %q, want %q", got, want)
+		}
+	})
+
 	t.Run("password with special characters is escaped, not corrupted", func(t *testing.T) {
 		t.Setenv("POSTGRES_DSN", "")
 		t.Setenv("POSTGRES_HOST", "localhost")

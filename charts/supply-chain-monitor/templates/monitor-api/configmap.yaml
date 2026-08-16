@@ -27,7 +27,26 @@ data:
   POSTGRES_PORT: {{ .Values.monitorApi.postgres.port | quote }}
   POSTGRES_USER: {{ .Values.monitorApi.postgres.user | quote }}
   POSTGRES_DB: {{ .Values.monitorApi.postgres.db | quote }}
-  POSTGRES_SSLMODE: {{ .Values.monitorApi.postgres.sslmode | quote }}
+  # DERIVED from postgres.tls unless explicitly overridden, so the
+  # client's expectation and the server's configuration cannot drift
+  # apart. Setting the server to serve TLS while leaving this at
+  # "disable" would leave every connection in cleartext against a
+  # perfectly good certificate, and nothing would report a problem --
+  # which is the state this chart was in before report S4.
+  {{- $sslmode := .Values.monitorApi.postgres.sslmode }}
+  {{- if not $sslmode }}
+    {{- if .Values.postgres.tls.enabled }}
+      {{- $sslmode = ternary "verify-full" "require" .Values.postgres.tls.verify }}
+    {{- else }}
+      {{- $sslmode = "disable" }}
+    {{- end }}
+  {{- end }}
+  POSTGRES_SSLMODE: {{ $sslmode | quote }}
+  {{- if and .Values.postgres.tls.enabled .Values.postgres.tls.verify }}
+  # verify-full has to be able to CHECK the chain, so the CA has to be
+  # on disk in this pod -- see the deployment's postgres-ca volume.
+  POSTGRES_SSLROOTCERT: /postgres-ca/ca.crt
+  {{- end }}
   # pgxpool connection pool sizing -- see main.go's buildPostgresDSN and
   # values.yaml's monitorApi.postgres.pool comment for why these aren't
   # just left at pgxpool's own CPU-derived default.

@@ -163,6 +163,19 @@ func buildPostgresDSN() string {
 
 	query := "sslmode=" + sslmode
 
+	// sslrootcert only when there is one. Emitting an empty
+	// sslrootcert= is not harmlessly ignored -- libpq/pgx read it as
+	// "the CA bundle lives at the empty path", so a stray one turns
+	// verify-full into a connection that cannot succeed at all. Absent
+	// is the correct representation of "not configured".
+	//
+	// Only sslmode=verify-ca/verify-full actually check it; the chart
+	// sets it exactly when it sets one of those (see
+	// templates/monitor-api/configmap.yaml).
+	if root := os.Getenv("POSTGRES_SSLROOTCERT"); root != "" {
+		query += "&sslrootcert=" + root
+	}
+
 	// pgxpool honors pool_max_conns/pool_min_conns as DSN query params
 	// (see NewPostgresStore, which just hands this string straight to
 	// pgxpool.New) -- left unset by default (0) so anyone running this

@@ -285,14 +285,20 @@ fi
 # so a cluster without cert-manager can still render this chart.
 echo "== with every TLS feature off, no cert-manager objects render =="
 # The point is that a cluster with no cert-manager CRDs can still render
-# this chart. Both gates have to be off for that: the CA chain is SHARED
-# between the Gateway and the registry, so either one alone legitimately
-# pulls it in.
+# this chart. ALL THREE gates have to be off for that: the CA chain is
+# SHARED between the Gateway, the registry and Postgres, so any one of
+# them alone legitimately pulls it in.
+#
+# postgres.tls was added to this list when it was added to the chart --
+# and this check is what noticed, by failing. Anything that starts
+# issuing certificates has to be named here, or "every TLS feature off"
+# quietly stops meaning every.
 disabled_tls="$(helm template scm-ci charts/supply-chain-monitor \
 	--set gateway.tls.enabled=false --set registry.tls.enabled=false \
+	--set postgres.tls.enabled=false \
 	2>/dev/null | grep -cE "kind: Certificate|kind: Issuer" || true)"
 if [ "$disabled_tls" != "0" ]; then
-	echo "ERROR: with gateway.tls and registry.tls both off, ${disabled_tls} cert-manager object(s) still rendered." >&2
+	echo "ERROR: with gateway.tls, registry.tls and postgres.tls all off, ${disabled_tls} cert-manager object(s) still rendered." >&2
 	echo "       A cluster without cert-manager CRDs must be able to render this chart." >&2
 	exit 1
 fi
@@ -488,6 +494,66 @@ case "$all_templates" in
 	echo "       Encrypting to a public key is pointless if the cluster permanently" >&2
 	echo "       holds the half that decrypts -- see cluster/postgres-restore.sh," >&2
 	echo "       which lends it for the duration of a restore instead." >&2
+	exit 1
+	;;
+esac
+
+# == postgres TLS is not half-configured ==
+#
+# The failure this catches reports NOTHING at runtime: the server
+# serves TLS with a perfectly valid certificate, the client connects
+# with sslmode=disable, and every row crosses the pod network in
+# cleartext exactly as before. Both sides come up healthy, the
+# certificate renews on schedule, and the only symptom is that the
+# security property everyone believes is on is off.
+#
+# So the two halves are asserted against the SAME render.
+echo "== postgres TLS is wired on both sides =="
+pg_deploy="$(helm template scm-ci charts/supply-chain-monitor -s templates/postgres/deployment.yaml)"
+pg_cm="$(helm template scm-ci charts/supply-chain-monitor -s templates/monitor-api/configmap.yaml)"
+case "$pg_deploy" in
+*"ssl=on"*) ;;
+*)
+	echo "ERROR: postgres.tls.enabled is on but the postgres container is not started with ssl=on." >&2
+	echo "       The server would accept only cleartext connections." >&2
+	exit 1
+	;;
+esac
+case "$pg_deploy" in
+*"ssl_key_file=/tls/tls.key"*) ;;
+*)
+	echo "ERROR: postgres is started with ssl=on but no ssl_key_file -- it will not start." >&2
+	exit 1
+	;;
+esac
+# The initContainer is what makes the key readable at all: a Secret
+# mount is 0644 and postgres refuses a group-readable key, and this
+# pod cannot use fsGroup to fix that (it would break PGDATA's 0700).
+case "$pg_deploy" in
+*"name: copy-tls"*) ;;
+*)
+	echo "ERROR: no copy-tls initContainer, so /tls/tls.key comes straight from a Secret mount." >&2
+	echo "       postgres refuses a key file that group or world can read and will not start." >&2
+	exit 1
+	;;
+esac
+case "$pg_cm" in
+*'POSTGRES_SSLMODE: "disable"'*)
+	echo "ERROR: postgres.tls.enabled is on but monitor-api is configured with sslmode=disable." >&2
+	echo "       The server would serve TLS while every connection stayed in cleartext," >&2
+	echo "       and nothing at runtime would report it. See report S4." >&2
+	exit 1
+	;;
+esac
+# ...and with TLS off, the client must NOT demand it, or monitor-api
+# cannot reach a database that is running perfectly well.
+echo "== with postgres TLS off, the client does not demand TLS =="
+pg_cm_off="$(helm template scm-ci charts/supply-chain-monitor --set postgres.tls.enabled=false -s templates/monitor-api/configmap.yaml)"
+case "$pg_cm_off" in
+*'POSTGRES_SSLMODE: "disable"'*) ;;
+*)
+	echo "ERROR: with postgres.tls.enabled=false, monitor-api still asks for TLS." >&2
+	echo "       It would fail to open its connection pool at startup." >&2
 	exit 1
 	;;
 esac
