@@ -60,7 +60,7 @@ ifeq ($(SCM_RUNTIME),podman)
 export DOCKER_HOST := $(shell (podman system connection ls --format json | jq -r '.[] | select(.Default==true) | .URI') 2>/dev/null)
 endif
 
-.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build test-image vulncheck trivy-config deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap check-alert-rules check-duplicate-keys helm-lint helm-template db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
+.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build test-image vulncheck trivy-config deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap check-alert-rules check-duplicate-keys helm-lint helm-template test-backup-scripts db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -204,6 +204,13 @@ GOVULNCHECK_VERSION ?= v1.1.4
 # Keep GO_BUILD_IMAGE in step with the Dockerfile's FROM lines.
 GO_BUILD_IMAGE ?= golang:1.26-alpine@sha256:70b46548e42db77e0966aaf3619fd068734dc6c77584d526b91126504fd95816
 
+# Executes the backup/restore SHELL LOGIC -- the one thing helm lint,
+# helm template and check-helm-manifests.sh all leave untested. See
+# cluster/test-backup-scripts.sh's header for the outage that makes
+# this worth a CI job of its own. Needs docker; no cluster, no database.
+test-backup-scripts:
+	./cluster/test-backup-scripts.sh
+
 vulncheck:
 	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src $(GO_BUILD_IMAGE) \
 		sh -c "go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) && govulncheck ./..."
@@ -329,10 +336,18 @@ db-backups-list:
 # Restores a backup into the live database -- destructive, asks for
 # confirmation. BACKUP is a filename from `make db-backups-list`, e.g.:
 #   make db-restore BACKUP=scm-postgres-20260101T020000Z.sql.gz
+#
+# A backup whose name ends .sql.gz.gpg is encrypted and needs the
+# private key, which lives OUTSIDE the cluster -- pass the file and it
+# is lent to the cluster for the length of the restore, then deleted:
+#   make db-restore BACKUP=scm-postgres-20260101T020000Z.sql.gz.gpg \
+#     GPG_PRIVATE_KEY_FILE=~/keys/scm-backup-private.asc
+# Add GPG_PASSPHRASE_FILE=... if that key is passphrase-protected.
+#
 # See cluster/postgres-restore.sh and README's "Backing up and
 # restoring Postgres".
 db-restore:
-	./cluster/postgres-restore.sh $(BACKUP)
+	GPG_PRIVATE_KEY_FILE="$(GPG_PRIVATE_KEY_FILE)" GPG_PASSPHRASE_FILE="$(GPG_PASSPHRASE_FILE)" ./cluster/postgres-restore.sh $(BACKUP)
 
 # quick smoke test against a port-forwarded API (run `make port-forward`
 # first). SCM_API_KEY must match whatever's in scm-monitor-api-auth --

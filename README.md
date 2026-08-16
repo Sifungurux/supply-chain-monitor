@@ -2604,6 +2604,86 @@ day, on the default schedule). See docs/architecture.md ("Postgres
 backups") for the full design and why WAL-based PITR isn't part of
 this yet.
 
+#### Encrypting backups
+
+Backups are plaintext `.sql.gz` by default. That's defensible while
+they never leave the cluster, and a liability the moment they're
+copied off it — a dump contains every artifact, finding and API-key
+hash the system holds.
+
+Encryption is opt-in, to a **public key**. The cluster gets only the
+half that encrypts, so neither the backup job nor anyone who walks off
+with the PVC can read a single dump — including the ones the job wrote
+itself.
+
+Generate a keypair **on your machine, not in the cluster**:
+
+```bash
+gpg --batch --quick-generate-key 'scm-backup' default default never
+gpg --armor --export scm-backup > scm-backup-public.asc
+gpg --armor --export-secret-keys scm-backup > scm-backup-private.asc
+```
+
+Put the **public** half in the cluster and switch it on:
+
+```bash
+kubectl -n supply-chain-monitor create secret generic scm-backup-encryption \
+  --from-file=publickey.asc=scm-backup-public.asc
+```
+
+```yaml
+# charts/supply-chain-monitor/values.yaml
+postgres:
+  backup:
+    encryption:
+      publicKeySecret: scm-backup-encryption
+```
+
+```bash
+make deploy && make db-backup
+```
+
+New backups are written as `.sql.gz.gpg`. Existing plaintext ones are
+left exactly as they are — this changes what gets written from now on,
+not what's already on the PVC, and both kinds restore with the same
+command.
+
+**Store `scm-backup-private.asc` somewhere outside this cluster, and
+test that you can still read it.** It is the only thing that can
+decrypt these backups. There is no recovery path if it's lost — that
+is the property you switched on, working as intended.
+
+To restore an encrypted backup, hand the private key to the restore:
+
+```bash
+make db-restore BACKUP=scm-postgres-20260101T020000Z.sql.gz.gpg \
+  GPG_PRIVATE_KEY_FILE=~/keys/scm-backup-private.asc
+```
+
+Add `GPG_PASSPHRASE_FILE=...` if the key is passphrase-protected.
+
+The key is **lent**, not installed: `cluster/postgres-restore.sh`
+creates a `scm-backup-decryption` Secret immediately before the restore
+Job and deletes it on the way out — including on failure or Ctrl-C. It
+exists in etcd for about the length of one restore. Leaving the private
+key permanently mounted would give the cluster back the ability to read
+every backup it has ever written, which is precisely what encrypting
+them removed; `make helm-template` fails if any deployed template
+references it.
+
+Two integrity details that come with this:
+
+- Each backup gets a `.sha256` sidecar, written and immediately
+  verified. For an encrypted backup it's the only integrity statement
+  available in-cluster, since nothing there can decrypt the file.
+- The nightly sweep discards a backup that fails its own checksum, but
+  **keeps** an encrypted backup with no sidecar and says so. "Can't
+  verify" doesn't mean "delete" — otherwise the first run after
+  enabling this would eat every backup written before it.
+
+`make db-backups-list` shows which backups are encrypted and verifies
+each checksum as it lists them.
+
 ### Pinned dependencies (go.sum)
 
 `services/monitor-api/go.sum` isn't committed yet — this project was

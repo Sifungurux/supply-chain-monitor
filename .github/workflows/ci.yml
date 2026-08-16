@@ -77,6 +77,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: make test-swagger-docs
         run: make test-swagger-docs
+  # The backup/restore shell logic, actually executed -- helm lint,
+  # helm template and check-helm-manifests.sh all check these two files
+  # as text and run none of them. See cluster/test-backup-scripts.sh.
+  test-backup-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: make test-backup-scripts
+        run: make test-backup-scripts
 
   # Node+jsdom test suite for dashboard/index.html. See `make
   # test-dashboard`.

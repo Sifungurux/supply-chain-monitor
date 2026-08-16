@@ -1,10 +1,11 @@
 {{- if .Values.postgres.backup.enabled }}
 # Daily pg_dump of scm-postgres into scm-postgres-backups, gzip-compressed,
-# with simple filename-based retention (keeps the newest keepBackups
-# files, deletes older ones) -- see docs/architecture.md ("Postgres
-# backups") and README's "Backing up and restoring Postgres" for the
-# human-facing how-to, including on-demand backups (`make db-backup`)
-# and restoring (`make db-restore BACKUP=...`).
+# optionally encrypted to a GPG public key, with filename-based
+# retention (keeps the newest keepBackups files, deletes older ones)
+# -- see docs/architecture.md ("Postgres backups") and README's
+# "Backing up and restoring Postgres" for the human-facing how-to,
+# including on-demand backups (`make db-backup`), restoring
+# (`make db-restore BACKUP=...`), and how to turn encryption on.
 #
 # Uses the same image as the database itself specifically so pg_dump's
 # version always matches the server's -- pg_dump is generally
@@ -79,8 +80,43 @@ spec:
                   # against this cluster, destroying good backups with
                   # empty ones while reporting success every time.
                   set -euo pipefail
+
+                  # ENCRYPTION IS A RUNTIME BRANCH, not a template
+                  # branch, deliberately: one script, both paths, so
+                  # the plaintext path an existing cluster is running
+                  # today is the *same code* that gets exercised when
+                  # someone tests the encrypted one. Templating two
+                  # variants would let them drift.
+                  #
+                  # `cat` is the identity encryptor. Every stage below
+                  # -- pipeline, verification, retention -- is written
+                  # once and works either way.
+                  encrypt() {
+                    if [ -n "${GPG_RECIPIENT_FILE:-}" ]; then
+                      # --trust-model always: the key arrives from a
+                      # Secret via --recipient-file, so it has no web
+                      # of trust and gpg would otherwise refuse it.
+                      # -z 0: the stream is already gzipped, and gpg's
+                      # own compression on compressed input costs CPU
+                      # to grow the file.
+                      gpg --batch --yes --quiet --no-options \
+                          --trust-model always \
+                          --recipient-file "$GPG_RECIPIENT_FILE" \
+                          -z 0 --encrypt
+                    else
+                      cat
+                    fi
+                  }
+
                   ts=$(date -u +%Y%m%dT%H%M%SZ)
-                  out="/backups/scm-postgres-${ts}.sql.gz"
+                  if [ -n "${GPG_RECIPIENT_FILE:-}" ]; then
+                    export GNUPGHOME=/tmp/gnupg
+                    # gpg refuses a homedir group/world can read.
+                    mkdir -p "$GNUPGHOME" && chmod 700 "$GNUPGHOME"
+                    out="/backups/scm-postgres-${ts}.sql.gz.gpg"
+                  else
+                    out="/backups/scm-postgres-${ts}.sql.gz"
+                  fi
                   echo "backing up ${POSTGRES_DB} to ${out}"
                   # Remove a partial file on ANY early exit. set -e aborts
                   # at the failing pg_dump pipeline itself, before the
@@ -88,7 +124,11 @@ spec:
                   # run would otherwise leave a corpse in the backup
                   # directory for the next operator to puzzle over.
                   # Cleared once the file has verified as a real dump.
-                  trap 'rm -f "${out:-}"' EXIT
+                  #
+                  # The sidecar goes with it: an orphaned .sha256 with
+                  # no dump beside it is something the sweep below then
+                  # has to have an opinion about, for no reason.
+                  trap 'rm -f "${out:-}" "${out:-}.sha256"' EXIT
                   export PGPASSWORD="$POSTGRES_PASSWORD"
 
                   # WAIT FOR THE NETWORK, not just for Postgres.
@@ -123,50 +163,150 @@ spec:
                     exit 1
                   fi
 
-                  pg_dump -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" | gzip > "$out"
-
-                  # Second line of defence: prove the file is a dump before
-                  # it is allowed to count as one. pipefail catches a
-                  # failing pg_dump; this catches everything else that can
-                  # yield a well-formed but useless file. Note gzip -t is
-                  # NOT enough on its own -- an empty gzip is perfectly
-                  # valid, which is exactly what the broken runs produced.
+                  # THE VALIDITY CHECK MOVED INTO THE PIPELINE, and it
+                  # had to.
                   #
-                  # Read into a variable rather than piping into grep: with
-                  # pipefail, grep -q or head closing the pipe early sends
-                  # SIGPIPE to gzip and the pipeline reports failure on a
-                  # perfectly good backup.
-                  head_bytes="$(gzip -dc "$out" 2>/dev/null | head -c 512 || true)"
-                  case "$head_bytes" in
-                    *"PostgreSQL database dump"*) ;;
-                    *)
-                      echo "ERROR: ${out} is not a valid dump -- removing it and pruning nothing." >&2
-                      echo "ERROR: every existing backup is left untouched." >&2
-                      rm -f "$out"
-                      exit 1
-                      ;;
-                  esac
+                  # This used to write the file and then decompress it
+                  # to prove it contained a real dump. That cannot work
+                  # once the output is encrypted to a public key: this
+                  # job holds only the half that encrypts, so it can
+                  # never read back what it just wrote. Verifying after
+                  # the write is a luxury of not having encryption.
+                  #
+                  # So the check now runs where the plaintext still
+                  # exists -- mid-stream, before gzip and gpg. awk
+                  # passes every byte through untouched while asserting
+                  # the header went past, and fails at END if it never
+                  # did. With pipefail that fails the whole pipeline,
+                  # and the EXIT trap removes the corpse.
+                  #
+                  # This is strictly stronger than the old check: it
+                  # cannot be fooled by a valid-but-empty gzip (which
+                  # is exactly what the three days of broken runs
+                  # produced), and it refuses to finish writing a bad
+                  # backup rather than deleting one afterwards.
+                  #
+                  # LC_ALL=C so awk is byte-transparent -- a locale
+                  # with a multibyte charset can mangle a dump on the
+                  # way through, and this stream is the backup.
+                  echo "dumping (validity is asserted mid-stream, before encryption)"
+                  pg_dump -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+                    | LC_ALL=C awk '
+                        NR <= 50 && /PostgreSQL database dump/ { seen = 1 }
+                        { print }
+                        END {
+                          if (!seen) {
+                            print "ERROR: stream carried no PostgreSQL dump header" > "/dev/stderr"
+                            exit 1
+                          }
+                        }' \
+                    | gzip \
+                    | encrypt > "$out"
+
+                  # Sidecar checksum. Two jobs: it proves the bytes on
+                  # the PVC are the bytes we wrote (the only integrity
+                  # check available for a file we cannot decrypt), and
+                  # it is what the sweep below uses to decide an
+                  # encrypted backup is still sound years later.
+                  #
+                  # Written with a bare filename so `sha256sum -c` works
+                  # from /backups without rewriting paths.
+                  ( cd /backups && sha256sum "$(basename "$out")" > "$(basename "$out").sha256" )
+
+                  # Read it straight back. Catches a PVC that accepted
+                  # the write and lost it -- the one failure the
+                  # in-stream gate cannot see, because it never touches
+                  # the disk.
+                  if ! ( cd /backups && sha256sum -c --status "$(basename "$out").sha256" ); then
+                    echo "ERROR: ${out} does not match the checksum just taken of it." >&2
+                    echo "ERROR: it is being removed and nothing is pruned; every existing backup is untouched." >&2
+                    exit 1
+                  fi
+
                   trap - EXIT
                   echo "backup complete: $(du -h "$out" | cut -f1)"
+                  if [ -n "${GPG_RECIPIENT_FILE:-}" ]; then
+                    echo "encrypted -- restoring it needs the private key (see README, \"Backing up and restoring Postgres\")"
+                  fi
 
                   cd /backups
                   # Sweep out any invalid file BEFORE counting, so a
                   # worthless one can never evict a real backup. This is
                   # what cleans up empties left by earlier broken runs.
-                  for f in scm-postgres-*.sql.gz; do
+                  #
+                  # "CANNOT VERIFY" NO LONGER MEANS "DELETE". That
+                  # equivalence was safe only while every file was
+                  # plaintext and the content check was authoritative
+                  # for all of them. An encrypted backup with no sidecar
+                  # -- one written by a version of this job older than
+                  # its sidecar, or copied in by hand -- is unreadable
+                  # to us and perfectly good. The old default branch
+                  # would have deleted every one of them on the first
+                  # run after this change.
+                  #
+                  # The list is built here rather than re-globbed for
+                  # the prune, so counting and deleting can never
+                  # disagree about what a backup is -- and so sidecars
+                  # are never counted as backups, which would silently
+                  # halve retention.
+                  survivors=/tmp/survivors
+                  : > "$survivors"
+                  for f in scm-postgres-*.sql.gz scm-postgres-*.sql.gz.gpg; do
                     [ -e "$f" ] || continue
-                    [ "$f" = "$(basename "$out")" ] && continue
-                    bytes="$(gzip -dc "$f" 2>/dev/null | head -c 512 || true)"
-                    case "$bytes" in
-                      *"PostgreSQL database dump"*) ;;
-                      *) echo "discarding ${f}: not a valid dump"; rm -f "$f" ;;
-                    esac
+                    if [ "$f" != "$(basename "$out")" ]; then
+                      case "$f" in
+                        *.gpg)
+                          # Undecryptable by design. The sidecar is the
+                          # only statement we can check -- and because
+                          # a dump only ever reaches the PVC after
+                          # passing the in-stream gate above, "matches
+                          # its sidecar" does chain back to "was a real
+                          # dump when written".
+                          if [ -f "${f}.sha256" ]; then
+                            if ! sha256sum -c --status "${f}.sha256"; then
+                              echo "discarding ${f}: does not match its own checksum (corrupt on disk)"
+                              rm -f "$f" "${f}.sha256"
+                              continue
+                            fi
+                          else
+                            echo "keeping ${f}: encrypted with no .sha256 sidecar, so it cannot be checked here -- NOT assumed bad"
+                          fi
+                          ;;
+                        *)
+                          bytes="$(gzip -dc "$f" 2>/dev/null | head -c 512 || true)"
+                          case "$bytes" in
+                            *"PostgreSQL database dump"*) ;;
+                            *)
+                              echo "discarding ${f}: not a valid dump"
+                              rm -f "$f" "${f}.sha256"
+                              continue
+                              ;;
+                          esac
+                          ;;
+                      esac
+                    fi
+                    echo "$f" >> "$survivors"
                   done
 
-                  count=$(ls -1t scm-postgres-*.sql.gz 2>/dev/null | wc -l)
+                  count=$(wc -l < "$survivors")
                   if [ "$count" -gt "$KEEP_BACKUPS" ]; then
                     echo "pruning to the newest $KEEP_BACKUPS backups (had $count)"
-                    ls -1t scm-postgres-*.sql.gz | tail -n +$((KEEP_BACKUPS + 1)) | xargs -r rm -v --
+                    # SORT ORDER IS LOAD-BEARING. `tail -n +N+1` drops
+                    # everything after the first N, so the first N must
+                    # be the ones to KEEP -- newest first.
+                    #
+                    # This was `ls -1t` (mtime, newest first). Filenames
+                    # already carry a UTC ISO timestamp, so sorting by
+                    # name is the same order without depending on mtime
+                    # surviving a PVC restore or a file copy. But only
+                    # in REVERSE: plain lexical ascending is oldest
+                    # first, which with the same `tail` would keep the
+                    # 7 oldest backups and delete every recent one,
+                    # nightly, while printing this same message.
+                    sort -r "$survivors" | tail -n +$((KEEP_BACKUPS + 1)) | while read -r old; do
+                      rm -v -- "$old"
+                      if [ -e "${old}.sha256" ]; then rm -v -- "${old}.sha256"; fi
+                    done
                   fi
               env:
                 - name: POSTGRES_HOST
@@ -175,16 +315,36 @@ spec:
                   value: "5432"
                 - name: KEEP_BACKUPS
                   value: {{ .Values.postgres.backup.keepBackups | quote }}
+                {{- if .Values.postgres.backup.encryption.publicKeySecret }}
+                # Presence of this variable is what switches the job's
+                # encrypt() from `cat` to gpg -- see the script above.
+                - name: GPG_RECIPIENT_FILE
+                  value: /etc/scm-backup-encryption/publickey.asc
+                {{- end }}
               envFrom:
                 - secretRef:
                     name: scm-postgres-credentials
               volumeMounts:
                 - name: backups
                   mountPath: /backups
+                {{- if .Values.postgres.backup.encryption.publicKeySecret }}
+                - name: encryption-key
+                  mountPath: /etc/scm-backup-encryption
+                  readOnly: true
+                {{- end }}
               resources:
                 {{- toYaml .Values.postgres.backup.resources | nindent 16 }}
           volumes:
             - name: backups
               persistentVolumeClaim:
                 claimName: scm-postgres-backups
+            {{- if .Values.postgres.backup.encryption.publicKeySecret }}
+            # NOT optional: if encryption is switched on and the key is
+            # missing, the pod must refuse to start. The alternative is
+            # a job that quietly falls back to writing plaintext under
+            # a configuration that says it encrypts.
+            - name: encryption-key
+              secret:
+                secretName: {{ .Values.postgres.backup.encryption.publicKeySecret | quote }}
+            {{- end }}
 {{- end }}

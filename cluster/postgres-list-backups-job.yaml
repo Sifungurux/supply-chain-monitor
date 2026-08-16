@@ -17,7 +17,40 @@ spec:
       containers:
         - name: list
           image: percona/percona-distribution-postgresql:17.10
-          command: ["sh", "-c", "ls -lh /backups 2>/dev/null || echo '(no backups yet)'"]
+          # Lists dumps only -- .sha256 sidecars are reported as a
+          # column, not as separate entries, because a filename from
+          # this output is what gets pasted into `make db-restore` and
+          # a sidecar is not a restorable thing.
+          #
+          # The checksum is actually verified rather than just noted.
+          # For an encrypted backup it is the ONLY integrity statement
+          # available (nothing here can decrypt it), so a listing that
+          # merely observed the sidecar exists would be reassurance
+          # without evidence.
+          command:
+            - sh
+            - -c
+            - |
+              cd /backups 2>/dev/null || { echo "(no backups yet)"; exit 0; }
+              found=""
+              printf '%-44s %8s  %-11s %s\n' "BACKUP" "SIZE" "ENCRYPTED" "CHECKSUM"
+              for f in $(ls -1r scm-postgres-*.sql.gz scm-postgres-*.sql.gz.gpg 2>/dev/null); do
+                found="yes"
+                case "$f" in
+                  *.gpg) enc="yes (key)" ;;
+                  *)     enc="no" ;;
+                esac
+                if [ -f "${f}.sha256" ]; then
+                  if sha256sum -c --status "${f}.sha256"; then sum="ok"; else sum="MISMATCH"; fi
+                else
+                  sum="(no sidecar)"
+                fi
+                printf '%-44s %8s  %-11s %s\n' "$f" "$(du -h "$f" | cut -f1)" "$enc" "$sum"
+              done
+              [ -n "$found" ] || echo "(no backups yet)"
+              echo
+              echo "Restore:  make db-restore BACKUP=<name>"
+              echo "          ...plus GPG_PRIVATE_KEY_FILE=/path/to/privatekey.asc for an encrypted one."
           volumeMounts:
             - name: backups
               mountPath: /backups
