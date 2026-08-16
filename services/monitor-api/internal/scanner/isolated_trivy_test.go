@@ -222,13 +222,47 @@ func TestIsolatedTrivyScanner_Scan_MountsCacheVolumeReadOnly(t *testing.T) {
 	}
 }
 
-// TestIsolatedTrivyScanner_Bucket confirms IsolatedTrivyScanner
-// declares BucketAffinity as "cve", same as TrivyScanner/SBOMScanner --
-// it just runs their code inside a Job instead of in-process.
-func TestIsolatedTrivyScanner_Bucket(t *testing.T) {
-	s := newTrivyScanner(t, &fakeJobClient{namespace: "test-ns"})
-	if got := s.Bucket(); got != "cve" {
-		t.Errorf("Bucket() = %q, want %q", got, "cve")
+// TestIsolatedTrivyScanner_Buckets confirms the declaration is
+// MODE-AWARE, which is the whole point of it: the Job runs
+// TrivyScanner's or SBOMScanner's own code (runScanWorker in main.go)
+// and hands back already-classified findings, so what this declares has
+// to match what that mode can actually produce.
+//
+// The "image" case is a safety property, not a cosmetic one. If it said
+// only "cve", a failing image scan would leave the secret bucket
+// unblocked and MergeFindings would mark every previously-open secret
+// "fixed" because the scan that finds them never ran.
+//
+// The "sbom" case is the converse: `trivy sbom` has no secret scanner,
+// so claiming "secret" there would block a bucket that mode can never
+// contribute to and suppress real "fixed" transitions.
+func TestIsolatedTrivyScanner_Buckets(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		subCommand string
+		want       []string
+	}{
+		{"image mode reports CVEs and secrets", "image", []string{"cve", "secret"}},
+		{"default mode is image", "", []string{"cve", "secret"}},
+		{"sbom mode cannot produce secrets", "sbom", []string{"cve"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewIsolatedTrivyScanner(&fakeJobClient{namespace: "test-ns"}, IsolatedTrivyConfig{
+				Image:          "monitor-api:dev",
+				CacheClaimName: "scm-trivy-db-cache",
+				SubCommand:     tc.subCommand,
+				PollInterval:   time.Millisecond,
+			})
+			got := s.Buckets()
+			if len(got) != len(tc.want) {
+				t.Fatalf("Buckets() = %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("Buckets() = %v, want %v", got, tc.want)
+				}
+			}
+		})
 	}
 }
 

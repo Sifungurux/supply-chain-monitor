@@ -200,10 +200,28 @@ func NewIsolatedTrivyScanner(client jobClient, cfg IsolatedTrivyConfig) *Isolate
 	return &IsolatedTrivyScanner{client: client, cfg: cfg.withDefaults()}
 }
 
-// Bucket implements BucketAffinity: both SubCommand modes ("image" and
-// "sbom") run TrivyScanner/SBOMScanner's own code inside the Job (see
-// runScanWorker in main.go), which only ever produces "cve" findings.
-func (s *IsolatedTrivyScanner) Bucket() string { return "cve" }
+// Buckets implements MultiBucketAffinity, and is MODE-AWARE.
+//
+// The scan-worker Job runs TrivyScanner/SBOMScanner's own code and
+// parses in-Job, handing back already-classified findings via
+// WorkerResult (see runScanWorker in main.go) -- so whatever those
+// scanners produce, this scanner produces, and the two must agree.
+//
+//   - "image" runs TrivyScanner, now `--scanners vuln,secret`: cve AND
+//     secret.
+//   - "sbom" runs SBOMScanner, `trivy sbom`: cve only. There are no
+//     files in an SBOM to find secrets in.
+//
+// Split rather than returning both for both modes: declaring "secret"
+// for the sbom mode would make an SBOM-scan failure block secret
+// fix-detection for a bucket that mode can never contribute to --
+// safe, but it would suppress real "fixed" transitions for no reason.
+func (s *IsolatedTrivyScanner) Buckets() []string {
+	if s.cfg.SubCommand == "sbom" {
+		return []string{"cve"}
+	}
+	return []string{"cve", "secret"}
+}
 
 // Scan implements the base Scanner interface -- equivalent to
 // ScanForArtifact with an empty artifactID, which never triggers

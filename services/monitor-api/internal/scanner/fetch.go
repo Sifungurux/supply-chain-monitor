@@ -211,3 +211,22 @@ func (f *FetchingScanner) Bucket() string {
 	}
 	return ""
 }
+
+// Buckets forwards the wrapped scanner's MultiBucketAffinity, for the
+// same reason Bucket forwards the single-bucket one: without it, a
+// wrapped multi-bucket scanner would fall back to Bucket() (or to no
+// affinity at all) and silently under-declare what it produces --
+// which for a failing scanner means a bucket it feeds is left
+// unblocked and its findings get marked "fixed".
+//
+// Nothing wraps TrivyScanner today (the image path registers it
+// directly), so this is forwarding for the general case rather than a
+// live one -- but the registration at main.go's pluggable-scanner path
+// wraps whatever it is handed, and a wrapper that quietly drops a
+// safety declaration is exactly the kind of thing nobody re-checks.
+func (f *FetchingScanner) Buckets() []string {
+	if mba, ok := f.inner.(MultiBucketAffinity); ok {
+		return mba.Buckets()
+	}
+	return nil
+}

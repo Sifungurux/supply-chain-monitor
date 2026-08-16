@@ -30,7 +30,7 @@ func loadSampleTrivyReport(t *testing.T) []byte {
 // requireTrivy skips the test if the real trivy CLI isn't on PATH --
 // this exercises the actual `trivy convert` invocation
 // (GenerateImageDocuments has no separate parsing step to test against
-// canned output the way parseTrivyVulnerabilities does, since trivy
+// canned output the way parseTrivyReport does, since trivy
 // convert itself *is* the logic here), so it needs the real binary.
 // Runs locally wherever trivy is installed (see Dockerfile's pinned
 // TRIVY_VERSION); CI doesn't install it, so this skips cleanly there

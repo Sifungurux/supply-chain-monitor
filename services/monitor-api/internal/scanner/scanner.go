@@ -68,6 +68,38 @@ type BucketAffinity interface {
 	Bucket() string
 }
 
+// MultiBucketAffinity is BucketAffinity for a scanner that produces
+// findings in a KNOWN, FIXED set of buckets rather than exactly one.
+//
+// TrivyScanner is why this exists: `trivy image --scanners vuln,secret`
+// reports CVEs and exposed secrets from a single invocation, so "cve"
+// alone is no longer the truth. Declaring only "cve" would be actively
+// dangerous rather than merely imprecise -- on a trivy failure the
+// secret bucket would be left unblocked, and MergeFindings would mark
+// every previously-open secret "fixed" because this round's report
+// (which never ran) didn't mention it. That is the exact false-"fixed"
+// the BucketAffinity doc above warns about.
+//
+// Added ALONGSIDE BucketAffinity rather than changing Bucket() to
+// return a slice: a dozen scanners each honestly produce exactly one
+// bucket, and rewriting all of them to say []string{"malware"} would
+// be a large diff that makes every one of them marginally harder to
+// read, to accommodate one scanner. Same optional-capability pattern
+// as ArtifactAwareScanner and RawImageScanner below.
+//
+// This does NOT weaken the rule the BucketAffinity doc states. A
+// scanner may implement this only if the set is knowable in advance
+// from the scanner's own configuration -- not "whatever categories
+// happen to be in the document this time", which remains the reason
+// SARIFScanner and PluggableScanner declare nothing at all and block
+// every bucket when they fail.
+//
+// scanArtifact (internal/api/scan.go) prefers this over
+// BucketAffinity when a scanner implements both.
+type MultiBucketAffinity interface {
+	Buckets() []string
+}
+
 // ArtifactAwareScanner is an optional interface a Scanner can implement
 // to also receive the ID of the artifact being scanned, not just its
 // ref. Scan(ctx, ref) alone is enough for every scanner that only ever
