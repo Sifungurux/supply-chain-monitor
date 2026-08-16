@@ -291,6 +291,31 @@ var schemaStatements = []string{
 	// holder"; both are served here.
 	`CREATE INDEX IF NOT EXISTS scan_slots_kind_idx ON scan_slots (scanner_kind)`,
 	`CREATE INDEX IF NOT EXISTS scan_slots_holder_idx ON scan_slots (holder_id)`,
+	// Per-Job upload credentials for scan workers.
+	//
+	// A scan worker exists to process UNTRUSTED content -- that is the
+	// whole reason it runs as a disposable, zero-RBAC pod. It was also
+	// handed SCM_API_KEY, the master credential, purely so it could post
+	// an SBOM back: a malicious image that popped trivy walked away with
+	// full API authority, and the isolation bought nothing (report S3).
+	//
+	// A token here is scoped to ONE artifact, expires with the Job, and
+	// each document kind is usable once -- so the worst a compromised
+	// worker can do with it is upload one SBOM and one SARIF for the
+	// artifact it was already scanning.
+	//
+	// Only the HASH is stored. A leaked database dump should not yield
+	// usable upload credentials, the same reasoning that applies to any
+	// other credential at rest.
+	`CREATE TABLE IF NOT EXISTS scan_tokens (
+		token_hash  TEXT PRIMARY KEY,
+		artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+		expires_at  TIMESTAMPTZ NOT NULL,
+		used_kinds  TEXT[] NOT NULL DEFAULT '{}'
+	)`,
+	// Cleanup deletes by artifact; expiry sweeps delete by time.
+	`CREATE INDEX IF NOT EXISTS scan_tokens_artifact_idx ON scan_tokens (artifact_id)`,
+	`CREATE INDEX IF NOT EXISTS scan_tokens_expires_idx ON scan_tokens (expires_at)`,
 }
 
 const selectArtifactColumns = `SELECT id, ref, digest, type, status, current_stage, created_at, updated_at, last_scan_at, maintainer_team, maintainer_email, last_scan_failure_reason FROM artifacts`
@@ -1865,4 +1890,53 @@ func (s *PostgresStore) GetDocument(artifactID, kind string) (*Document, error) 
 		return nil, fmt.Errorf("get %s document for %q: %w", kind, artifactID, err)
 	}
 	return &d, nil
+}
+
+// CreateScanToken records a per-Job upload credential. tokenHash is the
+// SHA-256 of the token; the token itself is never stored.
+func (s *PostgresStore) CreateScanToken(artifactID, tokenHash string, expiresAt time.Time) error {
+	ctx := context.Background()
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO scan_tokens (token_hash, artifact_id, expires_at) VALUES ($1, $2, $3)
+		 ON CONFLICT (token_hash) DO NOTHING`,
+		tokenHash, artifactID, expiresAt)
+	return err
+}
+
+// ConsumeScanToken validates a token for one artifact and one document
+// kind, marking that kind used. Reports false for every failure mode --
+// unknown token, wrong artifact, expired, or this kind already
+// uploaded.
+//
+// ONE STATEMENT, deliberately. Check-then-update would let two
+// concurrent replays of the same token both pass the check before
+// either wrote, which is exactly the replay this is meant to stop. The
+// UPDATE's WHERE clause is the check, so the database serialises it.
+func (s *PostgresStore) ConsumeScanToken(tokenHash, artifactID, kind string) (bool, error) {
+	ctx := context.Background()
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE scan_tokens
+		    SET used_kinds = array_append(used_kinds, $3)
+		  WHERE token_hash = $1
+		    AND artifact_id = $2
+		    AND expires_at > now()
+		    AND NOT ($3 = ANY(used_kinds))`,
+		tokenHash, artifactID, kind)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// DeleteScanTokens revokes every token for an artifact. Called when a
+// scan finishes and from the stale-scan reclamation path, so a token
+// never outlives the Job it was minted for even if that Job died
+// without reporting.
+func (s *PostgresStore) DeleteScanTokens(artifactID string) error {
+	ctx := context.Background()
+	// Expired rows anywhere are swept at the same time: this runs after
+	// every scan, so it is the natural place, and it needs no CronJob.
+	_, err := s.pool.Exec(ctx,
+		`DELETE FROM scan_tokens WHERE artifact_id = $1 OR expires_at <= now()`, artifactID)
+	return err
 }

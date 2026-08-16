@@ -541,7 +541,13 @@ func runScanWorker() {
 func captureImageDocuments(ctx context.Context, rawReport []byte) {
 	artifactID := os.Getenv("SCM_ARTIFACT_ID")
 	apiBaseURL := os.Getenv("SCM_API_BASE_URL")
-	apiKey := os.Getenv("SCM_API_KEY")
+	// SCM_SCAN_TOKEN is the per-Job upload credential (report S3);
+	// SCM_API_KEY is the pre-migration fallback for a Job minted before
+	// this landed, or by a deployment whose store cannot mint.
+	apiKey := os.Getenv("SCM_SCAN_TOKEN")
+	if apiKey == "" {
+		apiKey = os.Getenv("SCM_API_KEY")
+	}
 	if artifactID == "" || apiBaseURL == "" || apiKey == "" {
 		return
 	}
@@ -1556,6 +1562,21 @@ func runAPIServer() {
 			// where the scan-worker Job's network policy can't reach the
 			// API server pod.
 			APIBaseURL: getenv("SCAN_WORKER_API_BASE_URL", "http://monitor-api:8080"),
+			// Per-Job upload credential, minted at Job creation and
+			// scoped to this one artifact. Lives slightly longer than
+			// the Job's own deadline so a worker finishing right at the
+			// limit can still post its SBOM.
+			MintScanToken: func(artifactID string) (string, error) {
+				token, hash, err := api.NewScanToken()
+				if err != nil {
+					return "", err
+				}
+				ttl := time.Duration(scanWorkerActiveDeadlineSeconds+300) * time.Second
+				if err := store.CreateScanToken(artifactID, hash, time.Now().Add(ttl)); err != nil {
+					return "", err
+				}
+				return token, nil
+			},
 		})
 		// Same again for sbom-type artifacts (see docs/architecture.md,
 		// "Isolating SBOM trivy scanning") -- FetchPlainHTTP is set here
@@ -1754,6 +1775,8 @@ func runAPIServer() {
 		APIKey:         apiKey,
 		APIKeys:        apiKeys,
 		TrustedProxies: trustedProxies,
+		// Validates a scan worker's per-Job upload token (report S3).
+		ScanTokens: store.ConsumeScanToken,
 		// Empty = same-origin only. The dashboard proxies through its
 		// own nginx, so it needs no entry here.
 		CORSAllowedOrigins: splitAndTrim(os.Getenv("CORS_ALLOWED_ORIGINS")),

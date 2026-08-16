@@ -407,6 +407,21 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 		"artifact_id", id, "ref", updated.Ref,
 		"status", updated.Status, "scan_errors", len(updated.LastScanErrors))
 
+	// Revoke this artifact's upload tokens now the scan is over. They
+	// expire on their own, but a token that outlives the Job it was
+	// minted for is a credential nobody is watching -- and this is the
+	// one moment we know the Job is done. Also sweeps expired rows
+	// anywhere, so no CronJob is needed for it.
+	//
+	// After the results are persisted, deliberately: a worker racing to
+	// post its SBOM as the scan closes should win, not lose its
+	// credential mid-upload.
+	if err := h.store.DeleteScanTokens(id); err != nil {
+		// Not fatal to the scan, which has already succeeded. The
+		// tokens expire regardless.
+		slog.Warn("could not revoke scan upload tokens", "artifact_id", id, "err", err)
+	}
+
 	// An artifact whose own TYPE is sbom never had its components
 	// indexed. Indexing has only ever been triggered by an SBOM arriving
 	// at POST /artifacts/{id}/documents/sbom -- which is how an IMAGE

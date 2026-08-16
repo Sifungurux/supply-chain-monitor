@@ -2,7 +2,13 @@ package api_test
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/api"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/pipeline"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
@@ -85,4 +91,107 @@ func TestUploadDocument_NonexistentArtifactReturns404(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 for a nonexistent artifact, body=%s", rec.Code, rec.Body.String())
 	}
+}
+
+// Scan workers upload with a per-Job token instead of the master API
+// key (report S3). The worker pod exists to process UNTRUSTED content,
+// so the credential it carries has to be worth stealing as little as
+// possible.
+func TestScanToken_UploadAuth(t *testing.T) {
+	newSetup := func(t *testing.T) (http.Handler, *artifact.MemStore, string, string) {
+		t.Helper()
+		store := artifact.NewMemStore()
+		a, err := store.Create("example.com/app:1", artifact.TypeImage)
+		if err != nil {
+			t.Fatalf("seed artifact: %v", err)
+		}
+		token, hash, err := api.NewScanToken()
+		if err != nil {
+			t.Fatalf("mint: %v", err)
+		}
+		if err := store.CreateScanToken(a.ID, hash, time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("store token: %v", err)
+		}
+		h := api.NewRouter(api.Config{
+			Store:      store,
+			Tracker:    pipeline.NewTracker([]string{"build", "scan"}),
+			APIKey:     testAPIKey,
+			ScanTokens: store.ConsumeScanToken,
+		})
+		return h, store, a.ID, token
+	}
+
+	upload := func(h http.Handler, id, kind, cred string) int {
+		req := httptest.NewRequest(http.MethodPost,
+			"/api/v1/artifacts/"+id+"/documents/"+kind,
+			strings.NewReader(`{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}`))
+		req.Header.Set("Authorization", "Bearer "+cred)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	t.Run("valid token uploads for its own artifact", func(t *testing.T) {
+		h, _, id, token := newSetup(t)
+		if code := upload(h, id, "sbom", token); code != http.StatusOK {
+			t.Errorf("got %d, want 200", code)
+		}
+	})
+
+	t.Run("replay of the same kind is rejected", func(t *testing.T) {
+		h, _, id, token := newSetup(t)
+		if code := upload(h, id, "sbom", token); code != http.StatusOK {
+			t.Fatalf("first upload got %d, want 200", code)
+		}
+		// Single-use PER KIND: a compromised worker must not be able to
+		// overwrite the SBOM it already submitted.
+		if code := upload(h, id, "sbom", token); code != http.StatusUnauthorized {
+			t.Errorf("replay got %d, want 401", code)
+		}
+		// ...but the other kind is still available to the same Job.
+		if code := upload(h, id, "sarif", token); code != http.StatusOK {
+			t.Errorf("sarif after sbom got %d, want 200 -- each kind is usable once, not the token as a whole", code)
+		}
+	})
+
+	t.Run("token scoped to a different artifact is rejected", func(t *testing.T) {
+		h, store, _, token := newSetup(t)
+		other, err := store.Create("example.com/other:1", artifact.TypeImage)
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		// THE POINT OF SCOPING. A worker that pops trivy must not be
+		// able to write documents onto every other artifact.
+		if code := upload(h, other.ID, "sbom", token); code != http.StatusUnauthorized {
+			t.Errorf("cross-artifact upload got %d, want 401", code)
+		}
+	})
+
+	t.Run("expired token is rejected", func(t *testing.T) {
+		store := artifact.NewMemStore()
+		a, _ := store.Create("example.com/app:1", artifact.TypeImage)
+		token, hash, _ := api.NewScanToken()
+		_ = store.CreateScanToken(a.ID, hash, time.Now().Add(-time.Minute))
+		h := api.NewRouter(api.Config{
+			Store: store, Tracker: pipeline.NewTracker([]string{"build"}),
+			APIKey: testAPIKey, ScanTokens: store.ConsumeScanToken,
+		})
+		if code := upload(h, a.ID, "sbom", token); code != http.StatusUnauthorized {
+			t.Errorf("expired token got %d, want 401", code)
+		}
+	})
+
+	t.Run("a scan token is not accepted anywhere else", func(t *testing.T) {
+		h, _, id, token := newSetup(t)
+		// Scoped to the upload route ONLY -- it must not become a
+		// general-purpose credential.
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/artifacts/"+id, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("DELETE with a scan token got %d, want 401", rec.Code)
+		}
+	})
 }
