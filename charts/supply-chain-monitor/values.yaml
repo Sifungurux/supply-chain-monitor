@@ -570,7 +570,19 @@ monitorApi:
     # certificate verification, depending on the binary's reading of
     # the flag -- both wrong once a real CA is in play.
     insecure: "false"
-    public: "true"
+    # "false" because scm-registry requires a bearer token for every
+    # /v2/ request (templates/docker-auth/). --public tells unpacker to
+    # pull ANONYMOUSLY, bypassing the dockerconfig.json main.go builds
+    # from REGISTRY_USERNAME/PASSWORD -- so the pull is refused at the
+    # token endpoint even though the pod holds working credentials.
+    #
+    # Safe for public images too: that dockerconfig is keyed by registry
+    # host, so nothing is sent to gcr.io or ghcr.io. Anonymous pulls of
+    # public registries keep working.
+    #
+    # Flip back to "true" only for a registry that genuinely needs no
+    # auth, alongside registry.tls.enabled=false.
+    public: "false"
     maxFileMB: "100"
     # The unpacker executable itself. Bare name = found on PATH, which
     # is how it is baked into the monitor-api image (see Dockerfile);
