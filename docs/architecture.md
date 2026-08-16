@@ -557,11 +557,19 @@ a rebuild, so nothing else notices a new image is available.
   encrypts and cannot read its own backups; the private half is lent
   to a restore Job by `cluster/postgres-restore.sh` and deleted
   afterwards. Each dump carries a `.sha256` sidecar, and validity is
-  asserted *mid-stream* by an `awk` gate before gzip/gpg — verifying
-  after the write stopped being possible once the writer can no longer
-  decrypt what it wrote. Retention sorts by the ISO timestamp in the
-  filename rather than by mtime, which doesn't survive a PVC restore
-  or a file copy.
+  asserted *mid-stream* — verifying after the write stopped being
+  possible once the writer can no longer decrypt what it wrote. The
+  gate is byte-oriented (`dd` reads the first 512 bytes, checks the
+  header there, and passes the rest of the stream through untouched)
+  rather than line-oriented: a line-oriented gate has to hold one
+  whole `pg_dump` COPY row in memory, and rows holding SBOM/SARIF
+  documents are tens of MB, which OOM-killed the job. Dumps are
+  written to `*.partial` and renamed, so the final name only exists
+  once every byte is there — SIGKILL, node loss and power failure all
+  run no cleanup, and an interrupted write that looked like a finished
+  backup would be kept by the rule below. Retention sorts by the ISO
+  timestamp in the filename rather than by mtime, which doesn't
+  survive a PVC restore or a file copy.
 - **Registered-artifact sweep** — `monitor-api sweep-registered`
   (a third CLI mode, run as a `CronJob` every 15 minutes by default,
   `monitorApi.sweep.*`) lists artifacts still at `registered` status,
