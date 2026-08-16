@@ -591,10 +591,21 @@ a rebuild, so nothing else notices a new image is available.
   `monitorApi.sweep.*`) lists artifacts still at `registered` status,
   oldest first up to `batchSize` (default 5), and scans each through
   the normal `/scan` endpoint. Also opportunistically backfills any
-  artifact still missing a digest.
+  artifact still missing a digest. It additionally retries every
+  *failed* artifact on every run, and — with
+  `scanFreshness.autoRescan` (on by default) — rescans artifacts whose
+  last successful scan is older than `scanFreshness.rescanAfterDays`
+  (1 day). That threshold is deliberately **not** the same value as
+  the staleness badge (`warnAfterDays`, 7 days): a scanning cadence
+  and an alerting threshold are different questions, and sharing one
+  value leaves the badge permanently lit, since rescans are paced at
+  `batchSize` per run and a full pass takes hours.
 - **DB cache refresh** — daily `CronJob`s per active CVE scanner keep
   the shared Trivy/Grype vulnerability-DB PVCs current, staggered an
-  hour apart so they don't compete for disk/CPU on a small node.
+  hour apart so they don't compete for disk/CPU on a small node. Note
+  these only refresh the *databases*: nothing re-derives findings for
+  an already-scanned artifact, so the refresh is only worth anything
+  in combination with the auto-rescan above.
 
 ## Known limitations
 

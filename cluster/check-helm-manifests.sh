@@ -557,3 +557,44 @@ case "$pg_cm_off" in
 	exit 1
 	;;
 esac
+
+# == the rescan cadence is separate from the staleness badge ==
+#
+# Two silent failures, one guard.
+#
+# If autoRescan is on but SWEEP_RESCAN_STALE_AFTER_DAYS renders 0, the
+# sweep never rescans anything on age and NOTHING says so -- the
+# CronJob runs every 15 minutes, exits 0, and reports how many
+# registered artifacts it found. The vulnerability DBs keep refreshing
+# daily against artifacts that are never re-evaluated.
+#
+# And if the two values are wired to the same source again, an
+# aggressive rescan cadence drags the dashboard badge down with it,
+# which is the coupling this split exists to remove.
+echo "== rescan cadence and staleness badge are wired separately =="
+sweep_cj="$(helm template scm-ci charts/supply-chain-monitor -s templates/monitor-api/sweep-registered-cronjob.yaml)"
+api_cm="$(helm template scm-ci charts/supply-chain-monitor -s templates/monitor-api/configmap.yaml)"
+rescan_days="$(printf '%s' "$sweep_cj" | grep -A1 "name: SWEEP_RESCAN_STALE_AFTER_DAYS" | grep "value:" | tr -dc '0-9')"
+warn_days="$(printf '%s' "$api_cm" | grep "SCAN_STALE_AFTER_DAYS:" | tr -dc '0-9')"
+if [ -z "$rescan_days" ] || [ -z "$warn_days" ]; then
+	echo "ERROR: could not read the rescan/staleness values -- this check is not looking at anything." >&2
+	echo "       (rescan='${rescan_days}' warn='${warn_days}')" >&2
+	exit 1
+fi
+# Defaults ship autoRescan on, so a 0 here means the feature is off
+# while values.yaml says it is on.
+if [ "$rescan_days" = "0" ]; then
+	echo "ERROR: monitorApi.scanFreshness.autoRescan is on, but the sweep CronJob renders" >&2
+	echo "       SWEEP_RESCAN_STALE_AFTER_DAYS=0 -- it will never rescan anything on age," >&2
+	echo "       silently, while the trivy/grype DB refreshes keep running against" >&2
+	echo "       artifacts that are never re-evaluated." >&2
+	exit 1
+fi
+if [ "$rescan_days" = "$warn_days" ]; then
+	echo "ERROR: the rescan cadence (${rescan_days}d) equals the staleness badge (${warn_days}d)." >&2
+	echo "       These were deliberately split: rescans are paced at sweep.batchSize per" >&2
+	echo "       run, so artifacts legitimately sit past an aggressive threshold most of" >&2
+	echo "       the time and the badge stops meaning anything. If they genuinely should" >&2
+	echo "       match, change this check with the reason." >&2
+	exit 1
+fi

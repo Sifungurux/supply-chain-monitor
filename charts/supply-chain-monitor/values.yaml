@@ -844,7 +844,31 @@ monitorApi:
   # concurrency cap.
   scanFreshness:
     warnAfterDays: 7
-    autoRescan: false
+    # How old a successful scan may get before the sweep CronJob
+    # rescans it. SEPARATE from warnAfterDays deliberately, because the
+    # two answer different questions: "how often should findings be
+    # re-derived from a newer vulnerability DB" is a scanning cadence,
+    # while "how long before a human should be told something looks
+    # wrong" is an alerting threshold.
+    #
+    # Tying them together makes the badge useless at any aggressive
+    # cadence. Rescans are paced at sweep.batchSize per run, so a full
+    # pass over ~100 artifacts takes hours; with one shared value, most
+    # artifacts sit past the threshold most of the time and the
+    # dashboard is permanently red while the system is working exactly
+    # as designed.
+    #
+    # 0 (or unset) inherits warnAfterDays, which is what this did
+    # before the two were split. autoRescan: false is how you turn
+    # rescanning off, not 0 here.
+    rescanAfterDays: 1
+    # Rescanning matters more than it looks: the trivy/grype DB refresh
+    # CronJobs update the vulnerability databases daily, but nothing
+    # re-evaluates already-scanned artifacts against them. With this
+    # off, a CVE published today against a package in an image scanned
+    # last month simply never appears -- the refreshed DB is only
+    # consulted the next time something is actually scanned.
+    autoRescan: true
   # Per-scanner caps, so a memory-heavy tool can be throttled without
   # throttling everything else. Unset inherits scanConcurrency, which is
   # a no-op (a scan takes the global slot too, so an equal per-kind cap
