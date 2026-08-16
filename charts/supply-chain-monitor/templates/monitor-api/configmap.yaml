@@ -101,6 +101,7 @@ data:
   # file/sbom/sarif artifacts can be registered with an OCI registry
   # reference instead of a path already inside this pod -- oras pull
   # fetches them from scm-registry first (see internal/scanner/fetch.go).
+  CORS_ALLOWED_ORIGINS: {{ join "," .Values.monitorApi.corsAllowedOrigins | quote }}
   FETCH_PLAIN_HTTP: {{ .Values.monitorApi.fetchPlainHTTP | quote }}
   # Registry hosts exempt from ref validation (internal/scanner's
   # ValidateRef), which otherwise refuses any ref whose host is

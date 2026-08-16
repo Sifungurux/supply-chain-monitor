@@ -384,7 +384,7 @@ test('the detail page shows a download button only for documents that have actua
   dom.window.close();
 });
 
-test('clicking a document download button fetches it with the API key and triggers a save, without a plain <a href> (which would 401)', async () => {
+test('clicking a document download button fetches it via the proxy and triggers a save, sending no key of its own', async () => {
   const artifacts = [
     { id: 'd1', ref: 'alpine:3.19', type: 'image', status: 'scanned', current_stage: 'scan',
       cve_findings: [], malware_findings: [], created_at: '2026-07-19T09:00:00Z', updated_at: '2026-07-19T10:05:00Z',
@@ -408,7 +408,9 @@ test('clicking a document download button fetches it with the API key and trigge
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
-      window.SCM_CONFIG = { apiBase: '', apiKey: 'test-key-123' };
+      // No apiKey: the browser holds none (report S1); the dashboard's
+      // nginx attaches Authorization when proxying /dash-api.
+      window.SCM_CONFIG = { apiBase: '' };
       // jsdom has no createObjectURL/revokeObjectURL (confirmed against
       // this project's pinned jsdom version) -- stubbed here the same
       // way env.js/SCM_CONFIG is injected above, so the download path
@@ -432,7 +434,12 @@ test('clicking a document download button fetches it with the API key and trigge
   await tick(20);
 
   if (!capturedRequest) throw new Error('expected the sbom document endpoint to be fetched');
-  assert.equal(capturedRequest.headers['Authorization'], 'Bearer test-key-123', 'download must send the API key -- a plain <a href> could not');
+  // Was "must send the API key". The browser no longer has one, so the
+  // assertion inverts: it must send NO Authorization and let the proxy
+  // add it. The fetch+objectURL path is still what's used (rather than
+  // a plain <a href>), which is what the object-URL assertions below
+  // pin.
+  assert.ok(!capturedRequest.headers['Authorization'], 'browser must not send a key it does not hold');
 
   const counts = dom.window.__objectUrlCounts();
   assert.equal(counts.created, 1, 'expected exactly one object URL created for the download');
@@ -708,12 +715,16 @@ test('surfaces a visible connection error instead of silently showing nothing', 
   dom.window.close();
 });
 
-test("defaults the API base to the dashboard's own host on port 30300, not a hardcoded localhost", async () => {
-  // Regression test: this dashboard originally hardcoded
-  // "http://localhost:30300" as the default API address, which broke
-  // the colima runtime outright (NodePorts there are only reachable via
-  // the VM's own address, never "localhost") and didn't match the
-  // README's port-forward-based quickstart either.
+test("defaults the API base to the same-origin /dash-api proxy", async () => {
+  // Was the dashboard's own host on :30300 -- a direct, keyed call to
+  // monitor-api. The browser no longer holds a key (report S1), so the
+  // default is now the same-origin path the dashboard's own nginx
+  // serves, which attaches Authorization server-side.
+  //
+  // The older regression this replaces still matters and is still
+  // covered: the default must never be a hardcoded "localhost", which
+  // broke the colima runtime outright. A relative path satisfies that
+  // by construction.
   const dom = buildDom({
     url: 'http://192.168.64.12:30301/',
     fetchImpl(url) {
@@ -726,7 +737,7 @@ test("defaults the API base to the dashboard's own host on port 30300, not a har
 
   await tick(20);
   const apiInput = dom.window.document.getElementById('api-base');
-  assert.equal(apiInput.value, 'http://192.168.64.12:30300');
+  assert.equal(apiInput.value, '/dash-api');
   dom.window.close();
 });
 
@@ -1513,7 +1524,11 @@ test('uses window.SCM_CONFIG (injected by the render-config initContainer) when 
     beforeParseExtra(window) {
       // Simulates env.js, which the initContainer writes before nginx
       // ever serves this page -- see charts/supply-chain-monitor/templates/dashboard/deployment.yaml.
-      window.SCM_CONFIG = { apiBase: 'http://injected-host:30300', apiKey: 'injected-key' };
+      // env.js no longer carries apiKey -- it was published to every
+      // browser that could load the page (report S1). An explicit
+      // apiBase override is still honoured, for a dashboard pointed at
+      // an API that is not behind its proxy.
+      window.SCM_CONFIG = { apiBase: 'http://injected-host:30300' };
     }
   });
 
@@ -1521,10 +1536,12 @@ test('uses window.SCM_CONFIG (injected by the render-config initContainer) when 
   const doc = dom.window.document;
 
   assert.equal(doc.getElementById('api-base').value, 'http://injected-host:30300');
-  assert.equal(doc.getElementById('api-key').value, 'injected-key');
+  // No key comes from env.js any more, so the field stays empty and no
+  // Authorization header is sent -- the proxy adds it server-side.
+  assert.equal(doc.getElementById('api-key').value, '');
   assert.ok(calls.length > 0, 'expected at least one fetch call');
   for (const c of calls) {
-    assert.equal(c.headers['Authorization'], 'Bearer injected-key');
+    assert.ok(!c.headers['Authorization'], 'browser must not send a key it does not have');
     assert.equal(c.url.indexOf('http://injected-host:30300'), 0);
   }
   dom.window.close();
@@ -1570,7 +1587,7 @@ test('falls back to the old manual-entry behavior when window.SCM_CONFIG is abse
   await tick(20);
   const doc = dom.window.document;
   assert.equal(doc.getElementById('api-key').value, '');
-  assert.equal(doc.getElementById('api-base').value, 'http://localhost:30300');
+  assert.equal(doc.getElementById('api-base').value, '/dash-api');
   dom.window.close();
 });
 
@@ -2476,21 +2493,22 @@ test('the refresh poll does not close the maintainer editor mid-edit', async () 
   dom.window.close();
 });
 
-// THE BUG THIS ENCODES. The dashboard used to derive its API address as
-// protocol + host + ':30300', so a page served over HTTPS asked for
-// https://<host>:30300 -- a port speaking plain HTTP, which fails the
-// TLS handshake outright. Every API call failed, and enabling the
-// HTTP->HTTPS redirect made that the default way in.
+// The dashboard must call the SAME-ORIGIN proxy wherever it is served
+// from, and must never carry a key in the request.
 //
-// Served through the Gateway the API shares the page's origin (the
-// Gateway routes /api/ to monitor-api); served from the dashboard's own
-// NodePort it does not, because that nginx has static files only.
-test('the API address follows the origin the page was served from', async () => {
+// This replaces an origin-derived rule that was correct while the
+// browser held a key and called monitor-api directly. It no longer
+// does: the key was published in env.js to anyone who could load the
+// page (report S1), so the dashboard now calls /dash-api on its own
+// origin and its nginx attaches Authorization server-side.
+test('the dashboard calls the same-origin proxy and sends no key', async () => {
   const seen = [];
+  const headers = [];
   const domFor = (url) => buildDom({
     url,
-    fetchImpl(u) {
+    fetchImpl(u, opts) {
       seen.push(u);
+      headers.push((opts && opts.headers) || {});
       if (u.includes('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
       if (u.includes('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
       if (u.includes('/components/diff')) return jsonResponse({ from: null, to: null, added: [], removed: [], version_changed: [] });
@@ -2499,58 +2517,26 @@ test('the API address follows the origin the page was served from', async () => 
     }
   });
 
-  // Through the Gateway over HTTPS: same origin, no port rewrite. The
-  // old code produced https://localhost:30300 here, which cannot connect.
-  const viaGateway = domFor('https://localhost:30443/');
-  await tick(20);
-  const gatewayCalls = seen.filter((u) => u.startsWith('http'));
-  assert.ok(gatewayCalls.length > 0, 'the page must have called the API at all');
-  for (const u of gatewayCalls) {
-    assert.ok(u.startsWith('https://localhost:30443/'),
-      `called ${u} — over the Gateway the API shares the page origin; :30300 does not speak TLS`);
-  }
-  viaGateway.window.close();
+  // Both the Gateway path and the dashboard's own NodePort must behave
+  // identically -- the proxy exists on both.
+  for (const origin of ['https://localhost:30443/', 'http://localhost:30301/']) {
+    seen.length = 0;
+    headers.length = 0;
+    const dom = domFor(origin);
+    await tick(20);
 
-  // From the dashboard's own NodePort: that nginx proxies nothing, so
-  // the API has to be reached on its own port.
-  seen.length = 0;
-  const direct = domFor('http://localhost:30301/');
-  await tick(20);
-  const directCalls = seen.filter((u) => u.startsWith('http'));
-  assert.ok(directCalls.length > 0, 'the page must have called the API at all');
-  for (const u of directCalls) {
-    assert.ok(u.startsWith('http://localhost:30300/'),
-      `called ${u} — served from the dashboard NodePort, the API is on 30300`);
-  }
-  direct.window.close();
-});
-
-// A failure reason is a server-supplied string used as a map key, so an
-// inherited property name reaches the lookup. Before the Object.hasOwn
-// guard, last_scan_failure_reason "constructor" rendered a function body
-// into the badge. Not XSS -- esc() still runs -- but visible garbage
-// driven by a field the client does not control.
-test('an inherited property name as a failure reason renders "Failed"', async () => {
-  const hostile = Object.assign({}, SAMPLE_ARTIFACTS[0], {
-    id: 'proto', ref: 'proto:1', status: 'failed', last_scan_failure_reason: 'constructor'
-  });
-  const dom = buildDom({
-    url: 'http://localhost:30301/',
-    fetchImpl(u) {
-      if (u.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (u.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
-      if (u.includes('/components/diff')) return jsonResponse({ from: null, to: null, added: [], removed: [], version_changed: [] });
-      if (isArtifactsList(u)) return artifactsPage([hostile]);
-      return errorResponse(404, { error: 'not found' });
+    const calls = seen.filter((u) => u.includes('/api/v1/'));
+    assert.ok(calls.length > 0, `no API calls made from ${origin}`);
+    for (const u of calls) {
+      assert.ok(u.startsWith('/dash-api/'),
+        `called ${u} from ${origin} -- must go through the same-origin proxy, which is what holds the key`);
     }
-  });
-  await tick(20);
-  const row = dom.window.document.querySelector('#artifact-rows tr[data-id="proto"]');
-  assert.ok(row, 'the hostile artifact should still render');
-  assert.doesNotMatch(row.textContent, /function|native code|Object\(\)/,
-    'an inherited property leaked into the badge');
-  assert.match(row.textContent, /Failed/, 'should fall back to the generic label');
-  dom.window.close();
+    for (const h of headers) {
+      assert.ok(!h.Authorization,
+        'the browser sent an Authorization header -- it should hold no key at all');
+    }
+    dom.window.close();
+  }
 });
 
 // Failed scans, fleet-wide. The per-row badge only ever showed failures

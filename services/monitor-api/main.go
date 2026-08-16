@@ -1754,15 +1754,18 @@ func runAPIServer() {
 		APIKey:         apiKey,
 		APIKeys:        apiKeys,
 		TrustedProxies: trustedProxies,
-		RateLimitRPS:   rateLimitRPS,
-		RateLimitBurst: rateLimitBurst,
-		DigestResolver: digestResolver,
-		FetchPlainHTTP: fetchPlainHTTP,
-		ScanTimeout:    scanTimeout,
-		RequireDigest:  requireDigest,
-		ScanLimits:     api.ScanLimits{Concurrency: scanConcurrency, PerKind: perKindConcurrency},
-		Notifications:  api.Notifications{Notifiers: notifiers, MinSeverity: notifyMinSeverity, NotifyOnFirstScan: !suppressFirstScan},
-		RegLimits:      api.RegistrationLimits{MaxArtifacts: maxArtifacts},
+		// Empty = same-origin only. The dashboard proxies through its
+		// own nginx, so it needs no entry here.
+		CORSAllowedOrigins: splitAndTrim(os.Getenv("CORS_ALLOWED_ORIGINS")),
+		RateLimitRPS:       rateLimitRPS,
+		RateLimitBurst:     rateLimitBurst,
+		DigestResolver:     digestResolver,
+		FetchPlainHTTP:     fetchPlainHTTP,
+		ScanTimeout:        scanTimeout,
+		RequireDigest:      requireDigest,
+		ScanLimits:         api.ScanLimits{Concurrency: scanConcurrency, PerKind: perKindConcurrency},
+		Notifications:      api.Notifications{Notifiers: notifiers, MinSeverity: notifyMinSeverity, NotifyOnFirstScan: !suppressFirstScan},
+		RegLimits:          api.RegistrationLimits{MaxArtifacts: maxArtifacts},
 		// What GET /readyz actually checks. This is the only place a
 		// concrete *PostgresStore is in scope -- api.Config takes a func
 		// precisely so the Store interface doesn't have to grow a second
@@ -1791,4 +1794,19 @@ func runAPIServer() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fatal("server error", "err", err)
 	}
+}
+
+// splitAndTrim parses a comma-separated env list, dropping blanks so a
+// trailing comma or an empty variable yields no entries rather than one
+// empty entry -- an empty CORS origin would never match anything, but
+// an empty entry in an allowlist is the kind of thing that quietly
+// becomes a wildcard in a later refactor.
+func splitAndTrim(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

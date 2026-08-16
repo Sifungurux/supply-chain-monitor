@@ -547,6 +547,19 @@ monitorApi:
   #
   # Setting ["0.0.0.0/0", "::/0"] restores the pre-existing behaviour of
   # believing every peer, if you need it.
+  # Cross-origin callers allowed to use this API from a browser
+  # (CORS_ALLOWED_ORIGINS). Empty = same-origin only: no
+  # Access-Control-Allow-Origin header is sent at all, which is what
+  # actually makes a browser refuse.
+  #
+  # The dashboard needs NO entry here: it calls /dash-api on its own
+  # origin and its nginx proxies server-side. This list is only for
+  # other browser apps you deliberately want to call the API directly,
+  # and each needs its own key.
+  #
+  # Was "*", which meant any page a cluster-adjacent user visited could
+  # call this API with a key obtained elsewhere.
+  corsAllowedOrigins: []
   trustedProxyCIDRs: []
   # When true, this chart does NOT render
   # templates/monitor-api/auth-secret.yaml at all -- you're expected to

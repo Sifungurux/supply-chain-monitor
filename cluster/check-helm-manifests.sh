@@ -400,3 +400,36 @@ case "$api_route" in
 	exit 1
 	;;
 esac
+
+# == the dashboard never ships the API key to browsers ==
+#
+# The render-config initContainer writes env.js, which nginx serves to
+# ANY browser that can reach the dashboard. Writing API_KEY into it
+# published the only credential this API had -- full
+# register/scan/delete authority, retrievable with a plain
+# `curl .../env.js` (report S1, CRITICAL).
+#
+# The key now lives only in the nginx proxy config inside the pod. This
+# asserts the env.js line never regains it: the two are written by the
+# same script, a few lines apart, so a future edit could easily put it
+# back.
+echo "== the dashboard's env.js carries no API key =="
+# Only the line that WRITES the file -- comments mentioning apiKey (and
+# there are several, explaining why it is absent) are not the thing
+# under test.
+init_script="$(helm template scm-ci charts/supply-chain-monitor \
+	-s templates/dashboard/deployment.yaml \
+	| grep -E "printf .*SCM_CONFIG" || true)"
+if [ -z "$init_script" ]; then
+	echo "ERROR: could not find the line that writes env.js -- this check is not looking at anything." >&2
+	exit 1
+fi
+case "$init_script" in
+*apiKey*)
+	echo "ERROR: the generated env.js includes an apiKey field." >&2
+	echo "       env.js is served unauthenticated to every browser that can reach" >&2
+	echo "       the dashboard. The key belongs only in the nginx proxy config." >&2
+	echo "       Offending line: ${init_script}" >&2
+	exit 1
+	;;
+esac

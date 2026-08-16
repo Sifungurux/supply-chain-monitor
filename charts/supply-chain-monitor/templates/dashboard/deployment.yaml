@@ -79,7 +79,53 @@ spec:
               ESCAPED_BASE=$(printf '%s' "$DASHBOARD_API_BASE" | sed 's/\\/\\\\/g; s/"/\\"/g')
               ESCAPED_ALLOW_MANUAL_REG=$(printf '%s' "$DASHBOARD_ALLOW_MANUAL_REGISTRATION" | sed 's/\\/\\\\/g; s/"/\\"/g')
               ESCAPED_SHOW_CONN_SETTINGS=$(printf '%s' "$DASHBOARD_SHOW_CONNECTION_SETTINGS" | sed 's/\\/\\\\/g; s/"/\\"/g')
-              printf 'window.SCM_CONFIG = { apiBase: "%s", apiKey: "%s", allowManualRegistration: "%s", showConnectionSettings: "%s" };\n' "$ESCAPED_BASE" "$ESCAPED_KEY" "$ESCAPED_ALLOW_MANUAL_REG" "$ESCAPED_SHOW_CONN_SETTINGS" > /html/env.js
+              # NO apiKey IN env.js. That file is served by nginx to any
+              # browser that can reach the dashboard, so writing the key
+              # into it published the only credential this API has --
+              # full register/scan/delete authority, retrievable with a
+              # plain `curl .../env.js` (report S1).
+              #
+              # The key now lives only in the nginx config below, inside
+              # the pod, and is attached server-side to proxied requests.
+              printf 'window.SCM_CONFIG = { apiBase: "%s", allowManualRegistration: "%s", showConnectionSettings: "%s" };\n' "$ESCAPED_BASE" "$ESCAPED_ALLOW_MANUAL_REG" "$ESCAPED_SHOW_CONN_SETTINGS" > /html/env.js
+
+              # The dashboard calls /dash-api/... on its own origin; this
+              # proxy strips that prefix and adds the Authorization the
+              # browser no longer has.
+              #
+              # /dash-api rather than /api DELIBERATELY: the Gateway
+              # already routes /api/ straight to monitor-api for real API
+              # clients (templates/gateway/httproute-api.yaml), so a
+              # dashboard calling /api/ would bypass this proxy when
+              # served through the Gateway and get a 401. A distinct
+              # prefix always lands here, on both the Gateway path and
+              # the direct NodePort.
+              #
+              # This replaces the image's default.conf, so the static
+              # server block has to be reproduced here too.
+              cat > /nginx-conf/default.conf <<NGINX_EOF
+              server {
+                listen 8080;
+                server_name _;
+                root /usr/share/nginx/html;
+                index index.html;
+
+                location / {
+                  try_files \$uri \$uri/ =404;
+                }
+
+                location /dash-api/ {
+                  proxy_pass http://${MONITOR_API_ADDR}/;
+                  proxy_set_header Authorization "Bearer ${API_KEY}";
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_http_version 1.1;
+                  # Scan dispatch answers 202 quickly, but document
+                  # uploads and large lists can take a while.
+                  proxy_read_timeout 120s;
+                }
+              }
+              NGINX_EOF
           env:
             - name: API_KEY
               valueFrom:
@@ -90,6 +136,8 @@ spec:
                   # same way it did as two separate charts.
                   name: scm-monitor-api-auth
                   key: API_KEY
+            - name: MONITOR_API_ADDR
+              value: {{ printf "monitor-api.%s.svc.cluster.local:8080" .Release.Namespace | quote }}
             - name: DASHBOARD_API_BASE
               valueFrom:
                 configMapKeyRef:
@@ -111,6 +159,8 @@ spec:
               readOnly: true
             - name: html
               mountPath: /html
+            - name: nginx-conf
+              mountPath: /nginx-conf
       containers:
         - name: nginx
           image: "{{ .Values.dashboard.image.repository }}:{{ .Values.dashboard.image.tag }}"
@@ -132,6 +182,9 @@ spec:
             # caches under /var/cache/nginx. Without them the container
             # starts and then fails on the first request rather than at
             # boot, which is a worse failure to diagnose.
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
             - name: nginx-tmp
               mountPath: /tmp
             - name: nginx-cache
@@ -158,6 +211,8 @@ spec:
           configMap:
             name: scm-dashboard-html
         - name: html
+          emptyDir: {}
+        - name: nginx-conf
           emptyDir: {}
         - name: nginx-tmp
           emptyDir: {}

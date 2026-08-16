@@ -183,6 +183,36 @@ make deploy
 
 ### Auto-configured API address/key
 
+**The dashboard no longer holds an API key at all.** It calls
+`/dash-api/` on its own origin; the dashboard's nginx proxies that to
+`monitor-api` and attaches `Authorization` **server-side** from the
+mounted Secret. The key never reaches a browser.
+
+That closes a real hole: `env.js` is served unauthenticated to anyone
+who can reach the dashboard, so writing the key into it published the
+only credential this API had — full register/scan/delete authority,
+retrievable with a plain `curl .../env.js`. A CI guard now fails the
+build if `apiKey` reappears in that file.
+
+`/dash-api` rather than `/api` deliberately: the Gateway already routes
+`/api/` straight to `monitor-api` for real API clients, so a dashboard
+calling `/api/` would bypass its own proxy when served through the
+Gateway. The distinct prefix always lands on the dashboard's nginx, on
+both the Gateway path and the direct NodePort.
+
+**Be clear about what this does and does not buy.** The key can no
+longer be *extracted and reused elsewhere*, which is the actual fix.
+But anyone who can reach the dashboard can still drive the API
+*through* it — that is moving the trust boundary to "can you reach the
+dashboard", not adding authentication. Per-user auth on the dashboard
+is a separate, larger piece of work.
+
+CORS is now an **allowlist** (`monitorApi.corsAllowedOrigins`), empty by
+default, meaning same-origin only — no `Access-Control-Allow-Origin`
+header is sent at all. It was `*`, which meant any page a
+cluster-adjacent user visited could call this API with a key obtained
+elsewhere. The dashboard needs no entry, being same-origin.
+
 The dashboard no longer needs anyone to open it and paste an API key
 in by hand. `charts/supply-chain-monitor/templates/dashboard/deployment.yaml` runs a small
 initContainer before nginx starts that reads `API_KEY` from the same
