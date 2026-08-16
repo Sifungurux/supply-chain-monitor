@@ -186,31 +186,76 @@ spec:
                   # produced), and it refuses to finish writing a bad
                   # backup rather than deleting one afterwards.
                   #
-                  # LC_ALL=C so awk is byte-transparent -- a locale
-                  # with a multibyte charset can mangle a dump on the
-                  # way through, and this stream is the backup.
+                  # BYTE-ORIENTED, NOT LINE-ORIENTED, and that is not a
+                  # style preference -- a line-oriented gate is what an
+                  # earlier version of this did, and it OOM-killed the
+                  # job against the real database in eight seconds.
+                  #
+                  # `awk '{print}'` streams, but it has to hold one
+                  # whole RECORD in memory, and a record here is a
+                  # pg_dump COPY line: one row. This database stores
+                  # SBOM and SARIF documents, so a single row is
+                  # routinely tens of megabytes, against a 256Mi limit.
+                  # It passed every offline test, because a stub dump's
+                  # rows are 40 bytes long.
+                  #
+                  # dd reads exactly 512 bytes (bs=1 count=512 cannot
+                  # over-read the pipe the way a buffered `head -c`
+                  # can), the header is checked there, and `cat FILE -`
+                  # emits those bytes and then hands the rest of the
+                  # stream straight through. Constant memory, no
+                  # concept of a line, byte-for-byte identical output.
+                  gate() {
+                    dd bs=1 count=512 of=/tmp/dump-head 2>/dev/null
+                    if ! grep -q "PostgreSQL database dump" /tmp/dump-head; then
+                      echo "ERROR: the dump stream carried no PostgreSQL dump header." >&2
+                      return 1
+                    fi
+                    cat /tmp/dump-head -
+                  }
+
+                  # WRITE TO A TEMPORARY NAME AND RENAME.
+                  #
+                  # The EXIT trap above cannot save us from everything:
+                  # the OOM kill that found the bug above was SIGKILL,
+                  # which runs no trap, and it left a 16M truncated
+                  # .gpg on the PVC. That file then looked exactly like
+                  # a real encrypted backup that merely had no sidecar
+                  # -- which the sweep below deliberately KEEPS -- so it
+                  # would have sat there forever counting toward
+                  # retention and eventually evicting a good backup.
+                  #
+                  # A rename is atomic, so the final name only ever
+                  # exists once the bytes are all there. Anything
+                  # interrupted leaves *.partial, which is not a
+                  # backup by any glob below and gets swept. This
+                  # covers node loss and power failure too, which no
+                  # trap ever could.
+                  partial="${out}.partial"
+                  trap 'rm -f "${partial:-}"' EXIT
                   echo "dumping (validity is asserted mid-stream, before encryption)"
                   pg_dump -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-                    | LC_ALL=C awk '
-                        NR <= 50 && /PostgreSQL database dump/ { seen = 1 }
-                        { print }
-                        END {
-                          if (!seen) {
-                            print "ERROR: stream carried no PostgreSQL dump header" > "/dev/stderr"
-                            exit 1
-                          }
-                        }' \
+                    | gate \
                     | gzip \
-                    | encrypt > "$out"
+                    | encrypt > "$partial"
 
-                  # Sidecar checksum. Two jobs: it proves the bytes on
-                  # the PVC are the bytes we wrote (the only integrity
+                  mv "$partial" "$out"
+                  trap - EXIT
+
+                  # Sidecar checksum, taken after the file is in its
+                  # final place. Two jobs: it proves the bytes on the
+                  # PVC are the bytes we wrote (the only integrity
                   # check available for a file we cannot decrypt), and
                   # it is what the sweep below uses to decide an
                   # encrypted backup is still sound years later.
                   #
                   # Written with a bare filename so `sha256sum -c` works
                   # from /backups without rewriting paths.
+                  #
+                  # A kill between the rename and this line leaves a
+                  # COMPLETE backup with no sidecar. That is exactly
+                  # the case the sweep keeps and warns about, and it is
+                  # the right answer: the file is whole.
                   ( cd /backups && sha256sum "$(basename "$out")" > "$(basename "$out").sha256" )
 
                   # Read it straight back. Catches a PVC that accepted
@@ -220,10 +265,10 @@ spec:
                   if ! ( cd /backups && sha256sum -c --status "$(basename "$out").sha256" ); then
                     echo "ERROR: ${out} does not match the checksum just taken of it." >&2
                     echo "ERROR: it is being removed and nothing is pruned; every existing backup is untouched." >&2
+                    rm -f "$out" "${out}.sha256"
                     exit 1
                   fi
 
-                  trap - EXIT
                   echo "backup complete: $(du -h "$out" | cut -f1)"
                   if [ -n "${GPG_RECIPIENT_FILE:-}" ]; then
                     echo "encrypted -- restoring it needs the private key (see README, \"Backing up and restoring Postgres\")"
@@ -249,6 +294,23 @@ spec:
                   # disagree about what a backup is -- and so sidecars
                   # are never counted as backups, which would silently
                   # halve retention.
+                  # Interrupted writes from earlier runs. A killed job
+                  # runs no cleanup of its own, so somebody has to do
+                  # it, and *.partial is never a backup: it matches
+                  # neither glob below and cannot be restored.
+                  #
+                  # Note this would also remove a partial belonging to
+                  # a backup running RIGHT NOW. concurrencyPolicy is
+                  # Forbid so the schedule cannot overlap itself; a
+                  # manual `make db-backup` racing the nightly run
+                  # would fail loudly at its own `mv`, which is a
+                  # failed backup and not a lost one.
+                  for p in scm-postgres-*.partial; do
+                    [ -e "$p" ] || continue
+                    echo "removing ${p}: an interrupted write (a killed job cannot clean up after itself)"
+                    rm -f "$p"
+                  done
+
                   survivors=/tmp/survivors
                   : > "$survivors"
                   for f in scm-postgres-*.sql.gz scm-postgres-*.sql.gz.gpg; do

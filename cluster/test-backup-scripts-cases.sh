@@ -77,6 +77,56 @@ for d in 20260101 20260102 20260103 20260104; do
 	[ -f "/backups/scm-postgres-${d}T020000Z.sql.gz" ] && bad "kept ${d} -- should have been pruned" || ok "pruned ${d} (oldest)"
 done
 
+echo "=== T3b: a single huge row does not blow up memory ==="
+# The bug live verification found and every offline test missed: the
+# gate used to be `awk '{print}'`, which holds one whole RECORD --
+# and a record is one pg_dump COPY line, i.e. one row. This database
+# stores SBOM/SARIF documents, so real rows are tens of MB and the job
+# was OOM-killed in 8s against a 256Mi limit while passing every test
+# here, because a stub row is 40 bytes.
+#
+# One 64MB line, run under a 128MB address-space cap: a line-holding
+# gate cannot survive this, a byte-oriented one does not notice it.
+reset
+cat > /h/stubs/pg_dump <<'STUB'
+#!/bin/sh
+echo '--'
+echo '-- PostgreSQL database dump'
+echo '--'
+echo "COPY documents (id, body) FROM stdin;"
+# One row, 64MB of it, on a single line.
+i=0; while [ $i -lt 64 ]; do dd if=/dev/zero bs=1048576 count=1 2>/dev/null | tr '\0' 'x'; i=$((i+1)); done
+echo ""
+echo '\.'
+echo '-- PostgreSQL database dump complete'
+STUB
+chmod +x /h/stubs/pg_dump
+( ulimit -v 131072 2>/dev/null; cd / && sh /h/script-plain.sh ) >/tmp/big 2>&1; rc=$?
+[ "$rc" = 0 ] && ok "survived a 64MB single-line row under a 128MB cap" || { bad "exit $rc -- the gate is holding the row in memory"; tail -5 /tmp/big; }
+big=$(ls /backups/scm-postgres-*.sql.gz 2>/dev/null | head -1)
+if [ -n "$big" ]; then
+	got=$(gzip -dc "$big" | wc -c)
+	want=$(pg_dump | wc -c)
+	[ "$got" = "$want" ] && ok "67MB stream passed through byte-exact" || bad "mangled: $got vs $want"
+else
+	bad "no backup written"
+fi
+cp /tmp/pg_dump.real /h/stubs/pg_dump
+
+echo "=== T3c: an interrupted write leaves nothing restorable ==="
+# SIGKILL runs no EXIT trap. Before the write-to-.partial-and-rename
+# change, an OOM left a truncated .gpg that looked like a real backup
+# with a missing sidecar -- which the sweep KEEPS -- so it counted
+# toward retention forever and would eventually evict a good one.
+reset
+: > /backups/scm-postgres-20260101T020000Z.sql.gz.gpg.partial
+: > /backups/scm-postgres-20260102T020000Z.sql.gz.partial
+rc=$(run)
+[ "$rc" = 0 ] && ok "exit 0" || { bad "exit $rc"; tail -10 /tmp/out; }
+n=$(ls /backups/*.partial 2>/dev/null | wc -l)
+[ "$n" = 0 ] && ok "stray .partial files swept" || bad "$n .partial file(s) left behind"
+grep -q "an interrupted write" /tmp/out && ok "said what it removed" || bad "removed them silently"
+
 echo "=== T4: encrypted path round-trips ==="
 reset
 export GNUPGHOME=/tmp/keyring
