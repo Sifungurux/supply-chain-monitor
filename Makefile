@@ -194,8 +194,18 @@ test-image:
 # govulncheck job in .github/workflows/ci.yml. Run it by hand any time;
 # it needs network for the vulnerability database.
 GOVULNCHECK_VERSION ?= v1.1.4
+# PINNED TO THE SAME DIGEST THE BUILD USES. This ran against the
+# floating golang:1.26-alpine tag while services/monitor-api/Dockerfile
+# pinned by digest -- so the gating vulnerability check and the actual
+# build could disagree about which toolchain they were talking about,
+# and on 2026-08-16 they did: the tag moved to a Go release with four
+# stdlib CVEs while the build stayed on the pinned one.
+#
+# Keep GO_BUILD_IMAGE in step with the Dockerfile's FROM lines.
+GO_BUILD_IMAGE ?= golang:1.26-alpine@sha256:70b46548e42db77e0966aaf3619fd068734dc6c77584d526b91126504fd95816
+
 vulncheck:
-	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src golang:1.26-alpine \
+	docker run --rm -v "$(CURDIR)/services/monitor-api":/src -w /src $(GO_BUILD_IMAGE) \
 		sh -c "go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) && govulncheck ./..."
 
 # Misconfiguration scan of the two things this repo ships that describe

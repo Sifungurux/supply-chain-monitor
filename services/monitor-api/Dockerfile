@@ -12,7 +12,7 @@
 # top-level digest it prints, not a per-platform one.
 
 # --- monitor-api build stage ---
-FROM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
+FROM golang:1.26-alpine@sha256:70b46548e42db77e0966aaf3619fd068734dc6c77584d526b91126504fd95816 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY . .
@@ -38,7 +38,7 @@ RUN CGO_ENABLED=0 go build -o /out/monitor-api .
 # because umoci's go.mod wants a newer toolchain, bump the golang tag
 # here. (v0.4.7 is old and still builds clean under Go 1.26 -- verified,
 # not assumed, when this was bumped off 1.22.)
-FROM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS umoci-build
+FROM golang:1.26-alpine@sha256:70b46548e42db77e0966aaf3619fd068734dc6c77584d526b91126504fd95816 AS umoci-build
 # Pinned to a COMMIT, not a tag. `--branch v0.4.7` (what this used to
 # do) looked exactly as pinned as this does while guaranteeing nothing:
 # a tag is a mutable ref the upstream repo can move, or anyone with push
