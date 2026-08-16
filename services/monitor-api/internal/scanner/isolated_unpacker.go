@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strconv"
 	"time"
 
@@ -190,7 +191,7 @@ func (s *IsolatedUnpackerScanner) Scan(ctx context.Context, ref string) ([]artif
 		ServiceAccount:        s.cfg.ServiceAccount,
 		Command:               []string{"/usr/local/bin/monitor-api", "scan-worker"},
 		ActiveDeadlineSeconds: s.cfg.ActiveDeadlineSeconds,
-		Env: map[string]string{
+		Env: unpackerWorkerEnv(map[string]string{
 			"SCM_SCAN_REF":         ref,
 			"CLAMAV_ADDR":          s.cfg.ClamAddr,
 			"UNPACKER_BIN":         s.cfg.UnpackerBin,
@@ -203,7 +204,7 @@ func (s *IsolatedUnpackerScanner) Scan(ctx context.Context, ref string) ([]artif
 			"REGISTRY_ADDR": s.cfg.RegistryAddr,
 			// See VerboseLogs's own comment.
 			"SCM_SCAN_VERBOSE": strconv.FormatBool(s.cfg.VerboseLogs),
-		},
+		}),
 		SecretEnvVars:           secretEnv,
 		CPURequest:              s.cfg.CPURequest,
 		MemoryRequest:           s.cfg.MemoryRequest,
@@ -273,3 +274,25 @@ func (s *IsolatedUnpackerScanner) waitForCompletion(ctx context.Context, name st
 // the cap bounds concurrent runs of the TOOL, and whether it runs in a
 // Job or in this process does not change what it costs to run.
 func (s *IsolatedUnpackerScanner) Kind() string { return "unpacker" }
+
+// unpackerWorkerEnv forwards REF_HOST_ALLOWLIST into the Job.
+//
+// This worker runs "monitor-api scan-worker", which calls the same
+// RegistryFetcher -> ValidateRef this process does, reading the same
+// variable -- so without it the Job REFUSES the in-cluster registry it
+// exists to pull from, and the refusal happens before any pull is
+// attempted. The isolated trivy and grype scanners already do this; the
+// unpacker one did not, which is why malware scanning of any image in
+// scm-registry failed with "is an in-cluster service address -- refused"
+// while CVE scanning of the same image worked.
+//
+// Found by actually scanning an image from the in-cluster registry,
+// which apparently had never been done -- the two scanners that forward
+// it were enough to make the failure look like a partial success
+// (status "scanned", one scan error).
+func unpackerWorkerEnv(env map[string]string) map[string]string {
+	if allow := os.Getenv(RefHostAllowlistEnv); allow != "" {
+		env[RefHostAllowlistEnv] = allow
+	}
+	return env
+}

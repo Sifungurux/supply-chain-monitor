@@ -2,6 +2,8 @@ package scanner
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -171,7 +173,7 @@ func TestFetchAndResolve_ValidateRefThemselves(t *testing.T) {
 		t.Fatalf("Fetch(%q) = %v, want it refused before oras ever ran", metadataRef, err)
 	}
 
-	digest, err := NewOrasDigestResolver().Resolve(context.Background(), metadataRef, false)
+	digest, err := NewOrasDigestResolver("", "").Resolve(context.Background(), metadataRef, false)
 	if err == nil || !strings.Contains(err.Error(), "link-local") {
 		t.Fatalf("Resolve(%q) = (%q, %v), want it refused before oras ever ran", metadataRef, digest, err)
 	}
@@ -232,4 +234,54 @@ func requireLinkLocalRefusal(t *testing.T, err error) {
 	if !strings.Contains(err.Error(), "link-local") {
 		t.Fatalf("refused for the wrong reason: %v -- want the ValidateRef link-local refusal, not a missing binary or a failed connection", err)
 	}
+}
+
+// Every isolated scanner whose worker runs "monitor-api scan-worker"
+// must forward REF_HOST_ALLOWLIST into that Job.
+//
+// The worker calls the same RegistryFetcher -> ValidateRef this process
+// does, reading the same variable, so without it the Job refuses the
+// in-cluster registry it exists to pull from -- before any pull is
+// attempted.
+//
+// Asserted over the SOURCE rather than by building each scanner,
+// because the bug this catches is a NEW scanner being added that
+// forgets the line. Two of the three had it; the unpacker one did not,
+// so malware scanning of any scm-registry image failed while CVE
+// scanning of the same image succeeded -- which looked like a partial
+// success rather than a missing variable.
+func TestIsolatedScanners_ForwardRefHostAllowlist(t *testing.T) {
+	files, err := filepath.Glob("isolated_*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no isolated_*.go files found -- this test would pass vacuously")
+	}
+
+	var checked int
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		text := string(src)
+		// Only scanners that run the in-process worker validate refs.
+		// malcontent runs its own binary directly and never calls
+		// ValidateRef, so it has nothing to forward.
+		if !strings.Contains(text, `"scan-worker"`) {
+			continue
+		}
+		checked++
+		if !strings.Contains(text, "RefHostAllowlistEnv") {
+			t.Errorf("%s builds a scan-worker Job but never forwards %s -- that Job will refuse the in-cluster registry it exists to pull from", f, RefHostAllowlistEnv)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no scan-worker-based scanners were checked -- the test is not looking at anything")
+	}
+	t.Logf("checked %d scan-worker-based isolated scanners", checked)
 }

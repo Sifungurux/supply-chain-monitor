@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -11,7 +12,7 @@ import (
 // exec.CommandContext is ever constructed, so this can run in any Go
 // environment, unlike a real registry-fetch case.
 func TestOrasDigestResolver_Resolve_LocalPathNeverContactsARegistry(t *testing.T) {
-	r := NewOrasDigestResolver()
+	r := NewOrasDigestResolver("", "")
 	digest, err := r.Resolve(context.Background(), "/tmp/report.sarif", false)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -84,5 +85,30 @@ func TestQualifyDockerHubRef(t *testing.T) {
 				t.Fatalf("qualifyDockerHubRef(%q) = %q, want %q", tc.ref, got, tc.want)
 			}
 		})
+	}
+}
+
+// scm-registry requires a bearer token for every /v2/ request, so an
+// anonymous manifest fetch is refused at the token endpoint with a 401.
+// That failure is SILENT -- resolveDigest swallows it and continues
+// without a digest -- so the only symptom is dedup quietly not working
+// for in-cluster images.
+func TestOrasDigestResolver_PassesCredentials(t *testing.T) {
+	withCreds := NewOrasDigestResolver("scm-reader", "hunter2")
+	anonymous := NewOrasDigestResolver("", "")
+
+	// The resolver shells out, so assert on the argv it would build
+	// rather than on a live registry.
+	got := withCreds.args("example.com/app:1", false)
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "--username scm-reader") || !strings.Contains(joined, "--password hunter2") {
+		t.Errorf("credentials missing from argv: %q", joined)
+	}
+
+	// Anonymous must stay anonymous -- public registries reject an
+	// empty --username outright rather than ignoring it.
+	anon := strings.Join(anonymous.args("example.com/app:1", false), " ")
+	if strings.Contains(anon, "--username") {
+		t.Errorf("empty credentials still produced a --username flag: %q", anon)
 	}
 }

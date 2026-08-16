@@ -40,10 +40,29 @@ type DigestResolver interface {
 // the whole artifact. `oras resolve` also exists and is arguably a
 // better name match, but is marked "[Preview]" in oras's own docs as of
 // v1.3 -- `manifest fetch --descriptor` is the stable command.
-type OrasDigestResolver struct{}
+// OrasDigestResolver resolves a ref's digest by shelling out to oras.
+//
+// It carries registry credentials for the same reason RegistryFetcher
+// does: scm-registry requires a bearer token for every /v2/ request
+// (see templates/docker-auth/), so an anonymous manifest fetch is
+// refused with a 401 at the token endpoint.
+//
+// That failure was SILENT. Digest resolution is best-effort by
+// design -- resolveDigest swallows the error and continues without a
+// digest -- so an unauthenticated resolver does not break registration,
+// it just quietly stops deduplicating anything in the in-cluster
+// registry. Found by scanning an scm-registry image and noticing the
+// artifact came back with no digest.
+type OrasDigestResolver struct {
+	username string
+	password string
+}
 
-func NewOrasDigestResolver() *OrasDigestResolver {
-	return &OrasDigestResolver{}
+// NewOrasDigestResolver builds a resolver. Empty credentials mean
+// anonymous, which is correct for public registries and wrong for
+// scm-registry.
+func NewOrasDigestResolver(username, password string) *OrasDigestResolver {
+	return &OrasDigestResolver{username: username, password: password}
 }
 
 // orasDescriptor is the subset of `oras manifest fetch --descriptor`'s
@@ -99,13 +118,7 @@ func (r *OrasDigestResolver) Resolve(ctx context.Context, ref string, plainHTTP 
 		return "", err
 	}
 
-	args := []string{"manifest", "fetch", "--descriptor"}
-	if plainHTTP {
-		args = append(args, "--plain-http")
-	}
-	args = append(args, qualifyDockerHubRef(ref))
-
-	cmd := exec.CommandContext(ctx, "oras", args...)
+	cmd := exec.CommandContext(ctx, "oras", r.args(ref, plainHTTP)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -131,4 +144,24 @@ func (r *OrasDigestResolver) Resolve(ctx context.Context, ref string, plainHTTP 
 		return "", fmt.Errorf("oras returned no digest for %q", ref)
 	}
 	return desc.Digest, nil
+}
+
+// args builds the oras invocation. Split out from Resolve so the
+// credential handling is testable without a live registry.
+func (r *OrasDigestResolver) args(ref string, plainHTTP bool) []string {
+	args := []string{"manifest", "fetch", "--descriptor"}
+	if plainHTTP {
+		args = append(args, "--plain-http")
+	}
+	// Credentials go in argv rather than a config file, matching how
+	// RegistryFetcher already does it. Not ideal -- argv is visible in
+	// the pod's process list -- but consistent, and the alternative is a
+	// second dockerconfig write path for one command.
+	//
+	// Empty username means anonymous: a public registry rejects an
+	// empty --username outright rather than ignoring it.
+	if r.username != "" {
+		args = append(args, "--username", r.username, "--password", r.password)
+	}
+	return append(args, qualifyDockerHubRef(ref))
 }
