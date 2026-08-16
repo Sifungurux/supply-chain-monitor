@@ -89,12 +89,12 @@ spec:
             # scm-docker-auth-signing's private key file at all.
             - name: auth-certs
               mountPath: /auth-certs
+              readOnly: true
 {{- if .Values.registry.tls.enabled }}
             - name: tls
               mountPath: /tls
               readOnly: true
 {{- end }}
-              readOnly: true
           readinessProbe:
             httpGet:
               path: /debug/health

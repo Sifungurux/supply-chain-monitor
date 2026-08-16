@@ -53,12 +53,12 @@ spec:
               readOnly: true
             - name: signing-cert
               mountPath: /certs
+              readOnly: true
 {{- if .Values.registry.tls.enabled }}
             - name: tls
               mountPath: /tls
               readOnly: true
 {{- end }}
-              readOnly: true
           readinessProbe:
             tcpSocket:
               port: {{ .Values.dockerAuth.service.port }}

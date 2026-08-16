@@ -115,6 +115,16 @@ jobs:
   # reject the whole rule file, so alerts that look configured simply
   # never evaluate -- and helm-lint/helm-template both pass on it,
   # because to them a rule is just a string in a CRD.
+  # Duplicate mapping keys in the rendered chart. Helm accepts them
+  # (last value wins) and Flux rejects them at apply time, so this is
+  # invisible to helm-lint and helm-template but fails the deploy.
+  check-duplicate-keys:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: make check-duplicate-keys
+        run: make check-duplicate-keys
+
   check-alert-rules:
     runs-on: ubuntu-latest
     steps:

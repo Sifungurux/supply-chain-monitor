@@ -60,7 +60,7 @@ ifeq ($(SCM_RUNTIME),podman)
 export DOCKER_HOST := $(shell (podman system connection ls --format json | jq -r '.[] | select(.Default==true) | .URI') 2>/dev/null)
 endif
 
-.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build test-image vulncheck trivy-config deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap check-alert-rules helm-lint helm-template db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
+.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build test-image vulncheck trivy-config deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap check-alert-rules check-duplicate-keys helm-lint helm-template db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -342,7 +342,7 @@ test-artifact:
 		-H 'Content-Type: application/json' \
 		-d '{"ref":"alpine:3.19","type":"image"}' | tee /tmp/scm-artifact.json
 
-test: test-api test-dashboard check-dashboard-configmap check-openapi-spec check-alert-rules
+test: test-api test-dashboard check-dashboard-configmap check-openapi-spec check-alert-rules check-duplicate-keys
 
 # Runs services/monitor-api's Go test suite (handlers, store, pipeline)
 # via a containerized golang image -- no local Go install needed, just
@@ -445,6 +445,15 @@ check-openapi-spec:
 # Piped to the container rather than bind-mounted: on podman the host's
 # /tmp is not shared with the VM, and a missing path silently becomes
 # an empty directory rather than an error.
+# Duplicate mapping keys in the rendered chart. Helm does NOT catch
+# these -- lint and template both accept a repeated key, last value wins
+# -- but Flux rejects the whole HelmRelease at apply time, leaving the
+# cluster stuck on the previous revision. See cluster/check-duplicate-keys.py.
+check-duplicate-keys:
+	helm template scm-ci charts/supply-chain-monitor | docker run --rm -i \
+		-v "$(CURDIR)":/src -w /src python:3.13-alpine \
+		sh -c 'pip install --quiet pyyaml && python cluster/check-duplicate-keys.py'
+
 check-alert-rules:
 	@helm template scm-ci charts/supply-chain-monitor \
 		--set monitorApi.prometheusRule.enabled=true \
