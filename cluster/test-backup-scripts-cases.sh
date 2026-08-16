@@ -13,7 +13,12 @@
 # SC2012 (use find instead of ls): these globs are our own filenames,
 # scm-postgres-<ISO timestamp>.sql.gz, with no spaces or newlines
 # possible -- and `ls` is what the code under test uses.
-# shellcheck disable=SC2015,SC2012
+# SC3045 (ulimit -v is undefined in POSIX sh): used by T3b to cap
+# address space. The image's /bin/sh is bash, so it works -- and it is
+# not silently doing nothing, which is the real risk with a `2>/dev/null`
+# ulimit: reverting the gate to the old awk version makes T3b fail with
+# "cannot reallocate 134217729 bytes", so the cap is demonstrably real.
+# shellcheck disable=SC2015,SC2012,SC3045
 set -u
 export POSTGRES_HOST=db POSTGRES_PORT=5432 POSTGRES_USER=u POSTGRES_DB=scm POSTGRES_PASSWORD=p
 export PATH="/h/stubs:$PATH"
