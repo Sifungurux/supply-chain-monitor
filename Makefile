@@ -145,6 +145,11 @@ endif
 ifeq ($(SCM_RUNTIME),podman)
 	@echo "SCM_RUNTIME=podman -- importing docker.io/library/$(IMAGE) into k3d cluster '$(SCM_CLUSTER_NAME)' (see comment above)..."
 	k3d image import docker.io/library/$(IMAGE) -c $(SCM_CLUSTER_NAME)
+	@# Pin it against kubelet image GC. The import is the only copy --
+	@# nothing pushes this image to a registry, so a collected image
+	@# cannot be re-pulled and any Job landing on that node fails with
+	@# what looks like a credentials error. See cluster/pin-image.sh.
+	./cluster/pin-image.sh docker.io/library/$(IMAGE) $(SCM_CLUSTER_NAME)
 endif
 
 # Builds the image and asserts the properties its Dockerfile is written

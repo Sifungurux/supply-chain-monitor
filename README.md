@@ -79,6 +79,57 @@ Docker install — and the k3d image import was skipped silently, so a
 `make deploy` that appeared to succeed would roll out the previous
 image.
 
+### Why the image is pinned rather than pushed to `scm-registry`
+
+On the podman/k3d runtime, `make build` follows `k3d image import` with
+`cluster/pin-image.sh`, which labels `monitor-api:dev` as **pinned** in
+each node's containerd.
+
+That import is the image's *only* copy — nothing pushes it to a
+registry, so containerd has nowhere to re-pull it from. Kubelet's image
+GC doesn't know that. It frees images once the node filesystem crosses
+`--image-gc-high-threshold` (85% by default), and it counts an image as
+in-use only if a container **on that node** is using it. So the image
+survives on whichever node runs monitor-api and is collected everywhere
+else, silently. Nothing fails until a Job — a DB primer, the sweep, a
+scan worker — is scheduled onto one of those nodes:
+
+```
+Failed to pull image "monitor-api:dev": ... pull access denied,
+repository does not exist or may require authorization
+```
+
+which reads like a credentials problem and is nothing of the kind. The
+DB primers are Helm hooks, so the Helm upgrade then blocks behind the
+failing pod for its full 15-minute timeout and the deploy looks hung.
+
+Pushing to the in-cluster `scm-registry` looks like the obvious fix and
+isn't. `scm-registry` authenticates through a token realm at
+`https://scm-docker-auth.supply-chain-monitor.svc.cluster.local:5001/auth`
+— a cluster-DNS name that node-level containerd cannot resolve, behind a
+private CA it doesn't trust. Node pulls would need a `registries.yaml`
+on every node *and* a node-reachable auth realm, and k3d only writes
+`registries.yaml` when a cluster is **created** — meaning destroy and
+recreate a cluster holding the live database. Pinning states the actual
+invariant ("this image cannot be re-fetched, never collect it") in one
+label, with no restart and no cluster surgery.
+
+If a deploy ever does hang on `ImagePullBackOff` for this image, the
+recovery is `make build` (re-imports and re-pins), or directly:
+
+```bash
+k3d image import docker.io/library/monitor-api:dev -c supply-chain-monitor
+./cluster/pin-image.sh
+```
+
+Worth watching the node filesystem regardless — image GC firing at all
+means the disk is near 85%:
+
+```bash
+docker exec k3d-supply-chain-monitor-agent-0 df -h /var/lib/rancher/k3s
+podman system df        # dangling build layers are usually the bulk
+```
+
 ## Quickstart
 
 ```bash
