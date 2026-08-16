@@ -57,7 +57,7 @@ spec:
             # token spec doesn't require this leg to be TLS, matching
             # every other registry-facing tool in this project.
             - name: REGISTRY_AUTH_TOKEN_REALM
-              value: {{ printf "http://scm-docker-auth.%s.svc.cluster.local:%v/auth" .Release.Namespace .Values.dockerAuth.service.port | quote }}
+              value: {{ printf "%s://scm-docker-auth.%s.svc.cluster.local:%v/auth" (ternary "https" "http" .Values.registry.tls.enabled) .Release.Namespace .Values.dockerAuth.service.port | quote }}
             - name: REGISTRY_AUTH_TOKEN_SERVICE
               value: "scm-registry"
             # Must match dockerAuth.tokenIssuer exactly -- docker_auth
@@ -66,6 +66,18 @@ spec:
             # "iss" doesn't match this.
             - name: REGISTRY_AUTH_TOKEN_ISSUER
               value: {{ .Values.dockerAuth.tokenIssuer | quote }}
+{{- if .Values.registry.tls.enabled }}
+            # Serves HTTPS on the SAME port (5000): distribution switches
+            # the existing listener to TLS rather than opening a second
+            # one, so Service, NodePort and REGISTRY_ADDR are unchanged --
+            # only the scheme differs. The debug listener (5001) stays
+            # plain HTTP and is what the probes below use, so enabling
+            # this cannot break readiness.
+            - name: REGISTRY_HTTP_TLS_CERTIFICATE
+              value: /tls/tls.crt
+            - name: REGISTRY_HTTP_TLS_KEY
+              value: /tls/tls.key
+{{- end }}
             - name: REGISTRY_AUTH_TOKEN_ROOTCERTBUNDLE
               value: "/auth-certs/tls.crt"
           volumeMounts:
@@ -77,6 +89,11 @@ spec:
             # scm-docker-auth-signing's private key file at all.
             - name: auth-certs
               mountPath: /auth-certs
+{{- if .Values.registry.tls.enabled }}
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+{{- end }}
               readOnly: true
           readinessProbe:
             httpGet:
@@ -98,6 +115,11 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: scm-registry-data
+{{- if .Values.registry.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: scm-registry-tls
+{{- end }}
         - name: auth-certs
           secret:
             secretName: scm-docker-auth-signing

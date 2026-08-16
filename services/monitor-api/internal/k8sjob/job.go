@@ -10,7 +10,10 @@
 // why this exists at all.
 package k8sjob
 
-import "sort"
+import (
+	"os"
+	"sort"
+)
 
 // Job is a minimal representation of a batch/v1 Job manifest -- just
 // the fields this project's scan-worker Jobs actually need. Typed
@@ -150,6 +153,20 @@ type Volume struct {
 	EmptyDir              *EmptyDirVolume        `json:"emptyDir,omitempty"`
 	PersistentVolumeClaim *PVCVolumeSource       `json:"persistentVolumeClaim,omitempty"`
 	Ephemeral             *EphemeralVolumeSource `json:"ephemeral,omitempty"`
+	Secret                *SecretVolume          `json:"secret,omitempty"`
+}
+
+// SecretVolume mounts a Secret. Items narrows it to specific keys, which
+// matters for a CA bundle: the Secret cert-manager writes also holds the
+// PRIVATE KEY, and a scan worker has no business being able to read it.
+type SecretVolume struct {
+	SecretName string      `json:"secretName"`
+	Items      []KeyToPath `json:"items,omitempty"`
+}
+
+type KeyToPath struct {
+	Key  string `json:"key"`
+	Path string `json:"path"`
 }
 
 // EphemeralVolumeSource is a generic ephemeral volume: a PVC created
@@ -375,6 +392,13 @@ func NewScanJob(cfg ScanJobConfig) *Job {
 	for _, k := range keys {
 		env = append(env, EnvVar{Name: k, Value: cfg.Env[k]})
 	}
+	// SSL_CERT_DIR travels with the CA mount, set here rather than by
+	// each caller so the two cannot drift apart -- a mounted CA nothing
+	// points at is silently useless, and the failure looks like a TLS
+	// error rather than a missing variable.
+	if registryCASecret() != "" {
+		env = append(env, EnvVar{Name: "SSL_CERT_DIR", Value: "/etc/ssl/certs:/ca"})
+	}
 	for _, sev := range cfg.SecretEnvVars {
 		env = append(env, EnvVar{
 			Name:      sev.Name,
@@ -433,16 +457,49 @@ func NewScanJob(cfg ScanJobConfig) *Job {
 								ReadOnlyRootFilesystem:   boolPtr(true),
 								Capabilities:             &Capabilities{Drop: []string{"ALL"}},
 							},
-							VolumeMounts: append([]VolumeMount{
+							VolumeMounts: append(append([]VolumeMount{
 								{Name: "scratch", MountPath: "/tmp"},
-							}, cfg.ExtraVolumeMounts...),
+							}, registryCAMount()...), cfg.ExtraVolumeMounts...),
 						},
 					},
-					Volumes: append([]Volume{
+					Volumes: append(append([]Volume{
 						scratchVolume(cfg),
-					}, cfg.ExtraVolumes...),
+					}, registryCAVolume()...), cfg.ExtraVolumes...),
 				},
 			},
 		},
 	}
+}
+
+// registryCASecret names the Secret holding the private CA that signed
+// scm-registry's serving certificate, or "" when the registry is plain
+// HTTP. Read from the environment rather than threaded through every
+// ScanJobConfig: all four isolated scanners build their job here, so
+// injecting centrally means a new scanner cannot forget it.
+func registryCASecret() string { return os.Getenv("SCAN_WORKER_REGISTRY_CA_SECRET") }
+
+// registryCAVolume/registryCAMount mount that CA into every scan worker.
+//
+// Paired with SSL_CERT_DIR (set by the chart on the worker's env), NOT
+// SSL_CERT_FILE: in Go, SSL_CERT_FILE REPLACES the system trust store,
+// so pointing it at a private CA makes oras/trivy/grype stop trusting
+// gcr.io, ghcr.io and docker.io -- every public-image scan would fail.
+// SSL_CERT_DIR is additive, so the private CA is trusted alongside the
+// public roots.
+func registryCAVolume() []Volume {
+	name := registryCASecret()
+	if name == "" {
+		return nil
+	}
+	return []Volume{{
+		Name:   "registry-ca",
+		Secret: &SecretVolume{SecretName: name, Items: []KeyToPath{{Key: "ca.crt", Path: "scm-ca.crt"}}},
+	}}
+}
+
+func registryCAMount() []VolumeMount {
+	if registryCASecret() == "" {
+		return nil
+	}
+	return []VolumeMount{{Name: "registry-ca", MountPath: "/ca", ReadOnly: true}}
 }

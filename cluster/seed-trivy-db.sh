@@ -38,10 +38,34 @@ if ! command -v oras >/dev/null 2>&1; then
 fi
 
 echo "Copying ghcr.io/${DB_REF} -> ${REGISTRY}/${DB_REF} ..."
-oras cp --to-plain-http --to-username "${SCM_WRITER_USERNAME}" --to-password "${SCM_WRITER_PASSWORD}" "ghcr.io/${DB_REF}" "${REGISTRY}/${DB_REF}"
+# scm-registry serves TLS by default (registry.tls.enabled), and this
+# script runs from the HOST, which does not trust the in-cluster private
+# CA. Two ways through:
+#
+#   SCM_REGISTRY_PLAIN_HTTP=true   the registry is running plain HTTP
+#                                  (registry.tls.enabled=false)
+#   SCM_REGISTRY_CA=/path/ca.crt   trust the cluster CA, exported with:
+#     kubectl -n supply-chain-monitor get secret scm-ca-tls \
+#       -o jsonpath='{.data.ca\.crt}' | base64 -d > scm-ca.crt
+#
+# Neither set means a TLS registry and no CA, which fails with an opaque
+# x509 error -- so say so plainly instead.
+ORAS_TO_PLAIN_HTTP=""
+if [ "${SCM_REGISTRY_PLAIN_HTTP:-false}" = "true" ]; then
+	ORAS_TO_PLAIN_HTTP="--to-plain-http"
+elif [ -n "${SCM_REGISTRY_CA:-}" ]; then
+	SSL_CERT_DIR="/etc/ssl/certs:$(dirname "${SCM_REGISTRY_CA}")"
+	export SSL_CERT_DIR
+else
+	echo "scm-registry serves TLS. Set SCM_REGISTRY_CA=/path/to/ca.crt (see this script's header)," >&2
+	echo "or SCM_REGISTRY_PLAIN_HTTP=true if you deployed with registry.tls.enabled=false." >&2
+	exit 1
+fi
+
+oras cp ${ORAS_TO_PLAIN_HTTP} --to-username "${SCM_WRITER_USERNAME}" --to-password "${SCM_WRITER_PASSWORD}" "ghcr.io/${DB_REF}" "${REGISTRY}/${DB_REF}"
 
 echo "Copying ghcr.io/${JAVA_DB_REF} -> ${REGISTRY}/${JAVA_DB_REF} ..."
-oras cp --to-plain-http --to-username "${SCM_WRITER_USERNAME}" --to-password "${SCM_WRITER_PASSWORD}" "ghcr.io/${JAVA_DB_REF}" "${REGISTRY}/${JAVA_DB_REF}"
+oras cp ${ORAS_TO_PLAIN_HTTP} --to-username "${SCM_WRITER_USERNAME}" --to-password "${SCM_WRITER_PASSWORD}" "ghcr.io/${JAVA_DB_REF}" "${REGISTRY}/${JAVA_DB_REF}"
 
 echo
 echo "Done. scm-registry now has its own copy of both trivy databases."

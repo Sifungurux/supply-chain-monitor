@@ -263,3 +263,89 @@ func TestNewScanJob_ScratchNoneAsTheProcessWideValue(t *testing.T) {
 		t.Fatalf(`process-wide "none" must mean emptyDir, got %+v`, vol)
 	}
 }
+
+// The private CA has to reach every scan worker, and it has to arrive
+// with SSL_CERT_DIR pointing at it -- a mounted CA nothing references is
+// silently useless, and the failure surfaces as a TLS error rather than
+// as a missing variable.
+func TestNewScanJob_RegistryCA(t *testing.T) {
+	base := ScanJobConfig{Name: "scan-x", Image: "monitor-api:dev", ServiceAccount: "scm-scan-worker"}
+
+	t.Run("absent when no CA secret is configured", func(t *testing.T) {
+		t.Setenv("SCAN_WORKER_REGISTRY_CA_SECRET", "")
+		job := NewScanJob(base)
+		pod := job.Spec.Template.Spec
+		for _, v := range pod.Volumes {
+			if v.Name == "registry-ca" {
+				t.Error("CA volume mounted with no secret configured")
+			}
+		}
+		for _, e := range pod.Containers[0].Env {
+			if e.Name == "SSL_CERT_DIR" {
+				t.Error("SSL_CERT_DIR set with no CA mounted")
+			}
+		}
+	})
+
+	t.Run("mounted, key-narrowed, and pointed at by SSL_CERT_DIR", func(t *testing.T) {
+		t.Setenv("SCAN_WORKER_REGISTRY_CA_SECRET", "scm-ca-tls")
+		job := NewScanJob(base)
+		pod := job.Spec.Template.Spec
+
+		var vol *Volume
+		for i := range pod.Volumes {
+			if pod.Volumes[i].Name == "registry-ca" {
+				vol = &pod.Volumes[i]
+			}
+		}
+		if vol == nil {
+			t.Fatal("no registry-ca volume")
+		}
+		if vol.Secret == nil || vol.Secret.SecretName != "scm-ca-tls" {
+			t.Fatalf("volume does not reference the CA secret: %+v", vol)
+		}
+		// The Secret cert-manager writes also holds the PRIVATE KEY; a
+		// scan worker must not be able to read it.
+		if len(vol.Secret.Items) != 1 || vol.Secret.Items[0].Key != "ca.crt" {
+			t.Errorf("expected the mount narrowed to ca.crt, got %+v -- the same Secret carries tls.key", vol.Secret.Items)
+		}
+
+		var mounted bool
+		for _, m := range pod.Containers[0].VolumeMounts {
+			if m.Name == "registry-ca" && m.MountPath == "/ca" {
+				mounted = true
+			}
+		}
+		if !mounted {
+			t.Error("CA volume declared but never mounted")
+		}
+
+		var certDir string
+		for _, e := range pod.Containers[0].Env {
+			if e.Name == "SSL_CERT_DIR" {
+				certDir = e.Value
+			}
+		}
+		// SSL_CERT_DIR, not SSL_CERT_FILE: the latter REPLACES the system
+		// trust store, so oras/trivy/grype would stop trusting gcr.io and
+		// every public-image scan would fail.
+		if certDir != "/etc/ssl/certs:/ca" {
+			t.Errorf("SSL_CERT_DIR = %q, want \"/etc/ssl/certs:/ca\" -- must keep the public roots alongside the private CA", certDir)
+		}
+	})
+
+	// Scratch space must survive the addition.
+	t.Run("does not displace the scratch mount", func(t *testing.T) {
+		t.Setenv("SCAN_WORKER_REGISTRY_CA_SECRET", "scm-ca-tls")
+		pod := NewScanJob(base).Spec.Template.Spec
+		var scratch bool
+		for _, m := range pod.Containers[0].VolumeMounts {
+			if m.Name == "scratch" && m.MountPath == "/tmp" {
+				scratch = true
+			}
+		}
+		if !scratch {
+			t.Error("the scratch mount was displaced by the CA mount")
+		}
+	})
+}

@@ -104,6 +104,29 @@ spec:
                 secretKeyRef:
                   name: scm-monitor-api-auth
                   key: API_KEY
+{{- if .Values.registry.tls.enabled }}
+            # SSL_CERT_DIR, deliberately NOT SSL_CERT_FILE.
+            #
+            # In Go, SSL_CERT_FILE REPLACES the system trust store: set
+            # it to our CA and oras/trivy/grype instantly stop trusting
+            # gcr.io, ghcr.io and docker.io, so every scan of a public
+            # image fails. SSL_CERT_DIR is additive -- Go still loads the
+            # default cert files and then reads every file in these
+            # directories -- so the private CA is trusted ALONGSIDE the
+            # public roots.
+            #
+            # monitor-api needs this itself, not just the scan-worker
+            # Jobs: resolveDigest runs oras in THIS pod on every
+            # registration (main.go's OrasDigestResolver), and the
+            # in-process fetch paths do too.
+            # Names the Secret k8sjob mounts into every scan-worker Job
+            # (internal/k8sjob/job.go). Injected there centrally rather
+            # than per-scanner, so a new scanner cannot forget it.
+            - name: SCAN_WORKER_REGISTRY_CA_SECRET
+              value: scm-ca-tls
+            - name: SSL_CERT_DIR
+              value: /etc/ssl/certs:/ca
+{{- end }}
             - name: TRUSTED_PROXY_CIDRS
               # Falls back to networkPolicy.nodeCIDRs so the cluster's
               # trusted address space is defined once. See
@@ -182,6 +205,11 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+{{- if .Values.registry.tls.enabled }}
+            - name: registry-ca
+              mountPath: /ca
+              readOnly: true
+{{- end }}
             # readOnlyRootFilesystem needs a writable /tmp: monitor-api
             # is NOT write-free the way "all persistence goes through
             # Postgres" suggests. main.go's writeDockerConfig does
@@ -202,6 +230,14 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
       volumes:
+{{- if .Values.registry.tls.enabled }}
+        - name: registry-ca
+          secret:
+            secretName: scm-ca-tls
+            items:
+              - key: ca.crt
+                path: scm-ca.crt
+{{- end }}
         - name: scratch
           emptyDir: {}
         {{- with .Values.monitorApi.extraVolumes }}

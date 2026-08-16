@@ -77,6 +77,21 @@ networkPolicy:
     - 169.254.0.0/16
 
 registry:
+  tls:
+    # Serve the registry over HTTPS with a certificate issued by the
+    # in-cluster private CA (templates/gateway/certificates.yaml), so
+    # image pulls and the bearer token that authorises them stop
+    # crossing the pod network in cleartext.
+    #
+    # Requires cert-manager. The CA chain is shared with the Gateway and
+    # is rendered whenever EITHER feature is on, so this does not depend
+    # on gateway.tls.enabled.
+    #
+    # Turn OFF for a k3d/colima quickstart that pushes to the registry
+    # from the host: the host does not trust this CA, so `docker push
+    # localhost:30500/...` would fail certificate verification. In-cluster
+    # clients are unaffected either way -- they get the CA mounted.
+    enabled: true
   image:
     repository: registry
     # 3.x is the CNCF distribution/distribution successor to Docker's
@@ -616,7 +631,10 @@ monitorApi:
   # oras pull settings for file/sbom/sarif artifacts registered by OCI
   # reference. true matches unpacker.insecure/unpacker.public's same
   # plain-HTTP assumption.
-  fetchPlainHTTP: "true"
+  # "false" now that scm-registry serves TLS (registry.tls.enabled).
+  # Set back to "true" alongside registry.tls.enabled=false for a
+  # quickstart that runs the registry over plain HTTP.
+  fetchPlainHTTP: "false"
   # A real policy change, not a quiet default: false preserves today's
   # behavior exactly (expected_digest on POST /api/v1/artifacts is
   # optional, checked only if provided, and a mismatch refuses the whole

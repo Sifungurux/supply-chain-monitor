@@ -283,14 +283,35 @@ fi
 
 # ... and disabling TLS must remove the listener AND the certificates,
 # so a cluster without cert-manager can still render this chart.
-echo "== gateway.tls.enabled=false renders no TLS objects =="
-disabled_tls="$(helm template scm-ci charts/supply-chain-monitor --set gateway.tls.enabled=false \
-	-s templates/gateway/gateway.yaml -s templates/gateway/certificates.yaml 2>/dev/null | grep -cE "name: https|kind: Certificate|kind: Issuer" || true)"
+echo "== with every TLS feature off, no cert-manager objects render =="
+# The point is that a cluster with no cert-manager CRDs can still render
+# this chart. Both gates have to be off for that: the CA chain is SHARED
+# between the Gateway and the registry, so either one alone legitimately
+# pulls it in.
+disabled_tls="$(helm template scm-ci charts/supply-chain-monitor \
+	--set gateway.tls.enabled=false --set registry.tls.enabled=false \
+	2>/dev/null | grep -cE "kind: Certificate|kind: Issuer" || true)"
 if [ "$disabled_tls" != "0" ]; then
-	echo "ERROR: gateway.tls.enabled=false still rendered ${disabled_tls} TLS object(s)." >&2
+	echo "ERROR: with gateway.tls and registry.tls both off, ${disabled_tls} cert-manager object(s) still rendered." >&2
 	echo "       A cluster without cert-manager CRDs must be able to render this chart." >&2
 	exit 1
 fi
+
+# ...and the sharing itself: registry TLS alone must still produce the CA
+# it signs against, or the Certificate references an Issuer that does not
+# exist and never becomes Ready -- a failure that is silent from the
+# chart's point of view.
+echo "== registry TLS alone still renders the shared CA issuer =="
+registry_only="$(helm template scm-ci charts/supply-chain-monitor \
+	--set gateway.tls.enabled=false --set registry.tls.enabled=true 2>/dev/null)"
+case "$registry_only" in
+*"name: scm-ca-issuer"*) ;;
+*)
+	echo "ERROR: registry.tls.enabled=true rendered no scm-ca-issuer." >&2
+	echo "       The registry Certificate would reference an Issuer that does not exist." >&2
+	exit 1
+	;;
+esac
 
 # == the HTTPRoute attaches to the https listener, not just http ==
 #
