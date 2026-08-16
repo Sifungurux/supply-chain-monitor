@@ -507,6 +507,32 @@ monitorApi:
   # empty key would match the empty string a caller presents with a bare
   # "Bearer ", authenticating every anonymous request as that client.
   apiKeys: ""
+  # CIDRs whose X-Forwarded-For header the failed-auth throttle believes
+  # (TRUSTED_PROXY_CIDRS).
+  #
+  # The throttle has to identify a caller to bucket them. X-Forwarded-For
+  # is written by whoever connects, so honouring it from ANY peer lets a
+  # client rotate the header and get a fresh allowance per request --
+  # throttling nobody. Ignoring it entirely is worse in the other
+  # direction: every request through the Gateway arrives with Traefik's
+  # pod IP, all callers share one bucket, and a single attacker locks out
+  # everyone behind the ingress. So the header is believed only when the
+  # direct socket peer is a proxy this deployment put there.
+  #
+  # EMPTY INHERITS networkPolicy.nodeCIDRs below, rather than repeating
+  # those ranges here -- one place to widen or narrow the cluster's
+  # trusted address space.
+  #
+  # Be clear-eyed about what that default trusts: nodeCIDRs is RFC1918,
+  # which covers every in-cluster pod, not just the ingress controller.
+  # It stops forgery from OUTSIDE the cluster; it does not stop a
+  # compromised pod inside it from forging the header. Narrow this to the
+  # ingress controller's actual pod CIDR (e.g. ["10.42.0.0/16"], or the
+  # single /32 of the Traefik pod) to close that.
+  #
+  # Setting ["0.0.0.0/0", "::/0"] restores the pre-existing behaviour of
+  # believing every peer, if you need it.
+  trustedProxyCIDRs: []
   # When true, this chart does NOT render
   # templates/monitor-api/auth-secret.yaml at all -- you're expected to
   # have already created a Secret named scm-monitor-api-auth yourself

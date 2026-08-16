@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -364,5 +365,92 @@ func TestAuthThrottle_ExemptPathsUnaffected(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Errorf("%s got %d, want 200 even from a throttled address", path, rec.Code)
 		}
+	}
+}
+
+// trustedRouter builds a router whose failed-auth throttle only believes
+// X-Forwarded-For from the given CIDRs.
+func trustedRouter(t *testing.T, cidrs string) http.Handler {
+	t.Helper()
+	trusted, err := api.ParseTrustedProxies(cidrs)
+	if err != nil {
+		t.Fatalf("ParseTrustedProxies(%q): %v", cidrs, err)
+	}
+	return api.NewRouter(api.Config{
+		Store:          artifact.NewMemStore(),
+		Tracker:        pipeline.NewTracker([]string{"build", "scan"}),
+		APIKey:         testAPIKey,
+		TrustedProxies: trusted,
+	})
+}
+
+// wrongKeyFrom sends one bad-key request from a specific socket peer,
+// optionally forging X-Forwarded-For.
+func wrongKeyFrom(h http.Handler, peer, xff string) int {
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts", nil)
+	r.RemoteAddr = peer
+	r.Header.Set("Authorization", "Bearer wrong-key")
+	if xff != "" {
+		r.Header.Set("X-Forwarded-For", xff)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	return rec.Code
+}
+
+// THE PROPERTY THE SETTING EXISTS FOR. An attacker who rotates
+// X-Forwarded-For gets a fresh bucket per request while the header is
+// trusted unconditionally, which means the failed-auth throttle
+// throttles nobody.
+func TestAuthThrottle_ForgedXFFCannotEscapeThrottle(t *testing.T) {
+	h := trustedRouter(t, "10.42.0.0/16")
+
+	// Not a trusted proxy, and a different forged header every time.
+	var got429 bool
+	for i := 0; i < 25; i++ {
+		code := wrongKeyFrom(h, "198.51.100.66:40000", fmt.Sprintf("203.0.113.%d", i+1))
+		if code == http.StatusTooManyRequests {
+			got429 = true
+			break
+		}
+	}
+	if !got429 {
+		t.Error("25 failures from one socket peer were never throttled -- a rotated X-Forwarded-For escaped the limiter")
+	}
+}
+
+// The other half: a real proxy's header must still be believed, or every
+// caller behind it shares one bucket and one attacker locks out the rest.
+func TestAuthThrottle_TrustedProxyStillIsolatesClients(t *testing.T) {
+	h := trustedRouter(t, "10.42.0.0/16")
+
+	// Exhaust one client's allowance, as reported by the trusted proxy.
+	for i := 0; i < 25; i++ {
+		wrongKeyFrom(h, "10.42.0.7:54321", "203.0.113.9")
+	}
+	if code := wrongKeyFrom(h, "10.42.0.7:54321", "203.0.113.9"); code != http.StatusTooManyRequests {
+		t.Fatalf("precondition: that client should be throttled, got %d", code)
+	}
+
+	// A different client behind the SAME proxy must be unaffected.
+	if code := wrongKeyFrom(h, "10.42.0.7:54321", "198.51.100.7"); code != http.StatusUnauthorized {
+		t.Errorf("a different client behind the same proxy got %d, want 401 -- one attacker must not lock out everyone behind the ingress", code)
+	}
+}
+
+// Unset preserves the old behaviour exactly, so enabling this is opt-in.
+func TestAuthThrottle_UnconfiguredTrustsAnyXFF(t *testing.T) {
+	h := trustedRouter(t, "")
+
+	for i := 0; i < 25; i++ {
+		wrongKeyFrom(h, "198.51.100.66:40000", "203.0.113.9")
+	}
+	if code := wrongKeyFrom(h, "198.51.100.66:40000", "203.0.113.9"); code != http.StatusTooManyRequests {
+		t.Fatalf("precondition: that XFF value should be throttled, got %d", code)
+	}
+	// Same untrusted socket, different header -> a fresh bucket, because
+	// nothing is configured. This is the documented trade-off.
+	if code := wrongKeyFrom(h, "198.51.100.66:40000", "192.0.2.77"); code != http.StatusUnauthorized {
+		t.Errorf("got %d, want 401 -- with no trusted CIDRs the header is believed from any peer, unchanged from before", code)
 	}
 }

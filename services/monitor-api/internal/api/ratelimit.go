@@ -1,7 +1,11 @@
 package api
 
 import (
+	"fmt"
+	"net"
+	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -150,4 +154,111 @@ func (l *rateLimiter) size() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return len(l.buckets)
+}
+
+// TrustedProxies is the set of peer addresses whose X-Forwarded-For
+// header is believed (TRUSTED_PROXY_CIDRS / monitorApi.trustedProxyCIDRs).
+//
+// WHY THIS EXISTS. X-Forwarded-For is written by whoever connects, so
+// honouring it unconditionally lets a client rotate the header and get a
+// fresh throttle bucket per request -- the failed-auth limiter then
+// throttles nobody. Ignoring it unconditionally is worse in the other
+// direction: every request through the Gateway arrives with Traefik's
+// pod IP, all callers share one bucket, and one attacker locks out every
+// legitimate client behind the proxy.
+//
+// Conditional trust resolves it: believe the header only when the DIRECT
+// SOCKET PEER is a proxy this deployment put there. A forged header from
+// anywhere else is ignored and that caller is throttled on the address it
+// actually connected from, which it cannot spoof without spoofing TCP.
+//
+// The zero value is "not configured", which deliberately preserves the
+// original behaviour -- see ClientAddress.
+type TrustedProxies struct {
+	nets []*net.IPNet
+}
+
+// ParseTrustedProxies reads a comma-separated CIDR list.
+//
+// An unparseable entry is an ERROR rather than a skip, and that matters:
+// dropping a bad entry silently could empty the set, and an empty set
+// means "trust every peer's X-Forwarded-For". A typo would therefore
+// WIDEN trust while looking like a narrowing -- the exact failure a
+// security setting must not have. main.go turns this into a startup
+// failure.
+func ParseTrustedProxies(raw string) (TrustedProxies, error) {
+	var t TrustedProxies
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(entry)
+		if err != nil {
+			return TrustedProxies{}, fmt.Errorf("%q is not a CIDR (want e.g. 10.42.0.0/16): %w", entry, err)
+		}
+		t.nets = append(t.nets, n)
+	}
+	return t, nil
+}
+
+// Configured reports whether any CIDR was supplied. False means every
+// peer's X-Forwarded-For is honoured, which is the pre-existing
+// behaviour and the documented trade-off.
+func (t TrustedProxies) Configured() bool { return len(t.nets) > 0 }
+
+// Trusts reports whether ip is one of the configured proxies.
+func (t TrustedProxies) Trusts(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	for _, n := range t.nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// ClientAddress is the key the failed-auth throttle buckets on.
+//
+// Rules, in order:
+//
+//   - No trusted CIDRs configured: X-Forwarded-For's first value when
+//     present, else the socket address. Unchanged from before this
+//     setting existed, so enabling the feature is opt-in and an
+//     unconfigured deployment behaves exactly as it did.
+//   - Socket peer inside a trusted CIDR: X-Forwarded-For's first value
+//     when present, else the socket address. The first value is the
+//     original client; later entries are proxies that appended
+//     themselves.
+//   - Socket peer NOT trusted: the socket address, and the header is
+//     ignored entirely. A forged X-Forwarded-For buys nothing.
+//
+// Returns the socket address on any parse failure, which is the
+// conservative direction: a caller shares a bucket rather than escaping
+// one.
+func ClientAddress(r *http.Request, trusted TrustedProxies) string {
+	host := r.RemoteAddr
+	// RemoteAddr is "host:port"; the port would make every connection
+	// from one host look like a different client.
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		host = h
+	}
+
+	if trusted.Configured() && !trusted.Trusts(net.ParseIP(host)) {
+		return host
+	}
+
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return host
+	}
+	if i := strings.IndexByte(xff, ','); i >= 0 {
+		xff = xff[:i]
+	}
+	if first := strings.TrimSpace(xff); first != "" {
+		return first
+	}
+	return host
 }

@@ -395,16 +395,40 @@ credential guessing and a 404 from a typo are the same number there:
 They are **disjoint**. A rising `scm_auth_throttled_total` is the signal
 that someone is being slowed down — alert on that rather than on 4xx.
 
-**This is a speed bump, not a security boundary**, and the reason is
-worth knowing. Callers are identified by `X-Forwarded-For`'s first
-value, falling back to the socket address. That header is set by the
-client and only becomes trustworthy once a proxy overwrites it — so an
-attacker can rotate it and get a fresh allowance per request. The
-alternative is worse: without it every request through the Gateway
-arrives with Traefik's pod IP, all callers share one bucket, and a
-single attacker locks out everyone behind the proxy. A throttle that
-becomes a denial-of-service against legitimate users is the worse
-failure, so the header wins.
+**Callers are identified conditionally**, and the reason is worth
+knowing. `X-Forwarded-For` is written by whoever connects, so honouring
+it from any peer lets an attacker rotate the header and get a fresh
+allowance per request — throttling nobody. Ignoring it entirely is
+worse in the other direction: every request through the Gateway arrives
+with Traefik's pod IP, all callers share one bucket, and one attacker
+locks out everyone behind the ingress.
+
+`monitorApi.trustedProxyCIDRs` (`TRUSTED_PROXY_CIDRS`) resolves it: the
+header is believed **only when the direct socket peer is inside a
+trusted CIDR**, and otherwise ignored in favour of the address the
+caller actually connected from — which cannot be forged without
+spoofing TCP.
+
+| socket peer | `X-Forwarded-For` | bucketed on |
+|---|---|---|
+| trusted CIDR | present | the header's first value |
+| trusted CIDR | absent | socket address |
+| **not** trusted | present (forged) | **socket address** — header ignored |
+| any (setting empty) | present | the header's first value |
+
+Empty preserves the original behaviour exactly, so enabling this is
+opt-in; an unconfigured deployment is unchanged, and `monitor-api`
+**warns at startup** when it is unset.
+
+**Be clear-eyed about the default.** It inherits
+`networkPolicy.nodeCIDRs` (RFC1918), which covers every in-cluster pod
+— not just the ingress controller. That stops forgery from outside the
+cluster; it does **not** stop a compromised pod inside it. Narrow the
+value to the ingress controller's actual pod CIDR to close that.
+
+**It is still a speed bump, not a security boundary.** What protects
+the API is that keys are 32 bytes of entropy compared in constant time;
+this makes the cheap attack uneconomic.
 
 What actually protects the API is that keys are 32 bytes of entropy
 compared in constant time. This only makes the cheap attack uneconomic.
