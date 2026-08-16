@@ -439,11 +439,23 @@
   // number is not lovely, and it is the same coupling this line already
   // had -- an explicit DASHBOARD_API_BASE (env.js) overrides all of it
   // for any deployment where neither assumption holds.
-  var DASHBOARD_NODEPORT = '30301';
-  var API_NODEPORT = '30300';
-  var DEFAULT_API_BASE = window.location.port === DASHBOARD_NODEPORT
-    ? window.location.protocol + '//' + window.location.hostname + ':' + API_NODEPORT
-    : window.location.origin;
+  // Same-origin proxy path. The dashboard's own nginx serves
+  // /dash-api/ and attaches the Authorization header server-side
+  // (templates/dashboard/deployment.yaml), so the browser never holds
+  // the API key -- it used to be published in env.js to anyone who
+  // could load the page (report S1).
+  //
+  // /dash-api rather than /api because the Gateway already routes /api/
+  // straight to monitor-api for real API clients; calling /api/ here
+  // would bypass the proxy when served through the Gateway and 401.
+  // This prefix always lands on the dashboard's nginx, on both the
+  // Gateway path and the direct NodePort.
+  //
+  // An explicit DASHBOARD_API_BASE (env.js) or a saved connection
+  // setting still overrides it, for pointing a dev dashboard at an API
+  // elsewhere -- that path needs its own key, which is why the manual
+  // key field survives.
+  var DEFAULT_API_BASE = '/dash-api';
   // window.SCM_CONFIG is set by env.js (see the comment above this
   // script tag) -- rendered at container startup from the
   // scm-monitor-api-auth Secret and scm-dashboard-config ConfigMap, so
@@ -459,7 +471,10 @@
     apiBase: localStorage.getItem('scm-api-base') || injected.apiBase || DEFAULT_API_BASE,
     // Every request to monitor-api now requires `Authorization: Bearer
     // <key>` (see internal/api/router.go's withAuth).
-    apiKey: localStorage.getItem('scm-api-key') || injected.apiKey || '',
+    // No injected key any more: the proxy adds Authorization
+    // server-side. A manually saved key is still honoured, for a
+    // dashboard pointed at an API that is not behind the proxy.
+    apiKey: localStorage.getItem('scm-api-key') || '',
     stages: [],
     artifacts: [],
     // stats is GET /api/v1/stats -- the fleet-wide counts behind the

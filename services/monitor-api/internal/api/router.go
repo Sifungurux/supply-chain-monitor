@@ -42,6 +42,13 @@ type Config struct {
 	// never lock out a deployment mid-upgrade.
 	APIKeys APIKeys
 
+	// CORSAllowedOrigins allowlists cross-origin callers
+	// (CORS_ALLOWED_ORIGINS). Empty means same-origin only: no
+	// Access-Control-Allow-Origin header is sent at all, which is what
+	// actually makes a browser refuse. The dashboard does not need an
+	// entry -- it calls its own nginx, which proxies same-origin.
+	CORSAllowedOrigins []string
+
 	// TrustedProxies decides whether X-Forwarded-For is believed when
 	// keying the failed-auth throttle (TRUSTED_PROXY_CIDRS). The zero
 	// value trusts every peer's header, which is what this did before
@@ -191,7 +198,7 @@ func NewRouter(cfg Config) http.Handler {
 	// withAudit sits INSIDE withAuth, because it reports the
 	// authenticated client and that only exists in the context after
 	// withAuth has put it there.
-	return withMetrics(withCORS(withAuth(withAudit(top), keys, failures, cfg.TrustedProxies, h.metrics)), h.metrics)
+	return withMetrics(withCORS(withAuth(withAudit(top), keys, failures, cfg.TrustedProxies, h.metrics), cfg.CORSAllowedOrigins), h.metrics)
 }
 
 // withAuth requires `Authorization: Bearer <apiKey>` on every request
@@ -321,9 +328,22 @@ func withAuth(next http.Handler, keys APIKeys, failures *rateLimiter, trusted Tr
 // not a second real layer. Access-Control-Allow-Headers includes
 // Authorization specifically so the browser is allowed to send the
 // header withAuth requires.
-func withCORS(next http.Handler) http.Handler {
+func withCORS(next http.Handler, allowed []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		// ALLOWLISTED, not "*". The dashboard is same-origin now (it
+		// calls its own nginx, which proxies), so nothing legitimate
+		// needs a cross-origin grant by default -- and "*" meant any web
+		// page a cluster-adjacent user visited could call this API with
+		// a key it had obtained elsewhere.
+		//
+		// Empty list = no Access-Control-Allow-Origin header at all,
+		// which is same-origin-only. Deliberately not "deny with a
+		// header": omitting it is what actually makes a browser refuse.
+		if origin := r.Header.Get("Origin"); origin != "" && originAllowed(origin, allowed) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			// Origin-dependent response, so caches must key on it.
+			w.Header().Add("Vary", "Origin")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		// Without this, a cross-origin browser fetch can read the
@@ -379,4 +399,17 @@ func withRateLimit(next http.Handler, limiter *rateLimiter) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// originAllowed reports whether an Origin header matches the allowlist.
+// Exact string match: an origin is scheme+host+port, and substring or
+// suffix matching on it is how "evil-example.com" ends up matching an
+// allowlist entry of "example.com".
+func originAllowed(origin string, allowed []string) bool {
+	for _, a := range allowed {
+		if a == origin {
+			return true
+		}
+	}
+	return false
 }

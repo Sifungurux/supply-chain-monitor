@@ -106,16 +106,72 @@ func TestRateLimit_HealthzExemptEvenUnderExhaustedBurst(t *testing.T) {
 	}
 }
 
+// CORS is an ALLOWLIST now, not "*". The dashboard is same-origin (it
+// calls its own nginx, which proxies), so nothing legitimate needs a
+// cross-origin grant by default -- and "*" meant any page a
+// cluster-adjacent user visited could call this API with a key obtained
+// elsewhere.
+func TestCORS_AllowlistOnly(t *testing.T) {
+	const allowed = "https://ops.example.com"
+
+	withOrigins := func(origins []string) http.Handler {
+		return api.NewRouter(api.Config{
+			Store:              artifact.NewMemStore(),
+			Tracker:            pipeline.NewTracker([]string{"build", "scan"}),
+			APIKey:             testAPIKey,
+			CORSAllowedOrigins: origins,
+		})
+	}
+
+	get := func(h http.Handler, origin string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("allowlisted origin is echoed back", func(t *testing.T) {
+		rec := get(withOrigins([]string{allowed}), allowed)
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != allowed {
+			t.Errorf("ACAO = %q, want %q", got, allowed)
+		}
+		if !strings.Contains(rec.Header().Get("Vary"), "Origin") {
+			t.Error("origin-dependent response must Vary on Origin, or a cache serves one origin's grant to another")
+		}
+	})
+
+	t.Run("other origins get no grant at all", func(t *testing.T) {
+		rec := get(withOrigins([]string{allowed}), "https://evil.example.com")
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("ACAO = %q for a non-allowlisted origin, want no header", got)
+		}
+	})
+
+	t.Run("a suffix of an allowed origin is not allowed", func(t *testing.T) {
+		// Exact match only: substring/suffix matching is how
+		// "evil-example.com" ends up matching "example.com".
+		rec := get(withOrigins([]string{"https://example.com"}), "https://evil-example.com")
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("ACAO = %q for a lookalike origin, want no header", got)
+		}
+	})
+
+	t.Run("empty allowlist is same-origin only", func(t *testing.T) {
+		rec := get(withOrigins(nil), "https://ops.example.com")
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("ACAO = %q with an empty allowlist, want no header", got)
+		}
+	})
+}
+
 func TestCORSHeaders(t *testing.T) {
 	h, _ := newTestRouter(scanner.Registry{})
 
-	rec := doJSON(t, h, http.MethodGet, "/healthz", nil)
-	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Fatalf("Access-Control-Allow-Origin = %q, want %q", got, "*")
-	}
-
 	req := httptest.NewRequest(http.MethodOptions, "/api/v1/artifacts", nil)
-	rec = httptest.NewRecorder()
+	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("OPTIONS status = %d, want 204", rec.Code)
