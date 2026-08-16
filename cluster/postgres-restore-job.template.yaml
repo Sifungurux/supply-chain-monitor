@@ -41,22 +41,88 @@ spec:
               # that fails, because it is discovered later.
               set -euo pipefail
               export PGPASSWORD="$POSTGRES_PASSWORD"
-              echo "restoring __BACKUP_FILE__ into ${POSTGRES_DB}@${POSTGRES_HOST} -- this overwrites existing data"
+              BACKUP_FILE="__BACKUP_FILE__"
+              SRC="/backups/${BACKUP_FILE}"
+              PASS_ARGS=""
+              echo "restoring ${BACKUP_FILE} into ${POSTGRES_DB}@${POSTGRES_HOST} -- this overwrites existing data"
+
+              # The .gpg suffix is the whole protocol. The backup job
+              # names encrypted output .sql.gz.gpg, so nothing has to
+              # be remembered or passed in about how a given file was
+              # written -- the filename says it.
+              case "$BACKUP_FILE" in
+                *.gpg)
+                  if [ ! -f /etc/scm-backup-decryption/privatekey.asc ]; then
+                    echo "ERROR: ${BACKUP_FILE} is encrypted, but no private key was supplied." >&2
+                    echo "ERROR: re-run with GPG_PRIVATE_KEY_FILE=/path/to/privatekey.asc --" >&2
+                    echo "ERROR:   make db-restore BACKUP=${BACKUP_FILE} GPG_PRIVATE_KEY_FILE=..." >&2
+                    echo "ERROR: nothing was written to ${POSTGRES_DB}." >&2
+                    exit 1
+                  fi
+                  export GNUPGHOME=/tmp/gnupg
+                  mkdir -p "$GNUPGHOME" && chmod 700 "$GNUPGHOME"
+                  if [ -s /etc/scm-backup-decryption/passphrase ]; then
+                    PASS_ARGS="--pinentry-mode loopback --passphrase-file /etc/scm-backup-decryption/passphrase"
+                  fi
+                  gpg --batch --quiet --no-options $PASS_ARGS \
+                      --import /etc/scm-backup-decryption/privatekey.asc
+                  echo "private key imported (this pod, this run -- see cluster/postgres-restore.sh)"
+                  ;;
+              esac
+
+              # decrypt() is the identity function for a plaintext
+              # backup, so every line below is written once.
+              decrypt() {
+                case "$BACKUP_FILE" in
+                  *.gpg) gpg --batch --quiet --no-options $PASS_ARGS --decrypt "$SRC" ;;
+                  *)     cat "$SRC" ;;
+                esac
+              }
 
               # Refuse an archive that is not a readable dump BEFORE
               # touching the database. gzip -t alone is not enough: an
               # empty gzip is perfectly valid, and that is exactly what
               # the backup job produced for three days while reporting
               # success.
-              head_bytes="$(gunzip -c /backups/__BACKUP_FILE__ 2>/dev/null | head -c 512 || true)"
+              #
+              # gpg's stderr is captured rather than discarded so a
+              # WRONG KEY can be reported as a wrong key. Folding it
+              # into "not a readable PostgreSQL dump" would send an
+              # operator looking for a corrupt backup during an
+              # outage, when the backup is fine and the key is not.
+              #
+              # It is only ever read when the check has already
+              # failed, so the harmless SIGPIPE noise gpg emits when
+              # `head` closes the pipe early on a SUCCESSFUL read is
+              # never mistaken for an error.
+              head_bytes="$(decrypt 2>/tmp/decrypt.err | gunzip -c 2>/dev/null | head -c 512 || true)"
               case "$head_bytes" in
                 *"PostgreSQL database dump"*) ;;
                 *)
-                  echo "ERROR: /backups/__BACKUP_FILE__ is not a readable PostgreSQL dump." >&2
+                  if [ -s /tmp/decrypt.err ]; then
+                    echo "ERROR: could not DECRYPT ${SRC} -- this is a key problem, not a corrupt backup." >&2
+                    echo "ERROR: gpg said:" >&2
+                    sed 's/^/ERROR:   /' /tmp/decrypt.err >&2
+                  else
+                    echo "ERROR: ${SRC} is not a readable PostgreSQL dump." >&2
+                  fi
                   echo "ERROR: nothing was written to ${POSTGRES_DB}." >&2
                   exit 1
                   ;;
               esac
+
+              # If a sidecar exists, the file must match it. Catches
+              # bit-rot on the PVC before it is fed to psql rather
+              # than halfway through.
+              if [ -f "${SRC}.sha256" ]; then
+                if ( cd /backups && sha256sum -c --status "${BACKUP_FILE}.sha256" ); then
+                  echo "checksum sidecar verified"
+                else
+                  echo "ERROR: ${SRC} does not match its .sha256 sidecar -- it changed since it was written." >&2
+                  echo "ERROR: nothing was written to ${POSTGRES_DB}." >&2
+                  exit 1
+                fi
+              fi
 
               # WAIT FOR THE NETWORK, not just for Postgres. A new pod's
               # IP is not yet in the CNI's NetworkPolicy allow-set when
@@ -84,7 +150,7 @@ spec:
                 exit 1
               fi
 
-              gunzip -c /backups/__BACKUP_FILE__ | psql -v ON_ERROR_STOP=1 -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+              decrypt | gunzip -c | psql -v ON_ERROR_STOP=1 -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB"
               echo "restore finished."
           env:
             - name: POSTGRES_HOST
@@ -96,7 +162,27 @@ spec:
             - name: backups
               mountPath: /backups
               readOnly: true
+            - name: decryption-key
+              mountPath: /etc/scm-backup-decryption
+              readOnly: true
       volumes:
         - name: backups
           persistentVolumeClaim:
             claimName: scm-postgres-backups
+        # optional: true, because a plaintext restore must still work
+        # on a cluster that has never had an encryption key. The
+        # script above turns a missing key into a clear error only
+        # when the backup actually needs one.
+        #
+        # This Secret is NOT part of the deployment. It is created by
+        # cluster/postgres-restore.sh immediately before this Job and
+        # deleted immediately after -- the private key lives on the
+        # operator's machine, and the cluster holds it only for the
+        # seconds a restore is running. A permanently-mounted private
+        # key would give the cluster the ability to read every backup
+        # it has ever written, which is the exact property encrypting
+        # them was meant to remove.
+        - name: decryption-key
+          secret:
+            secretName: scm-backup-decryption
+            optional: true

@@ -433,3 +433,61 @@ case "$init_script" in
 	exit 1
 	;;
 esac
+
+# == backup encryption is wired end to end when it is switched on ==
+#
+# The failure this exists to catch is a backup job that LOOKS
+# configured for encryption and quietly writes plaintext anyway.
+# encrypt() in the CronJob branches on GPG_RECIPIENT_FILE being set,
+# so if the value is honoured in one place (the volume) but not the
+# other (the env var), every nightly dump lands unencrypted on the
+# PVC while values.yaml says otherwise -- and nothing fails, which is
+# the worst possible way for this to break.
+#
+# Rendered with the value ON, since with it off there is nothing to
+# assert; the default-off path is covered by the plaintext branch of
+# the CronJob's own script.
+echo "== backup encryption is wired end to end when enabled =="
+enc_cronjob="$(helm template scm-ci charts/supply-chain-monitor \
+	--set postgres.backup.encryption.publicKeySecret=scm-backup-encryption \
+	-s templates/postgres/backup-cronjob.yaml)"
+#
+# Matched on the env DECLARATION, not the bare name. The script body
+# reads ${GPG_RECIPIENT_FILE:-} in three places, so a substring test
+# for the name alone passes even with the env var deleted -- it would
+# be asserting that the script mentions the variable, which is not the
+# question. Verified by deleting the env entry and watching this fail.
+case "$enc_cronjob" in
+*"- name: GPG_RECIPIENT_FILE"*) ;;
+*)
+	echo "ERROR: postgres.backup.encryption.publicKeySecret is set but the backup" >&2
+	echo "       CronJob has no GPG_RECIPIENT_FILE env var. Its encrypt() falls back" >&2
+	echo "       to cat, so every backup would be written in PLAINTEXT while the" >&2
+	echo "       configuration claims otherwise -- and the job would exit 0." >&2
+	exit 1
+	;;
+esac
+case "$enc_cronjob" in
+*"secretName: \"scm-backup-encryption\""*) ;;
+*)
+	echo "ERROR: the backup CronJob does not mount the configured public-key Secret." >&2
+	echo "       The pod would fail to start, or worse, run without the key." >&2
+	exit 1
+	;;
+esac
+# The private half must never appear in anything the chart deploys.
+# A restore mounts it from a Secret this repo's restore script creates
+# and deletes; a chart template referencing it would make it permanent
+# and hand the cluster the ability to read every backup it ever wrote.
+echo "== no chart template mounts the backup PRIVATE key =="
+all_templates="$(helm template scm-ci charts/supply-chain-monitor \
+	--set postgres.backup.encryption.publicKeySecret=scm-backup-encryption)"
+case "$all_templates" in
+*scm-backup-decryption* | *privatekey.asc*)
+	echo "ERROR: a deployed template references the backup private key." >&2
+	echo "       Encrypting to a public key is pointless if the cluster permanently" >&2
+	echo "       holds the half that decrypts -- see cluster/postgres-restore.sh," >&2
+	echo "       which lends it for the duration of a restore instead." >&2
+	exit 1
+	;;
+esac

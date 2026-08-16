@@ -348,6 +348,33 @@ postgres:
     enabled: true
     schedule: "0 2 * * *" # daily at 02:00 UTC
     keepBackups: 7
+    # Encrypt each dump to a GPG PUBLIC key before it lands on the PVC.
+    #
+    # Opt-in: leave publicKeySecret empty and backups stay plaintext
+    # .sql.gz exactly as before, so enabling this is a decision and not
+    # something that silently changes what an existing cluster writes.
+    #
+    # Public-key, not a shared passphrase, and that asymmetry is the
+    # point: the cluster holds only the half that can ENCRYPT. A
+    # compromised backup CronJob -- or anyone who walks off with the
+    # PVC -- cannot read a single dump, including the ones it wrote
+    # itself. The private half never enters the cluster except for the
+    # seconds a restore is actually running (see
+    # cluster/postgres-restore.sh).
+    #
+    # GPG rather than age, which is what the audit item asked for:
+    # gpg is already in the Percona image. age is not, and this job
+    # deliberately runs the SAME image as the database so pg_dump can
+    # never drift from the server version -- so adding age means a
+    # derived image pinned to Percona's releases forever, maintained
+    # for one static binary. Same public-key property, no new image.
+    encryption:
+      # Name of a Secret holding an ASCII-armoured public key under the
+      # key `publickey.asc`. Create it with:
+      #   gpg --armor --export <key-id> > publickey.asc
+      #   kubectl -n supply-chain-monitor create secret generic \
+      #     scm-backup-encryption --from-file=publickey.asc
+      publicKeySecret: ""
     persistence:
       size: 5Gi
     resources:
