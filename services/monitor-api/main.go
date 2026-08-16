@@ -1669,7 +1669,7 @@ func runAPIServer() {
 	// fetchPlainHTTP is the same flag already computed for fetcher, not
 	// a second config surface -- see NewRouter's own comment for why
 	// image refs never use it regardless of this setting.
-	digestResolver := scanner.NewOrasDigestResolver()
+	digestResolver := scanner.NewOrasDigestResolver(registryUsername, registryPassword)
 
 	// REQUIRE_DIGEST -- see NewRouter's own comment for the full
 	// behavior this gates. Off by default: turning it on is a real
