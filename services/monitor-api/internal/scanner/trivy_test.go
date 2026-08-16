@@ -29,7 +29,7 @@ func TestTrivyScanner_Args(t *testing.T) {
 		{
 			name: "no overrides falls back to trivy's own defaults",
 			db:   TrivyDBConfig{},
-			want: []string{"image", "--quiet", "--format", "json", "alpine:3.19"},
+			want: []string{"image", "--quiet", "--format", "json", "--", "alpine:3.19"},
 		},
 		{
 			name: "air-gapped mirror with both DBs and skip-update set",
@@ -45,6 +45,7 @@ func TestTrivyScanner_Args(t *testing.T) {
 				"--java-db-repository", "scm-registry:5000/aquasecurity/trivy-java-db:1",
 				"--skip-db-update",
 				"--skip-java-db-update",
+				"--",
 				"alpine:3.19",
 			},
 		},
@@ -56,6 +57,7 @@ func TestTrivyScanner_Args(t *testing.T) {
 			want: []string{
 				"image", "--quiet", "--format", "json",
 				"--db-repository", "scm-registry:5000/aquasecurity/trivy-db:2",
+				"--",
 				"alpine:3.19",
 			},
 		},
@@ -76,6 +78,7 @@ func TestTrivyScanner_Args(t *testing.T) {
 				"--skip-java-db-update",
 				"--cache-dir", "/trivy-cache",
 				"--cache-backend", "memory",
+				"--",
 				"alpine:3.19",
 			},
 		},
@@ -102,7 +105,7 @@ func TestTrivyScanner_Args_Verbose(t *testing.T) {
 
 	s := NewTrivyScanner("", TrivyDBConfig{})
 	got := s.args("alpine:3.19")
-	want := []string{"image", "--debug", "--format", "json", "alpine:3.19"}
+	want := []string{"image", "--debug", "--format", "json", "--", "alpine:3.19"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
 	}

@@ -3,6 +3,8 @@ package api_test
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -87,5 +89,43 @@ func TestRegistration_OrdinaryRefStillRegisters(t *testing.T) {
 	}
 	if got.Digest != "sha256:abc" {
 		t.Fatalf("digest = %q, want the resolved digest -- validation must not short-circuit resolution", got.Digest)
+	}
+}
+
+// The same argument-injection guard, asserted at the REGISTRATION
+// handler rather than the scanner layer -- a flag-shaped ref must be
+// refused with 400 before it is ever stored, not merely refused later
+// when a scanner tries to use it.
+//
+// Both layers are tested deliberately: internal/scanner's test proves
+// the rule, this one proves the rule is actually reached from the API.
+func TestCreateArtifact_RejectsFlagShapedRefs(t *testing.T) {
+	h, _ := newTestRouter(nil)
+
+	cases := []struct {
+		name string
+		ref  string
+		want int
+	}{
+		{name: "short flag", ref: "-o", want: http.StatusBadRequest},
+		{name: "long flag", ref: "--cache-dir", want: http.StatusBadRequest},
+		{name: "flag shaped like a ref", ref: "-o.x/foo", want: http.StatusBadRequest},
+		{name: "flag with inline value", ref: "--output=/tmp/x", want: http.StatusBadRequest},
+		// Dashes inside a ref are ordinary and must still register.
+		{name: "dash inside the ref", ref: "docker.io/library/my-app:1.0", want: http.StatusCreated},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.NewReader(`{"ref":"` + tc.ref + `","type":"image"}`)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/artifacts", body)
+			req.Header.Set("Authorization", "Bearer "+testAPIKey)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Errorf("POST ref=%q got %d, want %d: %s", tc.ref, rec.Code, tc.want, rec.Body.String())
+			}
+		})
 	}
 }

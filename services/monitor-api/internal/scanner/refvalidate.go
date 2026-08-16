@@ -81,6 +81,38 @@ func ValidateRef(ctx context.Context, ref string) error {
 	if strings.TrimSpace(ref) != ref {
 		return fmt.Errorf("ref must not have leading or trailing whitespace")
 	}
+	// ARGUMENT INJECTION. Every scanner hands the ref to an external
+	// tool as a POSITIONAL argument (trivy image <ref>, oras pull
+	// <ref>, unpacker <ref>, ...), so a ref beginning with "-" is
+	// parsed by that tool as a FLAG rather than a reference.
+	//
+	// "--cache-dir" or "-o" reaching trivy redirects where it writes
+	// inside the scan worker. That is not remote code execution, but it
+	// breaks exactly the boundary the isolated-Job design exists to
+	// hold, and any caller able to register an artifact can do it.
+	//
+	// Checked here, before the host logic, because the host checks
+	// cannot see it: refHosts treats "-o" as a hostless single-segment
+	// ref, Docker Hub qualification gives it a legitimate-looking host,
+	// and validation returns nil. Measured before this was written --
+	// "-o", "--cache-dir", "-o.x/foo" and "--output=/tmp/x" all passed.
+	//
+	// Placed after the local-path branch would be wrong: a local path is
+	// absolute (see checkLocalArtifactPath), so it can never begin with
+	// "-", and checking first keeps the rule ahead of every branch.
+	// NOT a full OCI distribution grammar check, deliberately. A
+	// reference regexp would reject more, but it also rejects more
+	// FALSELY -- real-world refs carry ports, digests, nested paths and
+	// unusual tags, and a scanner that refuses a legitimate image is a
+	// worse failure here than one that accepts an odd-looking name the
+	// registry will reject anyway. The specific hazard is
+	// flag-injection, so that is what is checked; the scheme, whitespace
+	// and host rules above cover the rest of the reported surface.
+	// Revisit if a concrete ref shape gets through that a grammar would
+	// have caught.
+	if strings.HasPrefix(ref, "-") {
+		return fmt.Errorf("ref %q must not begin with \"-\" -- it would be parsed as a command-line flag by the scanner it is passed to", ref)
+	}
 	if looksLikeLocalPath(ref) {
 		// A local path has no host to check -- but it does have a policy
 		// to satisfy, and refusing it here means an artifact nothing

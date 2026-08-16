@@ -163,5 +163,10 @@ func (r *OrasDigestResolver) args(ref string, plainHTTP bool) []string {
 	if r.username != "" {
 		args = append(args, "--username", r.username, "--password", r.password)
 	}
-	return append(args, qualifyDockerHubRef(ref))
+	// "--" ends flag parsing, so even a ref that somehow reached here
+	// without passing ValidateRef is treated as a positional argument
+	// rather than a flag. Belt and braces: the actual fix is the
+	// leading-"-" rejection in refvalidate.go. Verified this tool
+	// accepts the separator before adding it.
+	return append(args, "--", qualifyDockerHubRef(ref))
 }
