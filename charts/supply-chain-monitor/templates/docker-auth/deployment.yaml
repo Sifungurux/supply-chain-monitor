@@ -53,6 +53,11 @@ spec:
               readOnly: true
             - name: signing-cert
               mountPath: /certs
+{{- if .Values.registry.tls.enabled }}
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+{{- end }}
               readOnly: true
           readinessProbe:
             tcpSocket:
@@ -75,6 +80,11 @@ spec:
         - name: config
           secret:
             secretName: scm-docker-auth-config
+{{- if .Values.registry.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: scm-docker-auth-tls
+{{- end }}
         - name: signing-cert
           secret:
             secretName: scm-docker-auth-signing

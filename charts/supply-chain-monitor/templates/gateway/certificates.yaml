@@ -1,4 +1,5 @@
-{{- if .Values.gateway.tls.enabled }}
+{{- $caNeeded := or .Values.gateway.tls.enabled .Values.registry.tls.enabled }}
+{{- if $caNeeded }}
 # TLS for the Gateway, issued by cert-manager
 # (k8s/releases/cert-manager-helmrelease.yaml).
 #
@@ -60,6 +61,9 @@ spec:
   ca:
     secretName: scm-ca-tls
 ---
+{{- end }}
+{{- if .Values.gateway.tls.enabled }}
+---
 # The Gateway's own certificate. Referenced by gateway.yaml's https
 # listener via certificateRefs -- the listener names this Secret, and
 # cert-manager keeps it populated and renewed.
@@ -83,6 +87,70 @@ spec:
     {{- range .Values.gateway.tls.dnsNames }}
     - {{ . | quote }}
     {{- end }}
+  issuerRef:
+    name: scm-ca-issuer
+    kind: Issuer
+    group: cert-manager.io
+{{- end }}
+{{- if .Values.registry.tls.enabled }}
+---
+# scm-registry's serving certificate.
+#
+# THE SAN LIST IS LOAD-BEARING. monitor-api addresses the registry by
+# its FULL cluster FQDN (REGISTRY_ADDR in
+# templates/monitor-api/configmap.yaml renders
+# "<svc>.<ns>.svc.cluster.local:<port>"), so a certificate carrying only
+# the short name would fail hostname verification for every in-cluster
+# client -- and TLS name mismatches surface as an opaque handshake error,
+# not as anything naming the certificate. All three forms are listed
+# because all three are used somewhere.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: scm-registry-tls
+  namespace: {{ .Release.Namespace }}
+spec:
+  secretName: scm-registry-tls
+  duration: {{ .Values.gateway.tls.duration | quote }}
+  renewBefore: {{ .Values.gateway.tls.renewBefore | quote }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  dnsNames:
+    - {{ .Values.monitorApi.registry.service | quote }}
+    - {{ printf "%s.%s.svc" .Values.monitorApi.registry.service .Release.Namespace | quote }}
+    - {{ printf "%s.%s.svc.cluster.local" .Values.monitorApi.registry.service .Release.Namespace | quote }}
+  issuerRef:
+    name: scm-ca-issuer
+    kind: Issuer
+    group: cert-manager.io
+---
+# scm-docker-auth's token endpoint. Same reasoning: a client that gets a
+# 401 from the registry is redirected to this realm and must complete a
+# TLS handshake against it, so it needs a name the client actually used.
+#
+# Note the registry itself does NOT call this service -- token auth is
+# client-side (fetch token here, present it there), and the registry
+# only verifies the JWT signature against its rootcertbundle. So no
+# registry-to-docker-auth trust is required by this change.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: scm-docker-auth-tls
+  namespace: {{ .Release.Namespace }}
+spec:
+  secretName: scm-docker-auth-tls
+  duration: {{ .Values.gateway.tls.duration | quote }}
+  renewBefore: {{ .Values.gateway.tls.renewBefore | quote }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  dnsNames:
+    - "scm-docker-auth"
+    - {{ printf "scm-docker-auth.%s.svc" .Release.Namespace | quote }}
+    - {{ printf "scm-docker-auth.%s.svc.cluster.local" .Release.Namespace | quote }}
   issuerRef:
     name: scm-ca-issuer
     kind: Issuer

@@ -371,6 +371,35 @@ alerts that look configured never evaluate — and `helm lint` and
 `helm template` both pass on it, because to them a rule is a string in
 a CRD.
 
+### Registry TLS
+
+`registry.tls.enabled` (**on**) serves scm-registry over HTTPS with a
+certificate from the in-cluster private CA, so image pulls — and the
+bearer token that authorises them — stop crossing the pod network in
+cleartext. `scm-docker-auth`'s token endpoint gets the same treatment,
+and the realm URL the registry advertises switches scheme with it.
+
+**In-cluster clients need no configuration**: monitor-api and every
+scan-worker Job get the CA mounted and `SSL_CERT_DIR` pointed at it.
+
+**`SSL_CERT_DIR`, not `SSL_CERT_FILE`** — this matters. In Go,
+`SSL_CERT_FILE` *replaces* the system trust store, so pointing it at a
+private CA makes `oras`/`trivy`/`grype` stop trusting gcr.io, ghcr.io
+and docker.io, and every public-image scan fails. `SSL_CERT_DIR` is
+additive, so the private CA is trusted **alongside** the public roots.
+
+**From your own machine** the CA is not trusted, so export it first:
+
+```bash
+kubectl -n supply-chain-monitor get secret scm-ca-tls \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > scm-ca.crt
+oras ... --ca-file scm-ca.crt
+```
+
+Set `registry.tls.enabled: false` (and `monitorApi.fetchPlainHTTP:
+"true"`) for a k3d/colima quickstart that would rather push over plain
+HTTP than manage a CA on the host.
+
 ### Failed-authentication throttling
 
 Repeated wrong keys from one address are throttled: **10 failures, then
@@ -1694,7 +1723,7 @@ oras` if you don't already have it, same as for
 # requires auth (see "Registry authentication" below); scm-writer can
 # push, scm-reader can only pull. The password is whatever you
 # configured (see "Registry authentication" for how to read it back).
-oras push --plain-http -u scm-writer -p "$SCM_WRITER_PASSWORD" localhost:30500/scans/app-sarif:1 results.sarif
+oras push --ca-file scm-ca.crt -u scm-writer -p "$SCM_WRITER_PASSWORD" localhost:30500/scans/app-sarif:1 results.sarif
 
 # register it -- ref is the registry reference, not a local path
 curl -s -X POST localhost:8080/api/v1/artifacts \
@@ -1792,9 +1821,9 @@ SCM_WRITER_PASSWORD=$(kubectl get secret scm-chart-secrets -n flux-system \
 passed `-u`/`-p`:
 
 ```bash
-docker login localhost:30500 -u scm-writer -p "$SCM_WRITER_PASSWORD"
+docker login localhost:30500 -u scm-writer -p "$SCM_WRITER_PASSWORD"   # needs the CA in the daemon's trust store
 # or, per-command, no login needed:
-oras push --plain-http -u scm-writer -p "$SCM_WRITER_PASSWORD" localhost:30500/myapp:1 ./myapp.tar
+oras push --ca-file scm-ca.crt -u scm-writer -p "$SCM_WRITER_PASSWORD" localhost:30500/myapp:1 ./myapp.tar
 ```
 
 `monitor-api` itself only ever pulls (never pushes) — it authenticates
@@ -2572,7 +2601,7 @@ online:
 
 ```bash
 brew install oras            # if you don't already have it
-./cluster/seed-trivy-db.sh   # mirrors both trivy DBs into localhost:30500
+SCM_REGISTRY_CA=./scm-ca.crt ./cluster/seed-trivy-db.sh   # mirrors both trivy DBs into localhost:30500
 ```
 
 Then set `monitorApi.trivyDB.enabled: true` and fill in
