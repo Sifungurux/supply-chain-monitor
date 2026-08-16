@@ -1851,8 +1851,9 @@ Trivy, `malware_findings` from ClamAV — told apart by `Finding.source`,
 not by artifact type. Relevant env vars (see
 `charts/supply-chain-monitor/values.yaml`'s `monitorApi.unpacker.*`
 keys, rendered into the ConfigMap by that chart):
-`UNPACKER_INSECURE`, `UNPACKER_PUBLIC` (defaults assume our local,
-plain-HTTP `scm-registry`), `UNPACKER_MAX_FILE_MB` (skip huge files
+`UNPACKER_INSECURE` (now `false` — `scm-registry` serves TLS; flip it
+back alongside `registry.tls.enabled=false`), `UNPACKER_PUBLIC`,
+`UNPACKER_MAX_FILE_MB` (skip huge files
 when walking the unpacked image, default 100MB).
 
 **The unpack+malware-scan step runs in its own Kubernetes Job, not
@@ -2103,8 +2104,9 @@ went out no matter how they were set). Grype instead needs a real
 `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` for both the malware-scan
 unpacker step and Grype, so no extra setup is needed here — see
 docs/architecture.md ("Adding Grype as a second CVE scanner") for the
-full story, including why `scm-registry`'s plain-HTTP setup also
-needs `GRYPE_REGISTRY_INSECURE_USE_HTTP=true`.
+full story. `GRYPE_REGISTRY_INSECURE_USE_HTTP` is set only when
+`FETCH_PLAIN_HTTP` is on, so it switches off automatically with
+`registry.tls.enabled`.
 
 ### Running monitor-api outside a Kubernetes pod
 
