@@ -111,7 +111,12 @@ func (f *RegistryFetcher) Fetch(ctx context.Context, ref string) (string, func()
 	if f.Username != "" {
 		args = append(args, "--username", f.Username, "--password", f.Password)
 	}
-	args = append(args, ref)
+	// "--" ends flag parsing, so even a ref that somehow reached here
+	// without passing ValidateRef is treated as a positional argument
+	// rather than a flag. Belt and braces: the actual fix is the
+	// leading-"-" rejection in refvalidate.go. Verified this tool
+	// accepts the separator before adding it.
+	args = append(args, "--", ref)
 
 	cmd := exec.CommandContext(ctx, "oras", args...)
 	var stderr bytes.Buffer

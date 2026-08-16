@@ -129,7 +129,12 @@ func (t *TrivyScanner) args(ref string) []string {
 	args = append(args, verbosityArgs()...)
 	args = append(args, "--format", "json")
 	args = append(args, dbArgs(t.db)...)
-	args = append(args, ref)
+	// "--" ends flag parsing, so even a ref that somehow reached here
+	// without passing ValidateRef is treated as a positional argument
+	// rather than a flag. Belt and braces: the actual fix is the
+	// leading-"-" rejection in refvalidate.go. Verified this tool
+	// accepts the separator before adding it.
+	args = append(args, "--", ref)
 	return args
 }
 

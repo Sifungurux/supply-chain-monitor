@@ -285,3 +285,44 @@ func TestIsolatedScanners_ForwardRefHostAllowlist(t *testing.T) {
 	}
 	t.Logf("checked %d scan-worker-based isolated scanners", checked)
 }
+
+// ARGUMENT INJECTION. Every scanner passes the ref to an external tool
+// as a POSITIONAL argument, so a ref beginning with "-" is parsed as a
+// flag by that tool -- "--cache-dir" reaching trivy redirects where it
+// writes inside the scan worker.
+//
+// Measured before the guard existed: "-o", "--cache-dir", "-o.x/foo"
+// and "--output=/tmp/x" ALL returned nil from ValidateRef. The host
+// checks cannot catch it -- refHosts reads "-o" as a hostless
+// single-segment ref and Docker Hub qualification gives it a
+// legitimate-looking host.
+func TestValidateRef_RejectsFlagShapedRefs(t *testing.T) {
+	cases := []struct {
+		name   string
+		ref    string
+		reject bool
+	}{
+		{name: "short flag", ref: "-o", reject: true},
+		{name: "long flag", ref: "--cache-dir", reject: true},
+		{name: "flag that also looks like a ref", ref: "-o.x/foo", reject: true},
+		{name: "flag with inline value", ref: "--output=/tmp/x", reject: true},
+		{name: "single dash alone", ref: "-", reject: true},
+		// A dash INSIDE the ref is entirely legitimate and must not be
+		// caught -- plenty of real images have one.
+		{name: "dash inside the repo name", ref: "docker.io/library/my-app:1.0", reject: false},
+		{name: "dash inside the host", ref: "my-registry.example.com/app:1", reject: false},
+		{name: "ordinary ref", ref: "alpine:3.19", reject: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateRef(context.Background(), tc.ref)
+			if tc.reject && err == nil {
+				t.Errorf("ValidateRef(%q) = nil, want rejection -- this ref becomes a FLAG when handed to trivy/oras", tc.ref)
+			}
+			if !tc.reject && err != nil {
+				t.Errorf("ValidateRef(%q) = %v, want nil -- a dash inside a ref is legitimate", tc.ref, err)
+			}
+		})
+	}
+}
