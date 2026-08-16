@@ -1,3 +1,8 @@
 node_modules/
 .DS_Store
 *.log
+
+# Locally-built binary -- never belongs in the tree (report S8a). The
+# Dockerfile builds its own; a committed host binary is the exact
+# "unverified binary in the repo" pattern this product detects elsewhere.
+services/monitor-api/monitor-api
