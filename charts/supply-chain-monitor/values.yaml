@@ -558,10 +558,18 @@ monitorApi:
   apiKeyExistingSecret: false
   # unpacker (github.com/Sifungurux/unpacker) pull settings, forwarded
   # into the env of each per-scan Kubernetes Job monitor-api creates.
-  # Defaults assume a local, unauthenticated, plain-HTTP dev registry
-  # (scm-registry) -- tighten before pointing this at anything else.
   unpacker:
-    insecure: "true"
+    # "false" now that scm-registry serves TLS (registry.tls.enabled).
+    # This is NOT gated on that flag automatically, because --insecure
+    # is the unpacker binary's own switch and this chart cannot know
+    # what a differently-configured registry needs -- so it is a plain
+    # default that has to be flipped alongside registry.tls.enabled.
+    #
+    # Set back to "true" with registry.tls.enabled=false. Leaving it
+    # "true" against a TLS registry either fails the pull or skips
+    # certificate verification, depending on the binary's reading of
+    # the flag -- both wrong once a real CA is in play.
+    insecure: "false"
     public: "true"
     maxFileMB: "100"
     # The unpacker executable itself. Bare name = found on PATH, which

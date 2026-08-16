@@ -475,8 +475,9 @@ its own auto-created versions (`gatewayClass.enabled: false`,
 `gateway.enabled: false`). The Gateway's listener port is `8000`
 (Traefik's internal `web` EntryPoint port), exposed externally via
 Traefik's `NodePort` Service on `30080`; the dashboard's direct
-NodePort (`30301`) still works unchanged. No TLS yet — `websecure` is
-disabled rather than half-wired.
+NodePort (`30301`) still works unchanged. `websecure` is exposed (NodePort
+`30443`) and the Gateway terminates TLS there; see "Known limitations"
+for what a private CA does and does not buy.
 
 **Network policy.** Three `NetworkPolicy` objects
 (`templates/networkpolicy/`, gated on `networkPolicy.enabled`, default
@@ -563,9 +564,19 @@ a rebuild, so nothing else notices a new image is available.
 
 ## Known limitations
 
-- Auth is a single shared API key — no per-client identity, no
-  revocation of one caller without rotating for everyone, no rotation
-  grace period.
+- Auth keys are **named per client** (`monitorApi.apiKeys`), so a
+  request is attributed in the audit log and one consumer can be revoked
+  without re-keying the others. A legacy shared `monitorApi.apiKey`
+  still authenticates, as the client `default`, so upgrading cannot lock
+  a deployment out. What is still missing is **scopes**: every key is
+  full-privilege, so a key that only needs to register artifacts can
+  also delete them and upload VEX (which suppresses findings).
+- **The dashboard hands its API key to any browser that loads it.** An
+  initContainer renders `env.js` from the same Secret
+  (`templates/dashboard/deployment.yaml`), so whoever can reach the
+  dashboard holds a full-privilege key. That is the trade-off for
+  needing no manual key entry; treat dashboard access as equivalent to
+  key access.
 - `charts/supply-chain-monitor/values.yaml`'s `postgres.credentials.password`
   and `monitorApi.apiKey` are empty by default — no plaintext credential
   ships in this repo. A real value comes from one of three places: Flux's
@@ -583,9 +594,16 @@ a rebuild, so nothing else notices a new image is available.
   and an account left unset is omitted from docker_auth's config
   entirely rather than rendered as a hash of the empty string (which
   would accept an empty password).
-- Both fetch paths (`RegistryFetcher`, `UnpackerScanner`) assume
-  unauthenticated, plain-HTTP access to the registry — no credentials
-  wired up for a private or TLS-terminated registry.
+- `scm-registry` and `scm-docker-auth`'s token endpoint serve **TLS**
+  from the in-cluster private CA (`registry.tls.enabled`, on by
+  default), and both fetch paths authenticate with the registry
+  credentials the chart provisions. In-cluster clients get the CA
+  mounted with `SSL_CERT_DIR` — deliberately not `SSL_CERT_FILE`, which
+  in Go *replaces* the system trust store and would stop `oras`,
+  `trivy` and `grype` trusting public registries.
+  What is still not wired up is an **external** private registry: there
+  is no per-registry credential or CA configuration for pulling from,
+  say, a private GHCR or Harbor.
 - Scan concurrency is now cluster-wide: slots are rows in a `scan_slots`
   table rather than a buffered channel per process, so two monitor-api
   replicas share one budget instead of each allowing a full
@@ -603,7 +621,10 @@ a rebuild, so nothing else notices a new image is available.
   can actually get a slot. Slots are not tied to artifacts by foreign
   key for the same reason: deleting an artifact mid-scan must not free a
   slot whose work is still running.
-- No TLS on the Gateway.
+- The Gateway terminates **TLS** with a cert-manager-issued certificate
+  from a private CA, and redirects plain HTTP to HTTPS (308). It is a
+  *private* CA: browsers warn until it is trusted, and it is no
+  substitute for a real certificate on anything public.
 - The dashboard's search box only searches the page currently loaded
   (server-side `status`/`type` filters narrow the whole set instead).
   The summary cards and pipeline strip no longer have this problem —
