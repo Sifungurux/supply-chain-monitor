@@ -648,7 +648,13 @@
       failed: 'badge-danger'
     };
     var label = status === 'failed'
-      ? (failureReasonLabels[a.last_scan_failure_reason] || 'Failed')
+      // Object.hasOwn, not a bare lookup: a reason of "constructor" or
+      // "toString" would otherwise hit an INHERITED property and render
+      // a function body into the badge. Not XSS (esc() still runs on
+      // the result), but visible garbage driven by a server field.
+      ? (Object.hasOwn(failureReasonLabels, a.last_scan_failure_reason)
+        ? failureReasonLabels[a.last_scan_failure_reason]
+        : 'Failed')
       : esc(status);
     return '<span class="badge ' + (map[status] || 'badge-neutral') + '">' + label + '</span>';
   }

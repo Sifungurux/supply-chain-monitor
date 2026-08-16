@@ -2525,6 +2525,34 @@ test('the API address follows the origin the page was served from', async () => 
   direct.window.close();
 });
 
+// A failure reason is a server-supplied string used as a map key, so an
+// inherited property name reaches the lookup. Before the Object.hasOwn
+// guard, last_scan_failure_reason "constructor" rendered a function body
+// into the badge. Not XSS -- esc() still runs -- but visible garbage
+// driven by a field the client does not control.
+test('an inherited property name as a failure reason renders "Failed"', async () => {
+  const hostile = Object.assign({}, SAMPLE_ARTIFACTS[0], {
+    id: 'proto', ref: 'proto:1', status: 'failed', last_scan_failure_reason: 'constructor'
+  });
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(u) {
+      if (u.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (u.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (u.includes('/components/diff')) return jsonResponse({ from: null, to: null, added: [], removed: [], version_changed: [] });
+      if (isArtifactsList(u)) return artifactsPage([hostile]);
+      return errorResponse(404, { error: 'not found' });
+    }
+  });
+  await tick(20);
+  const row = dom.window.document.querySelector('#artifact-rows tr[data-id="proto"]');
+  assert.ok(row, 'the hostile artifact should still render');
+  assert.doesNotMatch(row.textContent, /function|native code|Object\(\)/,
+    'an inherited property leaked into the badge');
+  assert.match(row.textContent, /Failed/, 'should fall back to the generic label');
+  dom.window.close();
+});
+
 // Failed scans, fleet-wide. The per-row badge only ever showed failures
 // on the page in front of you, so a few scattered through a large store
 // were invisible without going looking for them.

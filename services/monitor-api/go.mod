@@ -1,6 +1,6 @@
 module github.com/kirk-pedersen/supply-chain-monitor/monitor-api
 
-go 1.25.0
+go 1.26.0
 
 // pgx is the one non-stdlib dependency in this module, needed to talk
 // to Postgres (see internal/artifact/postgres_store.go and

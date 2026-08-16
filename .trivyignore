@@ -23,6 +23,25 @@
 # That is a chart change with a real chance of breaking the
 # vulnerability-DB pipeline, so it is not being smuggled into a CI
 # hardening change.
+#
+# VERIFIED 2026-08-16 against the pinned aquasec/trivy:0.73.0: NEITHER
+# this rule nor KSV-0109 below currently fires anywhere in the chart, at
+# any severity. Both entries are retained as a record of the decision,
+# not because they suppress anything today -- if a trivy bump makes one
+# fire again, a reviewer meets the rationale rather than a bare ID.
+#
+# The workloads this WOULD cover, each carrying its own in-file comment
+# explaining why (they run trivy/grype/psql, which write to TMPDIR and
+# other paths nobody has enumerated):
+#   postgres/backup-cronjob.yaml               monitor-api/prune-cronjob.yaml
+#   postgres/backup-pvc-primer-job.yaml        monitor-api/sweep-registered-cronjob.yaml
+#   monitor-api/trivy-db-cache-primer-job.yaml monitor-api/trivy-db-refresh-cronjob.yaml
+#   monitor-api/grype-db-cache-primer-job.yaml monitor-api/grype-db-refresh-cronjob.yaml
+#   registry/deployment.yaml
+#
+# Per-path scoping IS supported in 0.73 (.trivyignore.yaml with id +
+# paths -- tested), and is the right move the day the rule fires again.
+# Pointless while it matches nothing.
 KSV-0014
 
 # KSV-0109: "ConfigMap with secrets", on monitor-api-config.

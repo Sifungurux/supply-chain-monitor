@@ -196,8 +196,32 @@ func (h *handler) downloadDocument(w http.ResponseWriter, r *http.Request) {
 		ext = ".sarif"
 	}
 
-	w.Header().Set("Content-Type", doc.ContentType)
+	// The stored Content-Type is echoed back, and it arrived from
+	// whoever uploaded the document -- so it is caller-controlled. An
+	// allowlist keeps a hostile value (text/html) from turning a
+	// download into a page the browser renders in this origin.
+	//
+	// Content-Disposition: attachment already mitigates that, and
+	// nosniff below stops the browser second-guessing the type. All
+	// three together, because each covers a different browser's idea of
+	// what to do with an unexpected type.
+	w.Header().Set("Content-Type", safeDocumentContentType(doc.ContentType))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+id+"-"+kind+ext+`"`)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(doc.Content)
+}
+
+// safeDocumentContentType allowlists what downloadDocument will echo.
+//
+// Anything unrecognised becomes application/octet-stream rather than
+// being rejected: the document is still downloadable, it just stops
+// being something the browser might render.
+func safeDocumentContentType(stored string) string {
+	switch stored {
+	case "application/json", "application/sarif+json", "application/vnd.cyclonedx+json", "application/spdx+json":
+		return stored
+	default:
+		return "application/octet-stream"
+	}
 }

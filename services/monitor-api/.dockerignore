@@ -1,0 +1,13 @@
+# Keeps `COPY . .` from ingesting things the build must never see.
+#
+# The locally-built host binary was tracked in git and copied into every
+# image build (report S8a) -- a 15MB macOS binary landing in a Linux
+# image layer, unverified, in a product whose whole purpose is detecting
+# exactly that.
+monitor-api
+
+# Build/VCS noise that only invalidates the layer cache.
+.git
+.gitignore
+*_test.go
+testdata/
