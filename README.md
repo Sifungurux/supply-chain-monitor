@@ -1026,13 +1026,34 @@ badge on the row and detail page, plus a "Not scanned recently" summary
 card. `GET /api/v1/stats` carries both the threshold and the count, so
 the dashboard gets them in a request it already makes.
 
-`monitorApi.scanFreshness.autoRescan` (**false**) additionally has the
-sweep CronJob rescan stale artifacts. The warning is **independent** and
-shows either way — a backlogged or failing auto-rescan stays visible
-rather than hiding behind the feature meant to fix it. Rescans are paced
-by `sweep.batchSize`, which matters: enabling it against a fleet that
-has never been swept finds nearly all of it stale at once, and those
-rescans then age out together on the same future day.
+`monitorApi.scanFreshness.autoRescan` (**true**) has the sweep CronJob
+rescan artifacts whose last scan has aged out, at
+`monitorApi.scanFreshness.rescanAfterDays` (**1**). The warning is
+**independent** and shows either way — a backlogged or failing
+auto-rescan stays visible rather than hiding behind the feature meant to
+fix it. Rescans are paced by `sweep.batchSize`, which matters: enabling
+it against a fleet that has never been swept finds nearly all of it
+stale at once, and those rescans then age out together on the same
+future day.
+
+**`rescanAfterDays` and `warnAfterDays` are separate on purpose.** They
+answer different questions — how often findings should be re-derived
+from a newer vulnerability DB, versus how long before a human should be
+told something looks wrong. Sharing one value makes the badge useless at
+any aggressive cadence: rescans are paced at `batchSize` per run, so a
+full pass over ~100 artifacts takes hours, and most artifacts would sit
+past a 1-day threshold most of the time with the dashboard permanently
+red while everything worked as designed. `make helm-template` fails if
+the two are wired to the same source again. Leave `rescanAfterDays`
+unset to inherit `warnAfterDays` (the pre-split behaviour); use
+`autoRescan: false` to turn rescanning off, not `0`.
+
+**Why rescanning is on by default:** `scm-trivy-db-refresh` and its
+grype counterpart update the vulnerability databases daily, but nothing
+re-evaluates already-scanned artifacts against them. With auto-rescan
+off, a CVE published today against a package in an image scanned last
+month never appears — the refreshed DB is only consulted the next time
+something is actually scanned. The DB refresh on its own buys nothing.
 
 Two rules worth knowing, applied identically by the API count and the
 dashboard badge so they cannot contradict each other:

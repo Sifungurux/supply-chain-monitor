@@ -78,11 +78,20 @@ spec:
                   value: "http://monitor-api:8080"
                 - name: SWEEP_BATCH_SIZE
                   value: {{ .Values.monitorApi.sweep.batchSize | quote }}
-                # 0 (the default) means this sweep never rescans on age
-                # alone -- the staleness WARNING is independent and shows
-                # regardless. See monitorApi.scanFreshness.
+                # 0 means this sweep never rescans on age alone -- the
+                # staleness WARNING is independent and shows regardless.
+                # See monitorApi.scanFreshness.
+                #
+                # rescanAfterDays, NOT warnAfterDays: the scanning
+                # cadence and the alerting threshold are different
+                # questions, and sharing one value makes the badge
+                # meaningless at any aggressive cadence (rescans are
+                # paced at batchSize per run, so artifacts legitimately
+                # sit past an aggressive threshold most of the time).
+                # Falls back to warnAfterDays when unset, which is what
+                # this did before the two were split.
                 - name: SWEEP_RESCAN_STALE_AFTER_DAYS
-                  value: {{ if .Values.monitorApi.scanFreshness.autoRescan }}{{ .Values.monitorApi.scanFreshness.warnAfterDays | quote }}{{ else }}"0"{{ end }}
+                  value: {{ if .Values.monitorApi.scanFreshness.autoRescan }}{{ default .Values.monitorApi.scanFreshness.warnAfterDays .Values.monitorApi.scanFreshness.rescanAfterDays | quote }}{{ else }}"0"{{ end }}
                 - name: SWEEP_API_KEY
                   valueFrom:
                     secretKeyRef:
