@@ -5,11 +5,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/api"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/pipeline"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/policy"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
 )
 
 // newPolicyRouter is newTestRouter plus a policy, kept separate so the
@@ -22,7 +24,7 @@ func newPolicyRouter(t *testing.T, raw string) (http.Handler, *artifact.MemStore
 	}
 	store := artifact.NewMemStore()
 	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
-	return api.NewRouter(api.Config{Store: store, Tracker: tracker, APIKey: testAPIKey, Policy: p}), store
+	return api.NewRouter(api.Config{Store: store, Tracker: tracker, APIKey: testAPIKey, Policy: p, Enricher: scanner.NewEnricher(store)}), store
 }
 
 func getPolicy(t *testing.T, h http.Handler, id string) (int, policy.Result) {
@@ -171,5 +173,88 @@ func TestPolicyBucketsMatchAPI(t *testing.T) {
 	}
 	if got, want := len(policy.Buckets), 5; got != want {
 		t.Errorf("policy.Buckets has %d entries, want %d -- a bucket added to the API needs adding here too", got, want)
+	}
+}
+
+// TestSubmitFindings_CallerCannotAssertEnrichment is a provenance
+// rule, not a formatting one.
+//
+// epss_score and known_exploited are derived facts about a CVE, not
+// observations about this artifact. A submitter claiming
+// known_exploited=false for its own findings would be asserting
+// something it has no standing to know -- and the direction of that lie
+// is always "this is fine". Same reasoning that makes MergeFindings
+// recompute Status and Justification rather than trust a caller.
+func TestSubmitFindings_CallerCannotAssertEnrichment(t *testing.T) {
+	h, store := newPolicyRouter(t, "")
+	a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	// The store knows this CVE IS exploited; the caller claims it is not.
+	if err := store.ReplaceEnrichment(
+		[]string{"CVE-2024-9999"},
+		map[string]float64{"CVE-2024-9999": 0.94},
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("ReplaceEnrichment: %v", err)
+	}
+
+	body := map[string]any{
+		"bucket": "cve",
+		"findings": []map[string]any{
+			{
+				// The feed says this one IS exploited; the caller says
+				// it is not.
+				"id":              "CVE-2024-9999",
+				"severity":        "high",
+				"title":           "something",
+				"epss_score":      0.0,
+				"known_exploited": false,
+			},
+			{
+				// And the reverse, which is the case the clearing
+				// actually exists for: a CVE the feeds have never heard
+				// of, where the caller asserts a scary flag. Apply
+				// deliberately leaves unknown CVEs alone, so without the
+				// clearing this value would simply be persisted as
+				// submitted -- letting any caller stamp KEV on anything.
+				"id":              "CVE-1999-0001",
+				"severity":        "low",
+				"title":           "invented",
+				"epss_score":      0.99,
+				"known_exploited": true,
+			},
+		},
+	}
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+a.ID+"/findings", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	got, err := store.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	byID := map[string]artifact.Finding{}
+	for _, f := range got.CVEFindings {
+		byID[f.ID] = f
+	}
+	if len(byID) != 2 {
+		t.Fatalf("findings = %+v", got.CVEFindings)
+	}
+
+	known := byID["CVE-2024-9999"]
+	if !known.KnownExploited {
+		t.Error("the caller's known_exploited=false was accepted over the KEV catalog")
+	}
+	if known.EPSSScore != 0.94 {
+		t.Errorf("epss_score = %v, want 0.94 from the feed rather than the caller's 0", known.EPSSScore)
+	}
+
+	invented := byID["CVE-1999-0001"]
+	if invented.KnownExploited {
+		t.Error("a caller stamped known_exploited on a CVE the feeds have never heard of")
+	}
+	if invented.EPSSScore != 0 {
+		t.Errorf("epss_score = %v, want 0 -- a caller does not get to invent a score", invented.EPSSScore)
 	}
 }

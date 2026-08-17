@@ -50,6 +50,11 @@ type handler struct {
 	// -- see policy.Policy.Configured for why callers are told the
 	// difference between that and actually passing a gate.
 	policy policy.Policy
+	// enricher annotates CVE findings with CISA KEV / FIRST EPSS data
+	// (internal/scanner). nil disables enrichment entirely, which is
+	// exactly how every deployment behaved before it existed -- and how
+	// tests that do not care about it behave.
+	enricher *scanner.Enricher
 	// notifiers receive a ScanEvent when a scan introduces new findings
 	// at or above notifyMinSeverity. Empty (the default) means
 	// notifications are off entirely -- see internal/notify.
@@ -330,4 +335,14 @@ type RegistrationLimits struct {
 	// Registrations that would exceed it are refused; deleting
 	// artifacts frees the quota again. <= 0 means unlimited.
 	MaxArtifacts int
+}
+
+// enrich applies KEV/EPSS annotation when an enricher is configured.
+// A nil enricher is not an error -- it is how a deployment (or a test)
+// that has not turned this on behaves.
+func (h *handler) enrich(findings []artifact.Finding) error {
+	if h.enricher == nil {
+		return nil
+	}
+	return h.enricher.Apply(findings)
 }

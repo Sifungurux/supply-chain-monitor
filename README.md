@@ -1568,6 +1568,70 @@ Some details worth knowing:
   `POST /documents/{kind}`, which stores bytes and would let a document
   land without ever being applied.
 
+### Which CVEs are actually being exploited
+
+Severity describes how bad exploitation *would* be. It says nothing
+about whether anyone is doing it — so a findings list sorted by severity
+puts a critical nobody has ever exploited above a medium with a working
+exploit in the wild. Two feeds fix that:
+
+- **CISA KEV** — exploitation has been **observed**. A fact, not a
+  prediction.
+- **FIRST EPSS** — the estimated probability of exploitation in the next
+  30 days.
+
+CVE findings carry `known_exploited` and `epss_score`, the dashboard
+badges them, and detail tabs sort by **known-exploited → EPSS →
+severity**, with the id as a stable tiebreak so the list doesn't
+reshuffle between polls.
+
+Slack notifications lead with KEV when there is one:
+
+```
+KNOWN EXPLOITED: 2 of 11 new finding(s) on app:1.4 are in CISA's KEV catalog
+• CVE-2024-3400 (CRITICAL)  [KNOWN EXPLOITED]  EPSS 94%
+```
+
+The feeds are refreshed daily by a CronJob
+(`monitorApi.enrichment.refreshSchedule`) running `monitor-api
+enrich-refresh`, into Postgres. Both URLs are configurable
+(`monitorApi.enrichment.kevFeedURL` / `.epssFeedURL`) so an air-gapped
+cluster can mirror them, the same way `trivyDB.repository` works.
+
+**Where this lives, and why not the trivy cache.** The obvious home is
+the trivy cache dir the scanners already share. It can't go there:
+monitor-api runs with a read-only root filesystem and doesn't mount that
+PVC, and the PVC is `ReadWriteOnce` on `local-path` storage, so
+attaching it to a long-lived Deployment would pin every scan-worker Job
+to monitor-api's node. Postgres is already reachable from both the API
+and the refresh Job, already backed up, and shared across replicas. The
+cost is roughly 20MB of database (~300k EPSS rows), which flows into the
+nightly backup.
+
+**Absence is not a negative.** A CVE with no feed entry and a CVE the
+feed was never downloaded for both come back `known_exploited: false`,
+`epss_score: 0` — and a red badge that silently never appears reads as
+good news. So:
+
+- `enrich-refresh` **exits non-zero** if either feed fails, even when
+  the other succeeded and was stored, because the CronJob's exit status
+  is the only signal anyone watches.
+- It **refuses a feed that parses to zero entries** rather than
+  replacing good data with nothing — a mirror serving the wrong file
+  would otherwise clear every `known_exploited` flag at once.
+- A failed download leaves the *other* feed's data intact, and leaves
+  the failed feed's stored copy untouched rather than blanking it.
+- Enrichment **never overwrites a CVE the feeds don't know** with
+  zeroes, so a scan that ran before the first refresh is filled in by a
+  later one rather than permanently stamped "not exploited".
+
+`known_exploited` and `epss_score` are **derived facts about a CVE**,
+never trusted from a `POST /findings` caller — the same rule that makes
+`MergeFindings` recompute `status` and `justification`. A submitter
+asserting `known_exploited: false` about its own findings is claiming
+something it has no standing to know, and the direction of that lie is
+always "this is fine".
+
 ### Gating a pipeline on policy
 
 `GET /api/v1/artifacts/{id}/policy` answers "is this artifact

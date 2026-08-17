@@ -100,6 +100,28 @@ type Finding struct {
 	// assessed.
 	Justification string `json:"justification,omitempty"`
 
+	// EPSSScore is FIRST's Exploit Prediction Scoring System value for
+	// this CVE: the probability (0..1) that it will be exploited in the
+	// wild in the next 30 days. 0 means "no score", which is NOT the
+	// same as "0% chance" -- see EnrichmentStatus for why the
+	// difference matters and how a caller tells them apart.
+	//
+	// Set by enrichment at scan time (internal/scanner's Enricher), not
+	// by any scanner, and never trusted from an external submitFindings
+	// caller for the same reason Status and Justification are not: it
+	// is a derived fact about the CVE, not an observation about this
+	// artifact, so letting a caller assert it would let anything mark
+	// its own findings unexploitable.
+	EPSSScore float64 `json:"epss_score,omitempty"`
+	// KnownExploited is true when this CVE is in CISA's Known Exploited
+	// Vulnerabilities catalog -- i.e. exploitation has been OBSERVED,
+	// not predicted. It outranks severity and EPSS for triage: a
+	// medium-severity CVE with a working exploit in the wild is a more
+	// urgent problem than a critical nobody has ever exploited.
+	//
+	// Same provenance rules as EPSSScore.
+	KnownExploited bool `json:"known_exploited,omitempty"`
+
 	// Category is a transient bucket-routing hint a Scanner may set on
 	// a finding it returns -- "cve", "malware", "misconfiguration",
 	// "secret", or "other" (see internal/api/scan.go's
@@ -750,4 +772,49 @@ func SeverityRankOK(severity string) (int, bool) {
 // direction.
 func (f Finding) IsActive() bool {
 	return f.Status != FindingStatusFixed && f.Status != FindingStatusNotAffected
+}
+
+// Enrichment is what the KEV/EPSS feeds know about one CVE.
+type Enrichment struct {
+	EPSSScore      float64
+	KnownExploited bool
+}
+
+// EnrichmentStatus reports when each feed was last successfully
+// refreshed, and how many entries it holds.
+//
+// It exists because the absence of enrichment is indistinguishable
+// from a negative result: a CVE with no KEV entry and a CVE the feed
+// was never downloaded for both come back KnownExploited=false,
+// EPSSScore=0. A red "known exploited" badge that silently never
+// appears reads as good news, which is the worst possible failure
+// direction for this feature. Anything displaying enrichment is
+// expected to show staleness rather than let it pass as a clean bill
+// of health -- see GET /api/v1/stats and the dashboard's policyBadge
+// neighbours.
+type EnrichmentStatus struct {
+	KEVUpdatedAt  *time.Time `json:"kev_updated_at,omitempty"`
+	EPSSUpdatedAt *time.Time `json:"epss_updated_at,omitempty"`
+	KEVEntries    int        `json:"kev_entries"`
+	EPSSEntries   int        `json:"epss_entries"`
+}
+
+// Fresh reports whether both feeds were refreshed within maxAge.
+// Never-refreshed counts as stale, not as fresh-with-nothing.
+func (s EnrichmentStatus) Fresh(now time.Time, maxAge time.Duration) bool {
+	if s.KEVUpdatedAt == nil || s.EPSSUpdatedAt == nil {
+		return false
+	}
+	return now.Sub(*s.KEVUpdatedAt) <= maxAge && now.Sub(*s.EPSSUpdatedAt) <= maxAge
+}
+
+// IsCVEID reports whether a finding id looks like a CVE, which is the
+// only thing the KEV and EPSS feeds are keyed on.
+//
+// Used to skip lookups that cannot match: secret findings carry ids
+// like "secret:/app/.env:aws-access-key-id:3" and malware findings
+// carry signature names, and querying a 300k-row table for those is
+// pure waste.
+func IsCVEID(id string) bool {
+	return strings.HasPrefix(strings.ToUpper(id), "CVE-")
 }

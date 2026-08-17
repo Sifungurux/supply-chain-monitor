@@ -36,6 +36,26 @@ type ScanEvent struct {
 	// finding's own spelling (see severityRank on why the spelling
 	// varies).
 	Severity string `json:"severity"`
+	// KnownExploitedCount is how many of NewFindings are in CISA's KEV
+	// catalogue. The findings themselves already carry the flag (it is
+	// a field on artifact.Finding), but a notifier should not have to
+	// re-derive the one fact that decides whether this page is worth
+	// waking someone for -- exploitation OBSERVED beats any predicted
+	// severity, and it is what a message should lead with.
+	KnownExploitedCount int `json:"known_exploited_count"`
+}
+
+// CountKnownExploited returns how many findings are in the KEV
+// catalogue. Exported so the caller building a ScanEvent and any
+// notifier agree on the count rather than each counting differently.
+func CountKnownExploited(findings []artifact.Finding) int {
+	n := 0
+	for _, f := range findings {
+		if f.KnownExploited {
+			n++
+		}
+	}
+	return n
 }
 
 // Severity ranking. Higher is worse; 0 means "unrecognized", which is

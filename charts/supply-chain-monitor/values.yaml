@@ -439,6 +439,45 @@ monitorApi:
   #
   # Empty (the default) denies nothing and skips the evaluation.
   licenseDenylist: ""
+  # KEV/EPSS enrichment of CVE findings -- see README, "Which CVEs are
+  # actually being exploited".
+  #
+  # Severity alone is a poor triage signal: it describes how bad
+  # exploitation WOULD be, not whether anyone is doing it. CISA's Known
+  # Exploited Vulnerabilities catalogue says exploitation has been
+  # OBSERVED; FIRST's EPSS estimates the probability of exploitation in
+  # the next 30 days. A medium with a live exploit outranks a critical
+  # nobody has ever touched, and until something says which is which,
+  # every findings list is sorted by the wrong thing.
+  enrichment:
+    # The CronJob that downloads the feeds. With this off, nothing ever
+    # populates them, every finding keeps epss_score 0 /
+    # known_exploited false, and the dashboard shows no badges -- which
+    # is exactly how this behaved before the feature existed.
+    enabled: true
+    # Both feeds publish daily.
+    refreshSchedule: "0 4 * * *"
+    # Mirrorable for an air-gapped install, the same way
+    # trivyDB.repository is: point these at a copy somewhere the
+    # cluster can reach rather than having the feature simply not
+    # work. Empty uses the official sources.
+    #
+    # The KEV feed is JSON; the EPSS feed is a gzipped CSV. A mirror
+    # must preserve those formats -- enrich-refresh refuses a feed it
+    # parses to zero entries rather than replacing good data with
+    # nothing.
+    kevFeedURL: ""
+    epssFeedURL: ""
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        # The EPSS CSV is ~15MB uncompressed and is parsed into a map
+        # before being written, so this is sized for the parse rather
+        # than the download.
+        memory: 512Mi
   # Policy gate -- the rules GET /api/v1/artifacts/{id}/policy
   # evaluates, so a pipeline can ask "is this artifact acceptable" in
   # one call instead of fetching every finding and re-deriving the

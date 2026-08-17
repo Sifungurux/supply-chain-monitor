@@ -256,6 +256,14 @@ type Store interface {
 	// one that failed. So an artifact failing every scan stays "fresh"
 	// here forever; LastScanFailureReason is the signal for that case,
 	// not this one.
+	// KEV/EPSS enrichment (internal/scanner's Enricher). Kept on the
+	// Store because the feeds are shared state every replica and the
+	// refresh CronJob read and write -- see PostgresStore's own comment
+	// on why they live in the database rather than on a shared volume.
+	ReplaceEnrichment(kev []string, epss map[string]float64, at time.Time) error
+	LookupEnrichment(cveIDs []string) (map[string]Enrichment, error)
+	EnrichmentStatus() (EnrichmentStatus, error)
+
 	CountStaleScans(cutoff time.Time) (int, error)
 	CountOlderThan(cutoff time.Time) (int, error)
 	DeleteOlderThan(cutoff time.Time, limit int) (int, error)
@@ -286,6 +294,10 @@ type MemStore struct {
 	// a map is enough for a test backend, where PostgresStore has a real
 	// table with an index on purl.
 	components map[string][]Component
+	// enrichment mirrors PostgresStore's cve_enrichment/enrichment_feeds
+	// tables, keyed by upper-cased CVE id.
+	enrichment       map[string]Enrichment
+	enrichmentStatus EnrichmentStatus
 	// componentHistory is the per-scan snapshot log behind the diff
 	// endpoint, oldest first, capped at MaxComponentSnapshots. Mirrors
 	// PostgresStore's components_history table.
@@ -1154,4 +1166,63 @@ func (s *MemStore) DeleteScanTokens(artifactID string) error {
 		}
 	}
 	return nil
+}
+
+// ReplaceEnrichment mirrors PostgresStore's: wholesale per feed, and a
+// nil feed is left alone so a partial refresh keeps the good half.
+func (s *MemStore) ReplaceEnrichment(kev []string, epss map[string]float64, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.enrichment == nil {
+		s.enrichment = make(map[string]Enrichment)
+	}
+	when := at
+
+	if epss != nil {
+		for id, e := range s.enrichment {
+			e.EPSSScore = 0
+			s.enrichment[id] = e
+		}
+		for cve, score := range epss {
+			id := strings.ToUpper(cve)
+			e := s.enrichment[id]
+			e.EPSSScore = score
+			s.enrichment[id] = e
+		}
+		s.enrichmentStatus.EPSSUpdatedAt, s.enrichmentStatus.EPSSEntries = &when, len(epss)
+	}
+
+	if kev != nil {
+		for id, e := range s.enrichment {
+			e.KnownExploited = false
+			s.enrichment[id] = e
+		}
+		for _, cve := range kev {
+			id := strings.ToUpper(cve)
+			e := s.enrichment[id]
+			e.KnownExploited = true
+			s.enrichment[id] = e
+		}
+		s.enrichmentStatus.KEVUpdatedAt, s.enrichmentStatus.KEVEntries = &when, len(kev)
+	}
+	return nil
+}
+
+func (s *MemStore) LookupEnrichment(cveIDs []string) (map[string]Enrichment, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]Enrichment, len(cveIDs))
+	for _, id := range cveIDs {
+		up := strings.ToUpper(id)
+		if e, ok := s.enrichment[up]; ok {
+			out[up] = e
+		}
+	}
+	return out, nil
+}
+
+func (s *MemStore) EnrichmentStatus() (EnrichmentStatus, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.enrichmentStatus, nil
 }

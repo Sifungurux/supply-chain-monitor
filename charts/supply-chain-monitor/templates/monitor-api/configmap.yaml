@@ -15,6 +15,14 @@ data:
   # values.yaml for the matching rule, which is exact per identifier
   # rather than a substring.
   LICENSE_DENYLIST: {{ .Values.monitorApi.licenseDenylist | quote }}
+  # KEV/EPSS feed locations. Empty means the official sources (see
+  # internal/scanner/enrich.go's defaults); set them to a mirror for an
+  # air-gapped install, the same way trivyDB.repository works. Read by
+  # both the API (which only ever looks up stored data) and the
+  # enrich-refresh CronJob (which downloads), so a mirror is configured
+  # once.
+  KEV_FEED_URL: {{ .Values.monitorApi.enrichment.kevFeedURL | quote }}
+  EPSS_FEED_URL: {{ .Values.monitorApi.enrichment.epssFeedURL | quote }}
   # monitorApi.policy is written as YAML and rendered to JSON here, so
   # nobody has to embed a JSON string inside YAML. An empty map renders
   # as "{}", which policy.Load treats as a policy with no rules -- the

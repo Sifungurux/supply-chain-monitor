@@ -331,6 +331,15 @@ func main() {
 		runPrune()
 		return
 	}
+	// `monitor-api enrich-refresh` is a fifth mode: download CISA KEV
+	// and FIRST EPSS and replace the stored copies, then exit. A
+	// CronJob, like the trivy/grype DB refreshes it sits beside -- and
+	// for the same reason: the data is shared, changes daily, and has
+	// no business being fetched on a request path. See runEnrichRefresh.
+	if len(os.Args) > 1 && os.Args[1] == "enrich-refresh" {
+		runEnrichRefresh()
+		return
+	}
 	runAPIServer()
 }
 
@@ -1834,6 +1843,10 @@ func runAPIServer() {
 		// 0 switches the staleness warning off entirely.
 		StaleAfterDays: getenvInt("SCAN_STALE_AFTER_DAYS", 0),
 		Policy:         policyRules,
+		// KEV/EPSS annotation at scan time. Reads what the
+		// enrich-refresh CronJob stored; with no refresh ever having
+		// run it finds nothing and leaves findings untouched.
+		Enricher: scanner.NewEnricher(store),
 	})
 
 	srv := &http.Server{
@@ -1862,4 +1875,43 @@ func splitAndTrim(raw string) []string {
 		}
 	}
 	return out
+}
+
+// runEnrichRefresh downloads the KEV and EPSS feeds into the database.
+//
+// EXITS NON-ZERO ON ANY FEED FAILURE, even when the other feed
+// succeeded and was stored. The CronJob's own success/failure is the
+// only signal anybody watches for this, and a refresh that half-worked
+// while reporting success is exactly how enrichment silently rots into
+// a red badge that never appears -- which reads as good news.
+func runEnrichRefresh() {
+	setupLogging()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	store, err := connectStoreWithRetry(ctx, buildPostgresDSN(), 12, 5*time.Second)
+	if err != nil {
+		fatal("enrich-refresh: could not connect to postgres", "err", err)
+	}
+	defer store.Close()
+
+	start := time.Now().UTC()
+	enricher := scanner.NewEnricher(store)
+	refreshErr := enricher.Refresh(ctx, start)
+
+	status, statusErr := store.EnrichmentStatus()
+	if statusErr != nil {
+		slog.Warn("enrich-refresh: could not read back feed status", "err", statusErr)
+	} else {
+		slog.Info("enrich-refresh: feeds",
+			"kev_entries", status.KEVEntries, "kev_updated_at", status.KEVUpdatedAt,
+			"epss_entries", status.EPSSEntries, "epss_updated_at", status.EPSSUpdatedAt,
+			"took", time.Since(start).Round(time.Second).String())
+	}
+
+	if refreshErr != nil {
+		fatal("enrich-refresh: at least one feed failed -- enrichment is now stale for it", "err", refreshErr)
+	}
+	slog.Info("enrich-refresh: done")
 }

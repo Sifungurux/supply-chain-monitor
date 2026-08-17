@@ -2658,3 +2658,74 @@ test('a failing policy request leaves the badge empty rather than showing a verd
   assert.match(doc.getElementById('detail-body').innerHTML, /Last scan/, 'the rest of the detail page still renders');
   dom.window.close();
 });
+
+// KEV/EPSS ordering is the point of the enrichment, and it is NOT the
+// same as sorting by severity.
+//
+// KEV is an observation (exploitation seen in the wild), EPSS is a
+// prediction, severity describes impact if it happens. So a MEDIUM with
+// a live exploit belongs above a CRITICAL nobody has ever touched --
+// which is exactly the case this asserts, because sorting by severity
+// would get it backwards.
+test('findings are ordered known-exploited first, then EPSS, then severity', async () => {
+  const artifact = {
+    ...SAMPLE_ARTIFACTS[0],
+    id: 'a1',
+    cve_findings: [
+      { id: 'CVE-CRIT-QUIET', severity: 'critical', epss_score: 0.0001, known_exploited: false },
+      { id: 'CVE-MED-EXPLOITED', severity: 'medium', epss_score: 0.5, known_exploited: true },
+      { id: 'CVE-HIGH-LIKELY', severity: 'high', epss_score: 0.8, known_exploited: false },
+      { id: 'CVE-LOW-QUIET', severity: 'low', epss_score: 0, known_exploited: false }
+    ]
+  };
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/#/artifacts/a1',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (isArtifactsList(url)) return artifactsPage([artifact]);
+      return errorResponse(404, {});
+    }
+  });
+  await tick(20);
+  const body = dom.window.document.getElementById('detail-body').innerHTML;
+
+  const order = ['CVE-MED-EXPLOITED', 'CVE-HIGH-LIKELY', 'CVE-CRIT-QUIET', 'CVE-LOW-QUIET']
+    .map((id) => body.indexOf(id));
+  assert.ok(order.every((i) => i >= 0), 'every finding is rendered');
+  for (let i = 1; i < order.length; i++) {
+    assert.ok(
+      order[i - 1] < order[i],
+      `expected ordering known-exploited > EPSS > severity; got positions ${JSON.stringify(order)}`
+    );
+  }
+
+  assert.match(body, /Known exploited/, 'the KEV finding carries a badge');
+  assert.match(body, /EPSS 80%/, 'a high EPSS score is shown as a percentage');
+  // Most CVEs score near zero; a list where every row says "EPSS 0.0%"
+  // is a list where the number means nothing.
+  assert.doesNotMatch(body, /EPSS 0\.0%/, 'near-zero EPSS scores are not badged');
+
+  dom.window.close();
+});
+
+// Enrichment is optional and older artifacts predate it, so findings
+// with neither field must render exactly as before.
+test('findings with no enrichment render without KEV or EPSS badges', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/#/artifacts/a1',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, {});
+    }
+  });
+  await tick(20);
+  const body = dom.window.document.getElementById('detail-body').innerHTML;
+  assert.doesNotMatch(body, /Known exploited/);
+  assert.doesNotMatch(body, /EPSS/);
+  assert.match(body, /openssl bug/, 'the findings themselves still render');
+  dom.window.close();
+});

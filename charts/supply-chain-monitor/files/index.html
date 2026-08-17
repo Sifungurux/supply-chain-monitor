@@ -720,6 +720,68 @@
     return '<span class="badge ' + cls + '">' + esc(sev || 'unknown') + '</span>';
   }
 
+  // kevBadge marks a CVE that CISA has OBSERVED being exploited in the
+  // wild -- not predicted, observed. That outranks severity for triage:
+  // a medium with a working exploit is a more urgent problem than a
+  // critical nobody has ever exploited.
+  //
+  // Empty string, not a hidden badge, when false -- same as
+  // unsafeBadge: this is appended inline, so the negative case must
+  // contribute nothing rather than an empty span.
+  function kevBadge(f) {
+    return f.known_exploited
+      ? ' <span class="badge badge-danger" title="In CISA\u2019s Known Exploited Vulnerabilities catalog \u2014 exploitation has been observed in the wild">Known exploited</span>'
+      : '';
+  }
+
+  // epssBadge shows the probability this CVE is exploited in the next
+  // 30 days (FIRST\u2019s EPSS), as a percentage.
+  //
+  // Only shown from 1% up. Most CVEs score far below that, and a list
+  // where every row carries "EPSS 0.0%" is a list where the number
+  // means nothing -- the point of the score is to make the few that
+  // stand out actually stand out.
+  function epssBadge(f) {
+    var score = typeof f.epss_score === 'number' ? f.epss_score : 0;
+    if (score < 0.01) return '';
+    var pct = score >= 0.1 ? Math.round(score * 100) : (score * 100).toFixed(1);
+    return ' <span class="badge badge-warning" title="EPSS: estimated probability of exploitation in the next 30 days">EPSS ' + pct + '%</span>';
+  }
+
+  // sortFindings orders a bucket for triage: known-exploited first,
+  // then by EPSS, then by severity.
+  //
+  // That order is deliberate and not the same as sorting by severity.
+  // KEV is an observation, EPSS is a prediction, and severity is a
+  // description of impact if it happens -- so a medium with a live
+  // exploit belongs above a critical nobody has touched.
+  //
+  // Ties fall back to the id so the list does not reshuffle between
+  // the dashboard\u2019s 10s polls, which reads as the page glitching.
+  // Sorts a COPY: the array belongs to the artifact object the rest of
+  // the page renders from.
+  function sortFindings(list) {
+    return (list || []).slice().sort(function (a, b) {
+      var ak = a.known_exploited ? 1 : 0, bk = b.known_exploited ? 1 : 0;
+      if (ak !== bk) return bk - ak;
+      var ae = typeof a.epss_score === 'number' ? a.epss_score : 0;
+      var be = typeof b.epss_score === 'number' ? b.epss_score : 0;
+      if (ae !== be) return be - ae;
+      var as = SEVERITY_RANK[(a.severity || '').toLowerCase()] || 0;
+      var bs = SEVERITY_RANK[(b.severity || '').toLowerCase()] || 0;
+      if (as !== bs) return bs - as;
+      return String(a.id || '').localeCompare(String(b.id || ''));
+    });
+  }
+
+  // Mirrors internal/artifact/model.go's severityRank. Kept in step
+  // with it by the same reasoning that table gives for duplicating
+  // internal/notify's: a picker calling something "high" that the API
+  // treats as critical is worse than having no ordering at all.
+  var SEVERITY_RANK = {
+    critical: 5, high: 4, medium: 3, low: 2, negligible: 1, unknown: 0
+  };
+
   // findingIsNew flags a finding as newly discovered on the artifact's
   // most recent scan/submission, so the dashboard can call it out
   // rather than showing it exactly the same as a finding that's been
@@ -801,8 +863,12 @@
         '" target="_blank" rel="noopener noreferrer">Read more</a>'
       : '';
 
+    // KEV/EPSS sit next to the severity badge, at the START of the row:
+    // they are what decides whether this finding matters more than the
+    // one below it, and the label between them can be long enough to
+    // push anything trailing off a truncated row.
     var rowCls = 'finding badge-neutral' + (findingIsSuppressed(f) ? ' finding-fixed' : '');
-    return '<div class="' + rowCls + '">' + severityBadge(f.severity) +
+    return '<div class="' + rowCls + '">' + severityBadge(f.severity) + kevBadge(f) + epssBadge(f) +
       '<span class="finding-label" title="' + esc(fullText) + '">' + label + '</span>' +
       lifecycleBadge + readMore + '</div>';
   }
@@ -1679,7 +1745,9 @@
         BUCKET_LABELS[key] + ' ' + countCell(openFindings(a[key]).length) + '</button>';
     }).join('');
 
-    var list = a[activeKey] || [];
+    // Sorted here rather than in renderFinding, which only ever sees
+    // one finding and cannot order anything.
+    var list = sortFindings(a[activeKey]);
     var showId = activeKey !== 'malware_findings';
     var listHtml = list.length
       ? list.map(function (f) { return renderFinding(f, a, showId); }).join('')

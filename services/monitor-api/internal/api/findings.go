@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -163,6 +164,28 @@ func (h *handler) submitFindings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
+	// A caller does not get to assert KEV/EPSS. These are derived facts
+	// about a CVE, not observations about this artifact, so a submitter
+	// claiming known_exploited=false for its own findings would be
+	// asserting something it has no standing to know -- the same
+	// reasoning that makes MergeFindings recompute Status and
+	// Justification rather than trust them. Cleared here and re-derived
+	// from the feeds below.
+	for i := range req.Findings {
+		req.Findings[i].EPSSScore = 0
+		req.Findings[i].KnownExploited = false
+	}
+	// Re-derived from the feeds, before the store.Update below rather
+	// than inside its closure -- see scanArtifact's own comment for why
+	// a lookup in there deadlocks MemStore. Only the CVE bucket carries
+	// CVE ids; Apply skips the rest anyway.
+	if req.Bucket == "cve" {
+		if err := h.enrich(req.Findings); err != nil {
+			slog.Warn("could not enrich submitted findings with KEV/EPSS (submission unaffected)",
+				"artifact_id", id, "err", err)
+		}
+	}
+
 	// Same VEX overlay scanArtifact applies (see vexFor): an external
 	// system submitting findings has no idea what this artifact's
 	// operator has already assessed, so a submission must not be a way
@@ -192,6 +215,7 @@ func (h *handler) submitFindings(w http.ResponseWriter, r *http.Request) {
 			art.Status = artifact.StatusScanned
 		}
 		art.LastScanAt = &now
+
 	})
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())

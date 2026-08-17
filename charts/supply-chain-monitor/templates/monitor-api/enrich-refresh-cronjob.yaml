@@ -1,0 +1,83 @@
+# Runs `monitor-api enrich-refresh` (main.go) on a schedule: downloads
+# CISA's Known Exploited Vulnerabilities catalogue and FIRST's daily
+# EPSS scores, and replaces the stored copies.
+#
+# A sibling of trivy-db-refresh-cronjob.yaml rather than an extension of
+# it, for one concrete reason: that Job's whole purpose is to write into
+# the shared scm-trivy-db-cache PVC, and this data must NOT go there.
+# monitor-api is the consumer, and monitor-api runs with a read-only
+# root filesystem and does not mount that PVC -- and could not usefully
+# be made to, since it is ReadWriteOnce on local-path storage, so
+# attaching it to a long-lived Deployment would pin every scan-worker
+# Job to monitor-api's node. So the feeds go into Postgres, which both
+# the API and this Job already reach, and this Job needs no volume at
+# all.
+#
+# Reuses monitor-api's own image: enrich-refresh is the same binary as
+# the API server, scan-worker, sweep-registered and prune -- a fifth
+# `os.Args[1]` mode, no separate build.
+#
+# Talks straight to Postgres (unlike sweep-registered, which calls the
+# API over HTTP) because it writes bulk reference data, not artifact
+# state: ~300k EPSS rows through an HTTP endpoint would be a strange
+# shape for both sides.
+{{- if .Values.monitorApi.enrichment.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scm-enrich-refresh
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: scm-enrich-refresh
+spec:
+  schedule: {{ .Values.monitorApi.enrichment.refreshSchedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  # Kept deliberately: this Job failing is the ONLY signal that
+  # enrichment has gone stale, and stale enrichment presents as a red
+  # "Known exploited" badge that never appears -- which reads as good
+  # news. The failed Jobs are the evidence.
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: scm-enrich-refresh
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: scm-enrich-refresh
+        spec:
+          restartPolicy: Never
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+          containers:
+            - name: enrich-refresh
+              image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
+              imagePullPolicy: {{ .Values.monitorApi.image.pullPolicy }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                readOnlyRootFilesystem: true
+              args: ["enrich-refresh"]
+              envFrom:
+                # POSTGRES_HOST/PORT/USER/DB, LOG_LEVEL, and the two feed
+                # URLs -- all from the same ConfigMap the API reads, so
+                # a mirrored feed is configured in exactly one place.
+                - configMapRef:
+                    name: monitor-api-config
+              env:
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: scm-postgres-credentials
+                      key: POSTGRES_PASSWORD
+              resources:
+                {{- toYaml .Values.monitorApi.enrichment.resources | nindent 16 }}
+{{- end }}
