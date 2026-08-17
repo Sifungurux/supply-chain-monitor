@@ -1568,6 +1568,84 @@ Some details worth knowing:
   `POST /documents/{kind}`, which stores bytes and would let a document
   land without ever being applied.
 
+### Gating a pipeline on policy
+
+`GET /api/v1/artifacts/{id}/policy` answers "is this artifact
+acceptable" in one call, so a pipeline does not fetch every finding and
+re-derive the rules for itself — which is how two pipelines reading the
+same artifact end up disagreeing.
+
+Rules come from `monitorApi.policy` (rendered to `POLICY_JSON`):
+
+```yaml
+monitorApi:
+  policy:
+    maxSeverity:
+      cve: high        # high passes, critical fails
+      malware: none    # no active malware finding at all
+    disallowUnsafe: true
+    requireSBOM: true
+    requireScanWithinDays: 7
+    licenseDenylist: true
+```
+
+```bash
+curl -s -H "Authorization: Bearer $SCM_API_KEY" \
+  http://localhost:30300/api/v1/artifacts/$ARTIFACT_ID/policy
+```
+
+```json
+{
+  "pass": false,
+  "violations": [
+    {
+      "rule": "maxSeverity",
+      "detail": "cve: critical finding \"OpenSSL buffer overflow\" exceeds the \"high\" this policy allows",
+      "finding_id": "CVE-2024-2511"
+    }
+  ]
+}
+```
+
+As a build step that fails on a violation and prints why:
+
+```bash
+policy=$(curl -sf -H "Authorization: Bearer $SCM_API_KEY" \
+  "http://localhost:30300/api/v1/artifacts/$ARTIFACT_ID/policy") || {
+    echo "could not reach the policy endpoint" >&2; exit 2; }
+
+if [ "$(printf '%s' "$policy" | jq -r .pass)" != "true" ]; then
+  printf '%s' "$policy" | jq -r '.violations[] | "  \(.rule): \(.detail)"' >&2
+  exit 1
+fi
+```
+
+**This endpoint returns 200 even when the policy fails.** That is
+deliberate, and it is why the example above uses `curl -sf` for
+transport errors and reads `.pass` separately for the verdict. With a
+non-2xx for a violation, `curl --fail` could not tell "this artifact
+violates the policy" from "the API is down, the id is wrong, or my key
+is invalid" — the first must block a release, the others must be
+investigated rather than silently treated as a failed gate. Note the
+distinct exit codes above: `1` is a real violation, `2` is "I could not
+find out".
+
+Three things worth knowing before relying on it:
+
+- **Fixed and VEX-suppressed findings never count.** A critical someone
+  has already assessed as `not_affected` does not keep failing builds —
+  otherwise assessing it buys nothing and people route around the gate.
+  See "Suppressing findings with VEX".
+- **A severity this system does not recognize fails rather than
+  passes.** Severity ranking maps anything unknown to the bottom, so a
+  scanner that starts spelling severities differently would otherwise
+  walk straight through every threshold with the gate still green.
+- **With no policy configured everything passes**, with an empty
+  `violations` list. `monitor-api` refuses to start on a policy that is
+  set but invalid — an unknown rule name, bucket, or severity — because
+  a typo'd rule that gates nothing is exactly the failure this exists to
+  prevent, and startup is the only place it can be caught.
+
 ### Searching findings: which images still have this CVE?
 
 Exact ids are the right thing to *answer* with and a poor thing to

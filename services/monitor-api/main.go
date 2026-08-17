@@ -23,6 +23,7 @@ import (
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/k8sjob"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/notify"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/pipeline"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/policy"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
 )
 
@@ -1781,6 +1782,21 @@ func runAPIServer() {
 		log.Printf("registration capped at %d artifacts (MAX_ARTIFACTS)", maxArtifacts)
 	}
 
+	// POLICY_JSON / monitorApi.policy -- the pass/fail rule set
+	// GET /api/v1/artifacts/{id}/policy evaluates.
+	//
+	// REFUSES TO START on a policy that is set but unparseable, rather
+	// than falling back to "no rules". The whole point of this endpoint
+	// is to be a CI gate, and a gate that reports green while enforcing
+	// nothing is worse than no gate -- nobody investigates a passing
+	// build. Unset is the legitimate "no policy" case and starts fine.
+	policyRules, err := policy.Load(os.Getenv("POLICY_JSON"))
+	if err != nil {
+		fatal("POLICY_JSON is set but could not be parsed -- refusing to start rather than run a policy gate that enforces nothing",
+			"err", err)
+	}
+	slog.Info("policy gate", "configured", policyRules.Configured())
+
 	router := api.NewRouter(api.Config{
 		Store:          store,
 		Tracker:        stageTracker,
@@ -1817,6 +1833,7 @@ func runAPIServer() {
 		LicenseDenylist: scanner.NewLicenseDenylist(os.Getenv("LICENSE_DENYLIST")),
 		// 0 switches the staleness warning off entirely.
 		StaleAfterDays: getenvInt("SCAN_STALE_AFTER_DAYS", 0),
+		Policy:         policyRules,
 	})
 
 	srv := &http.Server{

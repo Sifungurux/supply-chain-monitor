@@ -9,6 +9,7 @@ import (
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/pipeline"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/policy"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
 )
 
@@ -129,13 +130,19 @@ type Config struct {
 	// artifact failing every scan stays "fresh" here. That is what
 	// LastScanFailureReason is for; see values.yaml's own comment.
 	StaleAfterDays int
+	// Policy is the rule set GET /api/v1/artifacts/{id}/policy evaluates
+	// (POLICY_JSON / monitorApi.policy). The zero value puts no rules in
+	// force; main.go refuses to start on a policy that is set but
+	// unparseable, because a broken policy that degrades to "no rules"
+	// is a CI gate reporting green while enforcing nothing.
+	Policy policy.Policy
 }
 
 // NewRouter wires up the v1 REST API. Uses Go 1.22's stdlib ServeMux
 // method+wildcard routing, so no external router dependency is needed.
 // See Config for what each field does and what its zero value means.
 func NewRouter(cfg Config) http.Handler {
-	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher, licenseDenylist: cfg.LicenseDenylist, staleAfterDays: cfg.StaleAfterDays}
+	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher, licenseDenylist: cfg.LicenseDenylist, staleAfterDays: cfg.StaleAfterDays, policy: cfg.Policy}
 	h.metrics = newMetrics()
 	h.scanCaps = cfg.ScanLimits.caps()
 
@@ -168,6 +175,7 @@ func NewRouter(cfg Config) http.Handler {
 	mux.HandleFunc("GET /api/v1/findings/{findingID}/artifacts", h.findByFindingID)
 	mux.HandleFunc("GET /api/v1/components", h.listByComponent)
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/components/diff", h.listComponentDiff)
+	mux.HandleFunc("GET /api/v1/artifacts/{id}/policy", h.getPolicy)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/scan", h.scanArtifact)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/stage", h.updateStage)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/maintainer", h.updateMaintainer)

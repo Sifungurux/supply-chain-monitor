@@ -2586,3 +2586,75 @@ test('the detail page badges a stale artifact', async () => {
   assert.match(doc.getElementById('detail-body').textContent, /STALE/);
   dom.window.close();
 });
+
+// The policy badge has THREE states, and the third is the point.
+//
+// The chart ships an empty policy by default, so if "no policy
+// configured" rendered as a pass, every default deployment would show a
+// green "Policy OK" badge having checked nothing -- an all-clear nobody
+// earned, on the screen people use to decide whether something is safe
+// to ship.
+test('the detail page shows policy pass, violations, and "no policy" as three distinct states', async () => {
+  async function badgeFor(policyBody) {
+    const dom = buildDom({
+      url: 'http://localhost:30301/#/artifacts/a1',
+      fetchImpl(url) {
+        if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+        if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+        if (/\/policy$/.test(url)) return jsonResponse(policyBody);
+        if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+        return errorResponse(404, {});
+      }
+    });
+    await tick(20);
+    // Closed before returning, like every other test here: each window
+    // starts the dashboard's own 10s poll interval, and a leaked one
+    // keeps Node's event loop alive so the whole FILE times out even
+    // though every assertion passed.
+    var html = dom.window.document.getElementById('policy-badge').innerHTML;
+    dom.window.close();
+    return html;
+  }
+
+  const pass = await badgeFor({ pass: true, configured: true, violations: [] });
+  assert.match(pass, /Policy OK/, 'a configured policy that passes shows a pass badge');
+  assert.doesNotMatch(pass, /badge-danger/, 'a pass is not rendered as a failure');
+
+  const failed = await badgeFor({
+    pass: false,
+    configured: true,
+    violations: [
+      { rule: 'maxSeverity', detail: 'cve: critical finding "openssl bug" exceeds the "high" this policy allows', finding_id: 'CVE-2024-1234' },
+      { rule: 'requireSBOM', detail: 'no SBOM document has been generated for this artifact' }
+    ]
+  });
+  assert.match(failed, /badge-danger/, 'a violation is rendered as a failure');
+  assert.match(failed, /2 violations/, 'the badge counts the violations');
+  assert.match(failed, /requireSBOM/, 'the reasons are available without leaving the page');
+
+  const none = await badgeFor({ pass: true, configured: false, violations: [] });
+  assert.match(none, /No policy/, 'an unconfigured policy says so');
+  assert.doesNotMatch(none, /badge-success/, 'an unconfigured policy must NOT render as a green pass -- nothing was checked');
+  assert.doesNotMatch(none, /Policy OK/, 'an unconfigured policy must not claim the artifact passed');
+});
+
+// A failed policy request must leave the badge empty rather than
+// rendering an error where a verdict belongs -- "I could not find out"
+// is easily misread as "fine".
+test('a failing policy request leaves the badge empty rather than showing a verdict', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/#/artifacts/a1',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (/\/policy$/.test(url)) return errorResponse(500, { error: 'boom' });
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, {});
+    }
+  });
+  await tick(20);
+  const doc = dom.window.document;
+  assert.equal(doc.getElementById('policy-badge').innerHTML, '', 'no badge at all when the verdict could not be fetched');
+  assert.match(doc.getElementById('detail-body').innerHTML, /Last scan/, 'the rest of the detail page still renders');
+  dom.window.close();
+});

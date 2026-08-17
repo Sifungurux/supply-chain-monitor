@@ -192,6 +192,32 @@ else
 		"${BASE}/api/v1/artifacts/${artifact_id}/documents/sbom")
 	check "POST /api/v1/artifacts/{id}/documents/sbom" "$sbom_status" "200"
 
+	# README's "Gating a pipeline on policy", run for real.
+	#
+	# The endpoint's whole contract is that a FAILING policy is still
+	# HTTP 200 -- a CI step cannot otherwise tell a violation from an
+	# outage, a wrong id, or a bad key. That is exactly the kind of
+	# claim a README makes and nothing checks, so it is checked here
+	# against a live server.
+	#
+	# This server runs with no POLICY_JSON, so the pass case is what a
+	# default deployment actually answers. The artifact has a submitted
+	# CRITICAL finding by this point (see the findings example above),
+	# which is what makes "still passes, because no policy is
+	# configured" a meaningful assertion rather than a vacuous one.
+	policy_status=$(curl -s -o /tmp/policy.json -w '%{http_code}' "${AUTH[@]}" \
+		"${BASE}/api/v1/artifacts/${artifact_id}/policy")
+	check "GET /api/v1/artifacts/{id}/policy (README's example)" "$policy_status" "200"
+	grep -q '"pass":true' /tmp/policy.json || { echo "FAIL: no policy is configured, so every artifact must pass: $(cat /tmp/policy.json)" >&2; fail=1; }
+	# violations must be [] and never null -- the README's jq pipeline
+	# does `.violations[]` on it.
+	grep -q '"violations":\[\]' /tmp/policy.json || { echo "FAIL: violations must encode as an empty array, not null: $(cat /tmp/policy.json)" >&2; fail=1; }
+
+	# A policy question about an id that does not exist is a 404 -- not
+	# a policy outcome, and the one case that is NOT a 200.
+	policy_404=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" "${BASE}/api/v1/artifacts/does-not-exist/policy")
+	check "GET /api/v1/artifacts/{id}/policy on an unknown id" "$policy_404" "404"
+
 	component_status=$(curl -s -o /tmp/components.json -w '%{http_code}' "${AUTH[@]}" \
 		--get --data-urlencode 'purl=pkg:apk/alpine/openssl@3.1.4-r5?arch=x86_64' \
 		"${BASE}/api/v1/components")

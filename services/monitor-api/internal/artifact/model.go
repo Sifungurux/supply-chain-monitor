@@ -717,7 +717,27 @@ var severityRank = map[string]int{
 // SeverityRank is exported so the SQL CASE in PostgresStore.SearchFindings
 // can be checked against it in a test rather than drifting silently.
 func SeverityRank(severity string) int {
-	return severityRank[strings.ToLower(strings.TrimSpace(severity))]
+	rank, _ := SeverityRankOK(severity)
+	return rank
+}
+
+// SeverityRankOK is SeverityRank plus whether the severity was one this
+// table actually knows.
+//
+// The two are indistinguishable through SeverityRank alone: an
+// unrecognized string like "moderate" or "IMPORTANT" ranks 0, and so
+// does the perfectly legitimate "unknown". For "worst seen"
+// aggregation that conflation is harmless -- both sort to the bottom.
+// For internal/policy it is not: a threshold comparison that silently
+// treats an unrecognized severity as the lowest possible one passes
+// every gate, so a scanner that starts spelling severities differently
+// would turn a policy gate green while enforcing nothing.
+//
+// Callers that need to tell those apart use this; everything doing
+// ordering keeps using SeverityRank and is unaffected.
+func SeverityRankOK(severity string) (int, bool) {
+	rank, ok := severityRank[strings.ToLower(strings.TrimSpace(severity))]
+	return rank, ok
 }
 
 // IsActive reports whether a finding still counts as a live problem:

@@ -439,6 +439,51 @@ monitorApi:
   #
   # Empty (the default) denies nothing and skips the evaluation.
   licenseDenylist: ""
+  # Policy gate -- the rules GET /api/v1/artifacts/{id}/policy
+  # evaluates, so a pipeline can ask "is this artifact acceptable" in
+  # one call instead of fetching every finding and re-deriving the
+  # answer for itself (which is how two pipelines reading the same
+  # artifact end up disagreeing). See README, "Gating a pipeline on
+  # policy".
+  #
+  # EMPTY (the default) means no policy. The endpoint still answers,
+  # and every artifact passes with no violations -- so a deployment
+  # that has not thought about this is unaffected, and the dashboard
+  # shows "no policy" rather than a green badge nobody earned.
+  #
+  # Rendered to POLICY_JSON with toJson, so this is written as ordinary
+  # YAML rather than an embedded JSON string.
+  #
+  # monitor-api REFUSES TO START if this is set but invalid -- an
+  # unknown rule name, an unknown bucket, or a severity that is not
+  # one. A typo'd rule silently gating nothing is the exact failure
+  # this feature exists to prevent, and startup is the only place it
+  # can be caught.
+  #
+  #   policy:
+  #     # Worst ACTIVE severity each bucket may contain. The named
+  #     # severity passes; anything worse fails. "none" allows no
+  #     # active finding at all, and is the only way to catch findings
+  #     # graded "unknown", which rank below every real threshold.
+  #     maxSeverity:
+  #       cve: high
+  #       malware: none
+  #     # Fail an artifact registered without a confirmed digest while
+  #     # requireDigest was on (artifact.unsafe).
+  #     disallowUnsafe: true
+  #     # Fail an artifact with no generated SBOM.
+  #     requireSBOM: true
+  #     # Fail an artifact scanned longer ago than this -- and one never
+  #     # scanned at all, which is the stricter and correct reading.
+  #     requireScanWithinDays: 7
+  #     # Fail on any active denylisted-license finding, reusing what
+  #     # licenseDenylist above already produced during a scan.
+  #     licenseDenylist: true
+  #
+  # Findings that are fixed or VEX-suppressed never count toward any of
+  # these: a critical someone has already assessed as not_affected must
+  # not keep failing builds, or the assessment buys nothing.
+  policy: {}
   # Prometheus scraping of monitor-api's /metrics (process and scan
   # counters -- see services/monitor-api/internal/api/metrics.go).
   #
