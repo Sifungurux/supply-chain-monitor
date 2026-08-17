@@ -2066,3 +2066,74 @@ func TestPostgresStore_ReplaceAndLookupEnrichment(t *testing.T) {
 		t.Errorf("a nil EPSS feed wiped the stored scores: %+v", found["CVE-2024-1111"])
 	}
 }
+
+// TestPostgresStore_ListCarriesEnrichment guards the SECOND path that
+// reads findings.
+//
+// Get uses loadFindings; List/ListPage use fillChildrenBatch. A column
+// added to one and not the other is invisible -- the field reads back
+// as its zero value on whichever path forgot it, and nothing errors.
+// epss_score/known_exploited shipped exactly that way: the artifact
+// endpoint returned them correctly while the list did not, so the
+// dashboard (which renders detail pages from the list payload) showed
+// no KEV badges at all.
+//
+// Asserts the two paths AGREE rather than checking one in isolation,
+// because agreement is the actual property.
+func TestPostgresStore_ListCarriesEnrichment(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	a, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := s.Update(a.ID, func(art *artifact.Artifact) {
+		art.CVEFindings = []artifact.Finding{
+			{ID: "CVE-2023-44487", Severity: "high", EPSSScore: 0.99999, KnownExploited: true},
+		}
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	fromGet, err := s.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	page, _, err := s.ListPage(50, 0, "", "")
+	if err != nil {
+		t.Fatalf("ListPage: %v", err)
+	}
+	var fromList *artifact.Artifact
+	for _, item := range page {
+		if item.ID == a.ID {
+			fromList = item
+		}
+	}
+	if fromList == nil {
+		t.Fatalf("artifact %s missing from the page", a.ID)
+	}
+
+	if len(fromList.CVEFindings) != 1 {
+		t.Fatalf("list findings = %+v", fromList.CVEFindings)
+	}
+	g, l := fromGet.CVEFindings[0], fromList.CVEFindings[0]
+	if g.KnownExploited != l.KnownExploited || g.EPSSScore != l.EPSSScore {
+		t.Fatalf("Get and List disagree about enrichment:\n  Get : known=%v epss=%v\n  List: known=%v epss=%v",
+			g.KnownExploited, g.EPSSScore, l.KnownExploited, l.EPSSScore)
+	}
+	if !l.KnownExploited {
+		t.Error("known_exploited did not survive the list path -- the dashboard renders detail pages from this payload")
+	}
+
+	// Same for List(), which uses the same batch loader.
+	all, err := s.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, item := range all {
+		if item.ID == a.ID && !item.CVEFindings[0].KnownExploited {
+			t.Error("known_exploited did not survive List() either")
+		}
+	}
+}
