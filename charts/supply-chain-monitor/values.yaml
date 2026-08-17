@@ -483,7 +483,30 @@ monitorApi:
   # Findings that are fixed or VEX-suppressed never count toward any of
   # these: a critical someone has already assessed as not_affected must
   # not keep failing builds, or the assessment buys nothing.
-  policy: {}
+  policy:
+    # Starter policy, chosen so the gate is real without painting the
+    # dashboard red on day one -- see README, "Gating a pipeline on
+    # policy".
+    #
+    # Deliberately NOT maxSeverity.cve yet: there are ~657 active
+    # CRITICAL CVE findings across the registered artifacts, so
+    # {cve: high} would fail nearly every one of them immediately and
+    # the badge would stop carrying information. Add it once that
+    # backlog is somewhere worth gating on.
+    maxSeverity:
+      # Any malware match is a failure regardless of how a scanner
+      # graded it. Currently zero active malware findings, so this
+      # passes everywhere -- which is the point: it proves the gate
+      # runs without manufacturing failures.
+      malware: none
+    # Registered while requireDigest was on, with a ref whose digest
+    # could not be confirmed. Only meaningful since the flag started
+    # being persisted at all.
+    disallowUnsafe: true
+    # Two days, against a sweep that rescans everything older than one
+    # -- so this fails only artifacts the rescan cycle is genuinely not
+    # keeping up with, not every artifact between nightly runs.
+    requireScanWithinDays: 2
   # Prometheus scraping of monitor-api's /metrics (process and scan
   # counters -- see services/monitor-api/internal/api/metrics.go).
   #
