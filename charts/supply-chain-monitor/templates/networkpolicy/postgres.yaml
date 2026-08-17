@@ -42,6 +42,24 @@ spec:
         - podSelector:
             matchLabels:
               app: scm-postgres-restore
+        # The retention CronJob (`monitor-api prune`), which connects
+        # straight to Postgres rather than through the API.
+        #
+        # It was missing here from the day it was added. Nobody noticed
+        # because retention.enabled defaults to false, so it has never
+        # run -- which is the same shape as the restore entry above:
+        # denied since the policies were created, invisible until
+        # somebody finally exercised it. See the check in
+        # cluster/check-helm-manifests.sh that now makes this class of
+        # omission fail the build instead of waiting for an outage.
+        - podSelector:
+            matchLabels:
+              app: scm-prune
+        # The KEV/EPSS refresh CronJob (`monitor-api enrich-refresh`),
+        # which writes bulk reference data straight to Postgres.
+        - podSelector:
+            matchLabels:
+              app: scm-enrich-refresh
       ports:
         - protocol: TCP
           port: {{ .Values.monitorApi.postgres.port | int }}
