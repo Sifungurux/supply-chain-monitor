@@ -506,3 +506,7 @@ helm-lint:
 # server-side validation against a real cluster did).
 helm-template:
 	docker run --rm -v "$(CURDIR)":/src -w /src --entrypoint sh alpine/helm:4.2.0 cluster/check-helm-manifests.sh
+	@# Every workload that talks to Postgres must be admitted by the
+	@# NetworkPolicy in front of it -- see the script for the three times
+	@# this repo has shipped one that was not.
+	docker run --rm -v "$(CURDIR)":/src -w /src --entrypoint sh alpine/helm:4.2.0 -c "apk add --no-cache python3 py3-yaml >/dev/null && python3 cluster/check-postgres-netpol.py"
