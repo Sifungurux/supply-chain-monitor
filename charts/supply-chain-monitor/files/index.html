@@ -1581,14 +1581,21 @@
     if (!el) return;
     try {
       var result = await fetchJSON('/api/v1/artifacts/' + encodeURIComponent(id) + '/policy');
-      if (currentDetailID() !== id) return;
+      // el.isConnected, NOT currentDetailID(): both answer "is this
+      // still the badge on screen" -- navigating from one artifact to
+      // another re-renders the detail body, which detaches the element
+      // this call captured -- but isConnected is a plain DOM property,
+      // while currentDetailID() reads window.location. Reading location
+      // on a window that has since been torn down throws, and an
+      // in-flight request outliving the page is exactly the case this
+      // guard exists for.
+      if (!el.isConnected) return;
       el.innerHTML = policyBadge(result);
     } catch (err) {
-      // Same staleness guard as the success path: navigating from one
-      // artifact to another while a request is in flight must not let
-      // the older artifact's late failure blank the badge now showing
-      // the newer one's verdict.
-      if (currentDetailID() !== id) return;
+      // Same guard, same reason: a late failure from the artifact you
+      // just navigated away from must not blank the badge now showing
+      // the new one's verdict.
+      if (!el.isConnected) return;
       el.innerHTML = '';
     }
   }

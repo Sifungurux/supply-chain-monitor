@@ -265,3 +265,69 @@ printf 'b' > "$2/image/b-succeeds.txt"
 		t.Fatalf("findings = %+v, want none", findings)
 	}
 }
+
+// TestUnpackerScanner_Scan_InsecureIsScopedToTheLocalRegistry is report
+// S4 leg 3 at the unpacker call site.
+//
+// UNPACKER_INSECURE is deployment-wide and exists for one host:
+// scm-registry serving plain HTTP in a dev cluster. Before this it was
+// appended to EVERY pull, so enabling it also dropped TLS verification
+// for docker.io in the same process, on the same code path, with
+// nothing in the output saying so.
+//
+// The scanner is constructed with insecure=true throughout -- the flag
+// being on is the premise, not the thing under test. What is under test
+// is that the flag alone is no longer enough.
+func TestUnpackerScanner_Scan_InsecureIsScopedToTheLocalRegistry(t *testing.T) {
+	const addr = "scm-registry.supply-chain-monitor.svc.cluster.local:5000"
+
+	cases := []struct {
+		name        string
+		ref         string
+		wantFlag    bool
+		allowlist   string
+		registryEnv string
+	}{
+		{
+			name: "the in-cluster registry still gets --insecure",
+			// Allowlisted so ValidateRef permits an in-cluster address
+			// at all -- which is how a real deployment is configured
+			// (see the chart's refHostAllowlist).
+			ref:         addr + "/app:v1",
+			allowlist:   "scm-registry.supply-chain-monitor.svc.cluster.local",
+			registryEnv: addr,
+			wantFlag:    true,
+		},
+		{
+			name:        "docker.io does not, even with the switch on",
+			ref:         "docker.io/library/alpine:3.19",
+			registryEnv: addr,
+			wantFlag:    false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(RegistryAddrEnv, tc.registryEnv)
+			t.Setenv(RefHostAllowlistEnv, tc.allowlist)
+
+			argvFile := filepath.Join(t.TempDir(), "argv.txt")
+			script := `mkdir -p "$2/image"
+echo "$@" > ` + argvFile
+			s := NewUnpackerScanner("127.0.0.1:1", writeFakeUnpacker(t, script), true, false, 0, "")
+
+			if _, err := s.Scan(context.Background(), tc.ref); err != nil {
+				t.Fatalf("Scan(%q): %v", tc.ref, err)
+			}
+			got, err := os.ReadFile(argvFile)
+			if err != nil {
+				t.Fatalf("read recorded argv: %v", err)
+			}
+			hasFlag := strings.Contains(string(got), "--insecure")
+			if hasFlag != tc.wantFlag {
+				t.Fatalf("--insecure present = %v for ref %q, want %v (argv: %q)",
+					hasFlag, tc.ref, tc.wantFlag, strings.TrimSpace(string(got)))
+			}
+		})
+	}
+}

@@ -2011,6 +2011,50 @@ as `scm-reader` via the `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` env vars
 (`registry-credentials-secret.yaml`), forwarded into every isolated
 scan-worker Job it creates the same way `SCM_API_KEY` already is.
 
+### Plain-HTTP is scoped to the in-cluster registry
+
+`scm-registry` serves TLS by default (`registry.tls.enabled`), but a
+quickstart or k3d cluster can legitimately run it over plain HTTP. Three
+settings exist for that:
+
+| Setting | Tool |
+|---|---|
+| `monitorApi.unpacker.insecure` | `unpacker --insecure` |
+| `monitorApi.fetchPlainHTTP` | `oras pull --plain-http` |
+| (derived from the same flag) | `GRYPE_REGISTRY_INSECURE_USE_HTTP` |
+
+Each is deployment-wide, and each used to be applied to **every pull the
+process made**. So turning on *"my in-cluster registry has no TLS"* also
+spoke plain HTTP to `docker.io`, `ghcr.io` and every other public
+registry — on the same code path, with nothing in the output saying so.
+For `oras pull` that is the worst of the three: `--username` and
+`--password` are on the same command line.
+
+They now apply only to:
+
+- the host in `REGISTRY_ADDR` (the chart sets this from
+  `monitorApi.registry.service`), and
+- anything listed in `monitorApi.refHostAllowlist`, which is already how
+  an operator declares *"this host is mine and internal"*
+
+**Everything else keeps TLS regardless of how these are set.** A dev
+cluster pulling from a plain-HTTP `scm-registry` no longer means a
+downgraded connection to Docker Hub in the same process, so the
+quickstart flow needs one switch rather than a trade-off.
+
+Two details worth knowing:
+
+- **All candidate hosts must qualify.** A bare `alpine:3.19` reads both
+  as `docker.io/library/alpine` and as a literal first segment; which one
+  a given tool dials is exactly the ambiguity that makes guessing unsafe,
+  so any doubt keeps TLS.
+- **Matching is on the whole host, never a substring.** A host that
+  merely contains the registry name —
+  `scm-registry.supply-chain-monitor.svc.cluster.local.evil.test` —
+  is a different host and gets TLS.
+
+See `services/monitor-api/internal/scanner/insecuretransport.go`.
+
 ### Image scanning: CVEs and malware, not just one or the other
 
 A container image is a real filesystem underneath, so it can carry

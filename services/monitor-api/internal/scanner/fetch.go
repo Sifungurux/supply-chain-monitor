@@ -104,21 +104,7 @@ func (f *RegistryFetcher) Fetch(ctx context.Context, ref string) (string, func()
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
 
-	args := []string{"pull", "--output", dir}
-	if f.PlainHTTP {
-		args = append(args, "--plain-http")
-	}
-	if f.Username != "" {
-		args = append(args, "--username", f.Username, "--password", f.Password)
-	}
-	// "--" ends flag parsing, so even a ref that somehow reached here
-	// without passing ValidateRef is treated as a positional argument
-	// rather than a flag. Belt and braces: the actual fix is the
-	// leading-"-" rejection in refvalidate.go. Verified this tool
-	// accepts the separator before adding it.
-	args = append(args, "--", ref)
-
-	cmd := exec.CommandContext(ctx, "oras", args...)
+	cmd := exec.CommandContext(ctx, "oras", f.pullArgs(ref, dir)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -229,4 +215,26 @@ func (f *FetchingScanner) Buckets() []string {
 		return mba.Buckets()
 	}
 	return nil
+}
+
+// pullArgs builds the `oras pull` invocation. Split out from Fetch so
+// the flag wiring is unit-testable without the real oras binary or a
+// registry -- the same reason TrivyScanner.args is split out.
+func (f *RegistryFetcher) pullArgs(ref, dir string) []string {
+	args := []string{"pull", "--output", dir}
+	// Scoped per-ref -- see InsecureTransportAllowed. FETCH_PLAIN_HTTP
+	// is about scm-registry serving plain HTTP in-cluster, not about
+	// speaking plain HTTP to whatever host a ref happens to name.
+	if f.PlainHTTP && InsecureTransportAllowed(ref) {
+		args = append(args, "--plain-http")
+	}
+	if f.Username != "" {
+		args = append(args, "--username", f.Username, "--password", f.Password)
+	}
+	// "--" ends flag parsing, so even a ref that somehow reached here
+	// without passing ValidateRef is treated as a positional argument
+	// rather than a flag. Belt and braces: the actual fix is the
+	// leading-"-" rejection in refvalidate.go. Verified this tool
+	// accepts the separator before adding it.
+	return append(args, "--", ref)
 }

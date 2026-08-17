@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -194,4 +195,68 @@ func TestFetchingScanner_Scan(t *testing.T) {
 			t.Fatal("cleanup must run even when the inner scan fails")
 		}
 	})
+}
+
+// TestRegistryFetcher_PullArgs_PlainHTTPIsScopedToTheLocalRegistry is
+// report S4 leg 3 at the fetch call site -- the third of the three
+// places a deployment-wide "insecure" switch was applied to every host.
+//
+// FETCH_PLAIN_HTTP is about scm-registry serving plain HTTP inside the
+// cluster. Applied unconditionally it also sent credentials and
+// artifacts to public registries over plain HTTP, which is worse here
+// than in the other two: --username/--password go on the same command
+// line.
+func TestRegistryFetcher_PullArgs_PlainHTTPIsScopedToTheLocalRegistry(t *testing.T) {
+	const addr = "scm-registry.supply-chain-monitor.svc.cluster.local:5000"
+
+	cases := []struct {
+		name string
+		ref  string
+		want bool
+	}{
+		{"the in-cluster registry gets --plain-http", addr + "/sbom.json:v1", true},
+		{"docker.io does not", "docker.io/library/alpine:3.19", false},
+		{"a bare ref (docker hub) does not", "alpine:3.19", false},
+		{"ghcr.io does not", "ghcr.io/example/sbom:v1", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(RegistryAddrEnv, addr)
+			t.Setenv(RefHostAllowlistEnv, "")
+			f := NewRegistryFetcher(true, "scm-writer", "hunter2")
+
+			var hasPlainHTTP bool
+			for _, a := range f.pullArgs(tc.ref, "/tmp/out") {
+				if a == "--plain-http" {
+					hasPlainHTTP = true
+				}
+			}
+			if hasPlainHTTP != tc.want {
+				t.Fatalf("--plain-http present = %v for %q, want %v (args: %v)",
+					hasPlainHTTP, tc.ref, tc.want, f.pullArgs(tc.ref, "/tmp/out"))
+			}
+		})
+	}
+}
+
+// The refactor that made the above testable must not have changed what
+// Fetch actually runs.
+func TestRegistryFetcher_PullArgs_Shape(t *testing.T) {
+	t.Setenv(RegistryAddrEnv, "")
+	t.Setenv(RefHostAllowlistEnv, "")
+
+	f := NewRegistryFetcher(false, "", "")
+	got := f.pullArgs("ghcr.io/example/sbom:v1", "/tmp/out")
+	want := []string{"pull", "--output", "/tmp/out", "--", "ghcr.io/example/sbom:v1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("pullArgs = %#v, want %#v", got, want)
+	}
+
+	withAuth := NewRegistryFetcher(false, "scm-writer", "hunter2")
+	got = withAuth.pullArgs("ghcr.io/example/sbom:v1", "/tmp/out")
+	want = []string{"pull", "--output", "/tmp/out", "--username", "scm-writer", "--password", "hunter2", "--", "ghcr.io/example/sbom:v1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("pullArgs with credentials = %#v, want %#v", got, want)
+	}
 }

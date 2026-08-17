@@ -710,6 +710,11 @@ monitorApi:
     # "true" against a TLS registry either fails the pull or skips
     # certificate verification, depending on the binary's reading of
     # the flag -- both wrong once a real CA is in play.
+    #
+    # Scoped to the in-cluster registry and refHostAllowlist -- see
+    # fetchPlainHTTP's comment below and report S4 leg 3. Setting this
+    # for a plain-HTTP scm-registry no longer drops TLS verification
+    # for docker.io in the same process.
     insecure: "false"
     # "false" because scm-registry requires a bearer token for every
     # /v2/ request (templates/docker-auth/). --public tells unpacker to
@@ -795,6 +800,19 @@ monitorApi:
   # "false" now that scm-registry serves TLS (registry.tls.enabled).
   # Set back to "true" alongside registry.tls.enabled=false for a
   # quickstart that runs the registry over plain HTTP.
+  #
+  # SCOPED TO THE IN-CLUSTER REGISTRY. This, unpacker.insecure and the
+  # grype equivalent are deployment-wide switches that used to apply to
+  # every pull -- so turning on "my registry has no TLS" also spoke
+  # plain HTTP to docker.io, ghcr.io and everything else in the same
+  # process, silently (report S4, leg 3).
+  #
+  # They now apply only to the host in REGISTRY_ADDR and to anything
+  # listed in refHostAllowlist below. Everything else keeps TLS no
+  # matter how these are set, so the k3d/quickstart flow (plain-HTTP
+  # scm-registry in-cluster, real TLS to public registries) works with
+  # one switch instead of a trade-off. See
+  # internal/scanner/insecuretransport.go.
   fetchPlainHTTP: "false"
   # A real policy change, not a quiet default: false preserves today's
   # behavior exactly (expected_digest on POST /api/v1/artifacts is
