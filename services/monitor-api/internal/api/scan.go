@@ -396,6 +396,28 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 	// second secret-producing scanner is ever registered for the same
 	// type, this needs the same treatment the CVE bucket gets.
 	cveFindings = artifact.CoalesceSameIDSources(cveFindings)
+
+	// Enriched BEFORE the store.Update below, never inside its mutate
+	// closure. MemStore.Update holds a write lock for the duration of
+	// that closure and LookupEnrichment takes a read lock on the same
+	// mutex, which sync.RWMutex does not allow to re-enter -- an
+	// enrichment lookup in there deadlocks the whole request. (It went
+	// unnoticed at first because every existing test builds a router
+	// with no enricher, making the call a no-op.) Doing network/database
+	// work while holding the store's lock would be wrong regardless.
+	//
+	// Enriching the INCOMING set is sufficient: MergeFindings copies
+	// every field except the lifecycle ones from the reported finding,
+	// so anything still open is re-enriched on each scan, and anything
+	// no longer reported is being marked fixed anyway.
+	//
+	// A failure is logged and swallowed: enrichment is annotation, and
+	// losing a scan's actual findings because a lookup failed would be
+	// a far worse trade.
+	if err := h.enrich(cveFindings); err != nil {
+		slog.Warn("could not enrich findings with KEV/EPSS (scan result unaffected)",
+			"artifact_id", a.ID, "err", err)
+	}
 	// A finding this scan is seeing for the first time can already be
 	// covered by a VEX document uploaded earlier -- read it here so it
 	// lands suppressed rather than paging somebody about a vulnerability
@@ -554,7 +576,9 @@ func (h *handler) notifyNewFindings(a *artifact.Artifact, roundStamp time.Time, 
 		ArtifactID:  a.ID,
 		ArtifactRef: a.Ref,
 		NewFindings: newFindings,
-		Severity:    notify.Worst(newFindings),
+		// Counted once here so the event and every notifier agree.
+		KnownExploitedCount: notify.CountKnownExploited(newFindings),
+		Severity:            notify.Worst(newFindings),
 	}
 	slog.Info("scan introduced new findings at or above the notify threshold",
 		"artifact_id", a.ID, "count", len(newFindings),

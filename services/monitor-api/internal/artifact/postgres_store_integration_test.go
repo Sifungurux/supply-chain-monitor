@@ -1952,3 +1952,117 @@ func TestPostgresStore_UnsafeRoundTrips(t *testing.T) {
 		t.Fatalf("artifact %s not in the list", a.ID)
 	}
 }
+
+// TestPostgresStore_EnrichmentRoundTrips covers the two new findings
+// columns and the feed tables.
+//
+// This file is where a forgotten column reads back as a zero value and
+// nothing complains -- exactly how Artifact.Unsafe went months without
+// being persisted. epss_score and known_exploited have the same shape
+// of risk: their "no data" values are indistinguishable from a genuine
+// negative, so a column missing from loadFindings' explicit list would
+// make every finding look not-exploited forever.
+func TestPostgresStore_EnrichmentRoundTrips(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	a, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := s.Update(a.ID, func(art *artifact.Artifact) {
+		art.CVEFindings = []artifact.Finding{
+			{ID: "CVE-2024-1111", Severity: "high", EPSSScore: 0.97231, KnownExploited: true},
+			{ID: "CVE-2024-2222", Severity: "low", EPSSScore: 0.00042},
+		}
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Read back through a FRESH Get, not the value Update returned --
+	// that is the distinction that made Unsafe look fine for months.
+	got, err := s.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.CVEFindings) != 2 {
+		t.Fatalf("findings = %+v", got.CVEFindings)
+	}
+	byID := map[string]artifact.Finding{}
+	for _, f := range got.CVEFindings {
+		byID[f.ID] = f
+	}
+	if f := byID["CVE-2024-1111"]; !f.KnownExploited || f.EPSSScore != 0.97231 {
+		t.Errorf("CVE-2024-1111 = %+v, want known_exploited and its EPSS score to survive", f)
+	}
+	if f := byID["CVE-2024-2222"]; f.KnownExploited || f.EPSSScore != 0.00042 {
+		t.Errorf("CVE-2024-2222 = %+v, want epss preserved and known_exploited false", f)
+	}
+}
+
+func TestPostgresStore_ReplaceAndLookupEnrichment(t *testing.T) {
+	s := newTestPostgresStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if err := s.ReplaceEnrichment(
+		[]string{"CVE-2024-1111"},
+		map[string]float64{"CVE-2024-1111": 0.9, "CVE-2024-2222": 0.1},
+		now,
+	); err != nil {
+		t.Fatalf("ReplaceEnrichment: %v", err)
+	}
+
+	found, err := s.LookupEnrichment([]string{"CVE-2024-1111", "CVE-2024-2222", "CVE-1999-0001"})
+	if err != nil {
+		t.Fatalf("LookupEnrichment: %v", err)
+	}
+	if e := found["CVE-2024-1111"]; !e.KnownExploited || e.EPSSScore != 0.9 {
+		t.Errorf("CVE-2024-1111 = %+v", e)
+	}
+	if e := found["CVE-2024-2222"]; e.KnownExploited || e.EPSSScore != 0.1 {
+		t.Errorf("CVE-2024-2222 = %+v", e)
+	}
+	// A CVE with no row is ABSENT, not a zero entry -- the caller uses
+	// that difference to leave findings unenriched rather than stamping
+	// them not-exploited.
+	if _, ok := found["CVE-1999-0001"]; ok {
+		t.Error("an unknown CVE came back as a zero-valued entry instead of being absent")
+	}
+
+	st, err := s.EnrichmentStatus()
+	if err != nil {
+		t.Fatalf("EnrichmentStatus: %v", err)
+	}
+	if st.KEVEntries != 1 || st.EPSSEntries != 2 {
+		t.Errorf("status = %+v, want 1 kev and 2 epss entries", st)
+	}
+	if st.KEVUpdatedAt == nil || st.EPSSUpdatedAt == nil {
+		t.Fatalf("status timestamps not recorded: %+v", st)
+	}
+	if !st.Fresh(now, time.Hour) {
+		t.Error("feeds refreshed just now report as stale")
+	}
+	if st.Fresh(now.Add(48*time.Hour), time.Hour) {
+		t.Error("feeds two days old report as fresh")
+	}
+
+	// A CVE dropping OUT of KEV is a real state change. Replacement is
+	// wholesale for exactly this: a merge would leave the old row
+	// asserting known_exploited forever.
+	if err := s.ReplaceEnrichment([]string{"CVE-2024-3333"}, nil, now); err != nil {
+		t.Fatalf("second ReplaceEnrichment: %v", err)
+	}
+	found, err = s.LookupEnrichment([]string{"CVE-2024-1111", "CVE-2024-3333"})
+	if err != nil {
+		t.Fatalf("LookupEnrichment: %v", err)
+	}
+	if found["CVE-2024-1111"].KnownExploited {
+		t.Error("a CVE that left the KEV catalog is still flagged known_exploited")
+	}
+	if !found["CVE-2024-3333"].KnownExploited {
+		t.Error("a CVE newly added to KEV was not flagged")
+	}
+	// ...and passing nil for EPSS left the scores alone.
+	if found["CVE-2024-1111"].EPSSScore != 0.9 {
+		t.Errorf("a nil EPSS feed wiped the stored scores: %+v", found["CVE-2024-1111"])
+	}
+}

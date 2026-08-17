@@ -72,6 +72,15 @@ func (s *SlackNotifier) Notify(ctx context.Context, event ScanEvent) error {
 func (s *SlackNotifier) buildMessage(event ScanEvent) map[string]any {
 	summary := fmt.Sprintf("%s: %d new %s finding(s) on %s",
 		strings.ToUpper(event.Severity), len(event.NewFindings), strings.ToLower(event.Severity), event.ArtifactRef)
+	// KEV leads. Exploitation observed in the wild outranks any
+	// predicted severity, and it is the single fact that decides
+	// whether this is worth interrupting someone for -- so it goes in
+	// front of the severity summary rather than being something the
+	// reader has to find in a list of twenty findings.
+	if event.KnownExploitedCount > 0 {
+		summary = fmt.Sprintf("KNOWN EXPLOITED: %d of %d new finding(s) on %s are in CISA's KEV catalog",
+			event.KnownExploitedCount, len(event.NewFindings), event.ArtifactRef)
+	}
 
 	var lines []string
 	for i, f := range event.NewFindings {
@@ -80,6 +89,12 @@ func (s *SlackNotifier) buildMessage(event ScanEvent) map[string]any {
 			break
 		}
 		line := fmt.Sprintf("• *%s* (%s)", f.ID, f.Severity)
+		if f.KnownExploited {
+			line += "  *[KNOWN EXPLOITED]*"
+		}
+		if f.EPSSScore > 0 {
+			line += fmt.Sprintf("  _EPSS %.1f%%_", f.EPSSScore*100)
+		}
 		if f.Title != "" {
 			line += " — " + f.Title
 		}

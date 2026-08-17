@@ -163,6 +163,38 @@ var schemaStatements = []string{
 	// clearly not a fabricated history, and the best available given
 	// that data was never captured.
 	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'open'`,
+	// KEV/EPSS enrichment (see internal/scanner/enrich.go). Defaults
+	// are the "no data" values, and are deliberately the same as a
+	// genuine negative -- which is why EnrichmentStatus exists to tell
+	// the two apart rather than trying to encode it here.
+	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS epss_score DOUBLE PRECISION NOT NULL DEFAULT 0`,
+	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS known_exploited BOOLEAN NOT NULL DEFAULT false`,
+	// The feeds themselves. One row per CVE, replaced wholesale on each
+	// refresh (see ReplaceEnrichment) rather than merged: both feeds are
+	// full snapshots, and a CVE dropping out of KEV is a real state
+	// change that a merge would never apply.
+	//
+	// In Postgres rather than on disk, deliberately. The obvious home
+	// would be the trivy cache dir the scanners already share -- but
+	// monitor-api runs with a read-only root filesystem and does not
+	// mount that PVC, and the PVC is ReadWriteOnce on local-path
+	// storage, so attaching it to a long-lived Deployment would pin
+	// every scan-worker Job to monitor-api's node. The database is
+	// already here, already backed up, and already reachable from both
+	// the API and the refresh CronJob.
+	`CREATE TABLE IF NOT EXISTS cve_enrichment (
+		cve_id          TEXT PRIMARY KEY,
+		epss_score      DOUBLE PRECISION NOT NULL DEFAULT 0,
+		known_exploited BOOLEAN NOT NULL DEFAULT false
+	)`,
+	`CREATE INDEX IF NOT EXISTS cve_enrichment_known_exploited_idx ON cve_enrichment (known_exploited) WHERE known_exploited`,
+	// One row per feed, so "when did this last succeed" survives a
+	// restart and can be reported without re-downloading anything.
+	`CREATE TABLE IF NOT EXISTS enrichment_feeds (
+		feed       TEXT PRIMARY KEY, -- 'kev' | 'epss'
+		updated_at TIMESTAMPTZ NOT NULL,
+		entries    INTEGER NOT NULL DEFAULT 0
+	)`,
 	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
 	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ`,
 	// Added for VEX suppression (see merge.go's MergeFindings and
@@ -561,8 +593,8 @@ func insertFinding(ctx context.Context, q pgxIface, artifactID, bucket string, f
 	if firstSeenAt.IsZero() {
 		firstSeenAt = time.Now().UTC()
 	}
-	_, err := q.Exec(ctx, `INSERT INTO findings (artifact_id, bucket, finding_id, severity, title, source, status, first_seen_at, resolved_at, justification) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		artifactID, bucket, f.ID, f.Severity, f.Title, f.Source, status, firstSeenAt, f.ResolvedAt, f.Justification)
+	_, err := q.Exec(ctx, `INSERT INTO findings (artifact_id, bucket, finding_id, severity, title, source, status, first_seen_at, resolved_at, justification, epss_score, known_exploited) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		artifactID, bucket, f.ID, f.Severity, f.Title, f.Source, status, firstSeenAt, f.ResolvedAt, f.Justification, f.EPSSScore, f.KnownExploited)
 	return err
 }
 
@@ -689,7 +721,7 @@ func loadStageHistory(ctx context.Context, q pgxIface, artifactID string) ([]Sta
 }
 
 func loadFindings(ctx context.Context, q pgxIface, artifactID, bucket string) ([]Finding, error) {
-	rows, err := q.Query(ctx, `SELECT finding_id, severity, title, source, status, first_seen_at, resolved_at, justification FROM findings WHERE artifact_id = $1 AND bucket = $2 ORDER BY id`, artifactID, bucket)
+	rows, err := q.Query(ctx, `SELECT finding_id, severity, title, source, status, first_seen_at, resolved_at, justification, epss_score, known_exploited FROM findings WHERE artifact_id = $1 AND bucket = $2 ORDER BY id`, artifactID, bucket)
 	if err != nil {
 		return nil, err
 	}
@@ -698,7 +730,7 @@ func loadFindings(ctx context.Context, q pgxIface, artifactID, bucket string) ([
 	out := make([]Finding, 0)
 	for rows.Next() {
 		var f Finding
-		if err := rows.Scan(&f.ID, &f.Severity, &f.Title, &f.Source, &f.Status, &f.FirstSeenAt, &f.ResolvedAt, &f.Justification); err != nil {
+		if err := rows.Scan(&f.ID, &f.Severity, &f.Title, &f.Source, &f.Status, &f.FirstSeenAt, &f.ResolvedAt, &f.Justification, &f.EPSSScore, &f.KnownExploited); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
@@ -1951,4 +1983,129 @@ func (s *PostgresStore) DeleteScanTokens(artifactID string) error {
 	_, err := s.pool.Exec(ctx,
 		`DELETE FROM scan_tokens WHERE artifact_id = $1 OR expires_at <= now()`, artifactID)
 	return err
+}
+
+// ReplaceEnrichment swaps in a whole new copy of both feeds.
+//
+// WHOLESALE, NOT MERGED. Both feeds publish full snapshots, and a CVE
+// leaving KEV -- or an EPSS score dropping -- is a real state change
+// that a merge would never apply, so the row would keep asserting
+// "known exploited" forever. Done in one transaction so a reader never
+// sees a half-replaced catalogue.
+//
+// A feed passed as nil is left completely alone, which is what lets a
+// refresh where one download failed still commit the other rather than
+// discarding good data. Its updated_at is not touched either, so
+// EnrichmentStatus keeps reporting the older feed as stale.
+func (s *PostgresStore) ReplaceEnrichment(kev []string, epss map[string]float64, at time.Time) error {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin enrichment replace: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if epss != nil {
+		if _, err := tx.Exec(ctx, `UPDATE cve_enrichment SET epss_score = 0`); err != nil {
+			return fmt.Errorf("clear epss: %w", err)
+		}
+		for cve, score := range epss {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO cve_enrichment (cve_id, epss_score) VALUES ($1, $2)
+				ON CONFLICT (cve_id) DO UPDATE SET epss_score = EXCLUDED.epss_score
+			`, strings.ToUpper(cve), score); err != nil {
+				return fmt.Errorf("upsert epss %s: %w", cve, err)
+			}
+		}
+		if err := recordFeed(ctx, tx, "epss", at, len(epss)); err != nil {
+			return err
+		}
+	}
+
+	if kev != nil {
+		if _, err := tx.Exec(ctx, `UPDATE cve_enrichment SET known_exploited = false`); err != nil {
+			return fmt.Errorf("clear kev: %w", err)
+		}
+		for _, cve := range kev {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO cve_enrichment (cve_id, known_exploited) VALUES ($1, true)
+				ON CONFLICT (cve_id) DO UPDATE SET known_exploited = true
+			`, strings.ToUpper(cve)); err != nil {
+				return fmt.Errorf("upsert kev %s: %w", cve, err)
+			}
+		}
+		if err := recordFeed(ctx, tx, "kev", at, len(kev)); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+func recordFeed(ctx context.Context, q pgxIface, feed string, at time.Time, entries int) error {
+	_, err := q.Exec(ctx, `
+		INSERT INTO enrichment_feeds (feed, updated_at, entries) VALUES ($1, $2, $3)
+		ON CONFLICT (feed) DO UPDATE SET updated_at = EXCLUDED.updated_at, entries = EXCLUDED.entries
+	`, feed, at, entries)
+	if err != nil {
+		return fmt.Errorf("record feed %s: %w", feed, err)
+	}
+	return nil
+}
+
+// LookupEnrichment returns what the feeds know about the given CVEs.
+// Ids with no row are simply absent from the result -- the caller
+// leaves those findings unenriched rather than writing zeroes, so a
+// re-run after a refresh can fill them in.
+func (s *PostgresStore) LookupEnrichment(cveIDs []string) (map[string]Enrichment, error) {
+	out := make(map[string]Enrichment, len(cveIDs))
+	if len(cveIDs) == 0 {
+		return out, nil
+	}
+	upper := make([]string, 0, len(cveIDs))
+	for _, id := range cveIDs {
+		upper = append(upper, strings.ToUpper(id))
+	}
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT cve_id, epss_score, known_exploited FROM cve_enrichment WHERE cve_id = ANY($1)`, upper)
+	if err != nil {
+		return nil, fmt.Errorf("lookup enrichment: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var e Enrichment
+		if err := rows.Scan(&id, &e.EPSSScore, &e.KnownExploited); err != nil {
+			return nil, err
+		}
+		out[id] = e
+	}
+	return out, rows.Err()
+}
+
+// EnrichmentStatus reports how current each feed is. Never-refreshed
+// feeds come back with nil timestamps, which Fresh treats as stale.
+func (s *PostgresStore) EnrichmentStatus() (EnrichmentStatus, error) {
+	var st EnrichmentStatus
+	rows, err := s.pool.Query(context.Background(), `SELECT feed, updated_at, entries FROM enrichment_feeds`)
+	if err != nil {
+		return st, fmt.Errorf("enrichment status: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var feed string
+		var at time.Time
+		var entries int
+		if err := rows.Scan(&feed, &at, &entries); err != nil {
+			return st, err
+		}
+		when := at
+		switch feed {
+		case "kev":
+			st.KEVUpdatedAt, st.KEVEntries = &when, entries
+		case "epss":
+			st.EPSSUpdatedAt, st.EPSSEntries = &when, entries
+		}
+	}
+	return st, rows.Err()
 }
