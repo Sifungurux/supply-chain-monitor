@@ -117,6 +117,18 @@ var schemaStatements = []string{
 	// DEFAULT '' matches "no failure reason set," the same convention
 	// every other optional string column on this table already uses.
 	`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS last_scan_failure_reason TEXT NOT NULL DEFAULT ''`,
+	// Artifact.Unsafe existed on the model, was set at registration and
+	// rendered by the dashboard for months, and was never persisted --
+	// no column, absent from every INSERT, SELECT and UPDATE. So it was
+	// always false when read back, which with the Postgres store is
+	// every read. MemStore keeps the whole struct, which is why the
+	// tests never noticed.
+	//
+	// That made the dashboard's "Unsafe" badge dead code in production
+	// and would have made policy's disallowUnsafe a gate that could
+	// never fire -- the exact silent no-op that feature exists to
+	// prevent.
+	`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS unsafe BOOLEAN NOT NULL DEFAULT false`,
 	`CREATE TABLE IF NOT EXISTS stage_history (
 		id          BIGSERIAL PRIMARY KEY,
 		artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
@@ -318,7 +330,7 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS scan_tokens_expires_idx ON scan_tokens (expires_at)`,
 }
 
-const selectArtifactColumns = `SELECT id, ref, digest, type, status, current_stage, created_at, updated_at, last_scan_at, maintainer_team, maintainer_email, last_scan_failure_reason FROM artifacts`
+const selectArtifactColumns = `SELECT id, ref, digest, type, status, current_stage, created_at, updated_at, last_scan_at, maintainer_team, maintainer_email, last_scan_failure_reason, unsafe FROM artifacts`
 
 // pgxIface is satisfied by both *pgxpool.Pool and pgx.Tx, so the
 // read/write helpers below can run either directly against the pool
@@ -588,7 +600,7 @@ func scanArtifactRow(row rowScanner) (*Artifact, error) {
 	var a Artifact
 	var typ, status string
 
-	err := row.Scan(&a.ID, &a.Ref, &a.Digest, &typ, &status, &a.CurrentStage, &a.CreatedAt, &a.UpdatedAt, &a.LastScanAt, &a.MaintainerTeam, &a.MaintainerEmail, &a.LastScanFailureReason)
+	err := row.Scan(&a.ID, &a.Ref, &a.Digest, &typ, &status, &a.CurrentStage, &a.CreatedAt, &a.UpdatedAt, &a.LastScanAt, &a.MaintainerTeam, &a.MaintainerEmail, &a.LastScanFailureReason, &a.Unsafe)
 	if err != nil {
 		return nil, err
 	}
@@ -994,8 +1006,8 @@ func (s *PostgresStore) Update(id string, mutate func(*Artifact)) (*Artifact, er
 	// doesn't have (its Update mutates the stored struct directly), so
 	// this needed calling out explicitly rather than discovering it via
 	// a test that only runs against Postgres.
-	if _, err := tx.Exec(ctx, `UPDATE artifacts SET status = $1, current_stage = $2, digest = $3, updated_at = $4, last_scan_at = $5, maintainer_team = $6, maintainer_email = $7, last_scan_failure_reason = $8 WHERE id = $9`,
-		string(a.Status), a.CurrentStage, a.Digest, a.UpdatedAt, a.LastScanAt, a.MaintainerTeam, a.MaintainerEmail, a.LastScanFailureReason, a.ID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE artifacts SET status = $1, current_stage = $2, digest = $3, updated_at = $4, last_scan_at = $5, maintainer_team = $6, maintainer_email = $7, last_scan_failure_reason = $8, unsafe = $9 WHERE id = $10`,
+		string(a.Status), a.CurrentStage, a.Digest, a.UpdatedAt, a.LastScanAt, a.MaintainerTeam, a.MaintainerEmail, a.LastScanFailureReason, a.Unsafe, a.ID); err != nil {
 		return nil, fmt.Errorf("update artifact: %w", err)
 	}
 
