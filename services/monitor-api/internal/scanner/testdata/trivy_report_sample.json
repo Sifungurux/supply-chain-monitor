@@ -22,7 +22,7 @@
           "Licenses": [
             "GPL-2.0-only"
           ],
-          "Maintainer": "S\u00f6ren Tempel <soeren+alpine@soeren-tempel.net>",
+          "Maintainer": "Sören Tempel <soeren+alpine@soeren-tempel.net>",
           "DependsOn": [
             "musl@1.2.4_git20230717-r5"
           ],
@@ -85,6 +85,45 @@
           ],
           "PublishedDate": "2025-04-23T18:16:03.057Z",
           "LastModifiedDate": "2026-06-17T08:14:42.853Z"
+        }
+      ]
+    },
+    {
+      "Target": "app/.env",
+      "Class": "secret",
+      "Secrets": [
+        {
+          "RuleID": "aws-access-key-id",
+          "Category": "AWS",
+          "Severity": "CRITICAL",
+          "Title": "AWS Access Key ID",
+          "StartLine": 3,
+          "EndLine": 3,
+          "Match": "AWS_ACCESS_KEY_ID=*****************"
+        },
+        {
+          "RuleID": "aws-access-key-id",
+          "Category": "AWS",
+          "Severity": "CRITICAL",
+          "Title": "AWS Access Key ID",
+          "StartLine": 11,
+          "EndLine": 11,
+          "Match": "AWS_ACCESS_KEY_ID=*****************"
+        }
+      ]
+    },
+    {
+      "Target": "etc/app/credentials.ini",
+      "Class": "secret",
+      "Secrets": [
+        {
+          "RuleID": "aws-access-key-id",
+          "Category": "AWS",
+          "Severity": "CRITICAL",
+          "Title": "AWS Access Key ID",
+          "StartLine": 3,
+          "EndLine": 3,
+          "Match": "aws_access_key_id = *****************"
         }
       ]
     }

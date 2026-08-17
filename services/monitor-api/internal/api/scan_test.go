@@ -376,6 +376,14 @@ type sequenceScanner struct {
 	// affinity blocks every bucket" fallback path exactly as before this
 	// field existed.
 	bucket string
+	// buckets, if set, additionally makes this double implement
+	// scanner.MultiBucketAffinity -- the shape TrivyScanner has since
+	// `trivy image --scanners vuln,secret` started reporting CVEs and
+	// exposed secrets from one invocation. Left nil by every other test,
+	// which Buckets() returns faithfully; scanArtifact treats a nil/empty
+	// result as "no answer" and falls through to Bucket(), so those tests
+	// are unaffected.
+	buckets []string
 }
 
 func (s *sequenceScanner) Scan(_ context.Context, _ string) ([]artifact.Finding, error) {
@@ -392,6 +400,8 @@ func (s *sequenceScanner) Scan(_ context.Context, _ string) ([]artifact.Finding,
 }
 
 func (s *sequenceScanner) Bucket() string { return s.bucket }
+
+func (s *sequenceScanner) Buckets() []string { return s.buckets }
 
 // TestScanArtifact_SecondScanMarksMissingFindingAsFixed is the core
 // behavior MergeFindings exists for: a CVE that stops being reported
@@ -530,6 +540,60 @@ func TestScanArtifact_FailureOnlyBlocksItsOwnBucket(t *testing.T) {
 	}
 	if got.CVEFindings[0].ResolvedAt == nil {
 		t.Fatal("resolved_at is nil, want it set now that the CVE bucket was free to detect the fix")
+	}
+}
+
+// TestScanArtifact_MultiBucketFailureBlocksEveryBucketItDeclares is the
+// safety property behind scanner.MultiBucketAffinity.
+//
+// TrivyScanner produces CVEs *and* secrets from one `trivy image
+// --scanners vuln,secret` run. If it declared only "cve", a trivy
+// failure would leave the secret bucket unblocked, and MergeFindings
+// would mark every previously-open secret "fixed" -- reporting that a
+// leaked credential had been removed when nothing of the sort happened
+// and the scan simply never ran. A false "fixed" on a secret is worse
+// than a stale one: it is an all-clear nobody earned.
+//
+// Mutating Buckets() back to []string{"cve"} must fail this test.
+func TestScanArtifact_MultiBucketFailureBlocksEveryBucketItDeclares(t *testing.T) {
+	trivy := &sequenceScanner{
+		buckets: []string{"cve", "secret"},
+		results: [][]artifact.Finding{
+			{
+				{ID: "CVE-2024-1", Severity: "high", Source: "trivy"},
+				{ID: "secret:app/.env:aws-access-key-id:3", Severity: "critical", Source: "trivy", Category: "secret"},
+			},
+			{}, // second scan reports nothing -- but it also errored
+		},
+		errs: []error{nil, errors.New("trivy: exit status 1")},
+	}
+	h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {trivy}})
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	rec, scanned := scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first scan status = %d, want 202, body=%s", rec.Code, rec.Body.String())
+	}
+	if len(scanned.SecretFindings) != 1 {
+		t.Fatalf("first scan: SecretFindings = %+v, want the secret routed there (not into CVEFindings %+v)",
+			scanned.SecretFindings, scanned.CVEFindings)
+	}
+
+	rec, scanned = scanAndWait(t, h, store, created.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("second scan status = %d, want 202, body=%s", rec.Code, rec.Body.String())
+	}
+	got := *scanned
+
+	if len(got.SecretFindings) != 1 {
+		t.Fatalf("SecretFindings = %+v, want the secret still on record", got.SecretFindings)
+	}
+	if got.SecretFindings[0].Status == artifact.FindingStatusFixed {
+		t.Error("the secret was marked FIXED after the only scanner that reports secrets failed -- " +
+			"a false all-clear on a leaked credential; Buckets() must declare \"secret\" as well as \"cve\"")
+	}
+	if got.CVEFindings[0].Status == artifact.FindingStatusFixed {
+		t.Error("the CVE was marked fixed even though the scanner that reports CVEs failed")
 	}
 }
 

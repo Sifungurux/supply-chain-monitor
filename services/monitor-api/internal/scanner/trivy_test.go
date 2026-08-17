@@ -29,7 +29,7 @@ func TestTrivyScanner_Args(t *testing.T) {
 		{
 			name: "no overrides falls back to trivy's own defaults",
 			db:   TrivyDBConfig{},
-			want: []string{"image", "--quiet", "--format", "json", "--", "alpine:3.19"},
+			want: []string{"image", "--quiet", "--format", "json", "--scanners", "vuln,secret", "--", "alpine:3.19"},
 		},
 		{
 			name: "air-gapped mirror with both DBs and skip-update set",
@@ -40,7 +40,7 @@ func TestTrivyScanner_Args(t *testing.T) {
 				SkipJavaDBUpdate: true,
 			},
 			want: []string{
-				"image", "--quiet", "--format", "json",
+				"image", "--quiet", "--format", "json", "--scanners", "vuln,secret",
 				"--db-repository", "scm-registry:5000/aquasecurity/trivy-db:2",
 				"--java-db-repository", "scm-registry:5000/aquasecurity/trivy-java-db:1",
 				"--skip-db-update",
@@ -55,7 +55,7 @@ func TestTrivyScanner_Args(t *testing.T) {
 				DBRepository: "scm-registry:5000/aquasecurity/trivy-db:2",
 			},
 			want: []string{
-				"image", "--quiet", "--format", "json",
+				"image", "--quiet", "--format", "json", "--scanners", "vuln,secret",
 				"--db-repository", "scm-registry:5000/aquasecurity/trivy-db:2",
 				"--",
 				"alpine:3.19",
@@ -73,7 +73,7 @@ func TestTrivyScanner_Args(t *testing.T) {
 				CacheDir:         "/trivy-cache",
 			},
 			want: []string{
-				"image", "--quiet", "--format", "json",
+				"image", "--quiet", "--format", "json", "--scanners", "vuln,secret",
 				"--skip-db-update",
 				"--skip-java-db-update",
 				"--cache-dir", "/trivy-cache",
@@ -105,14 +105,14 @@ func TestTrivyScanner_Args_Verbose(t *testing.T) {
 
 	s := NewTrivyScanner("", TrivyDBConfig{})
 	got := s.args("alpine:3.19")
-	want := []string{"image", "--debug", "--format", "json", "--", "alpine:3.19"}
+	want := []string{"image", "--debug", "--format", "json", "--scanners", "vuln,secret", "--", "alpine:3.19"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
 	}
 }
 
 // Confirms trivy's --format json output is decoded into normalized
-// Findings correctly -- this is pure JSON parsing (parseTrivyVulnerabilities
+// Findings correctly -- this is pure JSON parsing (parseTrivyReport
 // has no dependency on the real trivy binary), unlike Scan() itself,
 // so unlike most of this package's scanner tests, this one can
 // actually run in any Go environment with no external tools installed.
@@ -133,9 +133,9 @@ func TestParseTrivyVulnerabilities(t *testing.T) {
 				}
 			]
 		}`)
-		findings, err := parseTrivyVulnerabilities(input)
+		findings, err := parseTrivyReport(input)
 		if err != nil {
-			t.Fatalf("parseTrivyVulnerabilities: %v", err)
+			t.Fatalf("parseTrivyReport: %v", err)
 		}
 		want := []artifact.Finding{
 			{ID: "CVE-2024-1", Severity: "HIGH", Title: "some issue", Source: "trivy"},
@@ -149,9 +149,9 @@ func TestParseTrivyVulnerabilities(t *testing.T) {
 
 	t.Run("no vulnerabilities found", func(t *testing.T) {
 		input := []byte(`{"Results": [{"Vulnerabilities": []}]}`)
-		findings, err := parseTrivyVulnerabilities(input)
+		findings, err := parseTrivyReport(input)
 		if err != nil {
-			t.Fatalf("parseTrivyVulnerabilities: %v", err)
+			t.Fatalf("parseTrivyReport: %v", err)
 		}
 		if len(findings) != 0 {
 			t.Fatalf("expected no findings, got %+v", findings)
@@ -159,20 +159,223 @@ func TestParseTrivyVulnerabilities(t *testing.T) {
 	})
 
 	t.Run("invalid json", func(t *testing.T) {
-		if _, err := parseTrivyVulnerabilities([]byte("not json")); err == nil {
+		if _, err := parseTrivyReport([]byte("not json")); err == nil {
 			t.Fatal("expected an error for invalid json")
 		}
 	})
 }
 
-// TestTrivyScanner_Bucket confirms TrivyScanner declares BucketAffinity
-// as "cve" -- see its Bucket() comment for why that's a safe, static
-// claim to make (every finding comes from parseTrivyVulnerabilities,
-// which always sets Source: "trivy").
-func TestTrivyScanner_Bucket(t *testing.T) {
+// TestTrivyScanner_Buckets confirms TrivyScanner declares BOTH buckets
+// its single `trivy image --scanners vuln,secret` invocation can fill.
+//
+// This is a safety property, not bookkeeping. scanArtifact blocks
+// fix-detection per bucket for a scanner that failed; if this returned
+// only "cve", a trivy failure would leave the secret bucket unblocked
+// and MergeFindings would mark every previously-open secret "fixed" --
+// not because anyone removed a leaked credential, but because the scan
+// that finds them didn't run.
+func TestTrivyScanner_Buckets(t *testing.T) {
 	s := NewTrivyScanner("scm-registry:5000", TrivyDBConfig{})
-	if got := s.Bucket(); got != "cve" {
-		t.Errorf("Bucket() = %q, want %q", got, "cve")
+	want := []string{"cve", "secret"}
+	got := s.Buckets()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Buckets() = %v, want %v", got, want)
+	}
+}
+
+// TestParseTrivyReport_Secrets covers the secret half of the parser.
+func TestParseTrivyReport_Secrets(t *testing.T) {
+	t.Run("secrets are routed to the secret bucket, not cve", func(t *testing.T) {
+		// Category MUST be set explicitly on a secret finding.
+		// classifyBucket (internal/api/scan.go) falls back to Source
+		// when Category is empty, and Source "trivy" hits its default
+		// case -- "cve". Without it every exposed credential would be
+		// filed as a vulnerability.
+		input := []byte(`{
+			"Results": [
+				{
+					"Target": "app/.env",
+					"Secrets": [
+						{"RuleID": "aws-access-key-id", "Category": "AWS", "Severity": "CRITICAL", "Title": "AWS Access Key ID", "StartLine": 3}
+					]
+				}
+			]
+		}`)
+		findings, err := parseTrivyReport(input)
+		if err != nil {
+			t.Fatalf("parseTrivyReport: %v", err)
+		}
+		if len(findings) != 1 {
+			t.Fatalf("findings = %+v, want exactly 1", findings)
+		}
+		if findings[0].Category != "secret" {
+			t.Errorf("Category = %q, want %q -- an empty Category makes classifyBucket file this as a CVE",
+				findings[0].Category, "secret")
+		}
+		if findings[0].Source != "trivy" {
+			t.Errorf("Source = %q, want %q", findings[0].Source, "trivy")
+		}
+		if findings[0].Severity != "CRITICAL" {
+			t.Errorf("Severity = %q, want %q", findings[0].Severity, "CRITICAL")
+		}
+		// The file has to survive into the title: the ID is
+		// machine-shaped, and "AWS Access Key ID" with no location is
+		// not actionable.
+		if !strings.Contains(findings[0].Title, "app/.env") {
+			t.Errorf("Title = %q, want it to name the file the secret is in", findings[0].Title)
+		}
+	})
+
+	t.Run("same rule in different files stays two findings", func(t *testing.T) {
+		// THE test in this file. MergeFindings matches findings by ID,
+		// so if the ID were just RuleID these two would collapse into
+		// one -- one real leaked credential silently disappears, and
+		// the survivor's title/severity flip-flops between scans with
+		// decode order. One rule firing across several files in one
+		// image is the normal case, not an edge case.
+		input := []byte(`{
+			"Results": [
+				{
+					"Target": "app/.env",
+					"Secrets": [
+						{"RuleID": "aws-access-key-id", "Severity": "CRITICAL", "Title": "AWS Access Key ID", "StartLine": 3}
+					]
+				},
+				{
+					"Target": "etc/config/creds.ini",
+					"Secrets": [
+						{"RuleID": "aws-access-key-id", "Severity": "CRITICAL", "Title": "AWS Access Key ID", "StartLine": 3}
+					]
+				}
+			]
+		}`)
+		findings, err := parseTrivyReport(input)
+		if err != nil {
+			t.Fatalf("parseTrivyReport: %v", err)
+		}
+		if len(findings) != 2 {
+			t.Fatalf("findings = %+v, want 2 -- the same rule in two files is two secrets", findings)
+		}
+		if findings[0].ID == findings[1].ID {
+			t.Fatalf("both findings have ID %q -- MergeFindings matches by ID, so one of these two real secrets is lost", findings[0].ID)
+		}
+	})
+
+	t.Run("same rule twice in one file stays two findings", func(t *testing.T) {
+		// Which is why the line number is in the ID and not just the
+		// target.
+		input := []byte(`{
+			"Results": [
+				{
+					"Target": "app/.env",
+					"Secrets": [
+						{"RuleID": "generic-api-key", "Severity": "HIGH", "Title": "Generic API Key", "StartLine": 3},
+						{"RuleID": "generic-api-key", "Severity": "HIGH", "Title": "Generic API Key", "StartLine": 41}
+					]
+				}
+			]
+		}`)
+		findings, err := parseTrivyReport(input)
+		if err != nil {
+			t.Fatalf("parseTrivyReport: %v", err)
+		}
+		if len(findings) != 2 || findings[0].ID == findings[1].ID {
+			t.Fatalf("findings = %+v, want 2 distinct IDs", findings)
+		}
+	})
+
+	t.Run("vulnerabilities and secrets from one report", func(t *testing.T) {
+		// One trivy invocation produces both, which is the entire
+		// reason TrivyScanner declares two buckets.
+		input := []byte(`{
+			"Results": [
+				{
+					"Target": "alpine:3.19 (alpine 3.19.1)",
+					"Vulnerabilities": [
+						{"VulnerabilityID": "CVE-2024-1", "Severity": "HIGH", "Title": "some issue"}
+					]
+				},
+				{
+					"Target": "app/.env",
+					"Secrets": [
+						{"RuleID": "github-pat", "Category": "GitHub", "Severity": "CRITICAL", "Title": "GitHub Personal Access Token", "StartLine": 1}
+					]
+				}
+			]
+		}`)
+		findings, err := parseTrivyReport(input)
+		if err != nil {
+			t.Fatalf("parseTrivyReport: %v", err)
+		}
+		if len(findings) != 2 {
+			t.Fatalf("findings = %+v, want 2", findings)
+		}
+		var cve, secret int
+		for _, f := range findings {
+			switch f.Category {
+			case "":
+				cve++
+			case "secret":
+				secret++
+			}
+		}
+		if cve != 1 || secret != 1 {
+			t.Fatalf("got %d cve-bound and %d secret-bound findings, want 1 and 1 (%+v)", cve, secret, findings)
+		}
+	})
+
+	t.Run("a report with no Secrets block is unchanged", func(t *testing.T) {
+		// `trivy sbom` output never carries Secrets, and SBOMScanner
+		// shares this parser -- so this is the assertion that sharing
+		// it is safe.
+		input := []byte(`{"Results": [{"Target": "x", "Vulnerabilities": [{"VulnerabilityID": "CVE-2024-9", "Severity": "LOW", "Title": "t"}]}]}`)
+		findings, err := parseTrivyReport(input)
+		if err != nil {
+			t.Fatalf("parseTrivyReport: %v", err)
+		}
+		want := []artifact.Finding{{ID: "CVE-2024-9", Severity: "LOW", Title: "t", Source: "trivy"}}
+		if !reflect.DeepEqual(findings, want) {
+			t.Fatalf("findings = %+v, want %+v", findings, want)
+		}
+	})
+}
+
+// TestParseTrivyReport_Sample parses the REAL trivy report fixture the
+// document tests use, rather than another hand-written literal --
+// hand-written JSON only ever proves the parser matches the author's
+// idea of trivy's output, which is exactly the assumption worth
+// checking against a real one.
+func TestParseTrivyReport_Sample(t *testing.T) {
+	findings, err := parseTrivyReport(loadSampleTrivyReport(t))
+	if err != nil {
+		t.Fatalf("parseTrivyReport: %v", err)
+	}
+
+	var secrets, cves []artifact.Finding
+	for _, f := range findings {
+		if f.Category == "secret" {
+			secrets = append(secrets, f)
+		} else {
+			cves = append(cves, f)
+		}
+	}
+	if len(cves) == 0 {
+		t.Error("no CVE findings parsed -- secret support must not cost the vulnerability half")
+	}
+	// Two in app/.env (same rule, different lines) and one in
+	// etc/app/credentials.ini (same rule again, different file).
+	if len(secrets) != 3 {
+		t.Fatalf("parsed %d secret findings, want 3: %+v", len(secrets), secrets)
+	}
+	seen := map[string]bool{}
+	for _, f := range secrets {
+		if seen[f.ID] {
+			t.Errorf("duplicate secret finding ID %q -- MergeFindings matches by ID, so one real secret would be lost", f.ID)
+		}
+		seen[f.ID] = true
+		if f.Source != "trivy" {
+			t.Errorf("Source = %q, want %q", f.Source, "trivy")
+		}
 	}
 }
 

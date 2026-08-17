@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -90,10 +91,29 @@ func TestSBOMScanner_Args_Verbose(t *testing.T) {
 }
 
 // TestSBOMScanner_Bucket confirms SBOMScanner declares BucketAffinity
-// as "cve", same as TrivyScanner (both share parseTrivyVulnerabilities).
+// as "cve", same as TrivyScanner (both share parseTrivyReport).
 func TestSBOMScanner_Bucket(t *testing.T) {
 	s := NewSBOMScanner(TrivyDBConfig{})
 	if got := s.Bucket(); got != "cve" {
 		t.Errorf("Bucket() = %q, want %q", got, "cve")
+	}
+}
+
+// TestSBOMScanner_ArgsHaveNoSecretScanner is a guard on where the
+// --scanners flag lives, not on SBOMScanner's own behavior.
+//
+// dbArgs and verbosityArgs are deliberately SHARED between `trivy
+// image` and `trivy sbom`. Secret scanning belongs only to the image
+// side -- an SBOM lists packages and contains no files to search --
+// and `trivy sbom` rejects "secret" as a scanner outright. Putting the
+// flag in either shared helper would therefore break every SBOM scan,
+// with an error that looks nothing like the change that caused it.
+func TestSBOMScanner_ArgsHaveNoSecretScanner(t *testing.T) {
+	s := NewSBOMScanner(TrivyDBConfig{})
+	for _, a := range s.args("sbom.json") {
+		if strings.Contains(a, "secret") {
+			t.Fatalf("`trivy sbom` args contain %q -- trivy rejects the secret scanner here; it belongs only in TrivyScanner.args: %v",
+				a, s.args("sbom.json"))
+		}
 	}
 }

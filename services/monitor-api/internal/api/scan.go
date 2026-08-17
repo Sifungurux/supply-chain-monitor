@@ -327,6 +327,24 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 		if res.err == nil {
 			continue
 		}
+		// MultiBucketAffinity first: TrivyScanner produces CVEs AND
+		// secrets from one `trivy image --scanners vuln,secret` run, so
+		// its failure has to block both. Preferred over BucketAffinity
+		// when a scanner somehow offers both, since the multi-bucket
+		// answer is the complete one.
+		if mba, ok := scanners[i].(scanner.MultiBucketAffinity); ok {
+			// An EMPTY result falls through to the checks below rather
+			// than blocking nothing -- FetchingScanner implements this
+			// unconditionally and returns nil when the scanner it wraps
+			// has no multi-bucket opinion, so "no buckets" here means
+			// "no answer", never "this failure is harmless".
+			if bs := mba.Buckets(); len(bs) > 0 && allValidFindingsBuckets(bs) {
+				for _, b := range bs {
+					blockedBuckets[b] = true
+				}
+				continue
+			}
+		}
 		if ba, ok := scanners[i].(scanner.BucketAffinity); ok {
 			if b := ba.Bucket(); validFindingsBucket(b) {
 				blockedBuckets[b] = true
@@ -362,8 +380,21 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 	// Two CVE scanners (trivy, grype) can both report the same CVE ID in
 	// one round -- coalesce their Source values into one finding before
 	// merging, so the second scanner's result doesn't just overwrite the
-	// first's Source. Malware/misconfig/secret/other buckets only ever
-	// have one scanner each today, so they don't need this.
+	// first's Source. Malware/misconfig/secret/other buckets still have
+	// only one scanner each per artifact type, so they don't need this.
+	//
+	// "Per artifact type" is now load-bearing wording. TrivyScanner
+	// feeds two buckets (cve and secret, from one `--scanners
+	// vuln,secret` run), so "one scanner per bucket" no longer follows
+	// from "one bucket per scanner" the way it used to. It still holds:
+	// for image artifacts trivy is the only secret producer, and
+	// SARIFScanner -- the other thing that can emit Category "secret" --
+	// is registered against the SARIF artifact type, never alongside
+	// trivy. Coalescing would be a no-op regardless, since a secret
+	// finding's ID is composed from trivy's own target/rule/line
+	// (secretFindingID) and nothing else generates that shape. If a
+	// second secret-producing scanner is ever registered for the same
+	// type, this needs the same treatment the CVE bucket gets.
 	cveFindings = artifact.CoalesceSameIDSources(cveFindings)
 	// A finding this scan is seeing for the first time can already be
 	// covered by a VEX document uploaded earlier -- read it here so it

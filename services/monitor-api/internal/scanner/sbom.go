@@ -29,9 +29,16 @@ func NewSBOMScanner(db TrivyDBConfig) *SBOMScanner {
 	return &SBOMScanner{db: db}
 }
 
-// Bucket implements BucketAffinity: parseTrivyVulnerabilities (shared
-// with TrivyScanner) always sets Source: "trivy" -- classifyBucket's
-// default case, "cve".
+// Bucket implements BucketAffinity: parseTrivyReport (shared with
+// TrivyScanner) always sets Source: "trivy" -- classifyBucket's default
+// case, "cve".
+//
+// Stays SINGLE-bucket even though the shared parser now also walks
+// Results[].Secrets[]. `trivy sbom` has no secret scanner -- an SBOM
+// lists packages, it contains no files to search -- so that loop
+// decodes zero entries here. Declaring "secret" as well would mean an
+// SBOM-scan failure blocks secret fix-detection for a bucket this
+// scanner can never contribute to.
 func (s *SBOMScanner) Bucket() string { return "cve" }
 
 // args builds the trivy CLI invocation. Split out from Scan for the
@@ -79,5 +86,5 @@ func (s *SBOMScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding,
 		return nil, wrapTrivyScanError("trivy sbom scan", ref, err, stderr.String())
 	}
 
-	return parseTrivyVulnerabilities(stdout.Bytes())
+	return parseTrivyReport(stdout.Bytes())
 }

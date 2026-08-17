@@ -71,19 +71,70 @@ func NewTrivyScanner(registryAddr string, db TrivyDBConfig) *TrivyScanner {
 	return &TrivyScanner{registryAddr: registryAddr, db: db}
 }
 
-// Bucket implements BucketAffinity: every finding comes from
-// parseTrivyVulnerabilities, which always sets Source: "trivy" --
-// classifyBucket's default case, "cve".
-func (t *TrivyScanner) Bucket() string { return "cve" }
+// Buckets implements MultiBucketAffinity: `trivy image` runs with
+// --scanners vuln,secret (see args), so one invocation legitimately
+// produces findings in two buckets -- CVEs and exposed secrets.
+//
+// Declaring only "cve" here would not merely be imprecise, it would be
+// unsafe: on a trivy failure the secret bucket would stay unblocked and
+// MergeFindings would mark every previously-open secret "fixed" purely
+// because the scan that finds them didn't run.
+//
+// Note this is the IMAGE scanner. SBOMScanner (sbom.go) shares the
+// parser below but runs `trivy sbom`, which has no secret scanner at
+// all, and correctly still declares plain "cve".
+func (t *TrivyScanner) Buckets() []string { return []string{"cve", "secret"} }
 
 type trivyReport struct {
 	Results []struct {
+		// Target names what this result block is about -- for an image
+		// scan, the package source ("app/Gemfile.lock") or, for secret
+		// results, the file the secret was found in. Part of the secret
+		// finding ID below, since a RuleID on its own is not unique.
+		Target          string `json:"Target"`
 		Vulnerabilities []struct {
 			VulnerabilityID string `json:"VulnerabilityID"`
 			Severity        string `json:"Severity"`
 			Title           string `json:"Title"`
 		} `json:"Vulnerabilities"`
+		// Secrets is populated only by `trivy image --scanners secret`.
+		// Absent from `trivy sbom` output entirely, which is why
+		// SBOMScanner can share this type and this parser unchanged --
+		// it simply decodes zero of them.
+		Secrets []struct {
+			RuleID   string `json:"RuleID"`
+			Severity string `json:"Severity"`
+			Title    string `json:"Title"`
+			// Category is TRIVY's own grouping ("AWS", "GitHub", ...),
+			// NOT artifact.Finding.Category, which is this project's
+			// bucket vocabulary and must be exactly "secret" here. The
+			// two names collide and mean completely different things;
+			// trivy's goes into the title for context instead.
+			Category  string `json:"Category"`
+			StartLine int    `json:"StartLine"`
+		} `json:"Secrets"`
 	} `json:"Results"`
+}
+
+// secretFindingID builds the stable, unique ID a secret finding is
+// tracked by.
+//
+// MergeFindings (internal/artifact/merge.go) matches findings BY ID to
+// decide what is new, still open, or newly fixed -- so a non-unique ID
+// is not a cosmetic problem. RuleID alone is not unique: one rule
+// ("aws-access-key-id") routinely fires on several files in one image,
+// and every one of those would collapse into a single finding whose
+// severity and title flip-flopped between scans depending on decode
+// order.
+//
+// Target and line are both needed: the same rule can fire twice in one
+// file. The cost is that a secret which MOVES within a file reads as
+// one finding fixed and a new one opened -- accepted deliberately,
+// because the alternative (dropping the line) silently merges two real,
+// separate secrets into one, and because a moved line means a rebuilt
+// image anyway.
+func secretFindingID(target, ruleID string, startLine int) string {
+	return fmt.Sprintf("secret:%s:%s:%d", target, ruleID, startLine)
 }
 
 // dbArgs builds the shared DB-mirror flags both `trivy image` (this
@@ -128,6 +179,21 @@ func (t *TrivyScanner) args(ref string) []string {
 	args := []string{"image"}
 	args = append(args, verbosityArgs()...)
 	args = append(args, "--format", "json")
+	// Secret scanning alongside the vulnerability scan, in ONE trivy
+	// invocation -- an image is pulled and unpacked once either way, so
+	// a second pass for secrets would double the expensive part to
+	// re-read files trivy already has open.
+	//
+	// Naming "vuln" explicitly is required, not decorative: --scanners
+	// REPLACES the default set rather than adding to it, so
+	// "--scanners secret" alone would silently stop reporting CVEs --
+	// a scan that keeps succeeding while every vulnerability quietly
+	// disappears, and MergeFindings marking them all "fixed".
+	//
+	// Deliberately NOT in dbArgs/verbosityArgs, which sbom.go shares:
+	// `trivy sbom` has no secret scanner (there are no files in an
+	// SBOM to scan) and rejects it. See TestSBOMScanner_ArgsHaveNoSecretScanner.
+	args = append(args, "--scanners", "vuln,secret")
 	args = append(args, dbArgs(t.db)...)
 	// "--" ends flag parsing, so even a ref that somehow reached here
 	// without passing ValidateRef is treated as a positional argument
@@ -138,12 +204,18 @@ func (t *TrivyScanner) args(ref string) []string {
 	return args
 }
 
-// parseTrivyVulnerabilities decodes trivy's `--format json` output
-// (shared by `trivy image` and `trivy sbom` -- both use the same
-// Results[].Vulnerabilities[] shape) into normalized Findings. Split
-// out from Scan so it's unit-testable against canned JSON without
-// needing the real trivy binary (see trivy_test.go).
-func parseTrivyVulnerabilities(output []byte) ([]artifact.Finding, error) {
+// parseTrivyReport decodes trivy's `--format json` output (shared by
+// `trivy image` and `trivy sbom` -- both use the same Results[] shape)
+// into normalized Findings. Split out from Scan so it's unit-testable
+// against canned JSON without needing the real trivy binary (see
+// trivy_test.go).
+//
+// Walks both Results[].Vulnerabilities[] and Results[].Secrets[]. The
+// latter is only ever populated by `trivy image --scanners secret`, so
+// `trivy sbom` decodes zero of them and SBOMScanner's behavior is
+// unchanged by sharing this -- which is why this stayed one parser
+// rather than becoming two.
+func parseTrivyReport(output []byte) ([]artifact.Finding, error) {
 	var report trivyReport
 	if err := json.Unmarshal(output, &report); err != nil {
 		return nil, fmt.Errorf("failed to parse trivy output: %w", err)
@@ -159,8 +231,47 @@ func parseTrivyVulnerabilities(output []byte) ([]artifact.Finding, error) {
 				Source:   "trivy",
 			})
 		}
+		for _, s := range result.Secrets {
+			// Category is set EXPLICITLY here, unlike the
+			// vulnerabilities above. classifyBucket
+			// (internal/api/scan.go) falls back to Source when Category
+			// is empty, and Source "trivy" lands in its default case --
+			// "cve". Without this one field every exposed secret would
+			// be filed as a CVE.
+			findings = append(findings, artifact.Finding{
+				ID:       secretFindingID(result.Target, s.RuleID, s.StartLine),
+				Severity: s.Severity,
+				Title:    secretTitle(s.Title, s.Category, result.Target),
+				Source:   "trivy",
+				Category: "secret",
+			})
+		}
 	}
 	return findings, nil
+}
+
+// secretTitle composes the human-readable title for a secret finding.
+//
+// The ID is machine-shaped (see secretFindingID) and the dashboard
+// shows the title, so the file has to appear here -- otherwise a row
+// reads "AWS Access Key ID" with no indication of WHERE the key is,
+// which is the first thing anyone acting on it needs.
+//
+// trivy's own Category ("AWS", "GitHub") is appended when it is not
+// already implied by the title, since it groups rules usefully and is
+// otherwise dropped entirely (artifact.Finding.Category is taken, and
+// means something else).
+func secretTitle(title, category, target string) string {
+	if title == "" {
+		title = "exposed secret"
+	}
+	if category != "" && !strings.Contains(strings.ToLower(title), strings.ToLower(category)) {
+		title = fmt.Sprintf("%s (%s)", title, category)
+	}
+	if target != "" {
+		title = fmt.Sprintf("%s in %s", title, target)
+	}
+	return title
 }
 
 func (t *TrivyScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding, error) {
@@ -168,7 +279,7 @@ func (t *TrivyScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding
 	if err != nil {
 		return nil, err
 	}
-	return parseTrivyVulnerabilities(output)
+	return parseTrivyReport(output)
 }
 
 // ScanWithRaw is Scan plus the raw report ScanRaw returns, from a
@@ -183,7 +294,7 @@ func (t *TrivyScanner) ScanWithRaw(ctx context.Context, ref string) ([]artifact.
 	if err != nil {
 		return nil, nil, err
 	}
-	findings, err := parseTrivyVulnerabilities(raw)
+	findings, err := parseTrivyReport(raw)
 	if err != nil {
 		return nil, raw, err
 	}

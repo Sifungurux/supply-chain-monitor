@@ -86,6 +86,22 @@ func validFindingsBucket(bucket string) bool {
 	}
 }
 
+// allValidFindingsBuckets reports whether EVERY bucket in the set is a
+// real one. All-or-nothing deliberately: this gates
+// scanner.MultiBucketAffinity in scanArtifact, where a partially-valid
+// answer must not be partially honoured. A scanner that names one good
+// bucket and one typo'd bucket has demonstrated it does not know what
+// it produces, and the safe reading of that is "block everything",
+// which is what the caller falls through to.
+func allValidFindingsBuckets(buckets []string) bool {
+	for _, b := range buckets {
+		if !validFindingsBucket(b) {
+			return false
+		}
+	}
+	return len(buckets) > 0
+}
+
 type submitFindingsRequest struct {
 	// Bucket picks which of the artifact's five finding buckets this
 	// call writes into ("cve", "malware", "misconfiguration", "secret",
