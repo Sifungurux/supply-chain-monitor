@@ -60,12 +60,60 @@ func TestGrypeScanner_RegistryEnv(t *testing.T) {
 		},
 	}
 
+	// The ref is the in-cluster registry throughout, so these cases keep
+	// testing what they always tested: the mapping from flags to env
+	// vars. Whether plain-HTTP is permitted for a GIVEN ref is a
+	// separate question with its own test -- see
+	// TestGrypeScanner_RegistryEnv_PlainHTTPIsScopedToTheLocalRegistry.
+	const localRef = "scm-registry.supply-chain-monitor.svc.cluster.local:5000/app:v1"
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(RegistryAddrEnv, "scm-registry.supply-chain-monitor.svc.cluster.local:5000")
 			s := NewGrypeScanner(GrypeDBConfig{}, tc.plainHTTP, tc.dockerConfigDir)
-			got := s.registryEnv()
+			got := s.registryEnv(localRef)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("registryEnv() = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGrypeScanner_RegistryEnv_PlainHTTPIsScopedToTheLocalRegistry is
+// the S4 leg 3 fix at this call site: the switch is deployment-wide,
+// the hosts are not.
+//
+// GRYPE_REGISTRY_INSECURE_USE_HTTP exists because scm-registry serves
+// plain HTTP in a dev cluster. Applied to every pull, it also spoke
+// plain HTTP to docker.io -- on the same code path, with nothing in the
+// output saying so.
+func TestGrypeScanner_RegistryEnv_PlainHTTPIsScopedToTheLocalRegistry(t *testing.T) {
+	const addr = "scm-registry.supply-chain-monitor.svc.cluster.local:5000"
+
+	cases := []struct {
+		name string
+		ref  string
+		want bool
+	}{
+		{"the in-cluster registry gets plain HTTP", addr + "/app:v1", true},
+		{"docker.io does not", "docker.io/library/alpine:3.19", false},
+		{"a bare ref (docker hub) does not", "alpine:3.19", false},
+		{"ghcr.io does not", "ghcr.io/aquasecurity/trivy-db:2", false},
+		{"a lookalike host does not", "scm-registry.supply-chain-monitor.svc.cluster.local.evil.test/app:v1", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(RegistryAddrEnv, addr)
+			s := NewGrypeScanner(GrypeDBConfig{}, true, "")
+			got := false
+			for _, ev := range s.registryEnv(tc.ref) {
+				if ev == "GRYPE_REGISTRY_INSECURE_USE_HTTP=true" {
+					got = true
+				}
+			}
+			if got != tc.want {
+				t.Fatalf("plain HTTP for %q = %v, want %v", tc.ref, got, tc.want)
 			}
 		})
 	}

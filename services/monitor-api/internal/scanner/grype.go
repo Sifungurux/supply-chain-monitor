@@ -113,9 +113,15 @@ func NewGrypeScanner(db GrypeDBConfig, plainHTTP bool, dockerConfigDir string) *
 //     exactly the fallback this feature's plan flagged as a
 //     possibility before any of grype.go was written, and it's the one
 //     that turned out to be true.
-func (g *GrypeScanner) registryEnv() []string {
+//
+// Takes ref because the plain-HTTP decision is per-ref, not
+// per-deployment: GRYPE_REGISTRY_INSECURE_USE_HTTP is set for a
+// plain-HTTP scm-registry, and applying it to a public registry
+// downgrades that connection too. See InsecureTransportAllowed
+// (report S4, leg 3).
+func (g *GrypeScanner) registryEnv(ref string) []string {
 	var env []string
-	if g.plainHTTP {
+	if g.plainHTTP && InsecureTransportAllowed(ref) {
 		env = append(env, "GRYPE_REGISTRY_INSECURE_USE_HTTP=true")
 	}
 	if g.dockerConfigDir != "" {
@@ -216,7 +222,7 @@ func (g *GrypeScanner) ScanRaw(ctx context.Context, ref string) ([]byte, error) 
 	// Start from the process's own environment, then layer the DB and
 	// registry overrides on top -- dropping to just db.env()/registryEnv()
 	// would also drop PATH, silently breaking the exec entirely.
-	cmd.Env = append(os.Environ(), append(g.db.env(), g.registryEnv()...)...)
+	cmd.Env = append(os.Environ(), append(g.db.env(), g.registryEnv(ref)...)...)
 
 	var stdout, stderr bytes.Buffer
 	if VerboseScanLogs {

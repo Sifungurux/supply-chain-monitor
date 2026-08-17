@@ -89,7 +89,12 @@ func (u *UnpackerScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 	defer os.RemoveAll(tmpDir)
 
 	args := []string{"--output-dir", tmpDir}
-	if u.insecure {
+	// Scoped to the in-cluster registry rather than applied to every
+	// pull: UNPACKER_INSECURE exists for a plain-HTTP scm-registry, and
+	// before this it also downgraded transport for docker.io and every
+	// other public host in the same process. See
+	// InsecureTransportAllowed (report S4, leg 3).
+	if u.insecure && InsecureTransportAllowed(ref) {
 		args = append(args, "--insecure")
 	}
 	if u.public {
