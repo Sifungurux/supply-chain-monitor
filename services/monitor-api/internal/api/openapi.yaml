@@ -631,6 +631,46 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/artifacts/{id}/policy:
+    get:
+      tags: [artifacts]
+      summary: Would this artifact pass the configured policy gate
+      description: >-
+        Evaluates the deployment's policy (`POLICY_JSON` /
+        `monitorApi.policy`) against one artifact and reports pass/fail
+        with a reason per violation.
+
+
+        **Always 200 when the artifact exists — a failing policy is not
+        an HTTP error.** A CI step running `curl --fail` cannot tell a
+        non-2xx meaning "this artifact violates the policy" from one
+        meaning "the API is down, the id is wrong, or my key is
+        invalid" — and the first must block a release while the others
+        must be investigated, not silently treated as a failed gate.
+        Read `pass` from the body. See README, "Gating a pipeline on
+        policy".
+
+
+        Only ACTIVE findings are considered: anything fixed or
+        VEX-suppressed is excluded, so a critical a human has already
+        assessed as not_affected does not keep failing builds.
+
+
+        With no policy configured every artifact passes with an empty
+        `violations` list and `configured: false` — which is how a
+        caller tells that apart from clearing a real gate.
+      parameters:
+        - $ref: "#/components/parameters/ArtifactID"
+      responses:
+        "200":
+          description: >-
+            The evaluation. Note this is returned for a FAILING policy
+            too.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyResult" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/artifacts/{id}/documents/{kind}:
     parameters:
       - $ref: "#/components/parameters/ArtifactID"
@@ -774,6 +814,55 @@ components:
       type: object
       properties:
         error: { type: string }
+
+    PolicyViolation:
+      type: object
+      required: [rule, detail]
+      properties:
+        rule:
+          type: string
+          description: >-
+            Which policy rule failed. One of maxSeverity,
+            disallowUnsafe, requireSBOM, requireScanWithinDays,
+            licenseDenylist.
+          example: maxSeverity
+        detail:
+          type: string
+          description: Why it failed, in a form worth putting in a build log.
+          example: 'cve: critical finding "OpenSSL buffer overflow" exceeds the "high" this policy allows'
+        finding_id:
+          type: string
+          description: >-
+            The specific finding that caused this violation, when one
+            did. Absent for artifact-level rules like requireSBOM,
+            which no single finding is responsible for.
+          example: CVE-2024-2511
+
+    PolicyResult:
+      type: object
+      required: [pass, violations, configured]
+      properties:
+        configured:
+          type: boolean
+          description: >-
+            Whether any policy rule was actually in force. Without this
+            a caller cannot tell "cleared the gate" from "there is no
+            gate" — both are `pass: true` with no violations, and the
+            chart ships an empty policy by default.
+          example: true
+        pass:
+          type: boolean
+          description: >-
+            True when nothing violated the policy. Also true when no
+            policy is configured at all.
+          example: false
+        violations:
+          type: array
+          description: >-
+            Every rule that failed, in a stable order so a CI job
+            diffing this response between runs sees a change only when
+            something changed. Empty, never null, on a pass.
+          items: { $ref: "#/components/schemas/PolicyViolation" }
 
     Stats:
       type: object

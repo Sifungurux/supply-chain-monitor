@@ -12,6 +12,7 @@ import (
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/notify"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/pipeline"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/policy"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
 )
 
@@ -43,6 +44,12 @@ type handler struct {
 	// requireDigest is monitorApi.requireDigest / REQUIRE_DIGEST -- see
 	// NewRouter's own comment for the full behavior this gates.
 	requireDigest bool
+	// policy is the pass/fail rule set GET /api/v1/artifacts/{id}/policy
+	// evaluates (POLICY_JSON / monitorApi.policy). The zero value has no
+	// rules in force, so that endpoint answers "pass, nothing to check"
+	// -- see policy.Policy.Configured for why callers are told the
+	// difference between that and actually passing a gate.
+	policy policy.Policy
 	// notifiers receive a ScanEvent when a scan introduces new findings
 	// at or above notifyMinSeverity. Empty (the default) means
 	// notifications are off entirely -- see internal/notify.

@@ -685,6 +685,33 @@
     return a.unsafe ? ' <span class="badge badge-danger" title="Registered digest did not match what was resolved">Unsafe</span>' : '';
   }
 
+  // policyBadge renders GET /api/v1/artifacts/{id}/policy.
+  //
+  // THREE states, not two. "No policy configured" is deliberately NOT
+  // shown as a pass: the chart ships an empty policy by default, so
+  // every default deployment would otherwise display a green "Policy
+  // OK" badge having checked precisely nothing -- an all-clear nobody
+  // earned, on the one screen people look at to decide whether
+  // something is safe to ship. That is what `configured` on the
+  // response is for.
+  //
+  // A null result (the request failed) renders nothing at all, same as
+  // unsafeBadge's false case: this sits inline next to the status
+  // badge, and "I could not find out" must not look like "fine".
+  function policyBadge(p) {
+    if (!p) return '';
+    if (!p.configured) {
+      return ' <span class="badge badge-neutral" title="No policy is configured for this deployment, so nothing was checked">No policy</span>';
+    }
+    if (p.pass) {
+      return ' <span class="badge badge-success" title="Passes the configured policy">Policy OK</span>';
+    }
+    var n = (p.violations || []).length;
+    var detail = (p.violations || []).map(function (v) { return v.rule + ': ' + v.detail; }).join('\n');
+    return ' <span class="badge badge-danger" title="' + esc(detail) + '">Policy: ' +
+      n + ' violation' + (n === 1 ? '' : 's') + '</span>';
+  }
+
   function severityBadge(sev) {
     var s = (sev || '').toLowerCase();
     var cls = 'badge-neutral';
@@ -1195,6 +1222,7 @@
     // useful, and the SBOM diff is one more request that should not hold
     // it up or fail it. loadComponentDiff fills its own placeholder.
     loadComponentDiff(a.id);
+    loadPolicy(a.id);
   }
 
   function renderCards() {
@@ -1538,6 +1566,28 @@
     return when + body;
   }
 
+  // loadPolicy fills the policy badge placeholder in the detail
+  // header. Separate request because the verdict is not part of the
+  // artifact -- it depends on the deployment's rules, which can change
+  // without the artifact changing.
+  //
+  // A failure leaves the placeholder EMPTY rather than rendering an
+  // error badge: the rest of the detail view is fine, and a badge
+  // saying something went wrong sitting where a verdict belongs is
+  // easily misread as a verdict. Same reasoning as unsafeBadge
+  // contributing nothing when there is nothing to say.
+  async function loadPolicy(id) {
+    var el = document.getElementById('policy-badge');
+    if (!el) return;
+    try {
+      var result = await fetchJSON('/api/v1/artifacts/' + encodeURIComponent(id) + '/policy');
+      if (currentDetailID() !== id) return;
+      el.innerHTML = policyBadge(result);
+    } catch (err) {
+      el.innerHTML = '';
+    }
+  }
+
   // loadComponentDiff fills the "SBOM changes" placeholder. Failures
   // land in the section itself rather than the page-level status line:
   // the rest of the detail view loaded fine, and this is one section of
@@ -1652,7 +1702,7 @@
       '<div class="detail-digest">' + (a.digest ? esc(a.digest) : '<span class="muted">digest not resolved</span>') + '</div>' +
       '<div class="modal-meta">' +
         '<span>' + esc(a.type) + '</span>' +
-        '<span>' + statusBadge(a) + unsafeBadge(a) + staleBadge(a) + '</span>' +
+        '<span>' + statusBadge(a) + unsafeBadge(a) + staleBadge(a) + '<span id="policy-badge"></span></span>' +
         '<span><strong>Last scan:</strong> ' + esc(lastScanText(a)) + '</span>' +
         '<span><strong>Maintainer:</strong> ' + maintainerText(a) +
           ' <button type="button" class="link-btn" data-action="edit-maintainer">Edit</button></span>' +

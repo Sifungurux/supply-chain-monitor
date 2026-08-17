@@ -15,6 +15,15 @@ data:
   # values.yaml for the matching rule, which is exact per identifier
   # rather than a substring.
   LICENSE_DENYLIST: {{ .Values.monitorApi.licenseDenylist | quote }}
+  # monitorApi.policy is written as YAML and rendered to JSON here, so
+  # nobody has to embed a JSON string inside YAML. An empty map renders
+  # as "{}", which policy.Load treats as a policy with no rules -- the
+  # same as unset.
+  #
+  # monitor-api refuses to start if this parses but names an unknown
+  # rule, bucket or severity; see values.yaml's own comment for why a
+  # silently-ignored typo is the failure mode worth refusing over.
+  POLICY_JSON: {{ .Values.monitorApi.policy | toJson | quote }}
   CLAMAV_ADDR: {{ printf "%s.%s.svc.cluster.local:%s" .Values.monitorApi.clamav.service .Release.Namespace .Values.monitorApi.clamav.port | quote }}
   REGISTRY_ADDR: {{ printf "%s.%s.svc.cluster.local:%s" .Values.monitorApi.registry.service .Release.Namespace .Values.monitorApi.registry.port | quote }}
   # Postgres holds every artifact/finding/stage-history record -- see
