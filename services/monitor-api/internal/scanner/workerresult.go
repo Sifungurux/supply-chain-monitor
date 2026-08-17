@@ -24,6 +24,82 @@ type WorkerResult struct {
 	Error    string             `json:"error,omitempty"`
 }
 
+// wireFinding carries a Finding across the worker->parent hop WITHOUT
+// losing Category.
+//
+// artifact.Finding.Category is `json:"-"`, deliberately: it is a
+// transient bucket-routing hint, and in the API and in storage the
+// bucket is expressed by WHICH list a finding is in, so serializing it
+// there would be redundant state that could contradict its own
+// container. That tag is right everywhere it applies and wrong in
+// exactly one place -- here. This is an internal wire format between
+// two processes of the same binary, and it is the only hop where the
+// hint has to survive serialization, because the parent has nothing
+// else to route by: it never sees the tool output the worker parsed.
+//
+// Found in production, not in review. `trivy image --scanners
+// vuln,secret` detected six secrets in a real image, the worker
+// classified every one of them correctly, and all six arrived at the
+// parent with an empty Category -- so classifyBucket fell through to
+// Source "trivy", its default case, and filed them as CVEs. Nothing
+// errored. The only symptom was six findings with "secret:" IDs
+// sitting in the CVE bucket.
+//
+// This is NOT specific to secrets. MalcontentScanner sets
+// Category "malware" with Source "malcontent", which classifyBucket
+// has no case for -- so isolated malcontent findings would have been
+// filed as CVEs the same way. They had produced no findings on this
+// cluster yet, so it had never shown up.
+type wireFinding struct {
+	artifact.Finding
+	// Shadows the embedded Finding's json:"-" Category -- the outer,
+	// shallower field is the one encoding/json uses.
+	Category string `json:"category,omitempty"`
+}
+
+// wireResult is WorkerResult's actual JSON shape. A separate type, so
+// the Marshal/Unmarshal methods below cannot recurse into themselves.
+type wireResult struct {
+	Findings []wireFinding `json:"findings"`
+	Error    string        `json:"error,omitempty"`
+}
+
+// MarshalJSON keeps the on-the-wire document identical to what it has
+// always been, plus a per-finding "category" where one is set.
+func (r WorkerResult) MarshalJSON() ([]byte, error) {
+	out := wireResult{Error: r.Error}
+	if r.Findings != nil {
+		out.Findings = make([]wireFinding, 0, len(r.Findings))
+		for _, f := range r.Findings {
+			out.Findings = append(out.Findings, wireFinding{Finding: f, Category: f.Category})
+		}
+	}
+	return json.Marshal(out)
+}
+
+// UnmarshalJSON restores Category onto each Finding. A document
+// written by an older worker simply has no "category" key, and those
+// findings decode with an empty one -- exactly the behavior before
+// this existed, so a parent on a new binary can still read a Job that
+// somehow started on an old one.
+func (r *WorkerResult) UnmarshalJSON(b []byte) error {
+	var in wireResult
+	if err := json.Unmarshal(b, &in); err != nil {
+		return err
+	}
+	r.Error = in.Error
+	r.Findings = nil
+	if in.Findings != nil {
+		r.Findings = make([]artifact.Finding, 0, len(in.Findings))
+		for _, wf := range in.Findings {
+			f := wf.Finding
+			f.Category = wf.Category
+			r.Findings = append(r.Findings, f)
+		}
+	}
+	return nil
+}
+
 // ResultMarker prefixes the WorkerResult JSON line runScanWorker always
 // prints as the very last thing it does before exiting. Kubernetes pod
 // logs are a single combined stdout+stderr stream (see
