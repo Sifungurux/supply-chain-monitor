@@ -1872,3 +1872,83 @@ func TestPostgresStore_AcquireScanSlotsUncappedKindIsUnlimited(t *testing.T) {
 		}
 	}
 }
+
+// TestPostgresStore_UnsafeRoundTrips is a regression test for a field
+// that existed on the model, was set at registration, and was rendered
+// by the dashboard for months without ever being persisted.
+//
+// Artifact.Unsafe had no column and appeared in no INSERT, SELECT or
+// UPDATE, so it was always false when read back -- which, with the
+// Postgres store, is every read in production. MemStore keeps the whole
+// struct in memory, so every test that used it passed, and the
+// dashboard's "Unsafe" badge was dead code nobody could have noticed
+// from the outside: the badge simply never appeared, which looks
+// exactly like "no unsafe artifacts".
+//
+// It surfaced only when internal/policy's disallowUnsafe rule was about
+// to be switched on and the artifacts table turned out to have no such
+// column -- i.e. a policy gate that could never fire.
+func TestPostgresStore_UnsafeRoundTrips(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	a, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if a.Unsafe {
+		t.Fatal("a freshly created artifact is unsafe")
+	}
+
+	if _, err := s.Update(a.ID, func(art *artifact.Artifact) {
+		art.Unsafe = true
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Read back through Get -- a fresh query, not the value Update
+	// happened to return, which is what made this look fine for months.
+	got, err := s.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.Unsafe {
+		t.Fatal("unsafe did not survive a write/read round trip -- the dashboard badge and policy's disallowUnsafe both depend on this")
+	}
+
+	// And it must be clearable, not a one-way latch: a re-registration
+	// that now resolves cleanly has to be able to take the mark off.
+	if _, err := s.Update(a.ID, func(art *artifact.Artifact) {
+		art.Unsafe = false
+	}); err != nil {
+		t.Fatalf("Update (clearing): %v", err)
+	}
+	cleared, err := s.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get after clearing: %v", err)
+	}
+	if cleared.Unsafe {
+		t.Fatal("unsafe could be set but not cleared")
+	}
+
+	// It must also survive List, which uses the same column list via
+	// selectArtifactColumns but a different scan path.
+	if _, err := s.Update(a.ID, func(art *artifact.Artifact) { art.Unsafe = true }); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	list, err := s.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	var found bool
+	for _, item := range list {
+		if item.ID == a.ID {
+			found = true
+			if !item.Unsafe {
+				t.Error("unsafe is set in Get but not in List -- the list view renders this badge too")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("artifact %s not in the list", a.ID)
+	}
+}
