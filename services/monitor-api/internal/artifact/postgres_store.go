@@ -899,14 +899,22 @@ func (s *PostgresStore) fillChildrenBatch(ctx context.Context, ids []string, byI
 	}
 	stageRows.Close()
 
-	findingRows, err := s.pool.Query(ctx, `SELECT artifact_id, bucket, finding_id, severity, title, source, status, first_seen_at, resolved_at, justification FROM findings WHERE artifact_id = ANY($1) ORDER BY artifact_id, id`, ids)
+	// Column list kept in step with loadFindings' -- there are two
+	// paths that read findings (Get uses loadFindings, List/ListPage use
+	// this batch query) and a column added to one and not the other is
+	// invisible: the field simply reads back as its zero value on
+	// whichever path forgot it. epss_score/known_exploited shipped
+	// exactly that way, so the dashboard -- which renders detail pages
+	// from the LIST payload -- showed no KEV badges while the artifact
+	// endpoint returned them correctly.
+	findingRows, err := s.pool.Query(ctx, `SELECT artifact_id, bucket, finding_id, severity, title, source, status, first_seen_at, resolved_at, justification, epss_score, known_exploited FROM findings WHERE artifact_id = ANY($1) ORDER BY artifact_id, id`, ids)
 	if err != nil {
 		return fmt.Errorf("batch load findings: %w", err)
 	}
 	for findingRows.Next() {
 		var artifactID, bucket string
 		var f Finding
-		if err := findingRows.Scan(&artifactID, &bucket, &f.ID, &f.Severity, &f.Title, &f.Source, &f.Status, &f.FirstSeenAt, &f.ResolvedAt, &f.Justification); err != nil {
+		if err := findingRows.Scan(&artifactID, &bucket, &f.ID, &f.Severity, &f.Title, &f.Source, &f.Status, &f.FirstSeenAt, &f.ResolvedAt, &f.Justification, &f.EPSSScore, &f.KnownExploited); err != nil {
 			findingRows.Close()
 			return fmt.Errorf("scan findings row: %w", err)
 		}
