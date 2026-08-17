@@ -597,7 +597,12 @@ func pageLink(r *http.Request, limit, offset int, rel string) string {
 	q := url.Values{}
 	q.Set("limit", strconv.Itoa(limit))
 	q.Set("offset", strconv.Itoa(offset))
-	for _, name := range []string{"status", "type"} {
+	// q rides along with status/type so paging through a SEARCH keeps
+	// searching. A next link that silently dropped it would page into
+	// the unfiltered list while X-Total-Count still described the
+	// filtered one -- the counts and the rows would disagree from page
+	// two onwards.
+	for _, name := range []string{"status", "type", "q"} {
 		if v := r.URL.Query().Get(name); v != "" {
 			q.Set(name, v)
 		}
@@ -646,7 +651,13 @@ func (h *handler) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	// unrecognized value legitimately matches nothing -- an empty page
 	// is a truthful answer to "show me artifacts with status=banana,"
 	// where a 400 would just be a second enum to keep in sync.
-	list, total, err := h.store.ListPage(limit, offset, q.Get("status"), q.Get("type"))
+	//
+	// q is the same: a case-insensitive substring across ref, digest,
+	// maintainer team/email and current stage, bound as a parameter
+	// with its LIKE metacharacters escaped by the store. Total counts
+	// the SEARCH result, so X-Total-Count and the Link headers all
+	// describe the same filtered set.
+	list, total, err := h.store.ListPage(limit, offset, q.Get("status"), q.Get("type"), q.Get("q"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

@@ -147,6 +147,20 @@ var schemaStatements = []string{
 		source      TEXT NOT NULL DEFAULT '' -- e.g. "trivy", "clamav", "sarif"
 	)`,
 	`CREATE INDEX IF NOT EXISTS findings_artifact_id_idx ON findings (artifact_id)`,
+	// Search (?q=) is a case-insensitive SUBSTRING match across these
+	// five columns, which a plain b-tree index cannot serve -- a
+	// leading wildcard makes it useless. pg_trgm can, so it is used
+	// when the extension is available.
+	//
+	// CREATE EXTENSION needs privileges an unprivileged application
+	// role may not have, so this is deliberately best-effort: the
+	// statements below are run in a way that tolerates failure (see
+	// migrate), and without them the search still works -- Postgres
+	// falls back to a sequential scan. At this project's scale that is
+	// milliseconds, and correctness does not depend on it. What would
+	// be wrong is refusing to start because an index could not be
+	// created.
+
 	// Added for finding lifecycle tracking (see merge.go's MergeFindings
 	// and docs/architecture.md, "Tracking finding lifecycle: open vs
 	// fixed"). `ADD COLUMN IF NOT EXISTS` is idempotent the same way the
@@ -434,10 +448,40 @@ func (s *PostgresStore) Close() {
 	s.pool.Close()
 }
 
+// optionalSchemaStatements are BEST EFFORT: a failure is logged and
+// startup continues.
+//
+// They create the pg_trgm indexes that make ?q= substring search use an
+// index rather than a sequential scan. `CREATE EXTENSION` needs
+// privileges an unprivileged application role may not have, and the
+// index statements fail if the extension is absent -- neither is a
+// reason to refuse to start, because search is CORRECT either way.
+// Postgres just scans instead, which at this project's scale is
+// milliseconds.
+//
+// Kept apart from schemaStatements rather than given a "try this too"
+// flag: everything in that list is required, and mixing the two would
+// make the required ones look optional at a glance.
+var optionalSchemaStatements = []string{
+	`CREATE EXTENSION IF NOT EXISTS pg_trgm`,
+	`CREATE INDEX IF NOT EXISTS artifacts_ref_trgm_idx ON artifacts USING gin (ref gin_trgm_ops)`,
+	`CREATE INDEX IF NOT EXISTS artifacts_digest_trgm_idx ON artifacts USING gin (digest gin_trgm_ops)`,
+	`CREATE INDEX IF NOT EXISTS artifacts_maintainer_team_trgm_idx ON artifacts USING gin (maintainer_team gin_trgm_ops)`,
+}
+
 func (s *PostgresStore) migrate(ctx context.Context) error {
 	for _, stmt := range schemaStatements {
 		if _, err := s.pool.Exec(ctx, stmt); err != nil {
 			return fmt.Errorf("create tables: %w", err)
+		}
+	}
+	for _, stmt := range optionalSchemaStatements {
+		if _, err := s.pool.Exec(ctx, stmt); err != nil {
+			// Warn rather than fail: see optionalSchemaStatements. The
+			// statement is logged so "why is search slow" has an
+			// answer that does not require reading this file.
+			slog.Warn("optional schema statement failed -- artifact search will use a sequential scan, which is correct but slower",
+				"statement", stmt, "err", err)
 		}
 	}
 	return s.migrateLegacyJSONBColumns(ctx)
@@ -827,7 +871,7 @@ func (s *PostgresStore) List() ([]*Artifact, error) {
 // drift into filtering differently -- a count that doesn't match the
 // rows is exactly the bug that makes next/prev links point at empty
 // pages. Every value is a placeholder ($1, $2), never interpolated.
-func listFilterClause(statusFilter, typeFilter string) (string, []any) {
+func listFilterClause(statusFilter, typeFilter, searchFilter string) (string, []any) {
 	var clauses []string
 	var args []any
 	if statusFilter != "" {
@@ -838,10 +882,38 @@ func listFilterClause(statusFilter, typeFilter string) (string, []any) {
 		args = append(args, typeFilter)
 		clauses = append(clauses, fmt.Sprintf("type = $%d", len(args)))
 	}
+	if q := strings.TrimSpace(searchFilter); q != "" {
+		// ILIKE with a BOUND parameter, and the wildcards added to the
+		// value rather than spliced into the SQL -- the query text is a
+		// constant regardless of what anyone types.
+		//
+		// The pattern metacharacters are escaped first (see
+		// likePattern): without that, a search for "100%" matches every
+		// artifact rather than none, and "_" quietly becomes "any
+		// character". That is a correctness bug rather than an
+		// injection one, but it is the kind that makes a search box
+		// feel broken for reasons nobody can explain.
+		args = append(args, likePattern(q))
+		n := len(args)
+		clauses = append(clauses, fmt.Sprintf(
+			"(ref ILIKE $%d OR digest ILIKE $%d OR maintainer_team ILIKE $%d OR maintainer_email ILIKE $%d OR current_stage ILIKE $%d)",
+			n, n, n, n, n))
+	}
 	if len(clauses) == 0 {
 		return "", nil
 	}
 	return " WHERE " + strings.Join(clauses, " AND "), args
+}
+
+// likePattern turns a user's search text into a substring ILIKE
+// pattern, escaping the three characters LIKE treats specially so they
+// match themselves.
+//
+// Backslash first, or it would double-escape the escapes added after
+// it.
+func likePattern(q string) string {
+	r := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`)
+	return "%" + r.Replace(q) + "%"
 }
 
 // ListPage is List plus filtering, LIMIT/OFFSET and a total count --
@@ -859,9 +931,9 @@ func listFilterClause(statusFilter, typeFilter string) (string, []any) {
 // means scanArtifactRow's column list would have to differ between
 // List and ListPage -- and that column list is shared by Get/Update
 // too.
-func (s *PostgresStore) ListPage(limit, offset int, statusFilter, typeFilter string) ([]*Artifact, int, error) {
+func (s *PostgresStore) ListPage(limit, offset int, statusFilter, typeFilter, searchFilter string) ([]*Artifact, int, error) {
 	ctx := context.Background()
-	where, args := listFilterClause(statusFilter, typeFilter)
+	where, args := listFilterClause(statusFilter, typeFilter, searchFilter)
 
 	var total int
 	if err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM artifacts"+where, args...).Scan(&total); err != nil {

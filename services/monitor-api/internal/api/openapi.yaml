@@ -193,17 +193,38 @@ paths:
           in: query
           description: Only artifacts of this exact type.
           schema: { type: string, enum: [image, file, sbom, sarif] }
+        - name: q
+          in: query
+          description: >-
+            Case-insensitive SUBSTRING search across ref, digest,
+            maintainer team, maintainer email and current stage — the
+            fields somebody actually remembers an artifact by.
+
+
+            Combined with `status`/`type` rather than replacing them:
+            all three are ANDed. An unmatched search is an empty page,
+            not an error, and `%`/`_` match themselves rather than
+            acting as wildcards.
+
+
+            `X-Total-Count` and the `Link` URLs all describe the SEARCH
+            result, and `q` is carried into next/prev — paging through a
+            search keeps searching.
+          schema: { type: string, example: nginx }
       responses:
         "200":
           description: One page of artifacts.
           headers:
             X-Total-Count:
-              description: Artifacts matching the filters, across all pages.
+              description: >-
+                Artifacts matching the filters AND the search, across
+                all pages.
               schema: { type: integer }
             Link:
               description: >-
                 RFC 5988 next/prev links (relative references), present
-                only when there is a page in that direction.
+                only when there is a page in that direction. Carries
+                every filter in force, `q` included.
               schema: { type: string }
               example: '</api/v1/artifacts?limit=50&offset=50>; rel="next"'
           content:

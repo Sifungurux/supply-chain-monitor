@@ -448,7 +448,123 @@ test('clicking a document download button fetches it via the proxy and triggers 
   dom.window.close();
 });
 
-test('search filters the artifact table by ref, digest, stage, and CVE/malware id or title, case-insensitively', async () => {
+// Search is a SERVER filter now. These three tests used to drive the
+// old client-side matchesSearch, which re-filtered the rows already
+// fetched -- so searching for something on page 4 while sitting on
+// page 1 found nothing, and the page carried a note apologising for it.
+//
+// Note a deliberate narrowing: the box no longer matches finding ids or
+// titles. The server searches ref, digest, maintainer team/email and
+// current stage. Searching by CVE id has its own box, wired to
+// /api/v1/findings, which searches every artifact rather than a page.
+test('typing in the search box sends ?q= to the server, debounced, and resets to the first page', async () => {
+  const requests = [];
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (isArtifactsList(url)) {
+        requests.push(url);
+        // The server answers with the match; the page must render
+        // exactly what it is given rather than re-filtering it.
+        if (url.includes('q=alpine')) return artifactsPage([SAMPLE_ARTIFACTS[0]]);
+        // total far larger than the page, so Next is enabled and the
+        // page-reset assertion below is not vacuous -- with a total of
+        // 3 there is no page 2 to be on, and offset would already be 0.
+        return jsonResponse({ total: 500, artifacts: SAMPLE_ARTIFACTS });
+      }
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+  const search = doc.getElementById('search-input');
+  const idsShown = () => [...doc.querySelectorAll('#artifact-rows tr[data-id]')].map((tr) => tr.dataset.id);
+
+  // Move off page 1 first, so the reset is observable at all.
+  const next = doc.getElementById('page-next');
+  assert.equal(next.disabled, false, 'Next must be enabled for this test to mean anything');
+  next.click();
+  await tick(20);
+  assert.match(requests[requests.length - 1], /offset=(?!0\b)\d+/, 'we are genuinely off page 1 now');
+
+  const before = requests.length;
+  for (const value of ['a', 'al', 'alp', 'alpi', 'alpin', 'alpine']) {
+    search.value = value;
+    search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  }
+
+  // Nothing has gone out yet -- that is the debounce.
+  assert.equal(requests.length, before, 'six keystrokes fired no request before the debounce elapsed');
+
+  await tick(400);
+  const sent = requests.slice(before);
+  assert.equal(sent.length, 1, `six keystrokes should collapse into one request, got ${sent.length}`);
+  assert.match(sent[0], /q=alpine/, 'the request carries the search text');
+  assert.match(sent[0], /offset=0/, 'searching resets to the first page');
+
+  assert.deepEqual(idsShown(), ['a1'], 'the page renders exactly what the server returned');
+
+  dom.window.close();
+});
+
+// The server's answer is the answer. A page that re-filtered it would
+// reintroduce the old bug in a subtler form: rows dropping out of a
+// result the server said matched.
+test('the table renders the server result verbatim, without re-filtering it', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      // Deliberately returns rows that do NOT contain the search text
+      // anywhere the old client-side filter would have looked.
+      if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+      return errorResponse(404, {});
+    }
+  });
+  await tick(20);
+  const doc = dom.window.document;
+  const search = doc.getElementById('search-input');
+  search.value = 'matches-nothing-locally';
+  search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  await tick(400);
+
+  const ids = [...doc.querySelectorAll('#artifact-rows tr[data-id]')].map((tr) => tr.dataset.id);
+  assert.deepEqual(ids, ['a3', 'a1', 'a2'], 'every row the server returned is shown');
+  dom.window.close();
+});
+
+test('an empty search result shows a message without the old "another page" caveat', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (isArtifactsList(url)) {
+        return url.includes('q=') ? artifactsPage([]) : artifactsPage(SAMPLE_ARTIFACTS);
+      }
+      return errorResponse(404, {});
+    }
+  });
+  await tick(20);
+  const doc = dom.window.document;
+  const search = doc.getElementById('search-input');
+  search.value = 'no-such-artifact';
+  search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  await tick(400);
+
+  const rows = doc.getElementById('artifact-rows').textContent;
+  assert.match(rows, /Nothing matches/, 'the empty state names the search');
+  assert.match(rows, /no-such-artifact/, 'and quotes what was searched for');
+  assert.doesNotMatch(rows, /another page/, 'the page-scoped caveat is gone -- search covers every artifact now');
+  dom.window.close();
+});
+
+// The caveat itself is gone from the page entirely.
+test('the search-note caveat about "this page only" no longer exists', async () => {
   const dom = buildDom({
     url: 'http://localhost:30301/',
     fetchImpl(url) {
@@ -458,160 +574,14 @@ test('search filters the artifact table by ref, digest, stage, and CVE/malware i
       return errorResponse(404, {});
     }
   });
-
   await tick(20);
   const doc = dom.window.document;
-  const search = doc.getElementById('search-input');
-  const idsShown = () => [...doc.querySelectorAll('#artifact-rows tr[data-id]')].map((tr) => tr.dataset.id);
-
-  function type(value) {
-    search.value = value;
-    search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-  }
-
-  type('ALPINE');
-  assert.deepEqual(idsShown(), ['a1'], 'ref match is case-insensitive');
-
-  type('sha256:abc123');
-  assert.deepEqual(idsShown(), ['a1'], 'digest matches');
-
-  type('openssl');
-  assert.deepEqual(idsShown(), ['a1'], 'CVE finding title matches');
-
-  type('CVE-2024-1234');
-  assert.deepEqual(idsShown(), ['a1'], 'CVE finding id matches');
-
-  type('eicar');
-  assert.deepEqual(idsShown(), ['a2'], 'malware finding title matches');
-
-  type('clamav-signature-match');
-  assert.deepEqual(idsShown(), ['a2'], 'malware finding id matches');
-
-  type('build');
-  assert.deepEqual(idsShown(), ['a3'], 'current_stage matches');
-
-  type('');
-  // Rows stay sorted newest-updated-first regardless of search state:
-  // a3 (11:00) > a1 (10:05) > a2 (09:30).
-  assert.deepEqual(idsShown(), ['a3', 'a1', 'a2'], 'clearing the search restores every row');
-
+  const note = doc.getElementById('search-note');
+  assert.doesNotMatch(note.textContent, /only looks at the artifacts on this page/);
+  assert.equal(note.hidden, true, 'with no picker active the note is hidden rather than empty-but-present');
   dom.window.close();
 });
 
-test('search matches maintainer team/email, and shows a distinct message when nothing matches', async () => {
-  const artifactsWithMaintainer = SAMPLE_ARTIFACTS.concat([{
-    id: 'a4',
-    ref: 'ghcr.io/example/other:latest',
-    type: 'image',
-    status: 'registered',
-    current_stage: '',
-    stage_history: [],
-    cve_findings: [],
-    malware_findings: [],
-    last_scan_errors: [],
-    maintainer_team: 'platform-team',
-    maintainer_email: 'platform@example.com',
-    created_at: '2026-07-19T12:00:00Z',
-    updated_at: '2026-07-19T12:00:00Z'
-  }]);
-
-  const dom = buildDom({
-    url: 'http://localhost:30301/',
-    fetchImpl(url) {
-      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
-      if (isArtifactsList(url)) return artifactsPage(artifactsWithMaintainer);
-      return errorResponse(404, {});
-    }
-  });
-
-  await tick(20);
-  const doc = dom.window.document;
-  const search = doc.getElementById('search-input');
-
-  function type(value) {
-    search.value = value;
-    search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-  }
-
-  type('platform-team');
-  assert.deepEqual(
-    [...doc.querySelectorAll('#artifact-rows tr[data-id]')].map((tr) => tr.dataset.id),
-    ['a4'],
-    'maintainer team matches'
-  );
-
-  type('platform@example.com');
-  assert.deepEqual(
-    [...doc.querySelectorAll('#artifact-rows tr[data-id]')].map((tr) => tr.dataset.id),
-    ['a4'],
-    'maintainer email matches'
-  );
-
-  type('no-such-artifact-zzz');
-  const emptyRow = doc.querySelector('#artifact-rows tr .empty');
-  assert.ok(emptyRow, 'a no-match row is shown');
-  // The message says "on this page" now: search only filters the page
-  // the server sent, so it points at the status/type filters for
-  // narrowing the whole set (see the note under the search box).
-  assert.match(emptyRow.textContent, /No artifacts on this page match "no-such-artifact-zzz"/);
-
-  dom.window.close();
-});
-
-test('search matches an artifact id, but not a finding that has since been fixed', async () => {
-  const withFixed = [{
-    id: 'a5',
-    ref: 'alpine:3.19',
-    type: 'image',
-    status: 'scanned',
-    current_stage: 'scan',
-    stage_history: [],
-    cve_findings: [
-      {
-        id: 'CVE-2024-5555',
-        severity: 'high',
-        title: 'now patched',
-        source: 'trivy',
-        status: 'fixed',
-        first_seen_at: '2026-07-01T00:00:00Z',
-        resolved_at: '2026-07-19T10:00:00Z'
-      }
-    ],
-    malware_findings: [],
-    last_scan_errors: [],
-    created_at: '2026-07-01T00:00:00Z',
-    updated_at: '2026-07-19T10:00:00Z'
-  }];
-
-  const dom = buildDom({
-    url: 'http://localhost:30301/',
-    fetchImpl(url) {
-      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
-      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
-      if (isArtifactsList(url)) return artifactsPage(withFixed);
-      return errorResponse(404, {});
-    }
-  });
-
-  await tick(20);
-  const doc = dom.window.document;
-  const search = doc.getElementById('search-input');
-  const idsShown = () => [...doc.querySelectorAll('#artifact-rows tr[data-id]')].map((tr) => tr.dataset.id);
-
-  function type(value) {
-    search.value = value;
-    search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-  }
-
-  type('a5');
-  assert.deepEqual(idsShown(), ['a5'], 'searching the artifact id matches it');
-
-  type('CVE-2024-5555');
-  assert.deepEqual(idsShown(), [], 'a fixed finding must not match search -- it no longer affects this image');
-
-  dom.window.close();
-});
 
 test('editing maintainer on the detail page POSTs to the maintainer endpoint and updates the display', async () => {
   const calls = [];
@@ -1057,7 +1027,8 @@ test('the component box queries /api/v1/components and lists every artifact cont
   box.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
   await tick(20);
   assert.equal(doc.querySelectorAll('#artifact-rows tr').length, 3, 'clearing returns to the full list');
-  assert.match(doc.getElementById('search-note').textContent, /Search only looks at the artifacts on this page/);
+  // The caveat is gone; with no picker active the note is simply hidden.
+  assert.equal(doc.getElementById('search-note').hidden, true, 'clearing the component box hides the note again');
   assert.equal(doc.getElementById('filter-status').disabled, false, 'the filters come back with the normal list');
   assert.equal(doc.getElementById('filter-type').disabled, false);
 

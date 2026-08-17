@@ -359,7 +359,7 @@
           <option value="sarif">sarif</option>
         </select>
       </div>
-      <p class="search-note" id="search-note">Search only looks at the artifacts on this page — narrow the set with the status/type filters, which are applied by the server.</p>
+      <p class="search-note" id="search-note" hidden></p>
       <div id="component-picker" hidden></div>
       <table id="artifact-table">
         <thead>
@@ -898,44 +898,12 @@
     'secret_findings', 'other_findings'
   ];
 
-  // Matches a search query against every metadata field on an artifact
-  // (id, ref, digest, type, status, stage, maintainer) plus every open
-  // finding in every bucket (id, title, severity, source) -- so
-  // searching a CVE ID or malware signature name finds every image
-  // still affected by it, the same way searching a maintainer team
-  // finds everything they own. Findings already fixed are excluded via
-  // openFindings, the same filter every visible count on this page
-  // (the bucket columns, the "With CVEs" card, the modal) already
-  // applies -- otherwise a search for a resolved CVE would surface a
-  // row showing 0 in every finding column, which reads as a bug, not
-  // a match. Case-insensitive substring match, not a query language:
-  // this dataset is small enough (fetched whole into state.artifacts
-  // already) that a linear scan on every keystroke is plenty fast, so
-  // there's no need for a backend search endpoint or an index.
-  function matchesSearch(a, query) {
-    var q = query.trim().toLowerCase();
-    if (!q) return true;
-    var fields = [
-      a.id, a.ref, a.digest, a.type, a.status, a.current_stage,
-      a.maintainer_team, a.maintainer_email
-    ];
-    for (var i = 0; i < fields.length; i++) {
-      if (fields[i] && String(fields[i]).toLowerCase().indexOf(q) !== -1) return true;
-    }
-    for (var b = 0; b < FINDING_BUCKETS.length; b++) {
-      var findings = openFindings(a[FINDING_BUCKETS[b]]);
-      for (var f = 0; f < findings.length; f++) {
-        var finding = findings[f];
-        if (
-          (finding.id && finding.id.toLowerCase().indexOf(q) !== -1) ||
-          (finding.title && finding.title.toLowerCase().indexOf(q) !== -1) ||
-          (finding.severity && finding.severity.toLowerCase().indexOf(q) !== -1) ||
-          (finding.source && finding.source.toLowerCase().indexOf(q) !== -1)
-        ) return true;
-      }
-    }
-    return false;
-  }
+  // The client-side search filter that used to live here is gone: ?q=
+  // is a server filter now (see artifactsPath), so the rows fetched
+  // ARE the matches. It searched only the artifacts already on screen,
+  // which meant searching for something on page 4 while sitting on
+  // page 1 found nothing -- the page carried a note apologising for it.
+
 
   async function fetchJSON(path, opts) {
     opts = opts || {};
@@ -979,10 +947,20 @@
   // artifactsPath builds the paginated list URL from the current page
   // and filters -- the filters are applied by the server, so switching
   // one narrows the whole set, not just the rows already on screen.
+  // How long to wait after the last keystroke before searching. Named
+  // rather than inlined so the dashboard tests can reason about it.
+  var SEARCH_DEBOUNCE_MS = 300;
+
   function artifactsPath() {
     var q = 'limit=' + state.limit + '&offset=' + state.offset;
     if (state.filterStatus) q += '&status=' + encodeURIComponent(state.filterStatus);
     if (state.filterType) q += '&type=' + encodeURIComponent(state.filterType);
+    // Search is a SERVER filter now, exactly like status/type. It used
+    // to filter the rows already on screen, which meant it silently
+    // only ever looked at the current page -- so searching for
+    // something on page 4 while sitting on page 1 found nothing, and
+    // the page had to carry a note apologising for it.
+    if (state.searchQuery.trim()) q += '&q=' + encodeURIComponent(state.searchQuery.trim());
     return '/api/v1/artifacts?' + q;
   }
 
@@ -1212,11 +1190,13 @@
       var back = state.componentQuery
         ? ' <button type="button" class="link-btn" data-action="back-to-matches">← back to matches for “' + esc(state.componentQuery) + '”</button>'
         : '';
+      els.searchNote.hidden = false;
       els.searchNote.innerHTML = 'Showing every artifact whose SBOM lists <code>' + esc(state.componentPURL) +
         '</code> (exact match) — the status and type filters don’t apply to this view. Clear the component box to go back to the full list.' + back;
       return;
     }
     if (state.componentQuery) {
+      els.searchNote.hidden = false;
       els.searchNote.innerHTML = 'Packages matching <code>' + esc(state.componentQuery) +
         '</code> — pick one to see every artifact containing exactly that version. Paste a full <code>pkg:…</code> purl to skip this step.';
       return;
@@ -1225,16 +1205,23 @@
       var backToFindings = state.findingQuery
         ? ' <button type="button" class="link-btn" data-action="back-to-matches">← back to matches for “' + esc(state.findingQuery) + '”</button>'
         : '';
+      els.searchNote.hidden = false;
       els.searchNote.innerHTML = 'Showing every artifact still affected by <code>' + esc(state.findingID) +
         '</code> — fixed and VEX-suppressed findings are excluded, so this is what is actually outstanding. Clear the box to go back to the full list.' + backToFindings;
       return;
     }
     if (state.findingQuery) {
+      els.searchNote.hidden = false;
       els.searchNote.innerHTML = 'Findings matching <code>' + esc(state.findingQuery) +
         '</code> — pick one to see every artifact still affected by it. Enter an exact id (<code>CVE-2021-44228</code>) to skip this step.';
       return;
     }
-    els.searchNote.textContent = 'Search only looks at the artifacts on this page — narrow the set with the status/type filters, which are applied by the server.';
+    // No caveat any more: search is a server filter like status and
+    // type, so it covers every artifact rather than only the page on
+    // screen. The element itself stays, because the component and
+    // finding pickers above render their own notes into it.
+    els.searchNote.textContent = '';
+    els.searchNote.hidden = true;
   }
 
   function renderDetailView(id) {
@@ -1397,13 +1384,25 @@
         emptyMsg = 'No artifact’s SBOM lists ' + esc(state.componentPURL) +
           '. Check the purl (it must match exactly, qualifiers included), or whether these artifacts have SBOMs uploaded at all.';
       }
+      // Same reasoning as the two above: with a search in force, "no
+      // artifacts yet" is a lie -- there are artifacts, none of them
+      // match. And no "try another page" any more, because the search
+      // covered every page.
+      if (state.searchQuery.trim()) {
+        emptyMsg = 'Nothing matches “' + esc(state.searchQuery.trim()) + '”.';
+      }
       els.rows.innerHTML = '<tr><td colspan="11" class="empty">' + emptyMsg + '</td></tr>';
       return;
     }
-    var matched = state.artifacts.filter(function (a) { return matchesSearch(a, state.searchQuery); });
-    if (!matched.length) {
-      els.rows.innerHTML = '<tr><td colspan="11" class="empty">No artifacts on this page match &quot;' +
-        esc(state.searchQuery.trim()) + '&quot; — try the status/type filters, or another page.</td></tr>';
+    // No client-side filtering: state.artifacts IS the search result,
+    // because ?q= went to the server. What used to sit here re-filtered
+    // the rows already fetched, which meant search silently only ever
+    // looked at the current page -- hence the caveat this page used to
+    // carry, and the "or another page" in the empty state below.
+    var matched = state.artifacts;
+    if (!matched.length && state.searchQuery.trim()) {
+      els.rows.innerHTML = '<tr><td colspan="11" class="empty">Nothing matches &quot;' +
+        esc(state.searchQuery.trim()) + '&quot;.</td></tr>';
       return;
     }
     var rows = [];
@@ -2001,9 +2000,23 @@
   });
   els.refresh.addEventListener('click', loadAll);
 
+  // Debounced, because every keystroke is now a request rather than a
+  // local re-filter. 300ms is long enough that typing "nginx" is one
+  // round trip instead of five, and short enough not to feel laggy.
+  //
+  // Resets to the first page for the same reason applyFilters does:
+  // staying on offset 400 of the old result set would almost always
+  // land past the end of the new, narrower one -- which looks like the
+  // search returning nothing.
+  var searchDebounce = null;
   els.search.addEventListener('input', function () {
     state.searchQuery = els.search.value;
-    renderRows();
+    if (searchDebounce) clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(function () {
+      searchDebounce = null;
+      state.offset = 0;
+      loadAll();
+    }, SEARCH_DEBOUNCE_MS);
   });
 
   // The component box is a server round trip per query, not a local
