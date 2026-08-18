@@ -14,6 +14,12 @@ data:
   # Comma-separated SPDX identifiers this deployment refuses -- see
   # values.yaml for the matching rule, which is exact per identifier
   # rather than a substring.
+  # Per-key scopes (report H1). Empty enforces nothing, which is how
+  # every deployment behaved before this existed -- see
+  # monitorApi.apiKeyScopes for the full semantics. In the ConfigMap
+  # rather than the auth Secret because scopes are not credentials, and
+  # that Secret rolls the pod on change via checksum/api-key.
+  API_KEY_SCOPES: {{ include "supply-chain-monitor.apiKeyScopes" . | quote }}
   LICENSE_DENYLIST: {{ .Values.monitorApi.licenseDenylist | quote }}
   # KEV/EPSS feed locations. Empty means the official sources (see
   # internal/scanner/enrich.go's defaults); set them to a mirror for an

@@ -689,6 +689,51 @@ monitorApi:
   # empty key would match the empty string a caller presents with a bare
   # "Bearer ", authenticating every anonymous request as that client.
   apiKeys: ""
+  # apiKeyScopes: what each named key is ALLOWED to do (report H1).
+  #
+  # Named keys answer "who called this". Scopes answer "and were they
+  # allowed to". Without them every key is full-privilege, so the
+  # dashboard's key can delete artifacts and a CI scanner's key can
+  # change maintainers -- which makes the least-trusted consumer as
+  # dangerous as the most-trusted one.
+  #
+  #   apiKeyScopes:
+  #     dashboard: [read]
+  #     ci-pipeline: [read, register, scan]
+  #     admin-tooling: [admin]
+  #
+  # or the flat "name=scope|scope;name=scope" string Flux valuesFrom
+  # injects (SEMICOLON between clients, PIPE between scopes -- Flux
+  # parses a targetPath value through Helm strvals, where a comma is a
+  # delimiter and would tear the value apart; the binary accepts commas
+  # too so a hand-set API_KEY_SCOPES still works).
+  #
+  # The five scopes:
+  #   read             every GET
+  #   register         POST /artifacts and /artifacts/bulk
+  #   scan             triggering scans, and submitting findings/VEX
+  #                    (scan RESULTS arriving by another route -- making
+  #                    those admin would hand every CI scanner full
+  #                    authority, which is worse than no scopes)
+  #   documents:write  uploading SBOM/SARIF documents
+  #   admin            implies all of the above, and is required on its
+  #                    own for DELETE and for changing stage/maintainer
+  #
+  # EMPTY (the default) ENFORCES NOTHING -- every key behaves exactly as
+  # it did before this existed. That is deliberate: enforcement turning
+  # itself on during an upgrade would lock out the dashboard, the sweep
+  # CronJob and every CI consumer at once.
+  #
+  # Once non-empty, a key with NO entry still runs unrestricted, so
+  # adding scopes for one consumer cannot break the others. monitor-api
+  # logs a warning NAMING every such key at startup -- that is the list
+  # to work through. monitor-api also refuses to start on an unknown
+  # scope name, because a typo'd "reader" grants nothing and looks like
+  # working configuration until somebody hits a 403 they cannot explain.
+  #
+  # Note scan workers do NOT use a key at all: they get a per-Job token
+  # scoped to one artifact and one document kind (report S3).
+  apiKeyScopes: ""
   # CIDRs whose X-Forwarded-For header the failed-auth throttle believes
   # (TRUSTED_PROXY_CIDRS).
   #
