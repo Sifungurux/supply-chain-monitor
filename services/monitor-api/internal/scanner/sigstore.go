@@ -122,22 +122,36 @@ const (
 	findingVerifyFailed  = "provenance:verification-error"
 )
 
-// Scan verifies ref and reports what it found.
+// Scan implements the base Scanner interface. ScanProvenance is the
+// richer form scanArtifact actually uses -- this exists so anything
+// that only knows about Scanner still works.
 func (s *SigstoreScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding, error) {
+	findings, _, _, err := s.ScanProvenance(ctx, ref)
+	return findings, err
+}
+
+// ScanProvenance verifies ref and reports both the findings and the
+// verdict. Implements ProvenanceScanner.
+func (s *SigstoreScanner) ScanProvenance(ctx context.Context, ref string) ([]artifact.Finding, string, string, error) {
 	// Same guard every other scanner applies before handing a ref to a
 	// tool that will make an outbound request from it.
 	if err := ValidateRef(ctx, ref); err != nil {
-		return nil, err
+		return nil, artifact.ProvenanceUnknown, s.trustDescription(), err
 	}
 
 	findings := []artifact.Finding{}
+	status := artifact.ProvenanceUnknown
 
 	sigOut, sigErr := s.run(ctx, s.verifyArgs(ref))
 	switch classifyCosignResult(sigErr, sigOut) {
 	case cosignOK:
 		// Verified. No finding -- a signed image is the expected state,
 		// and a finding per signed image would bury the unsigned ones.
+		// The VERDICT is recorded instead, so "signed" is still
+		// visible; see ProvenanceScanner.
+		status = artifact.ProvenanceVerified
 	case cosignNotSigned:
+		status = artifact.ProvenanceUnsigned
 		findings = append(findings, artifact.Finding{
 			ID:       findingUnsigned,
 			Severity: "high",
@@ -150,6 +164,7 @@ func (s *SigstoreScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 		// finding rather than an error for the same reason as above,
 		// but at a lower severity and saying plainly that this is "we
 		// do not know", not "this is unsigned".
+		status = artifact.ProvenanceUnverified
 		findings = append(findings, artifact.Finding{
 			ID:       findingVerifyFailed,
 			Severity: "medium",
@@ -159,17 +174,22 @@ func (s *SigstoreScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 		// A failure to verify the signature makes the attestation check
 		// meaningless -- it would fail for the same reason and report
 		// the same thing twice.
-		return findings, nil
+		return findings, status, s.trustDescription(), nil
 	}
 
 	if !s.cfg.RequireAttestation {
-		return findings, nil
+		return findings, status, s.trustDescription(), nil
 	}
 
 	attOut, attErr := s.run(ctx, s.verifyAttestationArgs(ref))
 	switch classifyCosignResult(attErr, attOut) {
 	case cosignOK:
 	case cosignNotSigned:
+		// The signature verified but the required attestation is
+		// missing, so this artifact does not meet the bar this
+		// deployment set -- reporting it as "verified" would be
+		// answering a question nobody asked.
+		status = artifact.ProvenanceUnsigned
 		findings = append(findings, artifact.Finding{
 			ID:       findingNoAttestation,
 			Severity: "medium",
@@ -177,6 +197,7 @@ func (s *SigstoreScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 			Source:   ProvenanceFindingSource,
 		})
 	default:
+		status = artifact.ProvenanceUnverified
 		findings = append(findings, artifact.Finding{
 			ID:       findingVerifyFailed,
 			Severity: "medium",
@@ -184,7 +205,7 @@ func (s *SigstoreScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 			Source:   ProvenanceFindingSource,
 		})
 	}
-	return findings, nil
+	return findings, status, s.trustDescription(), nil
 }
 
 // verifyArgs builds `cosign verify`.

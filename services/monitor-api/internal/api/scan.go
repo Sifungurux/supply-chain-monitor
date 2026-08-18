@@ -187,6 +187,13 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 		// raw is the scanner's own report, kept only when this scan can
 		// derive documents from it -- see captureDocuments below.
 		raw []byte
+		// provenance is the verdict a ProvenanceScanner reached,
+		// carried back WITH its findings rather than read off the
+		// scanner afterwards: one scanner instance is shared by every
+		// artifact and these goroutines run concurrently, so a field on
+		// the scanner would let one artifact's verdict be read for
+		// another.
+		provenance, provenanceTrustRoot string
 	}
 	results := make([]scanResult, len(scanners))
 	var wg sync.WaitGroup
@@ -212,7 +219,15 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 			var findings []artifact.Finding
 			var scanErr error
 			var rawReport []byte
+			var provenance, provenanceTrustRoot string
 			switch impl := s.(type) {
+			case scanner.ProvenanceScanner:
+				// Reports a VERDICT as well as findings. "Verified" has
+				// no natural representation as a finding -- emitting one
+				// per signed image would bury the unsigned ones -- so
+				// without this a signed image is indistinguishable from
+				// this scanner being switched off.
+				findings, provenance, provenanceTrustRoot, scanErr = impl.ScanProvenance(ctx, a.Ref)
 			case scanner.ArtifactAwareScanner:
 				// Isolated scanners: the Job uploads its own documents
 				// back through POST /documents (main.go's
@@ -232,17 +247,24 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 			default:
 				findings, scanErr = s.Scan(ctx, a.Ref)
 			}
-			results[i] = scanResult{findings: findings, err: scanErr, raw: rawReport}
+			results[i] = scanResult{findings: findings, err: scanErr, raw: rawReport,
+				provenance: provenance, provenanceTrustRoot: provenanceTrustRoot}
 		}(i, s)
 	}
 	wg.Wait()
 
 	var cveFindings, malwareFindings, misconfigFindings, secretFindings, otherFindings []artifact.Finding
 	var scanErrors []string
+	// Stays ProvenanceUnknown when no ProvenanceScanner ran, which is
+	// exactly the right record: not verified, not unsigned, not checked.
+	provenance, provenanceTrustRoot := artifact.ProvenanceUnknown, ""
 
 	for _, res := range results {
 		if res.err != nil {
 			scanErrors = append(scanErrors, res.err.Error())
+		}
+		if res.provenance != artifact.ProvenanceUnknown {
+			provenance, provenanceTrustRoot = res.provenance, res.provenanceTrustRoot
 		}
 		for _, f := range res.findings {
 			switch classifyBucket(f) {
@@ -428,6 +450,18 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 	updated, updErr := h.store.Update(id, func(art *artifact.Artifact) {
 		art.Status = status
 		art.Digest = digest
+		// Recorded only when a check actually ran. A scan where the
+		// provenance scanner is disabled must not overwrite a verdict
+		// an earlier scan reached -- and must not replace it with
+		// "unknown", which reads as "we never looked" and would make
+		// disabling cosign silently erase every previous answer.
+		if provenance != artifact.ProvenanceUnknown {
+			art.Provenance = provenance
+			art.ProvenanceTrustRoot = provenanceTrustRoot
+			checked := now
+			art.ProvenanceCheckedAt = &checked
+		}
+
 		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, cveFindings, now, detectFixedFor("cve"), vex)
 		art.MalwareFindings = artifact.MergeFindings(art.MalwareFindings, malwareFindings, now, detectFixedFor("malware"), vex)
 		art.MisconfigFindings = artifact.MergeFindings(art.MisconfigFindings, misconfigFindings, now, detectFixedFor("misconfiguration"), vex)

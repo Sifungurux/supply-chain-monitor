@@ -2156,3 +2156,62 @@ func TestPostgresStore_ListPageSearch(t *testing.T) {
 	SeedSearchFixtures(t, s)
 	AssertSearch(t, s)
 }
+
+// TestPostgresStore_ProvenanceRoundTrips covers three more
+// artifact-level columns -- the exact shape that let Artifact.Unsafe go
+// months without being persisted.
+//
+// The stakes here are higher than for Unsafe: provenance defaults to
+// the EMPTY string, which means "not checked". If the column were
+// forgotten, every artifact would read back as not-checked forever,
+// which is at least the safe direction -- but a verified image would
+// never show as verified and the whole feature would look broken while
+// scanning correctly.
+func TestPostgresStore_ProvenanceRoundTrips(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	a, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// A fresh artifact is UNKNOWN, never verified.
+	if a.Provenance != artifact.ProvenanceUnknown {
+		t.Fatalf("a newly created artifact has provenance %q, want unknown", a.Provenance)
+	}
+
+	checked := time.Now().UTC().Truncate(time.Second)
+	if _, err := s.Update(a.ID, func(art *artifact.Artifact) {
+		art.Provenance = artifact.ProvenanceVerified
+		art.ProvenanceTrustRoot = "private Sigstore, trusted root /etc/sigstore/trusted_root.json"
+		art.ProvenanceCheckedAt = &checked
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := s.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Provenance != artifact.ProvenanceVerified {
+		t.Errorf("provenance = %q, want %q", got.Provenance, artifact.ProvenanceVerified)
+	}
+	// WHICH Sigstore matters: verified against the public instance and
+	// verified against your own are different claims.
+	if !strings.Contains(got.ProvenanceTrustRoot, "private Sigstore") {
+		t.Errorf("trust root = %q, want the private root preserved", got.ProvenanceTrustRoot)
+	}
+	if got.ProvenanceCheckedAt == nil || !got.ProvenanceCheckedAt.Equal(checked) {
+		t.Errorf("checked_at = %v, want %v", got.ProvenanceCheckedAt, checked)
+	}
+
+	// And through the list path, which the dashboard renders from.
+	page, _, err := s.ListPage(50, 0, "", "", "")
+	if err != nil {
+		t.Fatalf("ListPage: %v", err)
+	}
+	for _, item := range page {
+		if item.ID == a.ID && item.Provenance != artifact.ProvenanceVerified {
+			t.Error("provenance did not survive the list path -- the dashboard renders its badge from this payload")
+		}
+	}
+}

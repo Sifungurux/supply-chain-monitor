@@ -1605,6 +1605,35 @@ registry outage into a false accusation that looks exactly like a true
 one. An unrecognised failure is always reported as "could not verify",
 never as "unsigned".
 
+#### Seeing that an image *is* verified
+
+A verified image produces **no finding** — one per signed image would
+bury the unsigned ones. So the verdict is recorded on the artifact
+instead, as `provenance` (with `provenance_checked_at` and
+`provenance_trust_root`), and badged in both the list and detail views:
+
+| State | Badge | Means |
+|---|---|---|
+| `verified` | green **Signed** | Valid signature from the required identity |
+| `unsigned` | red **Unsigned** | Checked, and there is no such signature |
+| `unverified` | amber **Unverified** | Could **not find out** — registry down, trust root unusable |
+| `""` | *(no badge)* | Not checked: cosign is off, or not scanned since it was enabled |
+
+That fourth state is the reason this is a field at all. Without it,
+"signed" and "we never looked" both render as nothing, and a blank reads
+as an all-clear nobody earned. It shows no badge rather than a grey
+"not checked" one, because a badge on every row of every deployment that
+never enables cosign is noise forever — the absence is honest precisely
+because the other three are explicit.
+
+The badge tooltip names **which** Sigstore reached the verdict. Verified
+against the public instance and verified against your own are different
+claims.
+
+A later scan with cosign disabled **keeps** the previous verdict rather
+than resetting it to not-checked — turning the scanner off should not
+silently erase what it found.
+
 An unsigned image is a **finding, not a scan error** — an error would
 block fix-detection for the whole bucket and read as a broken scanner,
 so the first unsigned image in a fleet would switch provenance checking
