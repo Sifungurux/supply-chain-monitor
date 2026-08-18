@@ -598,3 +598,32 @@ if [ "$rescan_days" = "$warn_days" ]; then
 	echo "       match, change this check with the reason." >&2
 	exit 1
 fi
+
+# == cosign verification is configured meaningfully, or not at all ==
+#
+# `cosign verify` with no --certificate-identity-regexp and no
+# --certificate-oidc-issuer checks only that SOMEBODY signed the image
+# and that it chains to the trust root. Anybody can arrange that for any
+# image, so it proves close to nothing -- and it reports a PASS, which
+# is worse than not verifying: an artifact list with no provenance
+# findings reads as "everything is signed".
+#
+# monitor-api refuses to start in that state; this catches it at render
+# time instead, where the fix is obvious.
+echo "== cosign, when enabled, verifies against a real identity =="
+# Reads the CONFIGURED values rather than forcing enabled=true, which
+# would be this check constructing the bad state and then reporting it.
+cosign_cm="$(helm template scm-ci charts/supply-chain-monitor -s templates/monitor-api/configmap.yaml)"
+cosign_on=$(printf '%s' "$cosign_cm" | grep -c 'COSIGN_ENABLED: "true"' || true)
+if [ "$cosign_on" != "0" ]; then
+	case "$cosign_cm" in
+	*'COSIGN_CERT_IDENTITY_REGEXP: ""'* | *'COSIGN_CERT_OIDC_ISSUER: ""'*)
+		echo "ERROR: monitorApi.cosign.enabled is true without certIdentityRegexp/certOIDCIssuer." >&2
+		echo "       Verification would only prove SOMEBODY signed the image -- which anybody" >&2
+		echo "       can arrange -- and would report that as a pass. An artifact list with no" >&2
+		echo "       provenance findings then reads as \"everything is signed\"." >&2
+		exit 1
+		;;
+	esac
+	echo "      (cosign enabled, verifying against a configured identity)"
+fi

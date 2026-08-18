@@ -439,6 +439,71 @@ monitorApi:
   #
   # Empty (the default) denies nothing and skips the evaluation.
   licenseDenylist: ""
+  # cosign: signature and SLSA-provenance verification (report H2).
+  #
+  # Every other scanner here answers "what is wrong with this artifact".
+  # This one answers "where did it come from, and can that be proved" --
+  # which is the question a CVE scanner cannot ask at all.
+  #
+  # Runs IN-PROCESS, not in an isolated Job: unlike trivy or unpacker it
+  # parses no untrusted artifact content, so the isolation those need
+  # buys nothing and would triple the cost of a scan.
+  cosign:
+    # Off by default. An unsigned fleet would otherwise sprout a
+    # high-severity finding on every image the moment this shipped.
+    enabled: false
+
+    # WHO must have signed it. Both are REQUIRED when enabled --
+    # monitor-api refuses to start without them, because `cosign verify`
+    # with neither only proves that SOMEBODY signed the image and it
+    # chains to the trust root, which anybody can arrange for any image.
+    # Reporting that as a pass is worse than not verifying at all.
+    #
+    #   certIdentityRegexp: "^https://github.com/acme/.*$"
+    #   certOIDCIssuer: "https://token.actions.githubusercontent.com"
+    certIdentityRegexp: ""
+    certOIDCIssuer: ""
+
+    # Additionally demand a SLSA provenance attestation, not just a
+    # signature. A signature says somebody signed this; provenance says
+    # how it was built.
+    requireAttestation: false
+
+    # ---- Public Sigstore, or your own ----
+    #
+    # Leave BOTH of the following empty to verify against the PUBLIC
+    # Sigstore instance (the default trust root cosign ships).
+    #
+    # For an on-prem/private Sigstore (your own Fulcio, Rekor and TUF
+    # repo -- e.g. the k8s-sigstore stack), pick ONE:
+    #
+    #   trustedRoot -- mount a Sigstore TrustedRoot JSON and name its
+    #     path here. No network at startup, no writable TUF cache, which
+    #     is why it suits this pod's read-only root filesystem best.
+    #     Use trustedRootSecret below to have the chart mount it.
+    #
+    #   tufMirror -- the URL of your TUF repository, e.g.
+    #     "https://tuf.sigstore.internal". cosign initialize runs once
+    #     at startup against it; tufRoot optionally names a root.json to
+    #     bootstrap trust from.
+    #
+    # These are cosign v3 mechanisms. v2's --fulcio-url/--rekor-url
+    # flags were REMOVED from `cosign verify` -- verified against the
+    # v3.1.3 binary, not assumed -- so configuring endpoints that way
+    # would be silently ignored and verification would quietly fall back
+    # to the public root while still reporting a pass.
+    trustedRoot: ""
+    tufMirror: ""
+    tufRoot: ""
+
+    # Name of a Secret holding the TrustedRoot JSON under the key
+    # "trusted_root.json". When set, the chart mounts it at
+    # /etc/sigstore and points trustedRoot at it, so the path above does
+    # not have to be kept in step by hand.
+    #
+    #   kubectl -n supply-chain-monitor create secret generic scm-sigstore-root \
+    #     --from-file=trusted_root.json=./trusted_root.json
+    trustedRootSecret: ""
   # KEV/EPSS enrichment of CVE findings -- see README, "Which CVEs are
   # actually being exploited".
   #

@@ -205,6 +205,11 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+{{- if .Values.monitorApi.cosign.trustedRootSecret }}
+            - name: sigstore-trusted-root
+              mountPath: /etc/sigstore
+              readOnly: true
+{{- end }}
 {{- if .Values.registry.tls.enabled }}
             - name: registry-ca
               mountPath: /ca
@@ -255,6 +260,16 @@ spec:
             items:
               - key: ca.crt
                 path: ca.crt
+{{- end }}
+{{- if .Values.monitorApi.cosign.trustedRootSecret }}
+        # The trust root for a PRIVATE Sigstore. Deliberately NOT
+        # optional: with cosign enabled and this Secret named but
+        # missing, verification would fall back to the PUBLIC instance
+        # and report passes against a trust root this deployment never
+        # chose -- so the pod must refuse to start instead.
+        - name: sigstore-trusted-root
+          secret:
+            secretName: {{ .Values.monitorApi.cosign.trustedRootSecret | quote }}
 {{- end }}
         - name: scratch
           emptyDir: {}

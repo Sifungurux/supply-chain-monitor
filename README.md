@@ -1568,6 +1568,82 @@ Some details worth knowing:
   `POST /documents/{kind}`, which stores bytes and would let a document
   land without ever being applied.
 
+### Provenance: was this image signed, and by whom
+
+Every other scanner here answers *what is wrong with this artifact*.
+cosign answers *where did it come from* — a question a CVE scanner
+cannot ask at all.
+
+```yaml
+monitorApi:
+  cosign:
+    enabled: true
+    certIdentityRegexp: "^https://github.com/acme/.*$"
+    certOIDCIssuer: "https://token.actions.githubusercontent.com"
+    requireAttestation: true   # also demand SLSA provenance
+```
+
+**Both identity fields are required.** `cosign verify` with neither only
+proves that *somebody* signed the image and that it chains to the trust
+root — which anybody can arrange for any image — and it reports that as
+a pass. monitor-api refuses to start in that state, and
+`make helm-template` catches it before deploy: an artifact list with no
+provenance findings must not read as "everything is signed".
+
+Findings land in the **other** bucket with source `cosign`:
+
+| Finding | Severity | Means |
+|---|---|---|
+| `provenance:unsigned` | high | No valid signature from the required identity |
+| `provenance:no-slsa-provenance` | medium | Signed, but no SLSA attestation (`requireAttestation`) |
+| `provenance:verification-error` | medium | Could **not find out** — registry unreachable, trust root unusable |
+
+That last row is the important one. cosign exits non-zero both when an
+image is genuinely unsigned and when verification could not be
+completed, so treating the exit code alone as "unsigned" turns a
+registry outage into a false accusation that looks exactly like a true
+one. An unrecognised failure is always reported as "could not verify",
+never as "unsigned".
+
+An unsigned image is a **finding, not a scan error** — an error would
+block fix-detection for the whole bucket and read as a broken scanner,
+so the first unsigned image in a fleet would switch provenance checking
+off for everything.
+
+#### Public Sigstore, or your own
+
+Leave `trustedRoot` and `tufMirror` empty to verify against the **public**
+Sigstore instance. For an on-prem deployment — your own Fulcio, Rekor and
+TUF repo — pick one:
+
+```yaml
+# 1. A Sigstore TrustedRoot JSON, mounted by the chart.
+#    No network at startup, no writable TUF cache.
+monitorApi:
+  cosign:
+    trustedRootSecret: scm-sigstore-root   # key: trusted_root.json
+
+# 2. Or your TUF repository, initialised once at startup.
+monitorApi:
+  cosign:
+    tufMirror: "https://tuf.sigstore.internal"
+    tufRoot: "/etc/sigstore/root.json"      # optional bootstrap root
+```
+
+```bash
+kubectl -n supply-chain-monitor create secret generic scm-sigstore-root \
+  --from-file=trusted_root.json=./trusted_root.json
+```
+
+**These are cosign v3 mechanisms, and that matters.** v2's
+`--fulcio-url`/`--rekor-url` flags were **removed** from `cosign verify` —
+checked against the v3.1.3 binary, not assumed. Configuring endpoints
+that way would be silently ignored, verification would fall back to the
+public root, and it would still report a pass. Every finding names which
+Sigstore judged it (`public Sigstore` / `private Sigstore, trusted root …`)
+so "unsigned" is never ambiguous between *not signed by us* and *not
+signed by anyone the public instance knows*.
+
 ### Which CVEs are actually being exploited
 
 Severity describes how bad exploitation *would* be. It says nothing
