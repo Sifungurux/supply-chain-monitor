@@ -1355,6 +1355,34 @@ func runAPIServer() {
 	if apiKey == "" && !apiKeys.Enabled() {
 		fatal("no API key configured -- set API_KEY, or API_KEYS as \"name:key,name:key\"")
 	}
+
+	// API_KEY_SCOPES limits what each named key may do (report H1).
+	//
+	// REFUSES TO START on an unknown scope name. A typo'd "reader"
+	// grants nothing and looks like a working configuration until
+	// somebody hits a 403 they cannot explain -- and the opposite typo,
+	// in a deployment that meant to restrict a key, would leave it
+	// unrestricted instead. Neither is worth discovering at runtime.
+	keyScopes, invalidScopes := api.ParseKeyScopes(os.Getenv("API_KEY_SCOPES"))
+	if len(invalidScopes) > 0 {
+		fatal("API_KEY_SCOPES contains entries that are not valid scopes -- refusing to start rather than enforce a permission model with holes in it",
+			"invalid", strings.Join(invalidScopes, ", "),
+			"valid_scopes", strings.Join(api.AllScopes, ", "))
+	}
+	if keyScopes.Enforced() {
+		// Every client that authenticates, including the legacy shared
+		// key's "default" identity.
+		clients := append(apiKeys.Names(), legacyClientNameForLog(apiKey))
+		if unscoped := keyScopes.Unscoped(clients); len(unscoped) > 0 {
+			// NAMED, not counted. An unlisted client runs unrestricted
+			// so that enabling scopes cannot lock out a deployment
+			// mid-upgrade -- but that is a hole, and a hole nobody can
+			// see is one nobody closes.
+			slog.Warn("some API keys have no scopes configured and run UNRESTRICTED -- give them an entry in monitorApi.apiKeyScopes to close this",
+				"unscoped_clients", strings.Join(unscoped, ", "))
+		}
+		slog.Info("API key scopes are enforced", "clients", len(clients))
+	}
 	// A SHORT KEY IS A WARNING, NOT A REFUSAL. Fataling here would brick
 	// a running deployment on upgrade over a key that is weak but
 	// working -- turning a security note into an outage, which is a
@@ -1812,6 +1840,7 @@ func runAPIServer() {
 		Scanners:       scanners,
 		APIKey:         apiKey,
 		APIKeys:        apiKeys,
+		KeyScopes:      keyScopes,
 		TrustedProxies: trustedProxies,
 		// Validates a scan worker's per-Job upload token (report S3).
 		ScanTokens: store.ConsumeScanToken,
@@ -1914,4 +1943,15 @@ func runEnrichRefresh() {
 		fatal("enrich-refresh: at least one feed failed -- enrichment is now stale for it", "err", refreshErr)
 	}
 	slog.Info("enrich-refresh: done")
+}
+
+// legacyClientNameForLog names the identity the single shared API_KEY
+// authenticates as, or "" when no shared key is configured -- so the
+// unscoped-clients warning covers it too. It is the one every existing
+// consumer (dashboard, sweep CronJob) presents.
+func legacyClientNameForLog(apiKey string) string {
+	if apiKey == "" {
+		return ""
+	}
+	return "default"
 }

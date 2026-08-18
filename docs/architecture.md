@@ -613,9 +613,22 @@ a rebuild, so nothing else notices a new image is available.
   request is attributed in the audit log and one consumer can be revoked
   without re-keying the others. A legacy shared `monitorApi.apiKey`
   still authenticates, as the client `default`, so upgrading cannot lock
-  a deployment out. What is still missing is **scopes**: every key is
-  full-privilege, so a key that only needs to register artifacts can
-  also delete them and upload VEX (which suppresses findings).
+  a deployment out. Keys also carry **scopes**
+  (`monitorApi.apiKeyScopes`): `read`, `register`, `scan`,
+  `documents:write` and `admin`, enforced per route in `NewRouter` so
+  the whole permission model is one readable block. A denial is 403,
+  not 401 — the credential is valid, it simply may not do this.
+
+
+  What remains, deliberately: scopes are configured in the chart rather
+  than managed through an API, so granting one means a redeploy. The
+  report's H1 sketched a database-backed `api_keys` table with
+  CRUD endpoints; the Secret-based form was chosen instead because it
+  keeps credentials in the same place as every other secret this chart
+  manages, with no new admin surface to protect. And enforcement is
+  **opt-in**: with `apiKeyScopes` empty nothing is enforced, and once
+  set, a key with no entry still runs unrestricted (named in a startup
+  warning) so that scoping one consumer cannot break the others.
 - **The dashboard hands its API key to any browser that loads it.** An
   initContainer renders `env.js` from the same Secret
   (`templates/dashboard/deployment.yaml`), so whoever can reach the

@@ -130,6 +130,12 @@ type Config struct {
 	// artifact failing every scan stays "fresh" here. That is what
 	// LastScanFailureReason is for; see values.yaml's own comment.
 	StaleAfterDays int
+	// KeyScopes limits what each named key may do (API_KEY_SCOPES /
+	// monitorApi.apiKeyScopes). The zero value enforces nothing, which
+	// is how every deployment behaved before scopes existed and is what
+	// an upgrade lands in -- see KeyScopes' own comment.
+	KeyScopes KeyScopes
+
 	// Policy is the rule set GET /api/v1/artifacts/{id}/policy evaluates
 	// (POLICY_JSON / monitorApi.policy). The zero value puts no rules in
 	// force; main.go refuses to start on a policy that is set but
@@ -163,30 +169,37 @@ func NewRouter(cfg Config) http.Handler {
 	mux.HandleFunc("GET /metrics", h.metricsHandler)
 	mux.HandleFunc("GET /swagger", h.swaggerUI)
 	mux.HandleFunc("GET /openapi.yaml", h.openapiSpec)
-	mux.HandleFunc("GET /api/v1/pipeline/stages", h.listStages)
+	mux.HandleFunc("GET /api/v1/pipeline/stages", requireScope(ScopeRead, h.listStages))
 	// Not exempted in withAuth below, so it requires the API key like
 	// every other /api/v1 route -- deliberate: unlike /healthz and the
 	// swagger pages (which describe the API's shape), this reports how
 	// many artifacts carry active malware and CVE findings, which is
 	// data about the fleet, not documentation.
-	mux.HandleFunc("GET /api/v1/stats", h.getStats)
-	mux.HandleFunc("POST /api/v1/artifacts", h.createArtifact)
-	mux.HandleFunc("POST /api/v1/artifacts/bulk", h.bulkCreateArtifacts)
-	mux.HandleFunc("GET /api/v1/artifacts", h.listArtifacts)
-	mux.HandleFunc("GET /api/v1/artifacts/{id}", h.getArtifact)
-	mux.HandleFunc("DELETE /api/v1/artifacts/{id}", h.deleteArtifact)
-	mux.HandleFunc("GET /api/v1/findings", h.searchFindings)
-	mux.HandleFunc("GET /api/v1/findings/{findingID}/artifacts", h.findByFindingID)
-	mux.HandleFunc("GET /api/v1/components", h.listByComponent)
-	mux.HandleFunc("GET /api/v1/artifacts/{id}/components/diff", h.listComponentDiff)
-	mux.HandleFunc("GET /api/v1/artifacts/{id}/policy", h.getPolicy)
-	mux.HandleFunc("POST /api/v1/artifacts/{id}/scan", h.scanArtifact)
-	mux.HandleFunc("POST /api/v1/artifacts/{id}/stage", h.updateStage)
-	mux.HandleFunc("POST /api/v1/artifacts/{id}/maintainer", h.updateMaintainer)
-	mux.HandleFunc("POST /api/v1/artifacts/{id}/documents/{kind}", h.uploadDocument)
-	mux.HandleFunc("GET /api/v1/artifacts/{id}/documents/{kind}", h.downloadDocument)
-	mux.HandleFunc("POST /api/v1/artifacts/{id}/findings", h.submitFindings)
-	mux.HandleFunc("POST /api/v1/artifacts/{id}/vex", h.uploadVEX)
+	mux.HandleFunc("GET /api/v1/stats", requireScope(ScopeRead, h.getStats))
+	mux.HandleFunc("POST /api/v1/artifacts", requireScope(ScopeRegister, h.createArtifact))
+	mux.HandleFunc("POST /api/v1/artifacts/bulk", requireScope(ScopeRegister, h.bulkCreateArtifacts))
+	mux.HandleFunc("GET /api/v1/artifacts", requireScope(ScopeRead, h.listArtifacts))
+	mux.HandleFunc("GET /api/v1/artifacts/{id}", requireScope(ScopeRead, h.getArtifact))
+	// Destructive and irreversible (see deleteArtifact) -- admin only.
+	mux.HandleFunc("DELETE /api/v1/artifacts/{id}", requireScope(ScopeAdmin, h.deleteArtifact))
+	mux.HandleFunc("GET /api/v1/findings", requireScope(ScopeRead, h.searchFindings))
+	mux.HandleFunc("GET /api/v1/findings/{findingID}/artifacts", requireScope(ScopeRead, h.findByFindingID))
+	mux.HandleFunc("GET /api/v1/components", requireScope(ScopeRead, h.listByComponent))
+	mux.HandleFunc("GET /api/v1/artifacts/{id}/components/diff", requireScope(ScopeRead, h.listComponentDiff))
+	mux.HandleFunc("GET /api/v1/artifacts/{id}/policy", requireScope(ScopeRead, h.getPolicy))
+	mux.HandleFunc("POST /api/v1/artifacts/{id}/scan", requireScope(ScopeScan, h.scanArtifact))
+	// Stage and maintainer describe OWNERSHIP and pipeline position, not
+	// scan results -- changing them is an administrative act.
+	mux.HandleFunc("POST /api/v1/artifacts/{id}/stage", requireScope(ScopeAdmin, h.updateStage))
+	mux.HandleFunc("POST /api/v1/artifacts/{id}/maintainer", requireScope(ScopeAdmin, h.updateMaintainer))
+	mux.HandleFunc("POST /api/v1/artifacts/{id}/documents/{kind}", requireScope(ScopeDocumentsWrite, h.uploadDocument))
+	mux.HandleFunc("GET /api/v1/artifacts/{id}/documents/{kind}", requireScope(ScopeRead, h.downloadDocument))
+	// Findings and VEX are scan RESULTS arriving by another route, so
+	// they sit under "scan" rather than "admin". An external scanner
+	// needs to submit them; making that require admin would hand every
+	// CI scanner full authority, which is worse than no scopes at all.
+	mux.HandleFunc("POST /api/v1/artifacts/{id}/findings", requireScope(ScopeScan, h.submitFindings))
+	mux.HandleFunc("POST /api/v1/artifacts/{id}/vex", requireScope(ScopeScan, h.uploadVEX))
 
 	var top http.Handler = mux
 	if cfg.RateLimitRPS > 0 {
@@ -216,7 +229,7 @@ func NewRouter(cfg Config) http.Handler {
 	// withAudit sits INSIDE withAuth, because it reports the
 	// authenticated client and that only exists in the context after
 	// withAuth has put it there.
-	return withMetrics(withCORS(withAuth(withAudit(top), keys, failures, cfg.TrustedProxies, cfg.ScanTokens, h.metrics), cfg.CORSAllowedOrigins), h.metrics)
+	return withMetrics(withCORS(withAuth(withAudit(top), keys, cfg.KeyScopes, failures, cfg.TrustedProxies, cfg.ScanTokens, h.metrics), cfg.CORSAllowedOrigins), h.metrics)
 }
 
 // withAuth requires `Authorization: Bearer <apiKey>` on every request
@@ -291,7 +304,7 @@ const (
 // logs rather than a blank client field.
 const legacyClientName = "default"
 
-func withAuth(next http.Handler, keys APIKeys, failures *rateLimiter, trusted TrustedProxies, scanTokens ScanTokenConsumer, m *metrics) http.Handler {
+func withAuth(next http.Handler, keys APIKeys, scopes KeyScopes, failures *rateLimiter, trusted TrustedProxies, scanTokens ScanTokenConsumer, m *metrics) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/healthz", "/readyz", "/metrics", "/swagger", "/openapi.yaml":
@@ -320,6 +333,16 @@ func withAuth(next http.Handler, keys APIKeys, failures *rateLimiter, trusted Tr
 					// Named for the audit log so an upload is
 					// attributable to the Job that made it, not to
 					// whatever key happens to exist.
+					// Deliberately NOT scope-checked. This token is
+					// already narrower than any scope could make it:
+					// one artifact, one document kind, single use,
+					// expiring with the Job (see scantoken.go). Running
+					// it through the scope gate would mean giving the
+					// worker a key again, which is the thing per-Job
+					// tokens exist to avoid -- and a scope check
+					// inserted ahead of this branch would break every
+					// isolated scan's document upload, surfacing as
+					// uploads failing after a scan succeeded.
 					next.ServeHTTP(w, r.WithContext(WithClient(r.Context(), "scan-worker:"+id)))
 					return
 				}
@@ -349,7 +372,9 @@ func withAuth(next http.Handler, keys APIKeys, failures *rateLimiter, trusted Tr
 			writeError(w, http.StatusUnauthorized, "missing or invalid API key")
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(WithClient(r.Context(), client)))
+		ctx := WithClient(r.Context(), client)
+		ctx = WithScopes(ctx, scopes.For(client))
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

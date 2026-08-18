@@ -34,3 +34,37 @@ credential-shaped blank, and the binary must not trust that it didn't.
 {{- $value -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+supply-chain-monitor.apiKeyScopes renders monitorApi.apiKeyScopes as the
+flat "name=scope|scope;name=scope" string the binary parses, accepting
+either a map of lists or that string already.
+
+Sorted for the same reason apiKeys is: an unstable value changes the
+ConfigMap's checksum on every reconcile and rolls monitor-api for no
+reason.
+
+Semicolons between clients and pipes between scopes, NOT commas -- Flux
+resolves a valuesFrom entry with a targetPath through Helm's strvals
+parser, where a comma is a delimiter that tears the value apart before
+Helm sees it. Same hazard already documented for apiKeys above.
+
+Deliberately NOT in the auth Secret: scopes are not credentials, and the
+Secret carries a checksum/api-key annotation, so putting them there
+would roll the pod as though a key had rotated every time a permission
+changed.
+*/}}
+{{- define "supply-chain-monitor.apiKeyScopes" -}}
+{{- $value := .Values.monitorApi.apiKeyScopes -}}
+{{- if kindIs "map" $value -}}
+{{- $pairs := list -}}
+{{- range $name, $scopes := $value -}}
+{{- if and $name $scopes -}}
+{{- $pairs = append $pairs (printf "%s=%s" $name (join "|" $scopes)) -}}
+{{- end -}}
+{{- end -}}
+{{- join ";" (sortAlpha $pairs) -}}
+{{- else -}}
+{{- $value -}}
+{{- end -}}
+{{- end -}}

@@ -297,6 +297,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Artifact" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
       tags: [artifacts]
@@ -314,6 +315,7 @@ paths:
                 properties:
                   status: { type: string, example: deleted }
                   id: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/artifacts/{id}/scan:
@@ -355,6 +357,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Artifact" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "429":
           description: >-
@@ -398,6 +401,7 @@ paths:
               schema: { $ref: "#/components/schemas/Artifact" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/artifacts/{id}/maintainer:
@@ -425,6 +429,7 @@ paths:
               schema: { $ref: "#/components/schemas/Artifact" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/artifacts/{id}/findings:
@@ -461,6 +466,7 @@ paths:
               schema: { $ref: "#/components/schemas/Artifact" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/findings:
@@ -650,6 +656,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ComponentDiff" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/artifacts/{id}/policy:
@@ -690,6 +697,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PolicyResult" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/artifacts/{id}/documents/{kind}:
@@ -736,6 +744,7 @@ paths:
                   kind: { type: string }
         "400": { $ref: "#/components/responses/BadRequest" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/artifacts/{id}/vex:
@@ -778,6 +787,7 @@ paths:
                   artifact: { $ref: "#/components/schemas/Artifact" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
 components:
@@ -788,6 +798,19 @@ components:
       description: >-
         Every endpoint except /healthz requires
         `Authorization: Bearer <API key>`.
+
+
+        Keys can carry SCOPES (`monitorApi.apiKeyScopes`): `read`,
+        `register`, `scan`, `documents:write`, `admin`. A key without
+        the scope a route requires gets **403**, not 401 — the
+        credential is valid and identified, it simply may not do this.
+
+
+        Scope enforcement is opt-in. With none configured every key is
+        full-privilege, which is how this API behaved before scopes
+        existed; a key with no entry stays unrestricted even once
+        others have scopes, so scoping one consumer cannot break the
+        rest.
 
   parameters:
     ArtifactID:
@@ -802,6 +825,13 @@ components:
       schema: { type: string, enum: [sbom, sarif] }
 
   responses:
+    Forbidden:
+      description: >-
+        The API key is valid but lacks the scope this route requires.
+        See the bearerAuth description and monitorApi.apiKeyScopes.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     ArtifactLimitReached:
       description: >-
         The deployment's artifact limit (MAX_ARTIFACTS /
