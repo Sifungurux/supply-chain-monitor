@@ -782,6 +782,43 @@
     critical: 5, high: 4, medium: 3, low: 2, negligible: 1, unknown: 0
   };
 
+  // provenanceBadge renders signature verification (report H2).
+  //
+  // FOUR states, and the fourth is why this is a field rather than the
+  // absence of a finding. A verified image produces no finding -- one
+  // per signed image would bury the unsigned ones -- so "signed",
+  // "cosign is switched off" and "not scanned since it was switched on"
+  // would otherwise all render identically as nothing at all, and a
+  // blank read as "fine" is an all-clear nobody earned.
+  //
+  // Unknown renders NOTHING rather than a grey "not checked" badge: for
+  // the many deployments that never enable cosign, a badge on every row
+  // saying "we did not check" is noise on every screen forever. The
+  // absence is honest here precisely because the other three states are
+  // explicit.
+  function provenanceBadge(a) {
+    var title = a.provenance_trust_root
+      ? ' — ' + a.provenance_trust_root
+      : '';
+    switch (a.provenance) {
+      case 'verified':
+        return ' <span class="badge badge-success" title="Signature verified' + esc(title) +
+          '">Signed</span>';
+      case 'unsigned':
+        return ' <span class="badge badge-danger" title="No valid signature from the required identity' +
+          esc(title) + '">Unsigned</span>';
+      case 'unverified':
+        // Deliberately NOT the same badge as unsigned. cosign could not
+        // reach a verdict -- a registry outage or an unusable trust
+        // root -- and showing that as "unsigned" is an accusation the
+        // data does not support.
+        return ' <span class="badge badge-warning" title="Signature could not be verified — this is &quot;we could not find out&quot;, not &quot;unsigned&quot;' +
+          esc(title) + '">Unverified</span>';
+      default:
+        return '';
+    }
+  }
+
   // findingIsNew flags a finding as newly discovered on the artifact's
   // most recent scan/submission, so the dashboard can call it out
   // rather than showing it exactly the same as a finding that's been
@@ -1415,7 +1452,7 @@
           '<tr data-id="' + esc(a.id) + '">' +
             '<td class="ref" title="' + esc(a.ref) + '">' + esc(a.ref) + '</td>' +
             '<td>' + esc(a.type) + '</td>' +
-            '<td>' + statusBadge(a) + unsafeBadge(a) + staleBadge(a) + '</td>' +
+            '<td>' + statusBadge(a) + unsafeBadge(a) + staleBadge(a) + provenanceBadge(a) + '</td>' +
             '<td>' + (a.current_stage ? esc(a.current_stage) : '<span class="muted">—</span>') + '</td>' +
             '<td>' + countCell(openFindings(a.cve_findings).length) + '</td>' +
             '<td>' + countCell(openFindings(a.malware_findings).length) + '</td>' +
@@ -1781,7 +1818,7 @@
       '<div class="detail-digest">' + (a.digest ? esc(a.digest) : '<span class="muted">digest not resolved</span>') + '</div>' +
       '<div class="modal-meta">' +
         '<span>' + esc(a.type) + '</span>' +
-        '<span>' + statusBadge(a) + unsafeBadge(a) + staleBadge(a) + '<span id="policy-badge"></span></span>' +
+        '<span>' + statusBadge(a) + unsafeBadge(a) + staleBadge(a) + provenanceBadge(a) + '<span id="policy-badge"></span></span>' +
         '<span><strong>Last scan:</strong> ' + esc(lastScanText(a)) + '</span>' +
         '<span><strong>Maintainer:</strong> ' + maintainerText(a) +
           ' <button type="button" class="link-btn" data-action="edit-maintainer">Edit</button></span>' +

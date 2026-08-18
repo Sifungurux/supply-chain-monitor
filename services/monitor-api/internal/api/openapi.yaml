@@ -1212,6 +1212,40 @@ components:
         digest:
           type: string
           description: Resolved OCI content digest, if available.
+        provenance:
+          type: string
+          enum: ["", verified, unsigned, unverified]
+          description: >-
+            What cosign signature verification concluded (report H2).
+
+
+            A FIELD rather than the absence of a finding, because a
+            verified image produces no finding — one per signed image
+            would bury the unsigned ones. Without this, "signed" would
+            be indistinguishable from "cosign is switched off" and from
+            "never scanned since it was switched on".
+
+
+            `""` is not-checked and is NOT a pass. `unverified` means
+            the check could not be completed (registry unreachable,
+            trust root unusable) and is deliberately distinct from
+            `unsigned` — an outage must not read as an accusation.
+          example: verified
+        provenance_checked_at:
+          type: string
+          format: date-time
+          description: >-
+            When that conclusion was reached, so a "verified" from
+            before an image was retagged is visible as stale rather
+            than current.
+        provenance_trust_root:
+          type: string
+          description: >-
+            WHICH Sigstore judged it — the public instance, or a named
+            private deployment. "Verified" means different things
+            against each, so a badge that showed one for both would
+            assert more than it can support.
+          example: private Sigstore, trusted root /etc/sigstore/trusted_root.json
         unsafe:
           type: boolean
           description: >-

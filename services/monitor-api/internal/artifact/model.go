@@ -249,6 +249,28 @@ type Artifact struct {
 	// megabytes of document content just to let the UI decide whether a
 	// download button should show. Best-effort like Digest: false just
 	// means no document has been captured yet, not an error.
+	// Provenance is what signature verification concluded, and it is a
+	// FIELD rather than the absence of a finding for one reason: a
+	// verified image produces no finding (a finding per signed image
+	// would bury the unsigned ones), so without this "signed" is
+	// indistinguishable from "cosign is switched off" and from "never
+	// scanned since it was switched on". Those three need to look
+	// different -- reading a blank as "verified" is an all-clear
+	// nobody earned.
+	//
+	// One of ProvenanceUnknown/Verified/Unsigned/Unverified.
+	Provenance string `json:"provenance,omitempty"`
+	// ProvenanceCheckedAt is when that conclusion was reached, so a
+	// stale "verified" from before an image was retagged is visible as
+	// stale rather than current.
+	ProvenanceCheckedAt *time.Time `json:"provenance_checked_at,omitempty"`
+	// ProvenanceTrustRoot names WHICH Sigstore judged it -- public, or
+	// a specific private deployment. "Verified" against the public
+	// instance and "verified" against your own mean different things,
+	// and a UI that showed one badge for both would be asserting
+	// something it cannot support.
+	ProvenanceTrustRoot string `json:"provenance_trust_root,omitempty"`
+
 	HasSBOM   bool      `json:"has_sbom,omitempty"`
 	HasSARIF  bool      `json:"has_sarif,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
@@ -817,4 +839,32 @@ func (s EnrichmentStatus) Fresh(now time.Time, maxAge time.Duration) bool {
 // pure waste.
 func IsCVEID(id string) bool {
 	return strings.HasPrefix(strings.ToUpper(id), "CVE-")
+}
+
+// Provenance verification outcomes.
+//
+// UNKNOWN IS NOT A FAILURE AND NOT A PASS. It is the state of every
+// artifact in a deployment that has never enabled cosign, and of every
+// artifact not yet rescanned since it was enabled -- and it must be
+// shown as its own thing rather than collapsed into either.
+const (
+	ProvenanceUnknown = ""
+	// ProvenanceVerified: a valid signature from the required identity
+	// (plus a SLSA attestation, where one is required).
+	ProvenanceVerified = "verified"
+	// ProvenanceUnsigned: checked, and there is no such signature.
+	ProvenanceUnsigned = "unsigned"
+	// ProvenanceUnverified: the check could not be COMPLETED -- registry
+	// unreachable, trust root unusable. Distinct from unsigned, because
+	// an outage must not read as an accusation.
+	ProvenanceUnverified = "unverified"
+)
+
+// ValidProvenance reports whether a status is one this system sets.
+func ValidProvenance(s string) bool {
+	switch s {
+	case ProvenanceUnknown, ProvenanceVerified, ProvenanceUnsigned, ProvenanceUnverified:
+		return true
+	}
+	return false
 }

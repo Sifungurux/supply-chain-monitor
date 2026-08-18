@@ -143,6 +143,33 @@ type RawImageScanner interface {
 	ScanWithRaw(ctx context.Context, ref string) ([]artifact.Finding, []byte, error)
 }
 
+// ProvenanceScanner is an optional interface for a scanner that can
+// report a VERDICT, not just findings.
+//
+// It exists because "verified" has no natural representation as a
+// finding. SigstoreScanner emits nothing for a signed image -- a
+// finding per signed image would bury the unsigned ones -- so without
+// this the successful case is indistinguishable from the scanner being
+// switched off, or from the artifact never having been scanned since
+// it was switched on. Those three states have to look different.
+//
+// Same optional-capability shape as ArtifactAwareScanner and
+// RawImageScanner: scanArtifact type-asserts for it and nothing else
+// has to implement it.
+type ProvenanceScanner interface {
+	Scanner
+	// ScanProvenance is Scan plus the verdict it reached.
+	//
+	// The verdict is RETURNED rather than stashed on the scanner and
+	// read afterwards. One scanner instance is registered once and
+	// shared by every artifact, and scanArtifact scans artifacts
+	// concurrently -- so a "last status" field would let one artifact's
+	// verdict be read for another. Marking an unsigned image "verified"
+	// because a different image verified at the same moment is the
+	// worst bug this feature could have, and it would be invisible.
+	ScanProvenance(ctx context.Context, ref string) (findings []artifact.Finding, status, trustRoot string, err error)
+}
+
 // Registry maps an artifact type to the scanners that apply to it. An
 // artifact type can have more than one scanner registered against it --
 // e.g. a container image gets both a CVE scan (Trivy) and a malware

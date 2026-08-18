@@ -2700,3 +2700,45 @@ test('findings with no enrichment render without KEV or EPSS badges', async () =
   assert.match(body, /openssl bug/, 'the findings themselves still render');
   dom.window.close();
 });
+
+// Provenance has FOUR states and the fourth is the point: a verified
+// image produces no finding, so "signed", "cosign is off" and "not
+// scanned since it was enabled" would otherwise all render as nothing,
+// and a blank read as "fine" is an all-clear nobody earned.
+test('the provenance badge distinguishes signed, unsigned, unverified and not-checked', async () => {
+  const artifacts = [
+    { ...SAMPLE_ARTIFACTS[0], id: 'p1', ref: 'reg/signed:1', provenance: 'verified', provenance_trust_root: 'private Sigstore, trusted root /etc/sigstore/trusted_root.json' },
+    { ...SAMPLE_ARTIFACTS[0], id: 'p2', ref: 'reg/unsigned:1', provenance: 'unsigned', provenance_trust_root: 'public Sigstore' },
+    { ...SAMPLE_ARTIFACTS[0], id: 'p3', ref: 'reg/unknownstate:1', provenance: 'unverified', provenance_trust_root: 'public Sigstore' },
+    { ...SAMPLE_ARTIFACTS[0], id: 'p4', ref: 'reg/notchecked:1' }
+  ];
+
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (isArtifactsList(url)) return artifactsPage(artifacts);
+      return errorResponse(404, {});
+    }
+  });
+  await tick(20);
+  const doc = dom.window.document;
+  const rowHtml = (id) => doc.querySelector(`#artifact-rows tr[data-id="${id}"]`).innerHTML;
+
+  assert.match(rowHtml('p1'), /badge-success[^>]*>Signed</, 'a verified image is badged, even though it has no finding');
+  assert.match(rowHtml('p1'), /private Sigstore/, 'the badge names WHICH Sigstore verified it');
+
+  assert.match(rowHtml('p2'), /badge-danger[^>]*>Unsigned</);
+
+  // "Could not find out" must not look like "unsigned" -- that is an
+  // accusation the data does not support.
+  assert.match(rowHtml('p3'), /badge-warning[^>]*>Unverified</);
+  assert.doesNotMatch(rowHtml('p3'), />Unsigned</, 'a failed check was rendered as unsigned');
+
+  // Not checked renders nothing: a "we did not check" badge on every
+  // row of every deployment that never enables cosign is noise forever.
+  assert.doesNotMatch(rowHtml('p4'), />Signed<|>Unsigned<|>Unverified</);
+
+  dom.window.close();
+});

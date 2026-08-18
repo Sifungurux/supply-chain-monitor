@@ -1114,3 +1114,113 @@ func TestScanArtifact_OrdinaryRefStillScans(t *testing.T) {
 		t.Fatalf("scanner ran %d time(s), want 1", n)
 	}
 }
+
+// fakeProvenanceScanner implements scanner.ProvenanceScanner so
+// scanArtifact's verdict plumbing can be exercised without cosign.
+type fakeProvenanceScanner struct {
+	status    string
+	trustRoot string
+	findings  []artifact.Finding
+	err       error
+}
+
+func (f *fakeProvenanceScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding, error) {
+	fs, _, _, err := f.ScanProvenance(ctx, ref)
+	return fs, err
+}
+
+func (f *fakeProvenanceScanner) ScanProvenance(_ context.Context, _ string) ([]artifact.Finding, string, string, error) {
+	return f.findings, f.status, f.trustRoot, f.err
+}
+
+// TestScanArtifact_RecordsProvenanceVerdict is why the verdict exists
+// as a field rather than as the absence of a finding.
+//
+// A verified image produces NO finding, so without this "signed" would
+// be indistinguishable from "cosign is switched off" and from "never
+// scanned since it was switched on".
+func TestScanArtifact_RecordsProvenanceVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		scanner   *fakeProvenanceScanner
+		wantState string
+	}{
+		{
+			name:      "verified is recorded even though it produces no finding",
+			scanner:   &fakeProvenanceScanner{status: artifact.ProvenanceVerified, trustRoot: "public Sigstore"},
+			wantState: artifact.ProvenanceVerified,
+		},
+		{
+			name: "unsigned is recorded alongside its finding",
+			scanner: &fakeProvenanceScanner{
+				status:    artifact.ProvenanceUnsigned,
+				trustRoot: "public Sigstore",
+				findings:  []artifact.Finding{{ID: "provenance:unsigned", Severity: "high", Source: "cosign"}},
+			},
+			wantState: artifact.ProvenanceUnsigned,
+		},
+		{
+			// An outage must not read as an accusation, at the artifact
+			// level either.
+			name:      "could-not-verify is its own state",
+			scanner:   &fakeProvenanceScanner{status: artifact.ProvenanceUnverified, trustRoot: "public Sigstore"},
+			wantState: artifact.ProvenanceUnverified,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {tc.scanner}})
+			a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+			rec, scanned := scanAndWait(t, h, store, a.ID)
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("scan status = %d, want 202", rec.Code)
+			}
+			if scanned.Provenance != tc.wantState {
+				t.Fatalf("provenance = %q, want %q", scanned.Provenance, tc.wantState)
+			}
+			if scanned.ProvenanceCheckedAt == nil {
+				t.Error("provenance_checked_at is nil -- a verdict with no timestamp cannot be told from a stale one")
+			}
+			if scanned.ProvenanceTrustRoot == "" {
+				t.Error("provenance_trust_root is empty -- verified against WHICH Sigstore is part of the claim")
+			}
+		})
+	}
+}
+
+// With no provenance scanner registered, the field stays unknown. That
+// is the state of every artifact in a deployment that never enabled
+// cosign, and it must not read as either verified or unsigned.
+func TestScanArtifact_NoProvenanceScannerLeavesItUnknown(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {&fakeScanner{}}})
+	a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	_, scanned := scanAndWait(t, h, store, a.ID)
+	if scanned.Provenance != artifact.ProvenanceUnknown {
+		t.Fatalf("provenance = %q, want unknown when nothing checked it", scanned.Provenance)
+	}
+	if scanned.ProvenanceCheckedAt != nil {
+		t.Error("provenance_checked_at was set without a check having run")
+	}
+}
+
+// Disabling cosign must not ERASE a verdict an earlier scan reached --
+// replacing "verified" with "unknown" would read as "we never looked"
+// and quietly discard the answer.
+func TestScanArtifact_LaterScanWithoutProvenanceKeepsTheVerdict(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{
+		artifact.TypeImage: {&fakeProvenanceScanner{status: artifact.ProvenanceVerified, trustRoot: "public Sigstore"}},
+	})
+	a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	_, scanned := scanAndWait(t, h, store, a.ID)
+	if scanned.Provenance != artifact.ProvenanceVerified {
+		t.Fatalf("first scan: provenance = %q", scanned.Provenance)
+	}
+
+	// Re-scan with cosign gone from the registry.
+	h2, _ := newTestRouterWithStore(store, scanner.Registry{artifact.TypeImage: {&fakeScanner{}}})
+	_, rescanned := scanAndWait(t, h2, store, a.ID)
+	if rescanned.Provenance != artifact.ProvenanceVerified {
+		t.Fatalf("provenance = %q after a scan with no provenance scanner, want the earlier verdict kept", rescanned.Provenance)
+	}
+}

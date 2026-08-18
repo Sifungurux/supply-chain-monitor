@@ -254,3 +254,12 @@ func newTestRouterWithFetcher(fetcher scanner.Fetcher, scanners scanner.Registry
 		Fetcher: fetcher,
 	}), store
 }
+
+// newTestRouterWithStore builds a router over an EXISTING store, so a
+// test can re-scan the same artifact through a different scanner
+// registry -- which is how "cosign was enabled, then disabled" is
+// expressed.
+func newTestRouterWithStore(store *artifact.MemStore, scanners scanner.Registry) (http.Handler, *artifact.MemStore) {
+	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
+	return api.NewRouter(api.Config{Store: store, Tracker: tracker, Scanners: scanners, APIKey: testAPIKey}), store
+}
