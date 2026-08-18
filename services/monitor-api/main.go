@@ -1500,6 +1500,48 @@ func runAPIServer() {
 	// dockerconfig.json files for it.
 	dockerConfigPath := writeDockerConfig(registryAddr, registryUsername, registryPassword)
 	inProcessUnpacker := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024, dockerConfigPath)
+	// Signature/SLSA-provenance verification (report H2). Runs
+	// IN-PROCESS rather than in an isolated Job: unlike trivy or
+	// unpacker it parses no untrusted artifact content -- it makes
+	// network calls and checks signatures -- so the isolation those
+	// need buys nothing here, and a Job per verification would triple
+	// the cost of a scan for no security gain.
+	//
+	// nil unless an identity AND issuer are configured; see
+	// NewSigstoreScanner for why verifying without them is worse than
+	// not verifying at all.
+	sigstoreScanner := scanner.NewSigstoreScanner(scanner.SigstoreConfig{
+		CertIdentityRegexp: os.Getenv("COSIGN_CERT_IDENTITY_REGEXP"),
+		CertOIDCIssuer:     os.Getenv("COSIGN_CERT_OIDC_ISSUER"),
+		RequireAttestation: getenvBool("COSIGN_REQUIRE_ATTESTATION", false),
+		TrustedRootPath:    os.Getenv("COSIGN_TRUSTED_ROOT"),
+		TUFMirror:          os.Getenv("COSIGN_TUF_MIRROR"),
+		TUFRootPath:        os.Getenv("COSIGN_TUF_ROOT"),
+		// Same directory grype is pointed at -- both use
+		// go-containerregistry's keychain, which reads config.json from
+		// DOCKER_CONFIG.
+		DockerConfigDir: cosignDockerConfigDir(dockerConfigPath),
+	})
+	if getenvBool("COSIGN_ENABLED", false) && sigstoreScanner == nil {
+		// Enabled but unusable. Refusing to start beats running with
+		// provenance checking silently absent -- an artifact list with
+		// no provenance findings would look like "everything is
+		// signed".
+		fatal("COSIGN_ENABLED is set but COSIGN_CERT_IDENTITY_REGEXP/COSIGN_CERT_OIDC_ISSUER are not -- " +
+			"verifying without them only proves somebody signed the image, which anybody can arrange")
+	}
+	if !getenvBool("COSIGN_ENABLED", false) {
+		sigstoreScanner = nil
+	}
+	if sigstoreScanner != nil {
+		// TUF initialisation happens once, here, rather than on a scan
+		// path: it writes a cache and talks to the mirror.
+		if err := sigstoreScanner.Initialize(context.Background()); err != nil {
+			fatal("could not initialise cosign against the configured Sigstore TUF mirror", "err", err)
+		}
+		slog.Info("provenance verification enabled", "trust_root", cosignTrustDescription())
+	}
+
 	inProcessTrivy := scanner.NewTrivyScanner(registryAddr, trivyDB)
 	var grypeDockerConfigDir string
 	if dockerConfigPath != "" {
@@ -1686,9 +1728,9 @@ func runAPIServer() {
 		// isolated into their own scan-worker Job by default, all
 		// falling back in-process together under DISABLE_SCAN_ISOLATION.
 		// See buildImageScanners/cveScannersFor.
-		artifact.TypeImage: buildImageScanners(disableScanIsolation, cveScanner, malwareScanner,
+		artifact.TypeImage: appendSigstore(buildImageScanners(disableScanIsolation, cveScanner, malwareScanner,
 			inProcessTrivy, isolatedTrivyImage, inProcessGrype, isolatedGrypeImage,
-			inProcessUnpacker, isolatedUnpacker, inProcessMalcontent, isolatedMalcontent),
+			inProcessUnpacker, isolatedUnpacker, inProcessMalcontent, isolatedMalcontent), sigstoreScanner),
 		artifact.TypeFile: {
 			scanner.NewFetchingScanner(fetcher, scanner.NewClamAVScanner(clamAddr)),
 		},
@@ -1954,4 +1996,40 @@ func legacyClientNameForLog(apiKey string) string {
 		return ""
 	}
 	return "default"
+}
+
+// appendSigstore adds the provenance scanner to the image type's list
+// when one is configured. Separate from buildImageScanners so that
+// function keeps its single job -- choosing between the isolated and
+// in-process variants of the CVE/malware scanners.
+func appendSigstore(scanners []scanner.Scanner, sigstoreScanner *scanner.SigstoreScanner) []scanner.Scanner {
+	if sigstoreScanner == nil {
+		return scanners
+	}
+	return append(scanners, sigstoreScanner)
+}
+
+// cosignTrustDescription names which Sigstore is in force, for the
+// startup log -- "public" versus a private deployment is the single
+// most consequential thing about this configuration, and the least
+// visible.
+func cosignTrustDescription() string {
+	switch {
+	case os.Getenv("COSIGN_TRUSTED_ROOT") != "":
+		return "private (trusted root " + os.Getenv("COSIGN_TRUSTED_ROOT") + ")"
+	case os.Getenv("COSIGN_TUF_MIRROR") != "":
+		return "private (TUF mirror " + os.Getenv("COSIGN_TUF_MIRROR") + ")"
+	default:
+		return "public Sigstore"
+	}
+}
+
+// cosignDockerConfigDir mirrors the grypeDockerConfigDir derivation:
+// DOCKER_CONFIG names a DIRECTORY containing config.json, while
+// writeDockerConfig returns the path to the file itself.
+func cosignDockerConfigDir(dockerConfigPath string) string {
+	if dockerConfigPath == "" {
+		return ""
+	}
+	return filepath.Dir(dockerConfigPath)
 }

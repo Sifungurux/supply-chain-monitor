@@ -20,6 +20,22 @@ data:
   # rather than the auth Secret because scopes are not credentials, and
   # that Secret rolls the pod on change via checksum/api-key.
   API_KEY_SCOPES: {{ include "supply-chain-monitor.apiKeyScopes" . | quote }}
+  # cosign signature/provenance verification (report H2). See
+  # monitorApi.cosign for the public-vs-private Sigstore choice.
+  COSIGN_ENABLED: {{ .Values.monitorApi.cosign.enabled | quote }}
+  COSIGN_CERT_IDENTITY_REGEXP: {{ .Values.monitorApi.cosign.certIdentityRegexp | quote }}
+  COSIGN_CERT_OIDC_ISSUER: {{ .Values.monitorApi.cosign.certOIDCIssuer | quote }}
+  COSIGN_REQUIRE_ATTESTATION: {{ .Values.monitorApi.cosign.requireAttestation | quote }}
+  {{- if .Values.monitorApi.cosign.trustedRootSecret }}
+  # Derived from trustedRootSecret rather than taken from
+  # cosign.trustedRoot, so the mount path and the path cosign is told
+  # about cannot drift apart.
+  COSIGN_TRUSTED_ROOT: "/etc/sigstore/trusted_root.json"
+  {{- else }}
+  COSIGN_TRUSTED_ROOT: {{ .Values.monitorApi.cosign.trustedRoot | quote }}
+  {{- end }}
+  COSIGN_TUF_MIRROR: {{ .Values.monitorApi.cosign.tufMirror | quote }}
+  COSIGN_TUF_ROOT: {{ .Values.monitorApi.cosign.tufRoot | quote }}
   LICENSE_DENYLIST: {{ .Values.monitorApi.licenseDenylist | quote }}
   # KEV/EPSS feed locations. Empty means the official sources (see
   # internal/scanner/enrich.go's defaults); set them to a mirror for an

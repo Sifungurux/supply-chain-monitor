@@ -113,6 +113,23 @@ ARG GRYPE_VERSION=0.116.1
 ARG GRYPE_SHA256_AMD64=0122df7b655981abe547ad3d2190d65551dac6a2bfc80b4dc2a989b5d0587458
 ARG GRYPE_SHA256_ARM64=a8d7504a149629324eb5f4ce3dc25dfd211bbfe047e64ee2bf7844b466c3d84d
 
+# github.com/sigstore/cosign: signature and SLSA-provenance attestation
+# verification (internal/scanner/sigstore.go), enabled per deployment
+# via monitorApi.cosign.enabled.
+#
+# v3, not v2, and that matters for how on-prem Sigstore is configured:
+# v3's `verify` dropped the --fulcio-url/--rekor-url flags in favour of
+# a single --trusted-root pointing at a Sigstore TrustedRoot JSON (or a
+# TUF mirror initialised into TUF_ROOT). Checked against the real binary
+# rather than assumed -- `cosign verify --help` on v3.1.3 has no
+# --rekor-url at all.
+#
+# Downloaded as a bare binary, not a tarball, which is why it is not in
+# the tar loop below.
+ARG COSIGN_VERSION=3.1.3
+ARG COSIGN_SHA256_AMD64=4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71
+ARG COSIGN_SHA256_ARM64=c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a
+
 RUN apk add --no-cache curl tar
 # CURL_OPTS: -f so an HTTP error is a failed build rather than an error
 # page saved as a .tar.gz, and --retry so a connection that dies
@@ -148,13 +165,15 @@ RUN set -eux; \
     case "$ARCH" in \
       amd64) TRIVY_ASSET="Linux-64bit"; \
              TRIVY_SHA="${TRIVY_SHA256_AMD64}"; ORAS_SHA="${ORAS_SHA256_AMD64}"; \
-             UNPACKER_SHA="${UNPACKER_SHA256_AMD64}"; GRYPE_SHA="${GRYPE_SHA256_AMD64}" ;; \
+             UNPACKER_SHA="${UNPACKER_SHA256_AMD64}"; GRYPE_SHA="${GRYPE_SHA256_AMD64}"; \
+             COSIGN_SHA="${COSIGN_SHA256_AMD64}" ;; \
       arm64) TRIVY_ASSET="Linux-ARM64"; \
              TRIVY_SHA="${TRIVY_SHA256_ARM64}"; ORAS_SHA="${ORAS_SHA256_ARM64}"; \
-             UNPACKER_SHA="${UNPACKER_SHA256_ARM64}"; GRYPE_SHA="${GRYPE_SHA256_ARM64}" ;; \
+             UNPACKER_SHA="${UNPACKER_SHA256_ARM64}"; GRYPE_SHA="${GRYPE_SHA256_ARM64}"; \
+             COSIGN_SHA="${COSIGN_SHA256_ARM64}" ;; \
       *) echo "unsupported architecture: ${ARCH} -- add its release checksums above before building for it" >&2; exit 1 ;; \
     esac; \
-    for sum in "$TRIVY_SHA" "$ORAS_SHA" "$UNPACKER_SHA" "$GRYPE_SHA"; do \
+    for sum in "$TRIVY_SHA" "$ORAS_SHA" "$UNPACKER_SHA" "$GRYPE_SHA" "$COSIGN_SHA"; do \
       [ -n "$sum" ] || { echo "empty expected checksum for ${ARCH}" >&2; exit 1; }; \
     done; \
     mkdir -p /out; \
@@ -170,8 +189,10 @@ RUN set -eux; \
     curl ${CURL_OPTS} -o /tmp/grype.tar.gz "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_${ARCH}.tar.gz"; \
     echo "${GRYPE_SHA}  /tmp/grype.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/grype.tar.gz -C /out grype; \
+    curl ${CURL_OPTS} -o /out/cosign "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-${ARCH}"; \
+    echo "${COSIGN_SHA}  /out/cosign" | sha256sum -c -; \
     rm -f /tmp/*.tar.gz; \
-    chmod 0755 /out/trivy /out/oras /out/unpacker /out/grype
+    chmod 0755 /out/trivy /out/oras /out/unpacker /out/grype /out/cosign
 
 # --- runtime stage ---
 # Alpine, not distroless, and that is a checked decision rather than an
@@ -209,6 +230,7 @@ COPY --from=tools       /out/trivy       /usr/local/bin/trivy
 COPY --from=tools       /out/oras        /usr/local/bin/oras
 COPY --from=tools       /out/unpacker    /usr/local/bin/unpacker
 COPY --from=tools       /out/grype       /usr/local/bin/grype
+COPY --from=tools       /out/cosign      /usr/local/bin/cosign
 COPY --from=build       /out/monitor-api /usr/local/bin/monitor-api
 COPY --from=umoci-build /out/umoci       /usr/local/bin/umoci
 
