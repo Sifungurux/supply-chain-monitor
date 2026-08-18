@@ -1057,3 +1057,113 @@ func TestCreateArtifact_ResolvedDigestStillWinsOverRef(t *testing.T) {
 		t.Fatalf("store holds %d artifacts, want 1", len(all))
 	}
 }
+
+// TestListArtifacts_SearchPagination covers ?q= end to end through the
+// handler: the filtered total, and -- the part that actually breaks --
+// q surviving into the Link header.
+//
+// A next link that dropped q would page from a SEARCH into the
+// unfiltered list, while X-Total-Count still described the search. The
+// rows and the count would disagree from page two onwards, and the
+// symptom is "the search stops working when I click next", which reads
+// as a UI bug rather than a missing query parameter.
+func TestListArtifacts_SearchPagination(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+
+	// Five matches and three that must never appear.
+	for _, ref := range []string{"reg/nginx:1", "reg/nginx:2", "reg/nginx:3", "reg/nginx:4", "reg/nginx:5"} {
+		mustCreate(t, store, ref, artifact.TypeImage)
+	}
+	for _, ref := range []string{"reg/redis:1", "reg/postgres:1", "reg/busybox:1"} {
+		mustCreate(t, store, ref, artifact.TypeImage)
+	}
+
+	rec := doJSON(t, h, http.MethodGet, "/api/v1/artifacts?limit=2&offset=0&q=nginx", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	page := decodeArtifactPage(t, rec)
+
+	// The count describes the SEARCH, not the whole store.
+	if page.Total != 5 {
+		t.Fatalf("total = %d, want 5 (the matching artifacts, not all 8)", page.Total)
+	}
+	if got := rec.Header().Get("X-Total-Count"); got != "5" {
+		t.Fatalf("X-Total-Count = %q, want %q", got, "5")
+	}
+	if len(page.Artifacts) != 2 {
+		t.Fatalf("page has %d artifacts, want 2", len(page.Artifacts))
+	}
+	for _, a := range page.Artifacts {
+		if !strings.Contains(a.Ref, "nginx") {
+			t.Fatalf("page contains %q, which does not match the search", a.Ref)
+		}
+	}
+
+	link := rec.Header().Get("Link")
+	if !strings.Contains(link, `rel="next"`) {
+		t.Fatalf("Link = %q, want a next link (5 matches, limit 2)", link)
+	}
+	if !strings.Contains(link, "q=nginx") {
+		t.Fatalf("Link = %q, want it to carry q=nginx -- otherwise next pages out of the search", link)
+	}
+
+	// Follow the next link for real rather than reconstructing it: the
+	// bug being guarded against is in what that URL says.
+	next := extractLinkURL(t, link, "next")
+	rec = doJSON(t, h, http.MethodGet, next, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("following next: status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	page2 := decodeArtifactPage(t, rec)
+	if page2.Total != 5 {
+		t.Fatalf("page 2 total = %d, want 5 -- the search must survive paging", page2.Total)
+	}
+	for _, a := range page2.Artifacts {
+		if !strings.Contains(a.Ref, "nginx") {
+			t.Fatalf("page 2 contains %q -- next paged out of the search", a.Ref)
+		}
+	}
+
+	// ...and the prev link from page 2 carries it back.
+	prev := extractLinkURL(t, rec.Header().Get("Link"), "prev")
+	if !strings.Contains(prev, "q=nginx") {
+		t.Fatalf("prev = %q, want it to carry q=nginx", prev)
+	}
+}
+
+// extractLinkURL pulls one rel's URL out of an RFC 5988 Link header.
+func extractLinkURL(t *testing.T, header, rel string) string {
+	t.Helper()
+	for _, part := range strings.Split(header, ", ") {
+		if !strings.Contains(part, `rel="`+rel+`"`) {
+			continue
+		}
+		start := strings.Index(part, "<")
+		end := strings.Index(part, ">")
+		if start < 0 || end < start {
+			t.Fatalf("malformed Link segment %q", part)
+		}
+		return part[start+1 : end]
+	}
+	t.Fatalf("no %q link in %q", rel, header)
+	return ""
+}
+
+// An unmatched search is an empty page with total 0, not an error.
+func TestListArtifacts_SearchWithNoMatches(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	rec := doJSON(t, h, http.MethodGet, "/api/v1/artifacts?q=no-such-artifact", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	page := decodeArtifactPage(t, rec)
+	if page.Total != 0 || len(page.Artifacts) != 0 {
+		t.Fatalf("total=%d artifacts=%d, want an empty page", page.Total, len(page.Artifacts))
+	}
+	if got := rec.Header().Get("X-Total-Count"); got != "0" {
+		t.Fatalf("X-Total-Count = %q, want %q", got, "0")
+	}
+}

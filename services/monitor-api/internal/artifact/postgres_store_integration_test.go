@@ -555,7 +555,7 @@ func TestPostgresStore_VEXSuppressionRoundTrips(t *testing.T) {
 
 	// ListPage, not List: it's the batch loader the dashboard's own poll
 	// goes through.
-	page, _, err := s.ListPage(100, 0, "", "")
+	page, _, err := s.ListPage(100, 0, "", "", "")
 	if err != nil {
 		t.Fatalf("ListPage: %v", err)
 	}
@@ -1013,7 +1013,7 @@ func TestPostgresStore_ListPage(t *testing.T) {
 	}
 
 	// Type filter: total counts all five matches, the page holds two.
-	page, total, err := s.ListPage(2, 0, "", string(artifact.TypeSARIF))
+	page, total, err := s.ListPage(2, 0, "", string(artifact.TypeSARIF), "")
 	if err != nil {
 		t.Fatalf("ListPage: %v", err)
 	}
@@ -1028,7 +1028,7 @@ func TestPostgresStore_ListPage(t *testing.T) {
 	// none missing.
 	seen := map[string]bool{}
 	for offset := 0; offset < total; offset += 2 {
-		p, _, err := s.ListPage(2, offset, "", string(artifact.TypeSARIF))
+		p, _, err := s.ListPage(2, offset, "", string(artifact.TypeSARIF), "")
 		if err != nil {
 			t.Fatalf("ListPage(offset=%d): %v", offset, err)
 		}
@@ -1047,7 +1047,7 @@ func TestPostgresStore_ListPage(t *testing.T) {
 
 	// Both filters together, and the batched child-loading still runs
 	// (Update above left a stage history behind to load).
-	page, total, err = s.ListPage(50, 0, string(artifact.StatusScanned), string(artifact.TypeSARIF))
+	page, total, err = s.ListPage(50, 0, string(artifact.StatusScanned), string(artifact.TypeSARIF), "")
 	if err != nil {
 		t.Fatalf("ListPage(status+type): %v", err)
 	}
@@ -1056,7 +1056,7 @@ func TestPostgresStore_ListPage(t *testing.T) {
 	}
 
 	// An offset past the end is an empty page, not an error.
-	page, total, err = s.ListPage(50, 500, "", string(artifact.TypeSARIF))
+	page, total, err = s.ListPage(50, 500, "", string(artifact.TypeSARIF), "")
 	if err != nil {
 		t.Fatalf("ListPage(offset past end): %v", err)
 	}
@@ -2100,7 +2100,7 @@ func TestPostgresStore_ListCarriesEnrichment(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 
-	page, _, err := s.ListPage(50, 0, "", "")
+	page, _, err := s.ListPage(50, 0, "", "", "")
 	if err != nil {
 		t.Fatalf("ListPage: %v", err)
 	}
@@ -2136,4 +2136,23 @@ func TestPostgresStore_ListCarriesEnrichment(t *testing.T) {
 			t.Error("known_exploited did not survive List() either")
 		}
 	}
+}
+
+// TestPostgresStore_ListPageSearch runs the SAME table MemStore is
+// checked against (search_test.go's SearchCases).
+//
+// ?q= is implemented twice -- strings.Contains in MemStore, ILIKE in
+// Postgres -- and every API test in this repo runs against MemStore
+// while production runs against Postgres. Two implementations of one
+// rule are only safe if something asserts they agree; otherwise the
+// search box behaves one way in tests and another in production, and
+// the tests are actively misleading.
+//
+// The escaping cases matter most here: strings.Contains has no
+// metacharacters, so "%" is literal for free in MemStore and only
+// Postgres can get it wrong.
+func TestPostgresStore_ListPageSearch(t *testing.T) {
+	s := newTestPostgresStore(t)
+	SeedSearchFixtures(t, s)
+	AssertSearch(t, s)
 }

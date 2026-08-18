@@ -32,7 +32,12 @@ type Store interface {
 	// Callers must pass limit >= 1 and offset >= 0 -- validating and
 	// bounding those is the HTTP layer's job (see maxListLimit), not
 	// something each Store re-implements.
-	ListPage(limit, offset int, statusFilter, typeFilter string) ([]*Artifact, int, error)
+	// ListPage is List plus filtering, paging and a total count.
+	// searchFilter is a case-insensitive SUBSTRING match across ref,
+	// digest, maintainer team/email and current stage -- the fields
+	// somebody actually remembers an artifact by. Empty means no
+	// search, not "match nothing".
+	ListPage(limit, offset int, statusFilter, typeFilter, searchFilter string) ([]*Artifact, int, error)
 	Update(id string, mutate func(*Artifact)) (*Artifact, error)
 	// FindByFindingID returns every artifact where findingID (e.g.
 	// "CVE-2024-1234") is ACTIVE, in any of the five buckets -- the
@@ -419,9 +424,12 @@ func (s *MemStore) List() ([]*Artifact, error) {
 // back in a different order on every call, and offset paging over an
 // unstable order silently skips and repeats rows. PostgresStore's
 // ListPage orders by the same two columns for the same reason.
-func (s *MemStore) ListPage(limit, offset int, statusFilter, typeFilter string) ([]*Artifact, int, error) {
+func (s *MemStore) ListPage(limit, offset int, statusFilter, typeFilter, searchFilter string) ([]*Artifact, int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// Lower-cased once rather than per artifact per field.
+	needle := strings.ToLower(strings.TrimSpace(searchFilter))
 
 	filtered := make([]*Artifact, 0, len(s.data))
 	for _, a := range s.data {
@@ -429,6 +437,9 @@ func (s *MemStore) ListPage(limit, offset int, statusFilter, typeFilter string) 
 			continue
 		}
 		if typeFilter != "" && string(a.Type) != typeFilter {
+			continue
+		}
+		if needle != "" && !matchesArtifactSearch(a, needle) {
 			continue
 		}
 		filtered = append(filtered, copyArtifact(a))
@@ -1225,4 +1236,23 @@ func (s *MemStore) EnrichmentStatus() (EnrichmentStatus, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.enrichmentStatus, nil
+}
+
+// matchesArtifactSearch is MemStore's half of ?q=, and must agree with
+// the ILIKE clause listFilterClause builds for Postgres -- same five
+// fields, same case-insensitive substring semantics. needle is already
+// lower-cased and trimmed.
+//
+// The two are separate implementations of one rule, which is only safe
+// because a test runs the same cases against both (see
+// TestListPageSearchAgreesAcrossStores). A search box that behaves
+// differently in tests than in production would be worse than not
+// having one.
+func matchesArtifactSearch(a *Artifact, needle string) bool {
+	for _, field := range []string{a.Ref, a.Digest, a.MaintainerTeam, a.MaintainerEmail, a.CurrentStage} {
+		if strings.Contains(strings.ToLower(field), needle) {
+			return true
+		}
+	}
+	return false
 }
