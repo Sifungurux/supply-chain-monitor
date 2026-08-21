@@ -659,9 +659,29 @@ a rebuild, so nothing else notices a new image is available.
   mounted with `SSL_CERT_DIR` — deliberately not `SSL_CERT_FILE`, which
   in Go *replaces* the system trust store and would stop `oras`,
   `trivy` and `grype` trusting public registries.
-  What is still not wired up is an **external** private registry: there
-  is no per-registry credential or CA configuration for pulling from,
-  say, a private GHCR or Harbor.
+  **External** private registries are now configurable too, via
+  `monitorApi.registryCredentials`: each entry names a host and either
+  inline credentials or an existing `kubernetes.io/dockerconfigjson`
+  Secret, plus an optional CA. Everything lands in ONE merged
+  `config.json` that every tool authenticates from — `oras` via
+  `--registry-config`, trivy/grype/cosign via `DOCKER_CONFIG`, unpacker
+  via `--config` — so a credential is scoped to its own host instead of
+  being offered to whatever registry a scan happens to touch. The merge
+  happens in the pod at startup rather than in the chart, because an
+  operator-managed Secret's contents are not readable at template time.
+  The same Secrets and CAs are mounted into every scan-worker Job, so
+  the isolated path authenticates identically.
+
+  Three things this does NOT do. It does not open network egress: a
+  registry on a private address or a non-standard port is still refused
+  by the scan-worker egress policy, which allows 80/443 to public
+  addresses only (see `templates/networkpolicy/scan-worker-egress.yaml`).
+  It does not map host names to docker's auth keys: `host` is used
+  verbatim, so Docker Hub must be written as
+  `https://index.docker.io/v1/`. And it does not verify that a
+  configured credential works — a wrong one degrades to an anonymous
+  pull, which against a public registry succeeds with fewer results
+  rather than failing.
 - Scan concurrency is now cluster-wide: slots are rows in a `scan_slots`
   table rather than a buffered channel per process, so two monitor-api
   replicas share one budget instead of each allowing a full

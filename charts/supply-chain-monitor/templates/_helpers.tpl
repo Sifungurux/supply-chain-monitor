@@ -68,3 +68,45 @@ changed.
 {{- $value -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+supply-chain-monitor.registryAuthSecrets renders the names of every
+Secret holding a docker config for a non-scm registry, comma-separated
+and sorted.
+
+Two sources, one list: the Secret this chart renders from inline
+credentials, and every Secret an operator manages themselves. The
+consumers cannot tell them apart and should not -- both are mounted into
+the same directory and merged in the pod (main.go's mergeRegistryAuths).
+
+Sorted so the value is stable run to run; an unstable env var would roll
+monitor-api on every reconcile for no reason.
+*/}}
+{{- define "supply-chain-monitor.registryAuthSecrets" -}}
+{{- $names := list -}}
+{{- range .Values.monitorApi.registryCredentials -}}
+{{- if .username -}}
+{{- $names = append $names "scm-registry-credentials-inline" -}}
+{{- else if .existingDockerConfigSecret -}}
+{{- $names = append $names .existingDockerConfigSecret -}}
+{{- end -}}
+{{- end -}}
+{{- join "," ($names | uniq | sortAlpha) -}}
+{{- end -}}
+
+{{/*
+supply-chain-monitor.extraCASecrets renders the names of every Secret
+holding an additional registry CA, comma-separated and sorted. Same
+shape and same reasoning as registryAuthSecrets above.
+*/}}
+{{- define "supply-chain-monitor.extraCASecrets" -}}
+{{- $names := list -}}
+{{- range .Values.monitorApi.registryCredentials -}}
+{{- if .ca -}}
+{{- $names = append $names "scm-registry-extra-cas" -}}
+{{- else if .caSecret -}}
+{{- $names = append $names .caSecret.name -}}
+{{- end -}}
+{{- end -}}
+{{- join "," ($names | uniq | sortAlpha) -}}
+{{- end -}}

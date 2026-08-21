@@ -963,6 +963,62 @@ monitorApi:
   # one switch instead of a trade-off. See
   # internal/scanner/insecuretransport.go.
   fetchPlainHTTP: "false"
+  # Credentials for registries OTHER than the in-cluster scm-registry.
+  #
+  # scm-registry's own account is not listed here and never needs to be:
+  # it is derived from dockerAuth.accounts.reader (see
+  # templates/monitor-api/registry-credentials-secret.yaml) so the
+  # cleartext monitor-api presents and the bcrypt hash docker_auth
+  # checks cannot drift apart. This list is purely additive.
+  #
+  # Every entry ends up as one host in a single merged docker
+  # config.json, which is what each tool authenticates from: oras via
+  # --registry-config, trivy/grype/cosign via DOCKER_CONFIG, unpacker
+  # via --config. Credentials are therefore scoped to their host -- a
+  # scan of a ghcr.io image offers ghcr.io's entry and nothing else.
+  #
+  # host is used VERBATIM as the auths key, because that is what the
+  # docker CLI itself writes and what every one of those tools looks
+  # up. Docker Hub is the one host whose key is not its hostname:
+  # write it as "https://index.docker.io/v1/".
+  #
+  # Each entry is either inline credentials:
+  #
+  #   - host: ghcr.io
+  #     username: my-bot
+  #     password: ghp_xxx
+  #
+  # or a Secret you manage yourself, in the standard
+  # kubernetes.io/dockerconfigjson shape (what `kubectl create secret
+  # docker-registry` produces) -- the host inside it is whatever you
+  # put there, and this chart neither reads nor validates it:
+  #
+  #   - existingDockerConfigSecret: ghcr-pull-secret
+  #
+  # An optional CA for a registry with a private issuer, either inline
+  # PEM or an existing Secret. It is mounted ALONGSIDE the public roots
+  # via SSL_CERT_DIR, never replacing them -- see
+  # internal/k8sjob/job.go for why SSL_CERT_FILE would break every
+  # public-image scan:
+  #
+  #   - host: registry.internal:5000
+  #     username: svc
+  #     password: hunter2
+  #     ca: |
+  #       -----BEGIN CERTIFICATE-----
+  #       ...
+  #   - host: other.internal
+  #     existingDockerConfigSecret: other-pull-secret
+  #     caSecret:
+  #       name: other-ca
+  #       key: ca.crt
+  #
+  # Merging happens in the pod at startup, not here, and that is forced
+  # rather than chosen: an existingDockerConfigSecret's contents are not
+  # readable at template time (`lookup` returns nil under `helm
+  # template`), so a chart-side merge would silently render an empty
+  # auths map. See main.go's mergeRegistryAuths.
+  registryCredentials: []
   # A real policy change, not a quiet default: false preserves today's
   # behavior exactly (expected_digest on POST /api/v1/artifacts is
   # optional, checked only if provided, and a mismatch refuses the whole
