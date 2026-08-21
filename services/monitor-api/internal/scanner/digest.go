@@ -56,6 +56,12 @@ type DigestResolver interface {
 type OrasDigestResolver struct {
 	username string
 	password string
+	// registryConfigPath, when set, is the merged docker config file
+	// (main.go's writeDockerConfig) handed to oras via
+	// --registry-config. It supersedes username/password: it holds the
+	// same credentials keyed by host, which is the only shape that
+	// works once more than one registry is configured.
+	registryConfigPath string
 }
 
 // NewOrasDigestResolver builds a resolver. Empty credentials mean
@@ -63,6 +69,16 @@ type OrasDigestResolver struct {
 // scm-registry.
 func NewOrasDigestResolver(username, password string) *OrasDigestResolver {
 	return &OrasDigestResolver{username: username, password: password}
+}
+
+// NewOrasDigestResolverWithConfig builds a resolver that authenticates
+// from a merged docker config instead of a single credential pair.
+//
+// Kept as a second constructor rather than a fifth argument on the
+// first: every existing caller and test passes the pair, and the two
+// are alternatives rather than a combination.
+func NewOrasDigestResolverWithConfig(registryConfigPath string) *OrasDigestResolver {
+	return &OrasDigestResolver{registryConfigPath: registryConfigPath}
 }
 
 // orasDescriptor is the subset of `oras manifest fetch --descriptor`'s
@@ -153,14 +169,22 @@ func (r *OrasDigestResolver) args(ref string, plainHTTP bool) []string {
 	if plainHTTP {
 		args = append(args, "--plain-http")
 	}
-	// Credentials go in argv rather than a config file, matching how
-	// RegistryFetcher already does it. Not ideal -- argv is visible in
-	// the pod's process list -- but consistent, and the alternative is a
-	// second dockerconfig write path for one command.
+	// --registry-config takes a docker-shaped auth file, so one file
+	// covers every configured registry and each credential is scoped to
+	// its own host. It also keeps the password out of argv, which the
+	// --username/--password pair below could never do -- argv is
+	// visible in the pod's process list. Verified against the real oras
+	// binary that it accepts a docker config.json and authenticates
+	// from it, rather than assumed from the flag's name.
 	//
-	// Empty username means anonymous: a public registry rejects an
-	// empty --username outright rather than ignoring it.
-	if r.username != "" {
+	// The pair remains for callers that never got a config path (the
+	// single-registry constructor, and every test). Empty username
+	// means anonymous: a public registry rejects an empty --username
+	// outright rather than ignoring it.
+	switch {
+	case r.registryConfigPath != "":
+		args = append(args, "--registry-config", r.registryConfigPath)
+	case r.username != "":
 		args = append(args, "--username", r.username, "--password", r.password)
 	}
 	// "--" ends flag parsing, so even a ref that somehow reached here

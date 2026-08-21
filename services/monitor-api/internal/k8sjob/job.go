@@ -13,6 +13,8 @@ package k8sjob
 import (
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 )
 
 // Job is a minimal representation of a batch/v1 Job manifest -- just
@@ -396,8 +398,16 @@ func NewScanJob(cfg ScanJobConfig) *Job {
 	// each caller so the two cannot drift apart -- a mounted CA nothing
 	// points at is silently useless, and the failure looks like a TLS
 	// error rather than a missing variable.
-	if registryCASecret() != "" {
-		env = append(env, EnvVar{Name: "SSL_CERT_DIR", Value: "/etc/ssl/certs:/ca"})
+	if dirs := caCertDirs(); len(dirs) > 0 {
+		env = append(env, EnvVar{Name: "SSL_CERT_DIR", Value: strings.Join(append([]string{"/etc/ssl/certs"}, dirs...), ":")})
+	}
+	// The merged docker config the chart mounts (registryAuthVolumes),
+	// pointed at by the same name every consumer reads. Set here for
+	// the same reason SSL_CERT_DIR is: a mount nothing points at is
+	// silently useless, and the failure is a 401 at scan time rather
+	// than anything visible when the Job starts.
+	if len(registryAuthSecrets()) > 0 {
+		env = append(env, EnvVar{Name: "REGISTRY_AUTH_DIR", Value: registryAuthMountRoot})
 	}
 	for _, sev := range cfg.SecretEnvVars {
 		env = append(env, EnvVar{
@@ -459,12 +469,12 @@ func NewScanJob(cfg ScanJobConfig) *Job {
 							},
 							VolumeMounts: append(append([]VolumeMount{
 								{Name: "scratch", MountPath: "/tmp"},
-							}, registryCAMount()...), cfg.ExtraVolumeMounts...),
+							}, append(append(registryCAMount(), extraCAMounts()...), registryAuthMounts()...)...), cfg.ExtraVolumeMounts...),
 						},
 					},
 					Volumes: append(append([]Volume{
 						scratchVolume(cfg),
-					}, registryCAVolume()...), cfg.ExtraVolumes...),
+					}, append(append(registryCAVolume(), extraCAVolumes()...), registryAuthVolumes()...)...), cfg.ExtraVolumes...),
 				},
 			},
 		},
@@ -477,6 +487,98 @@ func NewScanJob(cfg ScanJobConfig) *Job {
 // ScanJobConfig: all four isolated scanners build their job here, so
 // injecting centrally means a new scanner cannot forget it.
 func registryCASecret() string { return os.Getenv("SCAN_WORKER_REGISTRY_CA_SECRET") }
+
+// registryAuthMountRoot is where every configured registry's docker
+// config is mounted, one subdirectory per Secret. main.go's
+// mergeRegistryAuths walks it and merges what it finds; the layout is
+// per-Secret because two Secrets cannot share a mount path.
+const registryAuthMountRoot = "/etc/scm/registry-auth"
+
+// registryAuthSecrets and extraCASecrets name the Secrets the chart
+// asks for, comma-separated. Read from the environment for the same
+// reason registryCASecret is: all four isolated scanners build their
+// Job here, so injecting centrally means a new scanner cannot forget
+// credentials or a CA.
+func registryAuthSecrets() []string {
+	return splitSecretList(os.Getenv("SCAN_WORKER_REGISTRY_AUTH_SECRETS"))
+}
+
+func extraCASecrets() []string { return splitSecretList(os.Getenv("SCAN_WORKER_EXTRA_CA_SECRETS")) }
+
+func splitSecretList(v string) []string {
+	var out []string
+	for _, name := range strings.Split(v, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// caCertDirs lists every directory SSL_CERT_DIR should name, in mount
+// order. SSL_CERT_DIR is a colon-separated list and Go reads every file
+// in each entry, so extra CAs get their own directory rather than being
+// merged into one Secret -- the scm CA is issued by cert-manager and
+// its contents are not the chart's to copy.
+func caCertDirs() []string {
+	var dirs []string
+	if registryCASecret() != "" {
+		dirs = append(dirs, "/ca")
+	}
+	for i := range extraCASecrets() {
+		dirs = append(dirs, extraCADir(i))
+	}
+	return dirs
+}
+
+func extraCADir(i int) string { return "/ca-extra-" + strconv.Itoa(i) }
+
+func registryAuthVolumes() []Volume {
+	var vols []Volume
+	for _, name := range registryAuthSecrets() {
+		vols = append(vols, Volume{
+			Name: "registry-auth-" + name,
+			// Projected to "config.json" specifically: a
+			// kubernetes.io/dockerconfigjson Secret's only key is
+			// ".dockerconfigjson", and go-containerregistry's keychain
+			// looks for a file called "config.json". Mounting the key
+			// under its own name would leave every pull anonymous with
+			// no error anywhere.
+			Secret: &SecretVolume{SecretName: name, Items: []KeyToPath{{Key: ".dockerconfigjson", Path: "config.json"}}},
+		})
+	}
+	return vols
+}
+
+func registryAuthMounts() []VolumeMount {
+	var mounts []VolumeMount
+	for _, name := range registryAuthSecrets() {
+		mounts = append(mounts, VolumeMount{
+			Name:      "registry-auth-" + name,
+			MountPath: registryAuthMountRoot + "/" + name,
+			ReadOnly:  true,
+		})
+	}
+	return mounts
+}
+
+func extraCAVolumes() []Volume {
+	var vols []Volume
+	for i, name := range extraCASecrets() {
+		// No Items filter: an extra-CA Secret may carry a PEM per
+		// registry, and SSL_CERT_DIR reads every file in the directory.
+		vols = append(vols, Volume{Name: "extra-ca-" + strconv.Itoa(i), Secret: &SecretVolume{SecretName: name}})
+	}
+	return vols
+}
+
+func extraCAMounts() []VolumeMount {
+	var mounts []VolumeMount
+	for i := range extraCASecrets() {
+		mounts = append(mounts, VolumeMount{Name: "extra-ca-" + strconv.Itoa(i), MountPath: extraCADir(i), ReadOnly: true})
+	}
+	return mounts
+}
 
 // registryCAVolume/registryCAMount mount that CA into every scan worker.
 //

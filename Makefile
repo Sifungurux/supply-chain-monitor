@@ -510,3 +510,8 @@ helm-template:
 	@# NetworkPolicy in front of it -- see the script for the three times
 	@# this repo has shipped one that was not.
 	docker run --rm -v "$(CURDIR)":/src -w /src --entrypoint sh alpine/helm:4.2.0 -c "apk add --no-cache python3 py3-yaml >/dev/null && python3 cluster/check-postgres-netpol.py"
+	@# A two-registry values file must render a merged docker config that
+	@# is actually usable -- see the script for the three ways it can be
+	@# wrong while `helm template` still exits 0, every one of which
+	@# degrades to an anonymous pull rather than an error.
+	docker run --rm -v "$(CURDIR)":/src -w /src --entrypoint sh alpine/helm:4.2.0 -c "apk add --no-cache python3 py3-yaml >/dev/null && python3 cluster/check-registry-credentials.py"

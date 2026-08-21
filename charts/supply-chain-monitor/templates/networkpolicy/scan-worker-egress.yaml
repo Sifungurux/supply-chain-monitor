@@ -103,6 +103,24 @@ spec:
     # cgr.dev), so an egress policy without this would fail every scan
     # it has.
     #
+    # This rule is also the ceiling on monitorApi.registryCredentials.
+    # Configuring credentials for another registry does NOT open a path
+    # to it, and the two failures look nothing alike: a public registry
+    # on 443 needs no change here, while a registry on a private address
+    # (an internal Harbor, a mirror on the node network) is inside the
+    # `except` list below and denied at the network layer, and one on a
+    # non-standard port (:5000, the shape scm-registry itself uses) is
+    # denied because only 80 and 443 are allowed. Neither reads as a
+    # policy problem from the pod: the scan fails with a connection
+    # timeout that looks like the registry being down.
+    #
+    # There is deliberately no values switch that opens either one.
+    # Reaching a private-network registry means narrowing
+    # networkPolicy.blockedEgressCIDRs, which is a decision about what
+    # this pod may reach on the internal network -- the pod that unpacks
+    # untrusted images -- and it should be made explicitly, per
+    # deployment, rather than implied by having typed a credential.
+    #
     # The `except` list is the actual security content: it denies the
     # cloud instance-metadata service (169.254.169.254, inside
     # 169.254.0.0/16), the kube-apiserver (ClusterIP 10.43.0.1 and the

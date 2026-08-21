@@ -124,8 +124,40 @@ spec:
             # than per-scanner, so a new scanner cannot forget it.
             - name: SCAN_WORKER_REGISTRY_CA_SECRET
               value: scm-ca-tls
+{{- end }}
+{{- $authSecrets := splitList "," (include "supply-chain-monitor.registryAuthSecrets" . | default "") }}
+{{- $caSecrets := splitList "," (include "supply-chain-monitor.extraCASecrets" . | default "") }}
+{{- $authSecrets = without $authSecrets "" }}
+{{- $caSecrets = without $caSecrets "" }}
+{{- $certDirs := list "/etc/ssl/certs" }}
+{{- if .Values.registry.tls.enabled }}
+{{- $certDirs = append $certDirs "/ca" }}
+{{- end }}
+{{- range $i, $_ := $caSecrets }}
+{{- $certDirs = append $certDirs (printf "/ca-extra-%d" $i) }}
+{{- end }}
+{{- if gt (len $certDirs) 1 }}
+            # Every directory holding a private CA, joined the way
+            # SSL_CERT_DIR expects. The list is built rather than
+            # hard-coded because an extra registry CA can be configured
+            # with registry.tls disabled -- gating this on that flag
+            # would mount CAs nothing points at, which fails as a TLS
+            # error rather than a missing variable.
             - name: SSL_CERT_DIR
-              value: /etc/ssl/certs:/ca
+              value: {{ join ":" $certDirs | quote }}
+{{- end }}
+{{- if $authSecrets }}
+            # Where the merged docker config sources are mounted, and
+            # the same names passed through to every scan-worker Job so
+            # the isolated path authenticates identically to this pod.
+            - name: REGISTRY_AUTH_DIR
+              value: /etc/scm/registry-auth
+            - name: SCAN_WORKER_REGISTRY_AUTH_SECRETS
+              value: {{ join "," $authSecrets | quote }}
+{{- end }}
+{{- if $caSecrets }}
+            - name: SCAN_WORKER_EXTRA_CA_SECRETS
+              value: {{ join "," $caSecrets | quote }}
 {{- end }}
             - name: TRUSTED_PROXY_CIDRS
               # Falls back to networkPolicy.nodeCIDRs so the cluster's
@@ -143,10 +175,12 @@ spec:
                   # still starts -- the binary treats absent as "no
                   # named keys", which is the pre-feature behaviour.
                   optional: true
-            # Authenticates this pod's own in-process pull paths
-            # (RegistryFetcher, UnpackerScanner's generated
-            # dockerconfig.json, trivy's native TRIVY_USERNAME/PASSWORD)
-            # against scm-registry's token-auth -- see main.go's
+            # scm-registry's own entry in the merged docker config
+            # every pull path authenticates from (main.go's
+            # mergeRegistryAuths). Additional registries come from
+            # monitorApi.registryCredentials and are mounted, not
+            # env-injected -- there is no env shape for N hosts.
+            # Authenticates against scm-registry's token-auth -- see main.go's
             # runAPIServer and docs/architecture.md's registry-auth
             # section. registry-credentials-secret.yaml is the read-only
             # scm-reader account; monitor-api never pushes.
@@ -215,6 +249,16 @@ spec:
               mountPath: /ca
               readOnly: true
 {{- end }}
+{{- range $name := $authSecrets }}
+            - name: registry-auth-{{ $name }}
+              mountPath: /etc/scm/registry-auth/{{ $name }}
+              readOnly: true
+{{- end }}
+{{- range $i, $name := $caSecrets }}
+            - name: extra-ca-{{ $i }}
+              mountPath: /ca-extra-{{ $i }}
+              readOnly: true
+{{- end }}
 {{- if and .Values.postgres.tls.enabled .Values.postgres.tls.verify }}
             - name: postgres-ca
               mountPath: /postgres-ca
@@ -247,6 +291,29 @@ spec:
             items:
               - key: ca.crt
                 path: scm-ca.crt
+{{- end }}
+{{- range $name := $authSecrets }}
+        - name: registry-auth-{{ $name }}
+          secret:
+            secretName: {{ $name }}
+            # Projected to "config.json" deliberately: a
+            # kubernetes.io/dockerconfigjson Secret's only key is
+            # ".dockerconfigjson", and go-containerregistry's keychain
+            # (trivy, grype, cosign) looks for a file called
+            # "config.json". Under any other name the mount is present,
+            # readable, and ignored -- every pull goes out anonymous
+            # with nothing logged.
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+{{- end }}
+{{- range $i, $name := $caSecrets }}
+        - name: extra-ca-{{ $i }}
+          # No items filter: an operator-supplied CA Secret may carry a
+          # PEM per registry, and SSL_CERT_DIR reads every file in the
+          # directory it names.
+          secret:
+            secretName: {{ $name }}
 {{- end }}
 {{- if and .Values.postgres.tls.enabled .Values.postgres.tls.verify }}
         # Separate from registry-ca even though it is the same CA

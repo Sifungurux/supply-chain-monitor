@@ -43,10 +43,22 @@ type RegistryFetcher struct {
 	// empty means no credentials, the original behavior from before
 	// registry auth existed.
 	Username, Password string
+	// RegistryConfigPath, when set, is the merged docker config file
+	// (main.go's writeDockerConfig) passed to oras via
+	// --registry-config, and supersedes Username/Password: it carries
+	// the same credentials keyed by host, which is what makes more than
+	// one registry possible at all.
+	RegistryConfigPath string
 }
 
 func NewRegistryFetcher(plainHTTP bool, username, password string) *RegistryFetcher {
 	return &RegistryFetcher{PlainHTTP: plainHTTP, Username: username, Password: password}
+}
+
+// NewRegistryFetcherWithConfig builds a fetcher that authenticates from
+// a merged docker config rather than one credential pair.
+func NewRegistryFetcherWithConfig(plainHTTP bool, registryConfigPath string) *RegistryFetcher {
+	return &RegistryFetcher{PlainHTTP: plainHTTP, RegistryConfigPath: registryConfigPath}
 }
 
 // looksLikeLocalPath distinguishes "ref is meant as a path inside the
@@ -228,7 +240,15 @@ func (f *RegistryFetcher) pullArgs(ref, dir string) []string {
 	if f.PlainHTTP && InsecureTransportAllowed(ref) {
 		args = append(args, "--plain-http")
 	}
-	if f.Username != "" {
+	// One docker-shaped file covers every configured registry, each
+	// credential scoped to its own host -- and keeps the password out
+	// of argv, which is visible in the pod's process list. See
+	// OrasDigestResolver.args for the same switch and why the pair
+	// stays behind it.
+	switch {
+	case f.RegistryConfigPath != "":
+		args = append(args, "--registry-config", f.RegistryConfigPath)
+	case f.Username != "":
 		args = append(args, "--username", f.Username, "--password", f.Password)
 	}
 	// "--" ends flag parsing, so even a ref that somehow reached here

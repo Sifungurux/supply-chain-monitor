@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"log/slog"
 	"net/http"
@@ -85,29 +86,93 @@ func getenvFloat(key string, fallback float64) float64 {
 	return f
 }
 
-// buildDockerConfigJSON returns the docker CLI config.json content (an
-// "auths" map, the same shape ~/.docker/config.json uses) unpacker's
-// own --config flag expects -- the file-based credential mechanism
-// unpacker takes, alongside oras's --username/--password flags
-// (fetch.go) and trivy's native TRIVY_USERNAME/TRIVY_PASSWORD env vars,
-// all three authenticating against the same scm-registry account. See
+// singleAuth is the in-cluster registry's "auths" entry -- the one
+// credential that arrives as an env pair rather than as a mounted
+// Secret, because the chart derives it from dockerAuth.accounts.reader
+// (templates/monitor-api/registry-credentials-secret.yaml) instead of
+// from monitorApi.registryCredentials. Same shape as every other entry;
+// mergeRegistryAuths folds it in alongside them. See
 // docs/architecture.md's registry-auth section.
-func buildDockerConfigJSON(registryAddr, username, password string) []byte {
-	auth := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
-	cfg := map[string]any{
-		"auths": map[string]any{
-			registryAddr: map[string]string{
-				"username": username,
-				"password": password,
-				"auth":     auth,
-			},
-		},
+func singleAuth(registryAddr, username, password string) map[string]any {
+	if username == "" {
+		return map[string]any{}
 	}
-	b, _ := json.Marshal(cfg) // map[string]any of only strings/maps of strings never fails to marshal
-	return b
+	return map[string]any{registryAddr: map[string]string{
+		"username": username,
+		"password": password,
+		"auth":     base64.StdEncoding.EncodeToString([]byte(username + ":" + password)),
+	}}
 }
 
-// writeDockerConfig writes buildDockerConfigJSON's output to a file
+// dockerConfigFileNames are the two names a mounted registry credential
+// can arrive under: "config.json" is what a docker CLI config uses, and
+// ".dockerconfigjson" is the key -- and therefore the file name -- of a
+// kubernetes.io/dockerconfigjson Secret mounted as a volume. Both hold
+// the same JSON shape, so both are read.
+var dockerConfigFileNames = map[string]bool{"config.json": true, ".dockerconfigjson": true}
+
+// mergeRegistryAuths merges the legacy single-registry credential pair
+// with every docker config mounted under authDir, and returns the
+// combined "auths" map.
+//
+// The merge happens HERE, at runtime, rather than in the chart, and
+// that is a deliberate constraint rather than a preference: an entry
+// naming a Secret the operator manages themselves (an existing
+// ghcr.io pull secret, say) has contents Helm cannot see. `lookup`
+// returns nil under `helm template`, so a chart-side merge would render
+// an empty auths map in exactly the case CI renders -- a test that
+// certifies nothing. Mounting each source and merging them in the pod
+// is the only shape where an externally-managed Secret works at all.
+//
+// Files are merged in sorted path order and a later host entry wins, so
+// the result does not depend on directory iteration order. The legacy
+// pair goes first: an explicitly configured entry for the same host is
+// meant to override the account the chart derives from dockerAuth.
+func mergeRegistryAuths(registryAddr, username, password, authDir string) map[string]any {
+	auths := singleAuth(registryAddr, username, password)
+
+	var paths []string
+	if authDir != "" {
+		// A missing directory is the normal "no extra registries
+		// configured" case, not an error -- WalkDir reports it through
+		// the callback, which skips it below.
+		_ = filepath.WalkDir(authDir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil //nolint:nilerr // an unreadable entry is skipped, not fatal -- see below
+			}
+			if !d.IsDir() && dockerConfigFileNames[d.Name()] {
+				paths = append(paths, path)
+			}
+			return nil
+		})
+	}
+	sort.Strings(paths)
+
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			// Skipped rather than fatal, but LOUDLY: a credential that
+			// silently fails to load turns into a 401 from a registry
+			// at scan time, which is a much harder thing to trace back
+			// to a mount than one line at startup.
+			slog.Error("registry auth: could not read mounted docker config", "path", path, "err", err)
+			continue
+		}
+		var cfg struct {
+			Auths map[string]json.RawMessage `json:"auths"`
+		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			slog.Error("registry auth: mounted docker config is not valid JSON", "path", path, "err", err)
+			continue
+		}
+		for host, entry := range cfg.Auths {
+			auths[host] = entry
+		}
+	}
+	return auths
+}
+
+// writeDockerConfig writes the merged "auths" map to a file
 // named "config.json" inside a fresh temp directory, and returns that
 // file's path -- unpacker's --config flag needs a real file path, not
 // inline JSON. Returns "" when username is empty (the "no registry
@@ -130,8 +195,9 @@ func buildDockerConfigJSON(registryAddr, username, password string) []byte {
 // "config.json" specifically -- confirmed against the real grype
 // binary. unpacker's own --config flag is unaffected by this shape
 // change: it already took a full file path either way.
-func writeDockerConfig(registryAddr, username, password string) string {
-	if username == "" {
+func writeDockerConfig(registryAddr, username, password, authDir string) string {
+	auths := mergeRegistryAuths(registryAddr, username, password, authDir)
+	if len(auths) == 0 {
 		return ""
 	}
 	dir, err := os.MkdirTemp("", "scm-dockerconfig-*")
@@ -139,11 +205,68 @@ func writeDockerConfig(registryAddr, username, password string) string {
 		fatal("could not create the docker config temp dir", "err", err)
 	}
 	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, buildDockerConfigJSON(registryAddr, username, password), 0o600); err != nil {
+	body, _ := json.Marshal(map[string]any{"auths": auths})
+	if err := os.WriteFile(path, body, 0o600); err != nil {
 		fatal("could not write the docker config temp file", "err", err)
 	}
+	hosts := make([]string, 0, len(auths))
+	for h := range auths {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+	// Hosts only, never the credentials themselves. Which registries
+	// this pod can authenticate to is the thing an operator needs to
+	// confirm from a log line, and it is the thing that silently
+	// disagrees with values.yaml when a mount is wrong.
+	slog.Info("registry auth: docker config written", "hosts", hosts, "path", path)
 	return path
 }
+
+// registryFetcher and digestResolverFor pick between the merged docker
+// config and the legacy single credential pair.
+//
+// Both exist so the choice is made in ONE place per type rather than at
+// each of the four call sites: a call site that forgot the config path
+// would fall back to scm-registry's account and 401 against every other
+// registry, which surfaces as a failed scan rather than anything
+// visible at startup.
+func registryFetcher(plainHTTP bool, dockerConfigPath, username, password string) *scanner.RegistryFetcher {
+	if dockerConfigPath != "" {
+		return scanner.NewRegistryFetcherWithConfig(plainHTTP, dockerConfigPath)
+	}
+	return scanner.NewRegistryFetcher(plainHTTP, username, password)
+}
+
+func digestResolverFor(dockerConfigPath, username, password string) *scanner.OrasDigestResolver {
+	if dockerConfigPath != "" {
+		return scanner.NewOrasDigestResolverWithConfig(dockerConfigPath)
+	}
+	return scanner.NewOrasDigestResolver(username, password)
+}
+
+// exportDockerConfig points DOCKER_CONFIG at the directory holding the
+// merged config.json, so every tool this process execs authenticates
+// from it without each call site having to pass anything.
+//
+// DOCKER_CONFIG names a DIRECTORY containing a file literally called
+// "config.json" -- go-containerregistry's keychain looks for that exact
+// name, which is why writeDockerConfig builds a directory rather than a
+// bare temp file. Process-wide on purpose: the alternative is every
+// exec site remembering to set it, and the failure mode of forgetting
+// is an anonymous pull that 401s at scan time rather than anything
+// visible at startup.
+func exportDockerConfig(dockerConfigPath string) {
+	if dockerConfigPath == "" {
+		return
+	}
+	os.Setenv("DOCKER_CONFIG", filepath.Dir(dockerConfigPath))
+}
+
+// registryAuthDir is the directory the chart mounts each configured
+// registry's credentials under, one subdirectory per Secret. Read from
+// the environment so a local run without the chart simply finds
+// nothing there and falls back to the legacy single-registry pair.
+func registryAuthDir() string { return getenv("REGISTRY_AUTH_DIR", "/etc/scm/registry-auth") }
 
 // buildPostgresDSN assembles a "postgres://..." connection string from
 // individual POSTGRES_* env vars. POSTGRES_DSN, if set, wins outright --
@@ -387,6 +510,15 @@ func runScanWorker() {
 	// constructor argument.
 	scanner.VerboseScanLogs = getenvBool("SCM_SCAN_VERBOSE", false)
 
+	// One merged docker config for this whole Job, exported as
+	// DOCKER_CONFIG so every tool the branches below exec inherits it:
+	// trivy, grype and cosign all read go-containerregistry's keychain
+	// from it, and unpacker takes the same file through --config. Set
+	// here rather than per-branch so a new scan tool cannot be added
+	// without credentials.
+	workerDockerConfigPath := writeDockerConfig(getenv("REGISTRY_ADDR", ""), os.Getenv("REGISTRY_USERNAME"), os.Getenv("REGISTRY_PASSWORD"), registryAuthDir())
+	exportDockerConfig(workerDockerConfigPath)
+
 	// Matches the scan timeout the API server itself used to apply
 	// in-process (see internal/api/scan.go) -- the Job's own
 	// activeDeadlineSeconds (the Job template built in internal/k8sjob,
@@ -442,7 +574,7 @@ func runScanWorker() {
 			// it fetches its own copy first via the same RegistryFetcher
 			// the in-process path uses (internal/scanner/fetch.go). See
 			// docs/architecture.md ("Isolating SBOM trivy scanning").
-			fetcher := scanner.NewRegistryFetcher(getenvBool("FETCH_PLAIN_HTTP", true), os.Getenv("REGISTRY_USERNAME"), os.Getenv("REGISTRY_PASSWORD"))
+			fetcher := registryFetcher(getenvBool("FETCH_PLAIN_HTTP", true), workerDockerConfigPath, os.Getenv("REGISTRY_USERNAME"), os.Getenv("REGISTRY_PASSWORD"))
 			path, cleanup, fetchErr := fetcher.Fetch(ctx, ref)
 			defer cleanup()
 			if fetchErr != nil {
@@ -472,7 +604,7 @@ func runScanWorker() {
 		// turned out not to actually work (see grype.go's registryEnv
 		// comment), so this dockerconfig.json + DOCKER_CONFIG is the
 		// real mechanism.
-		dockerConfigPath := writeDockerConfig(getenv("REGISTRY_ADDR", ""), os.Getenv("REGISTRY_USERNAME"), os.Getenv("REGISTRY_PASSWORD"))
+		dockerConfigPath := workerDockerConfigPath
 		var dockerConfigDir string
 		if dockerConfigPath != "" {
 			dockerConfigDir = filepath.Dir(dockerConfigPath)
@@ -482,7 +614,7 @@ func runScanWorker() {
 		} else {
 			// sbom mode: same fetch-then-scan shape as trivy's sbom
 			// branch above -- see that branch's comment.
-			fetcher := scanner.NewRegistryFetcher(plainHTTP, os.Getenv("REGISTRY_USERNAME"), os.Getenv("REGISTRY_PASSWORD"))
+			fetcher := registryFetcher(plainHTTP, workerDockerConfigPath, os.Getenv("REGISTRY_USERNAME"), os.Getenv("REGISTRY_PASSWORD"))
 			path, cleanup, fetchErr := fetcher.Fetch(ctx, ref)
 			defer cleanup()
 			if fetchErr != nil {
@@ -498,7 +630,7 @@ func runScanWorker() {
 		unpackerInsecure := getenvBool("UNPACKER_INSECURE", true)
 		unpackerPublic := getenvBool("UNPACKER_PUBLIC", true)
 		unpackerMaxFileMB := getenvInt("UNPACKER_MAX_FILE_MB", 100)
-		dockerConfigPath := writeDockerConfig(getenv("REGISTRY_ADDR", ""), os.Getenv("REGISTRY_USERNAME"), os.Getenv("REGISTRY_PASSWORD"))
+		dockerConfigPath := workerDockerConfigPath
 
 		s := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024, dockerConfigPath)
 		findings, scanErr = s.Scan(ctx, ref)
@@ -1238,25 +1370,34 @@ func runAPIServer() {
 
 	// REGISTRY_USERNAME/PASSWORD authenticate every registry-facing pull
 	// path (oras via RegistryFetcher, unpacker via a generated
-	// dockerconfig.json, trivy via its own native TRIVY_USERNAME/
-	// TRIVY_PASSWORD env vars set on isolated_trivy.go's scan-worker
-	// Jobs) against scm-registry's token-auth -- see
+	// dockerconfig.json, and trivy/grype/cosign via DOCKER_CONFIG)
+	// against scm-registry's token-auth -- see
 	// docs/architecture.md's registry-auth section. Empty (the default
 	// before registry auth existed) means every one of those falls back
 	// to unauthenticated behavior unchanged.
 	registryUsername := os.Getenv("REGISTRY_USERNAME")
 	registryPassword := os.Getenv("REGISTRY_PASSWORD")
-	// trivy reads its own native TRIVY_USERNAME/TRIVY_PASSWORD env vars
-	// directly (os/exec inherits this process's environment automatically,
-	// no explicit flag/arg needed -- see trivy.go's ScanRaw). Only
-	// actually exercised when DISABLE_SCAN_ISOLATION runs TrivyScanner
-	// in-process below; harmless to set unconditionally otherwise, since
-	// the isolated path's own scan-worker Jobs get these set independently
-	// via isolated_trivy.go's SecretEnvVars.
-	if registryUsername != "" {
-		os.Setenv("TRIVY_USERNAME", registryUsername)
-		os.Setenv("TRIVY_PASSWORD", registryPassword)
-	}
+	// trivy is NOT given TRIVY_USERNAME/TRIVY_PASSWORD any more, and
+	// that is the point rather than an omission. Those two are applied
+	// to whatever registry trivy happens to talk to -- measured against
+	// a probe registry that the credentials were never configured for:
+	// they authenticated it. With one registry that was merely untidy;
+	// with several it means scm-registry's account is offered to
+	// ghcr.io, docker.io and every other host a scan touches.
+	//
+	// DOCKER_CONFIG carries the same credentials keyed BY HOST, and
+	// trivy honours it -- confirmed against the real binary: with the
+	// pair unset and DOCKER_CONFIG pointing at a merged config, an
+	// authenticated pull succeeds; with neither, it fails. It is
+	// exported once dockerConfigPath exists, below.
+
+	// Computed once, here, and reused by every registry-facing path
+	// below: unpacker's --config, oras's --registry-config, and
+	// grype/trivy/cosign's DOCKER_CONFIG. One merged file rather than
+	// one per consumer -- they all authenticate against the same set of
+	// registries, and a second write path is a second thing to forget.
+	dockerConfigPath := writeDockerConfig(registryAddr, registryUsername, registryPassword, registryAuthDir())
+	exportDockerConfig(dockerConfigPath)
 
 	// unpacker (github.com/Sifungurux/unpacker) config, passed through
 	// to each scan-worker Job's env -- see IsolatedUnpackerScanner.
@@ -1443,7 +1584,12 @@ func runAPIServer() {
 	// first. image artifacts don't need this: unpacker and trivy both
 	// already fetch the image themselves. See internal/scanner/fetch.go.
 	fetchPlainHTTP := getenvBool("FETCH_PLAIN_HTTP", true)
-	fetcher := scanner.NewRegistryFetcher(fetchPlainHTTP, registryUsername, registryPassword)
+	// The merged docker config rather than the single pair: it holds
+	// every configured registry's credentials keyed by host, so a
+	// file/sbom/sarif ref naming ghcr.io authenticates with ghcr.io's
+	// entry instead of scm-registry's. Falls back to the pair when
+	// nothing is configured -- writeDockerConfig returns "" then.
+	fetcher := registryFetcher(fetchPlainHTTP, dockerConfigPath, registryUsername, registryPassword)
 
 	// Announced at startup for the same reason DISABLE_SCAN_ISOLATION is
 	// (below): it re-enables a convention that is off by default because
@@ -1494,11 +1640,6 @@ func runAPIServer() {
 	// registry. See docs/architecture.md and README's "Running
 	// monitor-api outside a Kubernetes pod".
 	disableScanIsolation := getenvBool("DISABLE_SCAN_ISOLATION", false)
-	// Computed once and reused for both unpacker's --config flag and
-	// grype's DOCKER_CONFIG below -- both authenticate against the same
-	// scm-registry account, no reason to write two separate temp
-	// dockerconfig.json files for it.
-	dockerConfigPath := writeDockerConfig(registryAddr, registryUsername, registryPassword)
 	inProcessUnpacker := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024, dockerConfigPath)
 	// Signature/SLSA-provenance verification (report H2). Runs
 	// IN-PROCESS rather than in an isolated Job: unlike trivy or
@@ -1783,7 +1924,7 @@ func runAPIServer() {
 	// fetchPlainHTTP is the same flag already computed for fetcher, not
 	// a second config surface -- see NewRouter's own comment for why
 	// image refs never use it regardless of this setting.
-	digestResolver := scanner.NewOrasDigestResolver(registryUsername, registryPassword)
+	digestResolver := digestResolverFor(dockerConfigPath, registryUsername, registryPassword)
 
 	// REQUIRE_DIGEST -- see NewRouter's own comment for the full
 	// behavior this gates. Off by default: turning it on is a real

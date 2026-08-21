@@ -349,3 +349,91 @@ func TestNewScanJob_RegistryCA(t *testing.T) {
 		}
 	})
 }
+
+// TestNewScanJob_MountsEveryConfiguredRegistryCredential covers the
+// isolated half of multi-registry support. The in-pod path and the Job
+// path authenticate from the same merged config, and the Job gets its
+// half through mounts -- a Job that silently lacked them would scan
+// with anonymous pulls and report a clean, empty result rather than an
+// error.
+func TestNewScanJob_MountsEveryConfiguredRegistryCredential(t *testing.T) {
+	t.Setenv("SCAN_WORKER_REGISTRY_AUTH_SECRETS", "ghcr-pull-secret,scm-registry-credentials-inline")
+
+	job := NewScanJob(ScanJobConfig{Name: "scm-scan-x", Namespace: "scm"})
+	c := job.Spec.Template.Spec.Containers[0]
+
+	for _, name := range []string{"ghcr-pull-secret", "scm-registry-credentials-inline"} {
+		wantPath := "/etc/scm/registry-auth/" + name
+		if !hasMountPath(c.VolumeMounts, wantPath) {
+			t.Errorf("no volume mounted at %q: %+v", wantPath, c.VolumeMounts)
+		}
+		if !hasSecretVolume(job.Spec.Template.Spec.Volumes, name) {
+			t.Errorf("no volume sourced from Secret %q: %+v", name, job.Spec.Template.Spec.Volumes)
+		}
+	}
+
+	// The key projection is load-bearing, not cosmetic:
+	// go-containerregistry looks for a file called "config.json", and a
+	// dockerconfigjson Secret's only key is ".dockerconfigjson". Mount
+	// it under its own name and every pull goes out anonymous with
+	// nothing logged anywhere.
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Secret == nil || v.Secret.SecretName != "ghcr-pull-secret" {
+			continue
+		}
+		if len(v.Secret.Items) != 1 || v.Secret.Items[0].Path != "config.json" {
+			t.Errorf("credential Secret not projected to config.json: %+v", v.Secret.Items)
+		}
+	}
+
+	if !hasEnv(c.Env, "REGISTRY_AUTH_DIR", "/etc/scm/registry-auth") {
+		t.Errorf("REGISTRY_AUTH_DIR not set to the mount root: %+v", c.Env)
+	}
+}
+
+// TestNewScanJob_SSLCertDirNamesEveryCADir is the mounted-but-unpointed-at
+// failure this file's own comment warns about: SSL_CERT_DIR used to be
+// gated on the scm registry CA alone, so an extra registry CA
+// configured with registry TLS off would mount and be ignored -- a TLS
+// error at scan time rather than anything visible at startup.
+func TestNewScanJob_SSLCertDirNamesEveryCADir(t *testing.T) {
+	t.Setenv("SCAN_WORKER_REGISTRY_CA_SECRET", "")
+	t.Setenv("SCAN_WORKER_EXTRA_CA_SECRETS", "internal-ca")
+
+	job := NewScanJob(ScanJobConfig{Name: "scm-scan-x", Namespace: "scm"})
+	c := job.Spec.Template.Spec.Containers[0]
+
+	if !hasEnv(c.Env, "SSL_CERT_DIR", "/etc/ssl/certs:/ca-extra-0") {
+		t.Errorf("SSL_CERT_DIR does not name the extra CA dir: %+v", c.Env)
+	}
+	if !hasMountPath(c.VolumeMounts, "/ca-extra-0") {
+		t.Errorf("extra CA not mounted: %+v", c.VolumeMounts)
+	}
+}
+
+func hasMountPath(mounts []VolumeMount, path string) bool {
+	for _, m := range mounts {
+		if m.MountPath == path {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSecretVolume(vols []Volume, secretName string) bool {
+	for _, v := range vols {
+		if v.Secret != nil && v.Secret.SecretName == secretName {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEnv(env []EnvVar, name, value string) bool {
+	for _, e := range env {
+		if e.Name == name && e.Value == value {
+			return true
+		}
+	}
+	return false
+}
