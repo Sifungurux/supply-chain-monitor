@@ -15,9 +15,10 @@ This guide is task-oriented: what each feature is *for*, and how to wire it into
 5. [Living with findings](#5-living-with-findings)
 6. [Fleet questions](#6-fleet-questions)
 7. [Tekton integration](#7-tekton-integration)
-8. [Connecting your own registries](#8-connecting-your-own-registries)
-9. [When a result looks too clean](#9-when-a-result-looks-too-clean)
-10. [Endpoint reference](#10-endpoint-reference)
+8. [Chart configuration: turning features on and off](#8-chart-configuration)
+9. [Connecting your own registries](#9-connecting-your-own-registries)
+10. [When a result looks too clean](#10-when-a-result-looks-too-clean)
+11. [Endpoint reference](#11-endpoint-reference)
 
 ---
 
@@ -255,7 +256,7 @@ curl -s -X POST localhost:18080/api/v1/artifacts "${AUTH[@]}" \
 ```
 → `HTTP 400`
 
-There is a NetworkPolicy floor under this too — the application check bounds the string, the policy refuses the packet regardless of what any binary decided to do with it. If you genuinely have an internal registry, `REF_HOST_ALLOWLIST` is the deliberate opt-in, and it needs a matching egress change (see [§8](#8-connecting-your-own-registries)).
+There is a NetworkPolicy floor under this too — the application check bounds the string, the policy refuses the packet regardless of what any binary decided to do with it. If you genuinely have an internal registry, `REF_HOST_ALLOWLIST` is the deliberate opt-in, and it needs a matching egress change (see [§9](#9-connecting-your-own-registries)).
 
 ---
 
@@ -628,7 +629,164 @@ Nothing here is Tekton-specific beyond the YAML. The same four steps are four `c
 
 ---
 
-## 8. Connecting your own registries
+## 8. Chart configuration
+
+Everything is a value in `charts/supply-chain-monitor/values.yaml`. This section is the map: what each switch turns on, **what actually disappears when you turn it off**, and which ones cost you more than they look like they do.
+
+The "removes" column below is measured, not read off the templates — each row was produced by rendering the chart twice and diffing the objects:
+
+```bash
+helm template scm charts/supply-chain-monitor --set networkPolicy.enabled=false
+```
+
+### How to apply values
+
+Two shapes, depending on how the release is managed.
+
+**Flux (how this cluster runs):** the HelmRelease carries `values:` inline and `valuesFrom:` for anything secret. Edit `k8s/releases/supply-chain-monitor-helmrelease.yaml`, commit, push — Flux reconciles. A secret never goes in that file; it goes in the Secret that `valuesFrom` points at.
+
+**Direct Helm:**
+
+```bash
+helm upgrade --install scm charts/supply-chain-monitor -n supply-chain-monitor -f my-values.yaml
+```
+
+> **One caveat that has bitten this repo.** A comma inside a value reaches Flux through Helm's `strvals` parser, where a comma is a delimiter — a comma-separated value set through `valuesFrom` with a `targetPath` is torn apart before Helm sees it. `monitorApi.apiKeys` uses semicolons for exactly this reason.
+
+### Feature switches
+
+Defaults are the chart's, not this cluster's — a HelmRelease can and does override them.
+
+| Value | Default | On/off turns this on or off | What actually appears or disappears |
+| --- | --- | --- | --- |
+| `networkPolicy.enabled` | `true` | the L3 floor under everything | 3 NetworkPolicies: `scm-monitor-api`, `scm-postgres-ingress`, `scm-scan-worker-egress` |
+| `registry.tls.enabled` | `true` | HTTPS on the in-cluster registry and its token endpoint | Certificates `scm-registry-tls`, `scm-docker-auth-tls` |
+| `postgres.tls.enabled` | `true` | TLS to the database | Certificate `scm-postgres-tls` |
+| `postgres.backup.enabled` | `true` | nightly `pg_dump` | CronJob `scm-postgres-backup`, its primer Job, and the backups PVC |
+| `clamav.autoscaling.enabled` | `true` | scaling malware scanning with load | HPA `scm-clamav` |
+| `monitorApi.enrichment.enabled` | `true` | CISA KEV + FIRST EPSS on findings | CronJob `scm-enrich-refresh` |
+| `monitorApi.sweep.enabled` | `true` | picking up artifacts that need a rescan | CronJob `scm-sweep-registered` |
+| `monitorApi.retention.enabled` | `false` | deleting artifacts older than `retention.days` | CronJob `scm-prune` |
+| `monitorApi.serviceMonitor.enabled` | `false` | Prometheus Operator scraping | ServiceMonitor `monitor-api` |
+| `monitorApi.prometheusRule.enabled` | `false` | the shipped alert rules | PrometheusRule `monitor-api` |
+| `monitorApi.cosign.enabled` | `false` | signature + SLSA provenance verification | nothing — env only (see the trap below) |
+| `gateway.api.enabled` | `true` | routing the API through the Gateway | HTTPRoute `scm-api` |
+| `gateway.tls.enabled` | `true` | TLS at the Gateway + HTTP→HTTPS redirect | Certificate `scm-gateway-tls`, HTTPRoute `scm-https-redirect` |
+| `dockerAuth.existingSecret` | `false` | *bring your own* registry credentials | removes Secrets `scm-docker-auth-config` **and** `scm-registry-credentials` — the chart stops rendering both halves together, deliberately |
+| `monitorApi.requireDigest` | `false` | `expected_digest` mandatory at registration | env only |
+| `monitorApi.disableScanIsolation` | `false` | running scans **in the API pod** instead of isolated Jobs | env only — a documented hardening downgrade for local dev |
+| `monitorApi.scanFreshness.autoRescan` | `true` | the sweep actually rescanning, rather than only reporting staleness | env only |
+| `monitorApi.localArtifacts.enabled` | `"false"` | accepting filesystem paths as refs | env only (`ALLOW_LOCAL_ARTIFACT_PATHS`) |
+| `dashboard.allowManualRegistration` | `false` | the dashboard's register form | env only |
+
+### Switches that are off by being empty
+
+Not every toggle is a boolean. These are disabled by their zero value, which is easy to miss when scanning a values file for `enabled:`:
+
+| Value | Off when | Turns on |
+| --- | --- | --- |
+| `monitorApi.maxArtifacts` | `0` | a cap on how many artifacts can exist (403 at the cap) |
+| `monitorApi.rateLimit.requestsPerSecond` | `0` | request rate limiting |
+| `monitorApi.licenseDenylist` | `""` | license findings from SBOM components |
+| `monitorApi.refHostAllowlist` | `""` | permitting refs that the private-IP checks would otherwise refuse |
+| `monitorApi.notifications.webhookURL` / `.slackURL` | `""` | outbound notifications |
+| `monitorApi.registryCredentials` | `[]` | credentials for registries beyond the in-cluster one ([§9](#9-connecting-your-own-registries)) |
+| `monitorApi.pluggableScanners` | `[]` | additional scanners |
+| `monitorApi.scanScratch.storageClass` | `""` | per-Job PVCs instead of node-disk `emptyDir` |
+| `monitorApi.cosign.trustedRootSecret` | `""` | verifying against a **private** Sigstore rather than the public one |
+
+### Choosing scanners
+
+```yaml
+monitorApi:
+  cveScanner: both        # trivy | grype | both
+  malwareScanner: clamav  # clamav | malcontent | both
+```
+
+`cveScanner: trivy` removes the grype DB primer Job and refresh CronJob. `cveScanner: grype` removes **nothing** — the trivy DB cache keeps refreshing, and that asymmetry is deliberate rather than an oversight:
+
+> ⚠️ **Turning trivy off costs more than CVEs.** The CycloneDX SBOM and SARIF documents are derived from *trivy's* raw image report (`captureImageDocuments` in `main.go`, `captureDocuments` in `internal/api/scan.go` — both take a trivy report; the grype branch calls `Scan`, not `ScanWithRaw`). Component indexing is triggered **by that document arriving**. So `cveScanner: grype` also costs you the SBOM, the component inventory, the component-diff endpoint, and license findings — and every scan still looks completely healthy while those features quietly do nothing.
+>
+> This is not hypothetical: the same gap already shipped once on the `disableScanIsolation` path, where image scans produced no SBOM at all.
+
+If you want grype's findings without losing all that, use `both`.
+
+### Secrets: three "bring your own" switches
+
+The chart generates credentials by default and hands them to the things that need them. Each can be replaced with one you manage:
+
+| Value | Chart stops rendering | You must provide |
+| --- | --- | --- |
+| `dockerAuth.existingSecret: true` | `scm-docker-auth-config` **and** `scm-registry-credentials` | both halves — the bcrypt hashes docker_auth checks, and the cleartext monitor-api presents |
+| `postgres.credentials.existingSecret: true` | the Postgres credentials Secret | `scm-postgres-credentials` |
+| `monitorApi.apiKeyExistingSecret: true` | `scm-monitor-api-auth` | a Secret with an `API_KEY` key |
+
+The docker-auth pair is one switch on purpose. Managing one externally while the chart renders the other from values it no longer has produces two objects that look fine and disagree — the symptom is 401s from the registry with nothing obviously wrong.
+
+### Two traps worth knowing
+
+**A feature that is off and a feature that is broken render identically.** `cosign.enabled: true` adds no Kubernetes object — it is environment only. If the identity and issuer are missing, monitor-api **refuses to start**, which is the intended behaviour: an artifact list with no provenance findings would otherwise look like "everything is signed". Check the pod, not the dashboard.
+
+**String-typed defaults accept real booleans.** Some values are quoted strings in `values.yaml` (`fetchPlainHTTP: "false"`, `unpacker.insecure: "false"`, `localArtifacts.enabled: "false"`) because they become env vars. Setting a genuine YAML `true` works — verified:
+
+```
+--set monitorApi.fetchPlainHTTP=true       -> FETCH_PLAIN_HTTP: "true"
+--set monitorApi.unpacker.insecure=true    -> UNPACKER_INSECURE: "true"
+--set monitorApi.localArtifacts.enabled=true -> ALLOW_LOCAL_ARTIFACT_PATHS: "true"
+```
+
+**But `registry.tls.enabled` and `unpacker.insecure` are not linked**, and that pair is a real footgun: `--insecure` is unpacker's own switch and the chart cannot know what a differently-configured registry needs. Turn registry TLS off and you must set `unpacker.insecure: "true"` yourself, or image pulls fail.
+
+### Check your values before you apply them
+
+The technique used to build the table above works for any change — render, and diff the objects:
+
+```bash
+helm template scm charts/supply-chain-monitor > /tmp/before.yaml
+helm template scm charts/supply-chain-monitor -f my-values.yaml > /tmp/after.yaml
+diff /tmp/before.yaml /tmp/after.yaml
+```
+
+`make helm-template` goes further: it renders the chart and fails on documents missing `apiVersion`, on any Postgres client not admitted by the NetworkPolicy in front of it, and on a two-registry credential file that renders an unusable docker config. `make helm-lint` is the structural check.
+
+### A worked override
+
+Turning on the things that are off by default, for a deployment that has somewhere to send alerts:
+
+```yaml
+monitorApi:
+  # cap the fleet and shed load rather than falling over
+  maxArtifacts: 500
+  rateLimit:
+    requestsPerSecond: 20
+    burst: 40
+  # delete artifacts nobody has touched in a quarter, dry-run first
+  retention:
+    enabled: true
+    days: 90
+    dryRun: true
+  # scrape and alert
+  serviceMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: true
+  # refuse anything whose digest the build did not pin
+  requireDigest: true
+  policy:
+    disallowUnsafe: true
+    maxSeverity:
+      malware: none
+    requireScanWithinDays: 2
+  notifications:
+    slackURL: ""   # set via valuesFrom, not here
+    minSeverity: high
+```
+
+Note `retention.dryRun: true`. Retention deletes; run it in dry-run for a cycle and read the logs before letting it act.
+
+---
+
+## 9. Connecting your own registries
 
 **Solves:** the monitor scans public images out of the box, but yours are in a private GHCR, Harbor or ECR that needs credentials — and possibly a private CA.
 
@@ -662,7 +820,7 @@ For the in-cluster registry's own auth, see [README § Registry authentication](
 
 ---
 
-## 9. When a result looks too clean
+## 10. When a result looks too clean
 
 A short list of results that look like good news and aren't. Each has a concrete thing to check.
 
@@ -698,7 +856,7 @@ Check `last_scan_at` actually moved. A rescan of an artifact that is already fre
 
 ---
 
-## 10. Endpoint reference
+## 11. Endpoint reference
 
 Full schemas: [`services/monitor-api/internal/api/openapi.yaml`](../services/monitor-api/internal/api/openapi.yaml), served live at `/openapi.yaml` with Swagger UI at **`/swagger`** — both without a key, deliberately, for the same reason `/healthz` needs none: they describe the API's shape, not its contents. (`/docs` is **not** a route; it 404s.)
 
@@ -745,6 +903,7 @@ Values as deployed on the cluster these examples ran against:
 | --- | --- |
 | §3 core loop, §4 gate, §5 findings, §6 fleet | Executed against the live cluster; every output pasted from the run |
 | §7 Tekton | Tekton Pipelines installed in the dev cluster; Tasks and Pipeline applied; PipelineRun and a failing TaskRun both executed |
+| §8 chart configuration | Every "what disappears" measured by rendering the chart twice and diffing the objects; the string-vs-bool renderings taken from `helm template --set` output. **The trivy/SBOM coupling was read from the code, not executed** — the claim is that `cveScanner: grype` produces no SBOM, and this cluster runs `both` |
 | §8 registry credentials | Mechanism verified against an htpasswd registry with anonymous controls; **the chart values have not authenticated a real second registry in a cluster** |
 | §9 malware `files_scanned` | Observed in a live scan-worker Job log (`files_scanned: 15530`) |
 | §9 provenance | Read from the live ConfigMap (`COSIGN_ENABLED = false`); the enabled path was not exercised |
