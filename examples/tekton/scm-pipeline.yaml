@@ -1,0 +1,64 @@
+# Supply Chain Monitor — the Pipeline the Tasks are for.
+#
+# Order matters and is expressed with runAfter rather than left to
+# Tekton's dependency inference: staging and scanning both only need the
+# artifact id, so without runAfter they would run concurrently and the
+# stage history would record "test" before the scan that justified it.
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: scm-scan-and-gate
+spec:
+  description: >-
+    Register a built image, record the stage it reached, scan it, and
+    refuse to continue unless it passes policy.
+  params:
+    - name: image
+      type: string
+    - name: expected-digest
+      type: string
+      default: ""
+    - name: stage
+      type: string
+      default: build
+  results:
+    - name: artifact-id
+      value: $(tasks.register.results.artifact-id)
+    - name: digest
+      value: $(tasks.register.results.digest)
+  tasks:
+    - name: register
+      taskRef:
+        name: scm-register
+      params:
+        - name: image
+          value: $(params.image)
+        - name: expected-digest
+          value: $(params.expected-digest)
+
+    - name: stage
+      taskRef:
+        name: scm-stage
+      runAfter: [register]
+      params:
+        - name: artifact-id
+          value: $(tasks.register.results.artifact-id)
+        - name: stage
+          value: $(params.stage)
+
+    - name: scan
+      taskRef:
+        name: scm-scan
+      runAfter: [stage]
+      params:
+        - name: artifact-id
+          value: $(tasks.register.results.artifact-id)
+
+    - name: gate
+      taskRef:
+        name: scm-gate
+      runAfter: [scan]
+      params:
+        - name: artifact-id
+          value: $(tasks.register.results.artifact-id)
