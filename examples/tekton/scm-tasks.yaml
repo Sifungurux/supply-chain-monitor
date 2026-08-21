@@ -1,0 +1,247 @@
+# Supply Chain Monitor — Tekton Tasks
+#
+# Four small Tasks that mirror what a build pipeline already does:
+# register what you built, say where it is, scan it, and refuse to
+# promote it if policy says no.
+#
+# They talk to monitor-api over the in-cluster Service, so the
+# PipelineRun must run in a namespace the monitor-api ingress
+# NetworkPolicy admits -- in-namespace pods are admitted, which is why
+# the examples run in supply-chain-monitor itself.
+#
+# The API key comes from the Secret the chart already creates. Nothing
+# here needs a key of its own.
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: scm-register
+spec:
+  description: >-
+    Register a built image with Supply Chain Monitor and emit its
+    artifact id for later Tasks.
+  params:
+    - name: image
+      type: string
+      description: Image reference, e.g. registry/org/app:1.2.3
+    - name: expected-digest
+      type: string
+      description: >-
+        The digest your build produced. When set, registration is
+        REFUSED with 409 if the registry resolves the ref to anything
+        else -- that is the tag-moved-under-you check.
+      default: ""
+    - name: api
+      type: string
+      default: http://monitor-api.supply-chain-monitor.svc.cluster.local:8080
+  results:
+    - name: artifact-id
+      description: The registered artifact's id.
+    - name: digest
+      description: The digest monitor-api resolved for the ref.
+  steps:
+    - name: register
+      image: public.ecr.aws/docker/library/alpine:3.20
+      env:
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: scm-monitor-api-auth
+              key: API_KEY
+      script: |
+        #!/bin/sh
+        set -eu
+        apk add --no-cache curl jq >/dev/null
+
+        if [ -n "$(params.expected-digest)" ]; then
+          body=$(jq -nc --arg r "$(params.image)" --arg d "$(params.expected-digest)" \
+            '{ref:$r, type:"image", expected_digest:$d}')
+        else
+          body=$(jq -nc --arg r "$(params.image)" '{ref:$r, type:"image"}')
+        fi
+
+        # -w writes the status code on its own line after the body, so one
+        # request gives both. A 409 here is a real answer, not a transport
+        # failure, so it must not be swallowed by curl -f.
+        out=$(curl -sS -w '\n%{http_code}' -X POST "$(params.api)/api/v1/artifacts" \
+          -H "Authorization: Bearer ${API_KEY}" \
+          -H 'Content-Type: application/json' \
+          -d "$body")
+        code=$(printf '%s' "$out" | tail -n1)
+        json=$(printf '%s' "$out" | sed '$d')
+
+        # Two different things return 409, and a pipeline must not treat
+        # them the same way. Found by running this Task against an image
+        # that was already registered.
+        #
+        #   - "this digest is already registered" carries
+        #     existing_artifact_id. Rebuilding an unchanged image is
+        #     normal, so adopt that id and carry on.
+        #   - a digest MISMATCH carries resolved_digest instead: the ref
+        #     resolves to something other than what the build produced.
+        #     That is the tag-moved-under-you case and it must stop the
+        #     pipeline.
+        case "$code" in
+          200|201) ;;
+          409)
+            existing=$(printf '%s' "$json" | jq -r '.existing_artifact_id // empty')
+            if [ -n "$existing" ]; then
+              echo "already registered as $existing -- reusing it"
+              printf '%s' "$existing" > "$(results.artifact-id.path)"
+              printf '%s' "$json" | jq -r .digest | tr -d '\n' > "$(results.digest.path)"
+              exit 0
+            fi
+            echo "REFUSED: $json" >&2
+            echo "The registry resolved this ref to a different digest than the build produced." >&2
+            exit 1 ;;
+          *)
+            echo "register failed (HTTP $code): $json" >&2
+            exit 1 ;;
+        esac
+
+        printf '%s' "$json" | jq -r .id     | tr -d '\n' > "$(results.artifact-id.path)"
+        printf '%s' "$json" | jq -r .digest | tr -d '\n' > "$(results.digest.path)"
+        echo "registered $(params.image) as $(printf '%s' "$json" | jq -r .id)"
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: scm-stage
+spec:
+  description: Record that an artifact reached a pipeline stage.
+  params:
+    - name: artifact-id
+      type: string
+    - name: stage
+      type: string
+      description: One of the configured PIPELINE_STAGES, e.g. build, test, deploy.
+    - name: api
+      type: string
+      default: http://monitor-api.supply-chain-monitor.svc.cluster.local:8080
+  steps:
+    - name: stage
+      image: public.ecr.aws/docker/library/alpine:3.20
+      env:
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: scm-monitor-api-auth
+              key: API_KEY
+      script: |
+        #!/bin/sh
+        set -eu
+        apk add --no-cache curl jq >/dev/null
+        curl -fsS -X POST "$(params.api)/api/v1/artifacts/$(params.artifact-id)/stage" \
+          -H "Authorization: Bearer ${API_KEY}" \
+          -H 'Content-Type: application/json' \
+          -d "$(jq -nc --arg s "$(params.stage)" '{stage:$s}')" \
+          | jq -r '"\(.id) is now at stage \(.current_stage)"'
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: scm-scan
+spec:
+  description: >-
+    Trigger a scan and wait for it to finish. Scanning is asynchronous --
+    POST /scan returns 202 and the work happens in separate Kubernetes
+    Jobs -- so a pipeline that wants results has to poll for them.
+  params:
+    - name: artifact-id
+      type: string
+    - name: timeout-seconds
+      type: string
+      default: "600"
+    - name: api
+      type: string
+      default: http://monitor-api.supply-chain-monitor.svc.cluster.local:8080
+  results:
+    - name: status
+      description: The artifact's status when polling stopped.
+  steps:
+    - name: scan-and-wait
+      image: public.ecr.aws/docker/library/alpine:3.20
+      env:
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: scm-monitor-api-auth
+              key: API_KEY
+      script: |
+        #!/bin/sh
+        set -eu
+        apk add --no-cache curl jq >/dev/null
+        auth="Authorization: Bearer ${API_KEY}"
+        art="$(params.api)/api/v1/artifacts/$(params.artifact-id)"
+
+        curl -fsS -o /dev/null -X POST "$art/scan" -H "$auth"
+        echo "scan requested for $(params.artifact-id)"
+
+        # Poll rather than sleep-then-assume. "scanning" is a real state
+        # and a pipeline that reads findings too early sees an empty set,
+        # which looks exactly like a clean image.
+        waited=0
+        while [ "$waited" -lt "$(params.timeout-seconds)" ]; do
+          status=$(curl -fsS "$art" -H "$auth" | jq -r .status)
+          if [ "$status" != "scanning" ]; then
+            printf '%s' "$status" > "$(results.status.path)"
+            echo "scan finished with status: $status"
+            exit 0
+          fi
+          sleep 10
+          waited=$((waited + 10))
+        done
+
+        echo "still scanning after $(params.timeout-seconds)s -- giving up" >&2
+        printf 'scanning' > "$(results.status.path)"
+        exit 1
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: scm-gate
+spec:
+  description: >-
+    Fail the pipeline unless the artifact passes the deployment policy
+    configured in monitorApi.policy. This is the Task that makes the
+    others matter.
+  params:
+    - name: artifact-id
+      type: string
+    - name: api
+      type: string
+      default: http://monitor-api.supply-chain-monitor.svc.cluster.local:8080
+  steps:
+    - name: gate
+      image: public.ecr.aws/docker/library/alpine:3.20
+      env:
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: scm-monitor-api-auth
+              key: API_KEY
+      script: |
+        #!/bin/sh
+        set -eu
+        apk add --no-cache curl jq >/dev/null
+        verdict=$(curl -fsS "$(params.api)/api/v1/artifacts/$(params.artifact-id)/policy" \
+          -H "Authorization: Bearer ${API_KEY}")
+
+        # "configured" distinguishes "policy passed" from "no policy is
+        # set, so nothing was checked". Without this the gate reports a
+        # pass on a deployment that has no policy at all -- a green light
+        # nobody ever asked for.
+        if [ "$(printf '%s' "$verdict" | jq -r .configured)" != "true" ]; then
+          echo "no policy is configured -- this gate is checking nothing" >&2
+          echo "set monitorApi.policy, or remove this Task" >&2
+          exit 1
+        fi
+
+        if [ "$(printf '%s' "$verdict" | jq -r .pass)" = "true" ]; then
+          echo "policy passed"
+          exit 0
+        fi
+
+        echo "policy FAILED:" >&2
+        printf '%s' "$verdict" | jq -r '.violations[] | "  - \(.rule): \(.detail)"' >&2
+        exit 1
