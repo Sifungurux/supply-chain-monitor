@@ -98,10 +98,11 @@ type IsolatedTrivyConfig struct {
 
 	// RegistryCredentialsSecretName/UsernameKey/PasswordKey, when
 	// SecretName is set, forward scm-registry's read-only credentials
-	// into the Job as TRIVY_USERNAME/TRIVY_PASSWORD -- trivy's own
-	// native registry-auth env vars (os/exec inherits them
-	// automatically, see trivy.go's ScanRaw), needed once scm-registry
-	// requires auth (see docs/architecture.md's registry-auth section).
+	// into the Job as REGISTRY_USERNAME/REGISTRY_PASSWORD. The Job
+	// folds them into its merged docker config as the in-cluster
+	// registry's entry (main.go's mergeRegistryAuths) and every tool
+	// authenticates from that -- see the comment at the SecretEnvVar
+	// append below for why trivy's own env pair is no longer set.
 	// Empty SecretName disables this, the pre-registry-auth default.
 	RegistryCredentialsSecretName string
 	RegistryUsernameKey           string
@@ -301,16 +302,27 @@ func (s *IsolatedTrivyScanner) ScanForArtifact(ctx context.Context, ref, artifac
 	}
 	if s.cfg.RegistryCredentialsSecretName != "" {
 		secretEnv = append(secretEnv,
-			// TRIVY_USERNAME/PASSWORD: trivy's own native registry-auth
-			// env vars, for "image" mode's direct pull.
-			k8sjob.SecretEnvVar{Name: "TRIVY_USERNAME", SecretName: s.cfg.RegistryCredentialsSecretName, SecretKey: s.cfg.RegistryUsernameKey},
-			k8sjob.SecretEnvVar{Name: "TRIVY_PASSWORD", SecretName: s.cfg.RegistryCredentialsSecretName, SecretKey: s.cfg.RegistryPasswordKey},
+			// Deliberately NOT TRIVY_USERNAME/TRIVY_PASSWORD, which
+			// this used to set for "image" mode's direct pull. Trivy
+			// applies that pair to whatever registry it talks to, not
+			// to the one they belong to -- measured against a probe
+			// registry they were never configured for, and they
+			// authenticated it. That offers scm-registry's account to
+			// ghcr.io, docker.io and every other host an image scan
+			// touches.
+			//
+			// runScanWorker now builds the merged docker config from
+			// REGISTRY_USERNAME/PASSWORD below plus every mounted
+			// credential, and exports DOCKER_CONFIG -- which trivy
+			// honours (confirmed against the real binary) and which is
+			// keyed by host, so each credential only ever goes to its
+			// own registry.
+			//
 			// REGISTRY_USERNAME/PASSWORD: consulted by runScanWorker's
 			// "sbom" branch (main.go) for its own RegistryFetcher pull,
-			// which happens before trivy ever runs -- a completely
-			// separate credential consumer from the two above, just
-			// sourced from the same Secret. Harmless in "image" mode,
-			// where nothing reads these.
+			// and folded into the merged docker config as the
+			// in-cluster registry's entry. Needed in "image" mode too
+			// now, for exactly that reason.
 			k8sjob.SecretEnvVar{Name: "REGISTRY_USERNAME", SecretName: s.cfg.RegistryCredentialsSecretName, SecretKey: s.cfg.RegistryUsernameKey},
 			k8sjob.SecretEnvVar{Name: "REGISTRY_PASSWORD", SecretName: s.cfg.RegistryCredentialsSecretName, SecretKey: s.cfg.RegistryPasswordKey},
 		)

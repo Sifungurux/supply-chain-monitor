@@ -337,3 +337,52 @@ func TestIsolatedScanners_SBOMJobsKeepTheEmptyDirScratch(t *testing.T) {
 		}
 	})
 }
+
+// TestIsolatedTrivy_NoHostAgnosticCredentialsInJobEnv is a regression
+// guard on a credential-scoping fix, and the direction of its failure
+// is why it exists at all.
+//
+// TRIVY_USERNAME/TRIVY_PASSWORD are applied by trivy to whatever
+// registry it talks to, not to the one they were configured for --
+// measured against a probe registry they were never meant for, which
+// they authenticated. Setting them again would not break a single
+// scan; it would silently start offering scm-registry's account to
+// ghcr.io and docker.io. Nothing else in this suite would notice.
+//
+// The Job authenticates from the merged docker config instead
+// (DOCKER_CONFIG, exported by runScanWorker), which is keyed by host.
+func TestIsolatedTrivy_NoHostAgnosticCredentialsInJobEnv(t *testing.T) {
+	client := &recordingJobClient{fakeJobClient: fakeJobClient{
+		namespace:      "supply-chain-monitor",
+		statusSequence: []jobStatusResult{{succeeded: true}},
+		podName:        "p",
+		logs:           `{"findings":[]}`,
+	}}
+	s := NewIsolatedTrivyScanner(client, IsolatedTrivyConfig{
+		Image:                         "monitor-api:dev",
+		PollInterval:                  time.Millisecond,
+		RegistryCredentialsSecretName: "scm-registry-credentials",
+		RegistryUsernameKey:           "REGISTRY_USERNAME",
+		RegistryPasswordKey:           "REGISTRY_PASSWORD",
+	})
+	if _, err := s.Scan(context.Background(), "ghcr.io/org/app:1"); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	var sawRegistryPair bool
+	for _, e := range client.createdJobs[0].Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "TRIVY_USERNAME" || e.Name == "TRIVY_PASSWORD" {
+			t.Errorf("%s is set on the scan Job: trivy sends it to every registry it talks to, not just the one it belongs to", e.Name)
+		}
+		if e.Name == "REGISTRY_USERNAME" {
+			sawRegistryPair = true
+		}
+	}
+	// The counterpart assertion: dropping the pair above must not have
+	// taken the in-cluster registry's credentials with it. They are
+	// what mergeRegistryAuths folds in as scm-registry's own entry, so
+	// losing them would make every scm-registry pull anonymous.
+	if !sawRegistryPair {
+		t.Error("REGISTRY_USERNAME missing from the scan Job -- the in-cluster registry would be pulled anonymously")
+	}
+}

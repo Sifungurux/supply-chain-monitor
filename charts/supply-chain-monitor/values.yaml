@@ -995,6 +995,9 @@ monitorApi:
   #
   #   - existingDockerConfigSecret: ghcr-pull-secret
   #
+  # An entry carrying both is treated as inline -- the Secret is
+  # ignored. They are alternatives, not layers.
+  #
   # An optional CA for a registry with a private issuer, either inline
   # PEM or an existing Secret. It is mounted ALONGSIDE the public roots
   # via SSL_CERT_DIR, never replacing them -- see

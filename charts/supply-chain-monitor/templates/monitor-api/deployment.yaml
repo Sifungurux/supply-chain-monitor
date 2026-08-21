@@ -175,10 +175,12 @@ spec:
                   # still starts -- the binary treats absent as "no
                   # named keys", which is the pre-feature behaviour.
                   optional: true
-            # Authenticates this pod's own in-process pull paths
-            # (RegistryFetcher, UnpackerScanner's generated
-            # dockerconfig.json, trivy's native TRIVY_USERNAME/PASSWORD)
-            # against scm-registry's token-auth -- see main.go's
+            # scm-registry's own entry in the merged docker config
+            # every pull path authenticates from (main.go's
+            # mergeRegistryAuths). Additional registries come from
+            # monitorApi.registryCredentials and are mounted, not
+            # env-injected -- there is no env shape for N hosts.
+            # Authenticates against scm-registry's token-auth -- see main.go's
             # runAPIServer and docs/architecture.md's registry-auth
             # section. registry-credentials-secret.yaml is the read-only
             # scm-reader account; monitor-api never pushes.

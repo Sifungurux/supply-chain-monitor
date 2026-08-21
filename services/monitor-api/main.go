@@ -86,21 +86,13 @@ func getenvFloat(key string, fallback float64) float64 {
 	return f
 }
 
-// buildDockerConfigJSON returns the docker CLI config.json content (an
-// "auths" map, the same shape ~/.docker/config.json uses) unpacker's
-// own --config flag expects -- the file-based credential mechanism
-// unpacker takes, alongside oras's --username/--password flags
-// (fetch.go) and trivy's native TRIVY_USERNAME/TRIVY_PASSWORD env vars,
-// all three authenticating against the same scm-registry account. See
+// singleAuth is the in-cluster registry's "auths" entry -- the one
+// credential that arrives as an env pair rather than as a mounted
+// Secret, because the chart derives it from dockerAuth.accounts.reader
+// (templates/monitor-api/registry-credentials-secret.yaml) instead of
+// from monitorApi.registryCredentials. Same shape as every other entry;
+// mergeRegistryAuths folds it in alongside them. See
 // docs/architecture.md's registry-auth section.
-func buildDockerConfigJSON(registryAddr, username, password string) []byte {
-	b, _ := json.Marshal(map[string]any{"auths": singleAuth(registryAddr, username, password)})
-	return b // a map of only strings/maps of strings never fails to marshal
-}
-
-// singleAuth is the one-host "auths" entry buildDockerConfigJSON used
-// to inline, split out so mergeRegistryAuths can fold it in alongside
-// the mounted ones.
 func singleAuth(registryAddr, username, password string) map[string]any {
 	if username == "" {
 		return map[string]any{}
@@ -180,7 +172,7 @@ func mergeRegistryAuths(registryAddr, username, password, authDir string) map[st
 	return auths
 }
 
-// writeDockerConfig writes buildDockerConfigJSON's output to a file
+// writeDockerConfig writes the merged "auths" map to a file
 // named "config.json" inside a fresh temp directory, and returns that
 // file's path -- unpacker's --config flag needs a real file path, not
 // inline JSON. Returns "" when username is empty (the "no registry
@@ -1378,9 +1370,8 @@ func runAPIServer() {
 
 	// REGISTRY_USERNAME/PASSWORD authenticate every registry-facing pull
 	// path (oras via RegistryFetcher, unpacker via a generated
-	// dockerconfig.json, trivy via its own native TRIVY_USERNAME/
-	// TRIVY_PASSWORD env vars set on isolated_trivy.go's scan-worker
-	// Jobs) against scm-registry's token-auth -- see
+	// dockerconfig.json, and trivy/grype/cosign via DOCKER_CONFIG)
+	// against scm-registry's token-auth -- see
 	// docs/architecture.md's registry-auth section. Empty (the default
 	// before registry auth existed) means every one of those falls back
 	// to unauthenticated behavior unchanged.
