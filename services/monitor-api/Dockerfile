@@ -103,9 +103,9 @@ ARG ORAS_SHA256_ARM64=8db4a223bd6034deff198e791ea7cb3af0840df25b7e9f370e2f1f3fd2
 # registry and unpacks it to a plain directory (oras-go / crane + umoci),
 # so ClamAV can scan a container image's actual file contents instead of
 # just its compressed layers.
-ARG UNPACKER_VERSION=0.7.0
-ARG UNPACKER_SHA256_AMD64=0ff1d5b3257359984d1e027683d39da056099411b9d3f8a9a9d0155a5ca69827
-ARG UNPACKER_SHA256_ARM64=d818527787184b6291acc94817d91c430d0c4d92359e2c65660c4af987fdceb0
+ARG UNPACKER_VERSION=0.7.1
+ARG UNPACKER_SHA256_AMD64=e4998d996766f94d5b27a4c531d9ae919fed04c868f91fb3760046017a10a13b
+ARG UNPACKER_SHA256_ARM64=1a65aaa83a442e432c5e3649957320d769d75bb74b17c3e54dfb9295c9c0893a
 
 # github.com/anchore/grype: alternative CVE scanner to trivy, selectable
 # via monitorApi.cveScanner (internal/scanner/grype.go).
