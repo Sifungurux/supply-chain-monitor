@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -1222,5 +1223,94 @@ func TestScanArtifact_LaterScanWithoutProvenanceKeepsTheVerdict(t *testing.T) {
 	_, rescanned := scanAndWait(t, h2, store, a.ID)
 	if rescanned.Provenance != artifact.ProvenanceVerified {
 		t.Fatalf("provenance = %q after a scan with no provenance scanner, want the earlier verdict kept", rescanned.Provenance)
+	}
+}
+
+// flakyScanner fails the first N calls, then succeeds -- the shape of a
+// registry entry that was broken once and has since recovered.
+type flakyScanner struct {
+	mu        sync.Mutex
+	failsLeft int
+	findings  []artifact.Finding
+}
+
+func (f *flakyScanner) Scan(_ context.Context, _ string) ([]artifact.Finding, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failsLeft > 0 {
+		f.failsLeft--
+		return nil, errors.New("unpacker: pull failed")
+	}
+	return f.findings, nil
+}
+
+// A clean scan must not erase the record of the previous failure. Before
+// this, scanArtifact assigned LastScanErrors unconditionally, so the
+// empty slice from a successful scan wiped the only evidence that the
+// artifact had ever failed -- the operator saw a green artifact and no
+// way to know it had been broken an hour earlier.
+func TestScanArtifact_CleanScanKeepsPreviousErrors(t *testing.T) {
+	sc := &flakyScanner{failsLeft: 1, findings: []artifact.Finding{{ID: "CVE-2024-9", Source: "trivy"}}}
+	h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {sc}})
+	created := mustCreate(t, store, "public.ecr.aws/docker/library/redis:7-alpine", artifact.TypeImage)
+
+	_, failed := scanAndWait(t, h, store, created.ID)
+	if failed.Status != artifact.StatusFailed {
+		t.Fatalf("first scan status = %q, want %q", failed.Status, artifact.StatusFailed)
+	}
+	if len(failed.LastScanErrors) != 1 {
+		t.Fatalf("expected the failure recorded, got %v", failed.LastScanErrors)
+	}
+	if failed.LastScanErrorAt == nil {
+		t.Fatal("expected LastScanErrorAt to be stamped on a failed scan")
+	}
+	firstErr := append([]string(nil), failed.LastScanErrors...)
+	firstAt := *failed.LastScanErrorAt
+
+	_, clean := scanAndWait(t, h, store, created.ID)
+	if clean.Status != artifact.StatusScanned {
+		t.Fatalf("second scan status = %q, want %q", clean.Status, artifact.StatusScanned)
+	}
+	if len(clean.CVEFindings) != 1 {
+		t.Fatalf("expected the recovered scanner's finding, got %+v", clean.CVEFindings)
+	}
+	if !reflect.DeepEqual(clean.LastScanErrors, firstErr) {
+		t.Fatalf("a clean scan erased the previous errors: got %v, want %v", clean.LastScanErrors, firstErr)
+	}
+	if clean.LastScanErrorAt == nil || !clean.LastScanErrorAt.Equal(firstAt) {
+		t.Fatalf("LastScanErrorAt moved on a clean scan: got %v, want %v", clean.LastScanErrorAt, firstAt)
+	}
+	// The pair is what lets the dashboard tell "failing now" from
+	// "failed once, fine since" without another stored flag.
+	if clean.LastScanAt == nil || !clean.LastScanAt.After(*clean.LastScanErrorAt) {
+		t.Fatalf("expected last_scan_at (%v) to be after last_scan_error_at (%v)", clean.LastScanAt, clean.LastScanErrorAt)
+	}
+	// A total failure still clears on recovery -- that one tracks
+	// current status, not history.
+	if clean.LastScanFailureReason != "" {
+		t.Fatalf("LastScanFailureReason should clear on a clean scan, got %q", clean.LastScanFailureReason)
+	}
+}
+
+// ...and a fresh failure must replace the old record rather than
+// accumulate: the field holds the LAST failure, not every one.
+func TestScanArtifact_NewFailureReplacesPreviousErrors(t *testing.T) {
+	sc := &flakyScanner{failsLeft: 1}
+	h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {sc}})
+	created := mustCreate(t, store, "public.ecr.aws/docker/library/redis:7-alpine", artifact.TypeImage)
+
+	_, first := scanAndWait(t, h, store, created.ID)
+	firstAt := *first.LastScanErrorAt
+
+	sc.mu.Lock()
+	sc.failsLeft = 1
+	sc.mu.Unlock()
+
+	_, second := scanAndWait(t, h, store, created.ID)
+	if len(second.LastScanErrors) != 1 {
+		t.Fatalf("expected exactly one error after a second failure, got %v", second.LastScanErrors)
+	}
+	if second.LastScanErrorAt == nil || !second.LastScanErrorAt.After(firstAt) {
+		t.Fatalf("expected LastScanErrorAt to advance on a new failure: got %v, previous %v", second.LastScanErrorAt, firstAt)
 	}
 }

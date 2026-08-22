@@ -2742,3 +2742,95 @@ test('the provenance badge distinguishes signed, unsigned, unverified and not-ch
 
   dom.window.close();
 });
+
+// Scan errors used to render as a bare line of red text at the very
+// foot of the detail page, with no heading saying what it was. They now
+// get a titled section of their own.
+test('scan errors render as a titled section, not an unlabelled line', async () => {
+  const artifact = {
+    ...SAMPLE_ARTIFACTS[0],
+    id: 'a1',
+    status: 'failed',
+    last_scan_errors: ['Image not found in the registry'],
+    last_scan_error_at: '2026-08-22T10:00:00Z',
+    last_scan_at: '2026-08-22T10:00:00Z'
+  };
+  const dom = buildDom({
+    url: 'http://localhost:30301/#/artifacts/a1',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (isArtifactsList(url)) return artifactsPage([artifact]);
+      return errorResponse(404, {});
+    }
+  });
+  await tick(20);
+  const doc = dom.window.document;
+  const body = doc.getElementById('detail-body').innerHTML;
+  assert.match(body, /<h3[^>]*>Scan errors<\/h3>/, 'the errors need a heading naming them');
+  assert.ok(doc.getElementById('scan-errors'), 'the errors live in a panel of their own');
+  assert.match(body, /Image not found in the registry/, 'the message itself still renders');
+  assert.match(body, /Failing/, 'an unrecovered artifact is flagged as currently failing');
+  dom.window.close();
+});
+
+// The record is deliberately retained after a later successful scan, so
+// the section must say so. Showing a stale failure with no indication
+// that it is stale would report a healthy artifact as broken -- the
+// exact opposite of the bug this feature fixes.
+test('a scan error kept after a successful rescan reads as history, not an active alarm', async () => {
+  const artifact = {
+    ...SAMPLE_ARTIFACTS[0],
+    id: 'a1',
+    status: 'scanned',
+    last_scan_errors: ['Image not found in the registry'],
+    last_scan_error_at: '2026-08-20T10:00:00Z',
+    last_scan_at: '2026-08-22T10:00:00Z'
+  };
+  const dom = buildDom({
+    url: 'http://localhost:30301/#/artifacts/a1',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (isArtifactsList(url)) return artifactsPage([artifact]);
+      return errorResponse(404, {});
+    }
+  });
+  await tick(20);
+  const doc = dom.window.document;
+  const body = doc.getElementById('detail-body').innerHTML;
+  assert.match(body, /<h3[^>]*>Last scan errors<\/h3>/, 'the heading marks it as a past failure');
+  assert.match(body, /Resolved/, 'a recovered artifact must not read as currently failing');
+  assert.doesNotMatch(body, /Failing/, 'the active-failure wording must not survive recovery');
+  assert.match(doc.getElementById('scan-errors').className, /errs-resolved/, 'the panel drops its alarm styling');
+  dom.window.close();
+});
+
+// Missing last_scan_error_at (an older API, or a row written before the
+// column existed) must not be read as "resolved" -- undated is treated
+// as current, because claiming a failure is fixed on absent data is the
+// one answer that actively misleads.
+test('an undated scan error is treated as current rather than resolved', async () => {
+  const artifact = {
+    ...SAMPLE_ARTIFACTS[0],
+    id: 'a1',
+    status: 'scanned',
+    last_scan_errors: ['clamav: connection refused'],
+    last_scan_at: '2026-08-22T10:00:00Z'
+  };
+  const dom = buildDom({
+    url: 'http://localhost:30301/#/artifacts/a1',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (isArtifactsList(url)) return artifactsPage([artifact]);
+      return errorResponse(404, {});
+    }
+  });
+  await tick(20);
+  const doc = dom.window.document;
+  const body = doc.getElementById('detail-body').innerHTML;
+  assert.match(body, /<h3[^>]*>Scan errors<\/h3>/, 'undated errors keep the current-failure heading');
+  assert.doesNotMatch(body, /Resolved/, 'absent data must never be reported as recovered');
+  dom.window.close();
+});

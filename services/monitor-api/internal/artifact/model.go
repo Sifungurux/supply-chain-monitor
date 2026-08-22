@@ -226,9 +226,19 @@ type Artifact struct {
 	// LastScanErrors holds a friendly, classified message per failed
 	// scanner from the most recent /scan call (e.g. one of several
 	// scanners for a type failed while others succeeded) -- never the
-	// scanner's raw error text, see scanner.ClassifyScanError. Empty on
-	// a fully clean scan.
+	// scanner's raw error text, see scanner.ClassifyScanError. Holds the
+	// LAST failure, which survives later successful scans -- see
+	// LastScanErrorAt. Empty only until the artifact's first failure.
 	LastScanErrors []string `json:"last_scan_errors,omitempty"`
+	// LastScanErrorAt is when the errors currently held in
+	// LastScanErrors were recorded. Deliberately NOT cleared by a later
+	// clean scan: a scanner that failed once and has worked since is
+	// still something an operator needs to see, and wiping the record
+	// on success meant the only evidence disappeared exactly when
+	// somebody might have gone looking for it. Compare against
+	// LastScanAt to tell "failing now" from "failed then, fine since"
+	// -- LastScanAt later than this means the artifact has recovered.
+	LastScanErrorAt *time.Time `json:"last_scan_error_at,omitempty"`
 	// LastScanFailureReason is a short, stable reason code (e.g.
 	// "not_found", "scan_timeout") set only when every scanner failed
 	// this round (Status == StatusFailed) -- see

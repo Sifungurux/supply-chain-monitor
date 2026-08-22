@@ -479,7 +479,19 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 			art.OtherFindings, otherFindings,
 			func(f artifact.Finding) bool { return f.Source != artifact.LicenseFindingSource },
 			now, detectFixedFor("other"), vex)
-		art.LastScanErrors = scanErrors
+		// Only overwrite when this scan actually produced errors. An
+		// unconditional assignment meant a clean scan's empty slice
+		// erased the previous failure, so an artifact that broke and
+		// recovered looked like it had never broken at all. The record
+		// is replaced by the NEXT failure, never by a success --
+		// LastScanErrorAt vs LastScanAt tells the two apart.
+		if len(scanErrors) > 0 {
+			art.LastScanErrors = scanErrors
+			art.LastScanErrorAt = &now
+		}
+		// Unlike the errors above, this one tracks CURRENT status and
+		// must still clear: leaving it set would badge a healthy
+		// artifact with the reason it failed last week.
 		art.LastScanFailureReason = failureReason
 		art.LastScanAt = &now
 	})

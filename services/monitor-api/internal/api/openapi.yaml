@@ -1283,7 +1283,19 @@ components:
           items: { $ref: "#/components/schemas/Finding" }
         last_scan_errors:
           type: array
+          description: >-
+            Classified messages from the most recent FAILED scan. Retained
+            after a later successful scan, so its presence does not mean the
+            artifact is failing now -- compare last_scan_error_at against
+            last_scan_at to tell the two apart.
           items: { type: string }
+        last_scan_error_at:
+          type: string
+          format: date-time
+          description: >-
+            When the messages in last_scan_errors were recorded. Absent if the
+            artifact has never failed a scan. Earlier than last_scan_at means
+            the artifact has since recovered.
         last_scan_at: { type: string, format: date-time }
         has_sbom: { type: boolean }
         has_sarif: { type: boolean }
