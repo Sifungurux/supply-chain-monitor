@@ -11,6 +11,8 @@
 package k8sjob
 
 import (
+	"encoding/json"
+	"log/slog"
 	"os"
 	"sort"
 	"strconv"
@@ -406,7 +408,7 @@ func NewScanJob(cfg ScanJobConfig) *Job {
 	// the same reason SSL_CERT_DIR is: a mount nothing points at is
 	// silently useless, and the failure is a 401 at scan time rather
 	// than anything visible when the Job starts.
-	if len(registryAuthSecrets()) > 0 {
+	if len(registryAuthSecrets()) > 0 || len(registryUserSecrets()) > 0 {
 		env = append(env, EnvVar{Name: "REGISTRY_AUTH_DIR", Value: registryAuthMountRoot})
 	}
 	for _, sev := range cfg.SecretEnvVars {
@@ -469,12 +471,12 @@ func NewScanJob(cfg ScanJobConfig) *Job {
 							},
 							VolumeMounts: append(append([]VolumeMount{
 								{Name: "scratch", MountPath: "/tmp"},
-							}, append(append(registryCAMount(), extraCAMounts()...), registryAuthMounts()...)...), cfg.ExtraVolumeMounts...),
+							}, append(append(append(registryCAMount(), extraCAMounts()...), registryAuthMounts()...), registryUserMounts()...)...), cfg.ExtraVolumeMounts...),
 						},
 					},
 					Volumes: append(append([]Volume{
 						scratchVolume(cfg),
-					}, append(append(registryCAVolume(), extraCAVolumes()...), registryAuthVolumes()...)...), cfg.ExtraVolumes...),
+					}, append(append(append(registryCAVolume(), extraCAVolumes()...), registryAuthVolumes()...), registryUserVolumes()...)...), cfg.ExtraVolumes...),
 				},
 			},
 		},
@@ -556,6 +558,87 @@ func registryAuthMounts() []VolumeMount {
 		mounts = append(mounts, VolumeMount{
 			Name:      "registry-auth-" + name,
 			MountPath: registryAuthMountRoot + "/" + name,
+			ReadOnly:  true,
+		})
+	}
+	return mounts
+}
+
+// registryUserSecret is one monitorApi.registryCredentials entry that
+// named a usernameSecretRef: an operator-managed Secret holding a bare
+// username and password rather than a whole dockerconfigjson.
+//
+// Arrives as JSON in one env var rather than as a delimited list, and
+// that is worth a sentence because the delimited shape was tried
+// first: a registry host legitimately contains a colon
+// ("registry.internal:5000"), which rules out the obvious separator,
+// and every remaining candidate is a character someone eventually puts
+// in a Secret name. JSON has no such hazard, Helm renders it with
+// toJson, and adding a field later costs nothing.
+type registryUserSecret struct {
+	Host        string `json:"host"`
+	Secret      string `json:"secret"`
+	UsernameKey string `json:"usernameKey"`
+	PasswordKey string `json:"passwordKey"`
+}
+
+// registryUserSecrets parses SCAN_WORKER_REGISTRY_USER_SECRETS.
+//
+// A malformed value is logged and dropped rather than fatal, matching
+// how every other credential source here fails: the pod still starts
+// and scans still run, they just run without this registry's
+// credentials. Fataling would take down scanning for every OTHER
+// registry over one bad entry.
+func registryUserSecrets() []registryUserSecret {
+	raw := os.Getenv("SCAN_WORKER_REGISTRY_USER_SECRETS")
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var out []registryUserSecret
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		slog.Error("registry auth: SCAN_WORKER_REGISTRY_USER_SECRETS is not valid JSON", "err", err)
+		return nil
+	}
+	// Sorted by host so the Job manifest is byte-identical run to run:
+	// an unstable volume order is a spurious diff in every scan Job
+	// anyone tries to compare.
+	sort.Slice(out, func(i, j int) bool { return out[i].Host < out[j].Host })
+	return out
+}
+
+// registryUserVolumeName is index-based because a Kubernetes volume
+// name must be a DNS-1123 label and a registry host is frequently not
+// one -- "registry.internal:5000" has a colon in it. The host lives in
+// the MOUNT PATH instead, which has no such restriction, and that is
+// where main.go's mergeRegistryAuths reads it from.
+func registryUserVolumeName(i int) string { return "registry-user-" + strconv.Itoa(i) }
+
+func registryUserVolumes() []Volume {
+	var vols []Volume
+	for i, u := range registryUserSecrets() {
+		// Projected onto the fixed names "username"/"password" so the
+		// reader never has to know what the operator called the keys
+		// in their own Secret -- the same trick registryAuthVolumes
+		// uses to turn ".dockerconfigjson" into "config.json".
+		vols = append(vols, Volume{
+			Name: registryUserVolumeName(i),
+			Secret: &SecretVolume{SecretName: u.Secret, Items: []KeyToPath{
+				{Key: u.UsernameKey, Path: "username"},
+				{Key: u.PasswordKey, Path: "password"},
+			}},
+		})
+	}
+	return vols
+}
+
+func registryUserMounts() []VolumeMount {
+	var mounts []VolumeMount
+	for i, u := range registryUserSecrets() {
+		mounts = append(mounts, VolumeMount{
+			Name: registryUserVolumeName(i),
+			// The host IS the directory name -- see
+			// main.go's registryUsernameFile comment.
+			MountPath: registryAuthMountRoot + "/" + u.Host,
 			ReadOnly:  true,
 		})
 	}

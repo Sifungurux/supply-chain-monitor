@@ -995,8 +995,25 @@ monitorApi:
   #
   #   - existingDockerConfigSecret: ghcr-pull-secret
   #
-  # An entry carrying both is treated as inline -- the Secret is
-  # ignored. They are alternatives, not layers.
+  # or a Secret holding a bare username and password, which is the
+  # shape most operators already have and the one to reach for rather
+  # than putting a password in this file:
+  #
+  #   - host: registry.internal:5000
+  #     usernameSecretRef:
+  #       name: harbor-creds
+  #       usernameKey: username   # optional, defaults to "username"
+  #       passwordKey: password   # optional, defaults to "password"
+  #
+  # PREFER usernameSecretRef OVER INLINE username/password. The inline
+  # form puts a registry password in this file in cleartext, and this
+  # file is checked into git in most deployments -- including this one.
+  # It stays supported because a throwaway dev registry does not
+  # deserve a Secret, not because it is the good option.
+  #
+  # An entry carrying more than one of the three is resolved in this
+  # order: inline `username` wins, then usernameSecretRef, then
+  # existingDockerConfigSecret. They are alternatives, not layers.
   #
   # An optional CA for a registry with a private issuer, either inline
   # PEM or an existing Secret. It is mounted ALONGSIDE the public roots

@@ -52,6 +52,30 @@ monitorApi:
       caSecret:
         name: external-ca
         key: ca.crt
+    # A CA on the SAME entry as a usernameSecretRef: the two are
+    # independent axes, and nothing else here proves that a private
+    # issuer still reaches SSL_CERT_DIR when the credential is a bare
+    # username/password rather than a dockerconfigjson.
+    - host: harbor.internal:8443
+      usernameSecretRef:
+        name: harbor-creds
+        usernameKey: robot-user
+        passwordKey: robot-token
+      ca: |
+        -----BEGIN CERTIFICATE-----
+        MIIBharbor
+        -----END CERTIFICATE-----
+    # No host: must be dropped, NOT mounted at the auth root where it
+    # would shadow every credential under it.
+    - usernameSecretRef:
+        name: hostless-creds
+    # Defaulted key names, and BOTH kinds of Secret on one entry: the
+    # dockerconfigjson must lose, or the same host ends up with two
+    # entries racing each other.
+    - host: quay.io
+      usernameSecretRef:
+        name: quay-creds
+      existingDockerConfigSecret: quay-should-be-ignored
 """
 
 failures = []
@@ -135,6 +159,48 @@ def main():
             fail(f"{secret_name!r} not forwarded to scan-worker Jobs "
                  f"(SCAN_WORKER_REGISTRY_AUTH_SECRETS={env.get('SCAN_WORKER_REGISTRY_AUTH_SECRETS')!r})")
 
+    # 3b. usernameSecretRef entries: a Secret holding a bare username
+    #     and password, whose HOST IS THE MOUNT PATH. Three ways this
+    #     degrades to an anonymous pull without failing the render: the
+    #     host never reaches the path, the operator's key names are not
+    #     projected onto username/password, or the JSON never reaches
+    #     the scan-worker Jobs.
+    user_secrets = json.loads(env.get("SCAN_WORKER_REGISTRY_USER_SECRETS") or "[]")
+    by_host = {u["host"]: u for u in user_secrets}
+    for host, secret_name, ukey, pkey in (
+        ("harbor.internal:8443", "harbor-creds", "robot-user", "robot-token"),
+        ("quay.io", "quay-creds", "username", "password"),
+    ):
+        entry = by_host.get(host)
+        if entry is None:
+            fail(f"usernameSecretRef host {host!r} not forwarded to scan-worker Jobs "
+                 f"(SCAN_WORKER_REGISTRY_USER_SECRETS={env.get('SCAN_WORKER_REGISTRY_USER_SECRETS')!r})")
+        elif (entry.get("secret"), entry.get("usernameKey"), entry.get("passwordKey")) != (secret_name, ukey, pkey):
+            fail(f"usernameSecretRef entry for {host!r} forwarded as {entry!r}, "
+                 f"want secret={secret_name!r} usernameKey={ukey!r} passwordKey={pkey!r}")
+
+        path = f"/etc/scm/registry-auth/{host}"
+        if path not in mounts:
+            fail(f"usernameSecretRef for {host!r} is not mounted at {path} -- "
+                 "the host is carried by the mount path and nothing else")
+            continue
+        items = volumes.get(mounts[path], {}).get("secret", {}).get("items", [])
+        projected = {i.get("key"): i.get("path") for i in items}
+        if projected.get(ukey) != "username" or projected.get(pkey) != "password":
+            fail(f"{secret_name!r} keys not projected onto username/password (items={items}) -- "
+                 "the mount is present, readable, and holds files nothing looks for")
+
+    if "/etc/scm/registry-auth" in mounts or "/etc/scm/registry-auth/" in mounts:
+        fail("a usernameSecretRef entry with no host mounted over the auth root -- "
+             "that mount shadows every other credential underneath it")
+    if any(u.get("secret") == "hostless-creds" for u in user_secrets):
+        fail("a usernameSecretRef entry with no host was forwarded to scan-worker Jobs")
+
+    # An entry carrying both must not ALSO mount its dockerconfigjson.
+    if "/etc/scm/registry-auth/quay-should-be-ignored" in mounts:
+        fail("existingDockerConfigSecret mounted for an entry that also set usernameSecretRef -- "
+             "two sources race for the same host")
+
     # 3. Every mounted CA directory is named by SSL_CERT_DIR.
     cert_dirs = (env.get("SSL_CERT_DIR") or "").split(":")
     ca_mounts = [p for p in mounts if p.startswith("/ca-extra-")]
@@ -143,6 +209,17 @@ def main():
     for path in ca_mounts:
         if path not in cert_dirs:
             fail(f"CA mounted at {path} but SSL_CERT_DIR={env.get('SSL_CERT_DIR')!r} does not name it")
+
+    # ...and the usernameSecretRef entry's own CA is actually in there.
+    # The mount existing proves only that SOME entry contributed a PEM.
+    cas = next((d for d in docs
+                if d.get("kind") == "Secret"
+                and d["metadata"]["name"] == "scm-registry-extra-cas"), None)
+    if cas is None:
+        fail("no scm-registry-extra-cas Secret rendered for inline ca: PEMs")
+    elif not any(k.startswith("harbor.internal") for k in cas.get("data", {})):
+        fail("the CA on the usernameSecretRef entry did not reach scm-registry-extra-cas: "
+             f"{sorted(cas.get('data', {}))}")
 
 
 if __name__ == "__main__":

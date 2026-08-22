@@ -182,6 +182,28 @@ test-image:
 	@echo "== no downloader left in the runtime image =="
 	@docker run --rm --entrypoint sh $(IMAGE)-verify -c 'command -v curl >/dev/null' \
 		&& { echo "curl is present in the runtime image -- it belongs to the tools stage only" >&2; exit 1; } || true
+	@# GREEN-BY-SKIP. Two scanner tests call t.Skip unless a real binary
+	@# is on PATH -- digest_test.go's authenticated-registry leg needs
+	@# oras, documents_test.go's needs trivy -- and `make test-api` runs
+	@# in a bare golang image that has neither. Both were therefore
+	@# skipping in EVERY CI job while reporting ok, which is the worst
+	@# possible reading: the suite is green and the code those two
+	@# cover (registry authentication, `trivy convert`) is untested.
+	@#
+	@# They run HERE because this is the only target that has already
+	@# built the image the binaries live in -- installing them into the
+	@# test-api container instead would mean a second set of version
+	@# pins to drift out of step with the Dockerfile's.
+	@echo "== the tool-gated scanner tests actually run =="
+	@rm -rf .tool-bin && mkdir -p .tool-bin
+	@docker run --rm --entrypoint sh -v "$(CURDIR)/.tool-bin":/dest $(IMAGE)-verify \
+		-c 'cp /usr/local/bin/oras /usr/local/bin/trivy /dest/'
+	docker run --rm -v "$(CURDIR)/services/monitor-api":/src \
+		-v "$(CURDIR)/.tool-bin/oras":/usr/local/bin/oras \
+		-v "$(CURDIR)/.tool-bin/trivy":/usr/local/bin/trivy \
+		-w /src $(GO_BUILD_IMAGE) \
+		sh -c "go mod download && go test ./internal/scanner -count=1 -run 'Oras|Registry|Documents'"
+	@rm -rf .tool-bin
 	@echo "image checks passed"
 
 # govulncheck against the module's own source. Reports only the

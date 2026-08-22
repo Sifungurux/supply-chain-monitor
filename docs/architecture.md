@@ -660,9 +660,23 @@ a rebuild, so nothing else notices a new image is available.
   in Go *replaces* the system trust store and would stop `oras`,
   `trivy` and `grype` trusting public registries.
   **External** private registries are now configurable too, via
-  `monitorApi.registryCredentials`: each entry names a host and either
-  inline credentials or an existing `kubernetes.io/dockerconfigjson`
-  Secret, plus an optional CA. Everything lands in ONE merged
+  `monitorApi.registryCredentials`: each entry names a host and one of
+  three credential sources — inline `username`/`password`, a
+  `usernameSecretRef` naming an operator-managed Secret that holds a
+  bare username and password (with the key names configurable, since
+  an existing Secret rarely calls them `username`/`password`), or an
+  existing `kubernetes.io/dockerconfigjson` Secret — plus an optional
+  CA. Prefer `usernameSecretRef`: the inline form puts a registry
+  password in `values.yaml`, which is checked into git in most
+  deployments including this one.
+
+  A `usernameSecretRef` pair carries no host of its own the way a
+  dockerconfigjson does, so **the host is the mount path**: the chart
+  mounts each pair at `/etc/scm/registry-auth/<host>` and
+  `mergeRegistryAuths` reads it back from the directory name. The
+  volume name could not carry it — that must be a DNS-1123 label, and
+  `registry.internal:5000` is not one. A colon in a `mountPath` was
+  verified against a real kubelet, not assumed. Everything lands in ONE merged
   `config.json` that every tool authenticates from — `oras` via
   `--registry-config`, trivy/grype/cosign via `DOCKER_CONFIG`, unpacker
   via `--config` — so a credential is scoped to its own host instead of
@@ -682,6 +696,18 @@ a rebuild, so nothing else notices a new image is available.
   configured credential works — a wrong one degrades to an anonymous
   pull, which against a public registry succeeds with fewer results
   rather than failing.
+
+  One implementation detail worth knowing before touching
+  `mergeRegistryAuths`: a mounted Secret is not a flat directory. The
+  kubelet's atomic writer keeps the real files in a timestamped
+  `..2026_08_22_15_44_23.381250005` directory and symlinks `..data` at
+  it, so every key is visible twice. That is harmless for a docker
+  config (the same hosts merged twice) and wrong for a
+  `usernameSecretRef` pair, whose host is its directory name — the
+  second copy would register credentials for a registry called
+  `..2026_08_22_15_44_23.381250005`. Hence the dot-directory skip in
+  the walk, and the test that reproduces the real mount layout rather
+  than two plain files.
 - Scan concurrency is now cluster-wide: slots are rows in a `scan_slots`
   table rather than a buffered channel per process, so two monitor-api
   replicas share one budget instead of each allowing a full
