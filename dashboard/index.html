@@ -234,7 +234,20 @@
   .timeline-item { font-size: 12.5px; padding: 4px 0; border-bottom: 1px solid var(--border-faint); }
   .timeline-item:last-child { border-bottom: none; }
   .muted { color: var(--text-muted); font-size: 12.5px; }
-  .errs { color: var(--danger); font-size: 12.5px; }
+  /* Scan errors get a panel of their own rather than a bare line of red
+     text at the foot of the page. The resolved variant is deliberately
+     quiet: the record is retained after a successful scan (see
+     Artifact.LastScanErrorAt), so it must read as history, not as an
+     alarm that never stops ringing. */
+  .errs-panel {
+    background: var(--color-surface); border: 1px solid var(--danger);
+    border-radius: var(--radius-lg); padding: 12px 14px; margin: 0 0 26px;
+  }
+  .errs-panel.errs-resolved { border-color: var(--border); }
+  .errs-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; font-size: 12.5px; }
+  .errs-list { margin: 0; padding-left: 18px; color: var(--danger); font-size: 12.5px; }
+  .errs-list li { margin: 2px 0; }
+  .errs-resolved .errs-list { color: var(--text-muted); }
   i.ti { font-size: 16px; vertical-align: -2px; }
   .modal-overlay {
     position: fixed; inset: 0; background: rgba(3, 7, 18, 0.66);
@@ -1766,6 +1779,36 @@
   // original per-bucket behavior exactly (malware ids are a constant
   // signature name with no information of their own; every other bucket
   // leads with its id).
+  // scanErrorsSection renders the errors from the most recent FAILED
+  // scan. That record now survives later successful scans, so the
+  // section has two moods: an active failure, and a historical one the
+  // artifact has already recovered from.
+  //
+  // "Recovered" is derived, not stored: last_scan_at later than
+  // last_scan_error_at means a scan completed after those errors were
+  // recorded. An older API that doesn't send last_scan_error_at can't
+  // be dated, so it is treated as CURRENT -- claiming "resolved" on
+  // missing data would be the one wrong answer here.
+  function scanErrorsSection(a) {
+    var errs = a.last_scan_errors || [];
+    if (!errs.length) return '';
+    var recovered = !!(a.last_scan_error_at && a.last_scan_at &&
+      new Date(a.last_scan_at).getTime() > new Date(a.last_scan_error_at).getTime());
+    var when = a.last_scan_error_at ? timeAgo(a.last_scan_error_at) : '';
+    var head = recovered
+      ? '<span class="badge badge-success">Resolved</span>' +
+        '<span class="muted">Last failed ' + esc(when) + ' — a scan has succeeded since.</span>'
+      : '<span class="badge badge-danger">Failing</span>' +
+        '<span class="muted">' + (when ? 'Recorded ' + esc(when) : 'From the most recent scan') + '</span>';
+    return '<h3 class="detail-section-title">' + (recovered ? 'Last scan errors' : 'Scan errors') + '</h3>' +
+      '<div class="errs-panel' + (recovered ? ' errs-resolved' : '') + '" id="scan-errors">' +
+        '<div class="errs-head">' + head + '</div>' +
+        '<ul class="errs-list">' +
+          errs.map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') +
+        '</ul>' +
+      '</div>';
+  }
+
   function renderFindingsTabs(a) {
     var activeKey = state.detailTab || 'cve_findings';
     var tabsHtml = FINDING_BUCKETS.map(function (key) {
@@ -1824,6 +1867,7 @@
         '<button type="button" data-action="cancel-edit-maintainer">Cancel</button>' +
       '</div>' +
       riskSpectrum(a) +
+      scanErrorsSection(a) +
       '<h3 class="detail-section-title">Pipeline</h3>' +
       pipelineTracker(a) +
       '<h3 class="detail-section-title">SBOM changes</h3>' +
@@ -1832,8 +1876,7 @@
       // and the diff needs its own request.
       '<div id="sbom-changes" class="muted">Loading…</div>' +
       '<h3 class="detail-section-title">Findings</h3>' +
-      renderFindingsTabs(a) +
-      (a.last_scan_errors && a.last_scan_errors.length ? '<div class="errs">' + a.last_scan_errors.map(esc).join('<br>') + '</div>' : '')
+      renderFindingsTabs(a)
     );
   }
 
