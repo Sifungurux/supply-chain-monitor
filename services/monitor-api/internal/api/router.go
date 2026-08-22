@@ -200,6 +200,12 @@ func NewRouter(cfg Config) http.Handler {
 	// CI scanner full authority, which is worse than no scopes at all.
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/findings", requireScope(ScopeScan, h.submitFindings))
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/vex", requireScope(ScopeScan, h.uploadVEX))
+	// Risk acceptance is NOT a scan result, which is why it sits under
+	// admin while its two neighbours above do not: it is a decision to
+	// ship a known vulnerability, and a CI scanner able to make that
+	// decision could silence whatever it found. See acceptFinding.
+	mux.HandleFunc("POST /api/v1/artifacts/{id}/findings/{findingID}/acceptance", requireScope(ScopeAdmin, h.acceptFinding))
+	mux.HandleFunc("DELETE /api/v1/artifacts/{id}/findings/{findingID}/acceptance", requireScope(ScopeAdmin, h.revokeFindingAcceptance))
 
 	var top http.Handler = mux
 	if cfg.RateLimitRPS > 0 {

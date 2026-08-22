@@ -838,15 +838,42 @@
   // second window comfortably absorbs that slack without ever mistaking
   // an old, still-open finding for a new one on some later, unrelated
   // update.
-  // findingIsSuppressed: on record, but not an active problem. Either a
-  // scan stopped reporting it ('fixed') or a VEX document uploaded for
-  // this artifact asserts it doesn't apply here ('not_affected' -- see
-  // the API's POST /artifacts/{id}/vex). Both keep their row on the
-  // detail page with a badge saying which; neither is counted anywhere.
+  // findingIsAccepted: an in-force RISK ACCEPTANCE -- somebody with the
+  // admin scope recorded "this is real, we are living with it until
+  // <date>" (see the API's POST
+  // /artifacts/{id}/findings/{findingID}/acceptance).
+  //
+  // Compares the date rather than merely testing that the field is
+  // present, which is the whole point of the feature: an acceptance
+  // EXPIRES, and a truthiness check would keep suppressing the finding
+  // forever once the date passed -- a lapsed acceptance reading as a
+  // clean bill of health is exactly the failure this is meant to
+  // prevent. An expired accepted_until stays on the finding as history,
+  // so 'present' and 'in force' are genuinely different states here.
+  //
+  // Mirrors Finding.Accepted on the backend (internal/artifact/
+  // model.go), including the boundary: expiring exactly now counts as
+  // expired.
+  function findingIsAccepted(f) {
+    return !!f.accepted_until && new Date(f.accepted_until).getTime() > Date.now();
+  }
+
+  // findingIsSuppressed: on record, but not an active problem. A scan
+  // stopped reporting it ('fixed'), a VEX document uploaded for this
+  // artifact asserts it doesn't apply here ('not_affected' -- see the
+  // API's POST /artifacts/{id}/vex), or its risk has been formally
+  // accepted for now (above). All three keep their row on the detail
+  // page with a badge saying which; none is counted anywhere.
   // Treats every other value -- including missing/unset -- as active, so
   // this fails toward showing a finding rather than hiding it.
+  //
+  // The acceptance clause is what keeps these counts agreeing with the
+  // server's: Finding.IsActive excludes accepted findings, so
+  // GET /api/v1/stats and the policy verdict already do. Counting them
+  // here would put "3 CVEs" in the table next to a stats card and a
+  // policy badge that both say there are none.
   function findingIsSuppressed(f) {
-    return f.status === 'fixed' || f.status === 'not_affected';
+    return f.status === 'fixed' || f.status === 'not_affected' || findingIsAccepted(f);
   }
 
   function findingIsNew(f, a) {
@@ -901,6 +928,23 @@
       lifecycleBadge = ' <span class="badge badge-accent">New</span>';
     }
 
+    // Its own badge appended after the lifecycle one, rather than
+    // another branch in that chain: an accepted finding's status is
+    // normally still 'open' (an acceptance concedes the finding is
+    // real -- it doesn't change what the scanner found), so this has to
+    // be able to render ALONGSIDE what's above, next to the VEX badge
+    // when a finding somehow carries both. The reason rides in the
+    // tooltip for the same reason the VEX justification does: it's free
+    // text on a single truncated row. Only shown while in force -- an
+    // expired acceptance is history, and a badge for it would claim a
+    // suppression that is no longer happening.
+    var acceptanceBadge = findingIsAccepted(f)
+      ? ' <span class="badge badge-warning" title="' +
+        esc((f.acceptance_reason || 'No reason recorded') +
+            (f.accepted_by ? ' — accepted by ' + f.accepted_by : '')) +
+        '">Accepted until ' + esc(new Date(f.accepted_until).toLocaleDateString()) + '</span>'
+      : '';
+
     var readMore = CVE_ID_RE.test(f.id)
       ? ' <a class="finding-link" href="https://nvd.nist.gov/vuln/detail/' + encodeURIComponent(f.id) +
         '" target="_blank" rel="noopener noreferrer">Read more</a>'
@@ -913,7 +957,7 @@
     var rowCls = 'finding badge-neutral' + (findingIsSuppressed(f) ? ' finding-fixed' : '');
     return '<div class="' + rowCls + '">' + severityBadge(f.severity) + kevBadge(f) + epssBadge(f) +
       '<span class="finding-label" title="' + esc(fullText) + '">' + label + '</span>' +
-      lifecycleBadge + readMore + '</div>';
+      lifecycleBadge + acceptanceBadge + readMore + '</div>';
   }
 
   function countCell(n) {

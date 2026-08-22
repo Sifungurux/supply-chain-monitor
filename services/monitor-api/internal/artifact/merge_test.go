@@ -513,3 +513,166 @@ func TestMergeFindings_VEXAffectedRevokesOnUploadWithNothingReported(t *testing.
 		t.Fatalf("first_seen_at = %v, want original %v", f.FirstSeenAt, firstSeen)
 	}
 }
+
+// acceptedUntil is a *time.Time helper -- an acceptance is only
+// meaningful as a pointer (nil is "never accepted"), and every test
+// below needs one relative to a fixed instant.
+func acceptedUntil(t time.Time) *time.Time { return &t }
+
+// The point of the feature across merges: an acceptance is a decision
+// recorded about a finding, and a scanner reporting that finding again
+// is not new information about the decision. Without the carry in
+// MergeFindings this fails on the very next scan, because a reported
+// finding is decoded from scanner/caller JSON and carries none of these
+// fields.
+func TestMergeFindings_AcceptanceSurvivesRescan(t *testing.T) {
+	// Relative to the REAL clock, not mergeNow. MergeFindings never
+	// looks at this value -- it only carries it -- but IsActive judges
+	// expiry against the wall clock (see its comment), and mergeNow is a
+	// fixed instant that drifts into the past as time passes, so an
+	// "until" derived from it would silently become an expired
+	// acceptance and this test would start asserting the opposite of
+	// what it means.
+	until := time.Now().UTC().Add(30 * 24 * time.Hour)
+	existing := []artifact.Finding{{
+		ID: "CVE-2024-1", Severity: "critical", Source: "trivy",
+		Status: artifact.FindingStatusOpen, FirstSeenAt: mergeNow.Add(-48 * time.Hour),
+		AcceptedUntil: acceptedUntil(until), AcceptedBy: "security-team",
+		AcceptanceReason: "no upstream fix yet",
+	}}
+	reported := []artifact.Finding{{ID: "CVE-2024-1", Severity: "critical", Source: "trivy"}}
+
+	merged := artifact.MergeFindings(existing, reported, mergeNow, true, nil)
+	if len(merged) != 1 {
+		t.Fatalf("merged = %+v, want 1 finding", merged)
+	}
+	f := merged[0]
+	if f.AcceptedUntil == nil || !f.AcceptedUntil.Equal(until) {
+		t.Fatalf("accepted_until = %v, want %v (an acceptance must survive a rescan)", f.AcceptedUntil, until)
+	}
+	if f.AcceptedBy != "security-team" || f.AcceptanceReason != "no upstream fix yet" {
+		t.Fatalf("accepted_by/reason = %q/%q, want them preserved", f.AcceptedBy, f.AcceptanceReason)
+	}
+	// Still open, and still suppressed by the acceptance rather than by
+	// a status change: an acceptance concedes the finding is real.
+	if f.Status != artifact.FindingStatusOpen {
+		t.Fatalf("status = %q, want %q -- an acceptance must not rewrite the status", f.Status, artifact.FindingStatusOpen)
+	}
+	if f.IsActive() {
+		t.Fatal("a finding under an in-force acceptance reports itself active")
+	}
+}
+
+// The trust boundary. submitFindings decodes findings straight from
+// request JSON, so a caller that could set these fields would be able
+// to accept the risk of its own findings -- which is what the endpoint's
+// admin scope exists to prevent.
+func TestMergeFindings_AcceptanceIsNeverTakenFromAReportedFinding(t *testing.T) {
+	forged := acceptedUntil(mergeNow.Add(365 * 24 * time.Hour))
+
+	t.Run("on a finding nobody has seen before", func(t *testing.T) {
+		merged := artifact.MergeFindings(nil, []artifact.Finding{{
+			ID: "CVE-2024-9", Severity: "critical",
+			AcceptedUntil: forged, AcceptedBy: "me", AcceptanceReason: "trust me",
+		}}, mergeNow, true, nil)
+
+		if merged[0].AcceptedUntil != nil || merged[0].AcceptedBy != "" || merged[0].AcceptanceReason != "" {
+			t.Fatalf("a reported finding accepted its own risk: %+v", merged[0])
+		}
+		if !merged[0].IsActive() {
+			t.Fatal("a self-accepted finding was suppressed")
+		}
+	})
+
+	t.Run("on one already on record and not accepted", func(t *testing.T) {
+		existing := []artifact.Finding{{
+			ID: "CVE-2024-9", Severity: "critical",
+			Status: artifact.FindingStatusOpen, FirstSeenAt: mergeNow.Add(-time.Hour),
+		}}
+		merged := artifact.MergeFindings(existing, []artifact.Finding{{
+			ID: "CVE-2024-9", Severity: "critical",
+			AcceptedUntil: forged, AcceptedBy: "me", AcceptanceReason: "trust me",
+		}}, mergeNow, true, nil)
+
+		if merged[0].AcceptedUntil != nil {
+			t.Fatalf("a reported finding overwrote the record's acceptance: %+v", merged[0])
+		}
+	})
+}
+
+// An acceptance must never block fix-detection. A finding that actually
+// got fixed while accepted is good news, and swallowing it would leave
+// a resolved problem looking like one somebody chose to tolerate.
+func TestMergeFindings_AcceptedFindingStillBecomesFixed(t *testing.T) {
+	until := mergeNow.Add(30 * 24 * time.Hour)
+	existing := []artifact.Finding{{
+		ID: "CVE-2024-1", Severity: "critical",
+		Status: artifact.FindingStatusOpen, FirstSeenAt: mergeNow.Add(-48 * time.Hour),
+		AcceptedUntil: acceptedUntil(until), AcceptedBy: "security-team",
+		AcceptanceReason: "no upstream fix yet",
+	}}
+
+	// Not reported this round, and the report is trusted as complete.
+	merged := artifact.MergeFindings(existing, nil, mergeNow, true, nil)
+	if len(merged) != 1 {
+		t.Fatalf("merged = %+v, want 1 finding", merged)
+	}
+	f := merged[0]
+	if f.Status != artifact.FindingStatusFixed {
+		t.Fatalf("status = %q, want %q -- an acceptance must not block fix detection", f.Status, artifact.FindingStatusFixed)
+	}
+	if f.ResolvedAt == nil || !f.ResolvedAt.Equal(mergeNow) {
+		t.Fatalf("resolved_at = %v, want %v", f.ResolvedAt, mergeNow)
+	}
+	// Kept as history alongside the fix, not cleared: who accepted what,
+	// and until when, stays answerable after the fact.
+	if f.AcceptedUntil == nil || !f.AcceptedUntil.Equal(until) || f.AcceptedBy != "security-team" {
+		t.Fatalf("the acceptance history was lost on fix: %+v", f)
+	}
+}
+
+// Expiry is the whole justification for the feature: an acceptance ends
+// on its own, with nothing to run and nobody to remember. Nothing in
+// MergeFindings clears the fields -- the finding simply becomes active
+// again once the date passes, which is what makes an expired acceptance
+// distinguishable from a deleted one.
+func TestFindingAcceptanceExpires(t *testing.T) {
+	base := artifact.Finding{ID: "CVE-2024-1", Severity: "critical", Status: artifact.FindingStatusOpen}
+
+	inForce := base
+	inForce.AcceptedUntil = acceptedUntil(time.Now().Add(24 * time.Hour))
+	if inForce.IsActive() {
+		t.Fatal("a finding accepted until tomorrow reports itself active")
+	}
+
+	expired := base
+	expired.AcceptedUntil = acceptedUntil(time.Now().Add(-time.Second))
+	if !expired.IsActive() {
+		t.Fatal("an EXPIRED acceptance still suppresses the finding -- it would never come back")
+	}
+	// The record survives the expiry rather than being cleared.
+	if expired.AcceptedUntil == nil {
+		t.Fatal("expiry erased the acceptance history")
+	}
+
+	// The boundary, asserted against Accepted directly since IsActive
+	// can only be asked about the wall clock: expiring exactly at t has
+	// expired, which fails toward showing a problem.
+	at := mergeNow
+	boundary := base
+	boundary.AcceptedUntil = acceptedUntil(at)
+	if boundary.Accepted(at) {
+		t.Fatal("an acceptance expiring exactly now still counts as in force")
+	}
+	if !boundary.Accepted(at.Add(-time.Nanosecond)) {
+		t.Fatal("an acceptance one nanosecond before its expiry is not in force")
+	}
+
+	// A finding nobody accepted is untouched by any of this.
+	if !base.IsActive() {
+		t.Fatal("a finding with no acceptance reports itself inactive")
+	}
+	if base.Accepted(at) {
+		t.Fatal("a nil accepted_until counts as accepted")
+	}
+}

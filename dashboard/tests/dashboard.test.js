@@ -962,6 +962,109 @@ test('a VEX-suppressed finding shows a "VEX: not affected" badge, dims, and drop
   dom.window.close();
 });
 
+// acceptedArtifact builds a one-CVE artifact whose finding carries a
+// risk acceptance expiring at `until`. Dates are computed from the
+// wall clock rather than hardcoded, because the behaviour under test IS
+// the comparison against now -- a fixed date would silently flip from
+// "in force" to "expired" as it aged, which is the same trap the Go
+// tests document.
+function acceptedArtifact(until) {
+  return [{
+    id: 'a12',
+    ref: 'alpine:3.19',
+    type: 'image',
+    status: 'scanned',
+    current_stage: 'scan',
+    stage_history: [],
+    cve_findings: [
+      {
+        id: 'CVE-2024-7777',
+        severity: 'critical',
+        title: 'openssl overflow',
+        source: 'trivy',
+        // Still OPEN. An acceptance concedes the finding is real -- it
+        // does not rewrite the status the way a VEX statement does,
+        // which is exactly why the badge cannot be another branch of
+        // the status chain.
+        status: 'open',
+        first_seen_at: '2026-07-01T00:00:00Z',
+        accepted_until: until,
+        accepted_by: 'security-team',
+        acceptance_reason: 'no upstream fix yet; mitigated by network policy'
+      }
+    ],
+    malware_findings: [],
+    last_scan_errors: [],
+    created_at: '2026-07-01T00:00:00Z',
+    updated_at: '2026-07-19T10:00:00Z'
+  }];
+}
+
+function domForAccepted(until) {
+  return buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      // The card is server-computed (Finding.IsActive already excludes
+      // an accepted finding); the per-row column and the detail page
+      // below are this dashboard's own job.
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(statsFor({}));
+      if (isArtifactsList(url)) return artifactsPage(acceptedArtifact(until));
+      return errorResponse(404, {});
+    }
+  });
+}
+
+test('an accepted finding shows an "Accepted until" badge, dims, and drops out of open-finding counts', async () => {
+  const until = new Date(Date.now() + 30 * 86400 * 1000).toISOString();
+  const dom = domForAccepted(until);
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  // The point of the feature: a finding somebody has formally decided
+  // to live with stops inflating the numbers -- and these must agree
+  // with the server's, which already excludes it.
+  const cveCountCell = doc.querySelector('#artifact-rows tr[data-id="a12"] td:nth-child(5)');
+  assert.equal(cveCountCell.textContent.trim(), '0', 'an accepted CVE is still being counted');
+
+  // ...but stays visible on the detail page, badged and dimmed, with
+  // the reason and the accepter in the tooltip.
+  doc.querySelector('button[data-action="toggle"][data-id="a12"]').click();
+  const detailHtml = doc.getElementById('detail-body').innerHTML;
+  assert.match(detailHtml, /openssl overflow/);
+  assert.match(detailHtml, /Accepted until/);
+  assert.match(detailHtml, /finding-fixed/);
+  assert.match(detailHtml, /no upstream fix yet/);
+  assert.match(detailHtml, /accepted by security-team/);
+
+  dom.window.close();
+});
+
+// The half that a truthiness check on accepted_until would fail: an
+// acceptance EXPIRES, and a lapsed one reading as a clean bill of
+// health is the failure this whole feature exists to avoid. The
+// expired dates stay on the finding as history, so "present" and "in
+// force" are genuinely different states here.
+test('an EXPIRED acceptance counts again and loses its badge', async () => {
+  const until = new Date(Date.now() - 1000).toISOString();
+  const dom = domForAccepted(until);
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  const cveCountCell = doc.querySelector('#artifact-rows tr[data-id="a12"] td:nth-child(5)');
+  assert.equal(cveCountCell.textContent.trim(), '1', 'an expired acceptance still suppressed the finding');
+
+  doc.querySelector('button[data-action="toggle"][data-id="a12"]').click();
+  const detailHtml = doc.getElementById('detail-body').innerHTML;
+  assert.match(detailHtml, /openssl overflow/);
+  assert.doesNotMatch(detailHtml, /Accepted until/, 'an expired acceptance still claims to be suppressing');
+  assert.doesNotMatch(detailHtml, /finding-fixed/, 'an expired acceptance still dims the finding');
+
+  dom.window.close();
+});
+
 test('the component box queries /api/v1/components and lists every artifact containing that purl', async () => {
   const PURL = 'pkg:apk/alpine/openssl@3.1.4-r5';
   const containing = [SAMPLE_ARTIFACTS[0], SAMPLE_ARTIFACTS[2]];

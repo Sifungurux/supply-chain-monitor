@@ -790,6 +790,99 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/artifacts/{id}/findings/{findingID}/acceptance:
+    parameters:
+      - $ref: "#/components/parameters/ArtifactID"
+      - name: findingID
+        in: path
+        required: true
+        schema: { type: string }
+        description: The finding id to accept, e.g. `CVE-2024-1234`.
+    post:
+      tags: [findings]
+      summary: Accept the risk of a finding until a date
+      description: >-
+        Records a time-boxed risk acceptance: "this finding is real, we
+        know, and we are choosing to live with it until `until`." The
+        finding keeps its `open` status and stays visible on the
+        artifact, but is excluded from every count, from
+        GET /api/v1/stats, and from policy evaluation until the
+        acceptance expires -- at which point it returns on its own with
+        no further action.
+
+
+        Distinct from a VEX `not_affected` statement, which asserts the
+        finding does not apply to this artifact at all. An acceptance
+        concedes that it does, which is why it must expire.
+
+
+        Requires the **admin** scope, unlike the findings and VEX
+        endpoints: accepting risk is a decision about what the
+        organization will tolerate, not a scan result, and a CI scanner
+        able to make it could silence its own findings. `accepted_by` is
+        taken from the authenticated key, never from the body.
+
+
+        Applies to every bucket carrying this finding id -- one id can
+        legitimately appear in more than one (a CVE from both trivy and
+        a SARIF import).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [until, reason]
+              properties:
+                until:
+                  type: string
+                  format: date-time
+                  description: >-
+                    RFC3339. Must be in the future and at most 365 days
+                    out -- a longer acceptance is a deletion with extra
+                    steps.
+                  example: "2026-12-31T00:00:00Z"
+                reason:
+                  type: string
+                  description: >-
+                    Required. An acceptance with no stated reason is
+                    indistinguishable from hiding the finding.
+                  example: "no upstream fix yet; mitigated by network policy"
+      responses:
+        "200":
+          description: Accepted. Returns the updated artifact.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No such artifact, or no such finding on it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      tags: [findings]
+      summary: Revoke a risk acceptance
+      description: >-
+        Ends an acceptance early, putting the finding straight back into
+        every count and policy evaluation. Idempotent -- revoking an
+        acceptance that is not there succeeds, since the state the
+        caller asked for holds either way. Requires the **admin** scope.
+      responses:
+        "200":
+          description: Revoked. Returns the updated artifact.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No such artifact, or no such finding on it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1148,6 +1241,32 @@ components:
           type: string
           description: Why a VEX statement suppressed this finding. Empty otherwise.
           example: vulnerable_code_not_in_execute_path
+          readOnly: true
+        accepted_until:
+          type: string
+          format: date-time
+          description: >-
+            When a recorded RISK ACCEPTANCE expires. While this is in
+            the future the finding is excluded from every count and from
+            policy evaluation, exactly as a `fixed` or `not_affected`
+            one is, while keeping its `open` status -- an acceptance
+            concedes the finding is real. Absent on findings nobody has
+            accepted, which is almost all of them. A date in the PAST is
+            an expired acceptance, kept as history: the finding is
+            active again. Set only via
+            POST /api/v1/artifacts/{id}/findings/{findingID}/acceptance.
+          readOnly: true
+        accepted_by:
+          type: string
+          description: >-
+            The authenticated client that recorded the acceptance. Taken
+            from the API key, never from the request body.
+          example: security-team
+          readOnly: true
+        acceptance_reason:
+          type: string
+          description: Why the risk was accepted, in the accepter's own words.
+          example: "no upstream fix yet; mitigated by network policy, revisit at the 2.x upgrade"
           readOnly: true
 
     FindingMatch:

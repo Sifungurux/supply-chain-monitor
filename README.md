@@ -699,6 +699,8 @@ request/response shapes.
 | POST   | `/api/v1/artifacts/{id}/scan`      | run the scanner appropriate for its type   |
 | POST   | `/api/v1/artifacts/{id}/findings`  | record findings an external system already computed `{bucket, findings}` |
 | POST   | `/api/v1/artifacts/{id}/vex`       | upload an OpenVEX/CycloneDX-VEX document and suppress the findings it clears |
+| POST   | `/api/v1/artifacts/{id}/findings/{findingID}/acceptance` | accept the risk of a finding until a date `{until, reason}` — admin scope; drops it out of counts and policy until it expires |
+| DELETE | `/api/v1/artifacts/{id}/findings/{findingID}/acceptance` | revoke a risk acceptance early — admin scope |
 | POST   | `/api/v1/artifacts/{id}/stage`     | record a pipeline-stage transition         |
 | GET    | `/api/v1/findings?q=...`           | search finding ids/titles ("log4j") — returns matching ids with artifact counts |
 | GET    | `/api/v1/findings/{findingID}/artifacts` | every artifact still affected by a given finding ID (e.g. a CVE) |

@@ -1,10 +1,13 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
@@ -328,5 +331,383 @@ func TestSearchFindings_RequiresAQuery(t *testing.T) {
 	}
 	if got := searchFindings(t, h, "nothing-like-this"); got.Total != 0 || len(got.Findings) != 0 {
 		t.Fatalf("no-match search = %+v, want an empty list and total 0", got)
+	}
+}
+
+// acceptancePath builds the endpoint under test for one artifact and
+// finding.
+func acceptancePath(artifactID, findingID string) string {
+	return "/api/v1/artifacts/" + artifactID + "/findings/" + findingID + "/acceptance"
+}
+
+// findingByID pulls one finding out of the CVE bucket of a response.
+func findingByID(t *testing.T, a artifact.Artifact, id string) artifact.Finding {
+	t.Helper()
+	for _, f := range a.CVEFindings {
+		if f.ID == id {
+			return f
+		}
+	}
+	t.Fatalf("no finding %q in %+v", id, a.CVEFindings)
+	return artifact.Finding{}
+}
+
+// acceptedArtifact registers an artifact with one open critical CVE
+// already on record, which is the state every acceptance test starts
+// from.
+func acceptedArtifact(t *testing.T, store *artifact.MemStore) *artifact.Artifact {
+	t.Helper()
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	if _, err := store.Update(created.ID, func(a *artifact.Artifact) {
+		a.CVEFindings = []artifact.Finding{{
+			ID: "CVE-2024-1", Severity: "critical", Title: "very bad", Source: "trivy",
+			Status: artifact.FindingStatusOpen, FirstSeenAt: time.Now().UTC().Add(-24 * time.Hour),
+		}}
+	}); err != nil {
+		t.Fatalf("seed findings: %v", err)
+	}
+	return created
+}
+
+// The end-to-end shape: accept a real finding, and it drops out of the
+// counts and the policy gate while staying visible on the artifact --
+// then comes back when the acceptance is revoked.
+func TestAcceptFinding(t *testing.T) {
+	h, store := newTestRouter(nil)
+	created := acceptedArtifact(t, store)
+	until := time.Now().UTC().Add(30 * 24 * time.Hour).Truncate(time.Second)
+
+	rec := doJSON(t, h, http.MethodPost, acceptancePath(created.ID, "CVE-2024-1"), map[string]any{
+		"until":  until.Format(time.RFC3339),
+		"reason": "no upstream fix yet; mitigated by network policy",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	f := findingByID(t, decodeArtifact(t, rec), "CVE-2024-1")
+	if f.AcceptedUntil == nil || !f.AcceptedUntil.Equal(until) {
+		t.Fatalf("accepted_until = %v, want %v", f.AcceptedUntil, until)
+	}
+	if f.AcceptanceReason != "no upstream fix yet; mitigated by network policy" {
+		t.Fatalf("acceptance_reason = %q", f.AcceptanceReason)
+	}
+	// From the authenticated client, never the body -- an accountability
+	// record a caller can write is not one. The test router's single key
+	// authenticates as "default" (legacyClientName).
+	if f.AcceptedBy != "default" {
+		t.Fatalf("accepted_by = %q, want the authenticated client name", f.AcceptedBy)
+	}
+	// Still open and still on the artifact: an acceptance concedes the
+	// finding is real, so it must not rewrite the status or delete it.
+	if f.Status != artifact.FindingStatusOpen {
+		t.Fatalf("status = %q, want open", f.Status)
+	}
+	if f.IsActive() {
+		t.Fatal("an accepted finding still counts as active")
+	}
+
+	// And it is out of the fleet counts, with no code in stats aware of
+	// acceptance at all -- see Finding.IsActive.
+	stats, err := store.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.WithFindings["cve"] != 0 {
+		t.Fatalf("with_findings[cve] = %d, want 0 -- an accepted finding is still being counted", stats.WithFindings["cve"])
+	}
+}
+
+func TestAcceptFinding_Validation(t *testing.T) {
+	h, store := newTestRouter(nil)
+	created := acceptedArtifact(t, store)
+	future := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
+
+	cases := []struct {
+		name string
+		body map[string]any
+		want string // a distinctive substring of the error
+	}{
+		{"missing reason", map[string]any{"until": future}, "reason is required"},
+		{"blank reason", map[string]any{"until": future, "reason": "   "}, "reason is required"},
+		{"missing until", map[string]any{"reason": "because"}, "until is required"},
+		{"until is not RFC3339", map[string]any{"until": "31/12/2026", "reason": "because"}, "RFC3339"},
+		// An acceptance already expired when it is recorded changes
+		// nothing and reads to whoever set it as though the finding had
+		// been suppressed -- the worst failure direction this has.
+		{"until in the past", map[string]any{"until": time.Now().UTC().Add(-time.Hour).Format(time.RFC3339), "reason": "because"}, "must be in the future"},
+		{"until beyond the cap", map[string]any{"until": time.Now().UTC().Add(400 * 24 * time.Hour).Format(time.RFC3339), "reason": "because"}, "at most 365 days"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doJSON(t, h, http.MethodPost, acceptancePath(created.ID, "CVE-2024-1"), tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.want) {
+				t.Fatalf("body = %s, want it to mention %q", rec.Body.String(), tc.want)
+			}
+		})
+	}
+
+	// Nothing was recorded by any of the rejections above.
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.CVEFindings[0].AcceptedUntil != nil {
+		t.Fatalf("a rejected request still recorded an acceptance: %+v", got.CVEFindings[0])
+	}
+}
+
+func TestAcceptFinding_NotFound(t *testing.T) {
+	h, store := newTestRouter(nil)
+	created := acceptedArtifact(t, store)
+	body := map[string]any{
+		"until":  time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339),
+		"reason": "because",
+	}
+
+	t.Run("unknown artifact", func(t *testing.T) {
+		rec := doJSON(t, h, http.MethodPost, acceptancePath("no-such-artifact", "CVE-2024-1"), body)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	// A finding id nobody ever reported for this artifact. Accepting the
+	// risk of a finding that does not exist is a typo, and answering 200
+	// would let it read as a successful suppression.
+	t.Run("unknown finding on a real artifact", func(t *testing.T) {
+		rec := doJSON(t, h, http.MethodPost, acceptancePath(created.ID, "CVE-9999-9"), body)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404, body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "CVE-9999-9") {
+			t.Fatalf("body = %s, want it to name the finding", rec.Body.String())
+		}
+	})
+
+	t.Run("revoking on an unknown finding", func(t *testing.T) {
+		rec := doJSON(t, h, http.MethodDelete, acceptancePath(created.ID, "CVE-9999-9"), nil)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestRevokeFindingAcceptance(t *testing.T) {
+	h, store := newTestRouter(nil)
+	created := acceptedArtifact(t, store)
+
+	rec := doJSON(t, h, http.MethodPost, acceptancePath(created.ID, "CVE-2024-1"), map[string]any{
+		"until":  time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339),
+		"reason": "because",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("accept status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, http.MethodDelete, acceptancePath(created.ID, "CVE-2024-1"), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	f := findingByID(t, decodeArtifact(t, rec), "CVE-2024-1")
+	// Cleared whole: a finding showing "accepted by X because Y" with no
+	// date would read as a suppression with no end.
+	if f.AcceptedUntil != nil || f.AcceptedBy != "" || f.AcceptanceReason != "" {
+		t.Fatalf("acceptance survived a revoke: %+v", f)
+	}
+	if !f.IsActive() {
+		t.Fatal("a revoked finding is still suppressed")
+	}
+
+	// Idempotent: the caller asked for a state, and that state holds.
+	// An acceptance that lapsed on its own between the decision to
+	// revoke and the call arriving is not an error anybody can act on.
+	rec = doJSON(t, h, http.MethodDelete, acceptancePath(created.ID, "CVE-2024-1"), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second revoke status = %d, want 200 (idempotent), body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// Accepting risk is a decision about what the organization will
+// tolerate, not a scan result -- so unlike POST /findings and /vex
+// beside it, a scan-scoped key must not be able to make it. A CI
+// scanner that could would be able to silence whatever it found.
+func TestAcceptFinding_RequiresAdminScope(t *testing.T) {
+	h, store := newScopedRouter(t, scopedKeys, "reader=read;scanner=scan;boss=admin")
+	created := acceptedArtifact(t, store)
+	path := acceptancePath(created.ID, "CVE-2024-1")
+	body := `{"until":"` + time.Now().UTC().Add(24*time.Hour).Format(time.RFC3339) + `","reason":"because"}`
+
+	for _, tc := range []struct {
+		name, key string
+		want      int
+	}{
+		{"a read-only key may not accept", readerKey, http.StatusForbidden},
+		// The one that matters: submitting findings and uploading VEX
+		// are both ScopeScan, so this is the boundary that separates
+		// reporting a result from deciding to live with it.
+		{"a scan key may not accept", scanKey, http.StatusForbidden},
+		{"an admin key may", adminKey, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := callWithKey(t, h, http.MethodPost, path, tc.key, body); got != tc.want {
+				t.Fatalf("status = %d, want %d", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("revoking is admin-only too", func(t *testing.T) {
+		if got := callWithKey(t, h, http.MethodDelete, path, scanKey, ""); got != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", got)
+		}
+		if got := callWithKey(t, h, http.MethodDelete, path, adminKey, ""); got != http.StatusOK {
+			t.Fatalf("status = %d, want 200", got)
+		}
+	})
+}
+
+// An acceptance is recorded against a finding on record, and a scanner
+// re-reporting that finding is not new information about the decision.
+// The API-level mirror of TestMergeFindings_AcceptanceSurvivesRescan --
+// this is the path that actually runs in production.
+func TestAcceptFinding_SurvivesTheNextScan(t *testing.T) {
+	trivyLike := &fakeScanner{findings: []artifact.Finding{
+		{ID: "CVE-2024-1", Severity: "critical", Source: "trivy"},
+	}}
+	h, store := newTestRouter(scanner.Registry{artifact.TypeImage: {trivyLike}})
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	if _, scanned := scanAndWait(t, h, store, created.ID); len(scanned.CVEFindings) != 1 {
+		t.Fatalf("cve findings after first scan = %+v, want 1", scanned.CVEFindings)
+	}
+
+	until := time.Now().UTC().Add(30 * 24 * time.Hour).Truncate(time.Second)
+	rec := doJSON(t, h, http.MethodPost, acceptancePath(created.ID, "CVE-2024-1"), map[string]any{
+		"until": until.Format(time.RFC3339), "reason": "no upstream fix yet",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("accept status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The image hasn't changed, so the next scan reports it again.
+	_, rescanned := scanAndWait(t, h, store, created.ID)
+	f := findingByID(t, *rescanned, "CVE-2024-1")
+	if f.AcceptedUntil == nil || !f.AcceptedUntil.Equal(until) {
+		t.Fatalf("accepted_until = %v after a rescan, want %v", f.AcceptedUntil, until)
+	}
+	if f.AcceptedBy != "default" || f.AcceptanceReason != "no upstream fix yet" {
+		t.Fatalf("acceptance metadata lost in a rescan: %+v", f)
+	}
+	if f.IsActive() {
+		t.Fatal("a rescan reopened an accepted finding")
+	}
+}
+
+// One finding id legitimately lives in more than one bucket -- a CVE
+// reported by trivy lands in "cve", and the same CVE arriving inside a
+// SARIF import lands in "other" (see classifyBucket). An acceptance
+// that silenced one while the other kept failing the policy gate would
+// look like the endpoint had simply not worked, so applyToFindingID
+// applies to every bucket carrying the id. Nothing else in this file
+// seeds a bucket other than CVEFindings, so without this the
+// cross-bucket promise in the handler comment and the OpenAPI
+// description is untested.
+func TestAcceptFinding_AppliesToEveryBucketCarryingTheID(t *testing.T) {
+	h, store := newTestRouter(nil)
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	seen := time.Now().UTC().Add(-24 * time.Hour)
+	if _, err := store.Update(created.ID, func(a *artifact.Artifact) {
+		a.CVEFindings = []artifact.Finding{
+			{ID: "CVE-2024-1", Severity: "critical", Source: "trivy", Status: artifact.FindingStatusOpen, FirstSeenAt: seen},
+		}
+		// The same id, from a SARIF import.
+		a.OtherFindings = []artifact.Finding{
+			{ID: "CVE-2024-1", Severity: "critical", Source: "sarif", Status: artifact.FindingStatusOpen, FirstSeenAt: seen},
+		}
+		// A different id in a third bucket, which must be left alone.
+		a.SecretFindings = []artifact.Finding{
+			{ID: "secret:/app/.env:aws-key:3", Severity: "high", Source: "trivy", Status: artifact.FindingStatusOpen, FirstSeenAt: seen},
+		}
+	}); err != nil {
+		t.Fatalf("seed findings: %v", err)
+	}
+
+	rec := doJSON(t, h, http.MethodPost, acceptancePath(created.ID, "CVE-2024-1"), map[string]any{
+		"until":  time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339),
+		"reason": "no upstream fix yet",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	got := decodeArtifact(t, rec)
+
+	for _, b := range []struct {
+		name     string
+		findings []artifact.Finding
+	}{{"cve", got.CVEFindings}, {"other", got.OtherFindings}} {
+		if len(b.findings) != 1 {
+			t.Fatalf("%s bucket = %+v, want 1", b.name, b.findings)
+		}
+		if b.findings[0].AcceptedUntil == nil {
+			t.Errorf("the %s bucket's copy of the finding was not accepted: %+v", b.name, b.findings[0])
+		}
+		if b.findings[0].IsActive() {
+			t.Errorf("the %s bucket's copy still counts as active", b.name)
+		}
+	}
+
+	// A finding the caller did not name is untouched -- an acceptance
+	// applies to one id, not to the artifact.
+	if got.SecretFindings[0].AcceptedUntil != nil {
+		t.Fatalf("accepting one finding accepted an unrelated one: %+v", got.SecretFindings[0])
+	}
+
+	// Revoking clears every copy too, for the same reason.
+	rec = doJSON(t, h, http.MethodDelete, acceptancePath(created.ID, "CVE-2024-1"), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	got = decodeArtifact(t, rec)
+	if got.CVEFindings[0].AcceptedUntil != nil || got.OtherFindings[0].AcceptedUntil != nil {
+		t.Fatalf("a revoke left one bucket's copy accepted: cve=%+v other=%+v", got.CVEFindings[0], got.OtherFindings[0])
+	}
+}
+
+// A finding that lives ONLY in a non-CVE bucket must be acceptable too
+// -- the handler walks all five, and a malware or secret finding is a
+// legitimate thing to decide to live with (a test fixture image that
+// really does ship EICAR, say).
+func TestAcceptFinding_NonCVEBucket(t *testing.T) {
+	h, store := newTestRouter(nil)
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	if _, err := store.Update(created.ID, func(a *artifact.Artifact) {
+		a.MalwareFindings = []artifact.Finding{
+			{ID: "clamav-signature-match", Severity: "critical", Title: "Eicar-Test-Signature",
+				Source: "clamav", Status: artifact.FindingStatusOpen, FirstSeenAt: time.Now().UTC()},
+		}
+	}); err != nil {
+		t.Fatalf("seed findings: %v", err)
+	}
+
+	rec := doJSON(t, h, http.MethodPost, acceptancePath(created.ID, "clamav-signature-match"), map[string]any{
+		"until":  time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339),
+		"reason": "deliberate EICAR test fixture",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	f := decodeArtifact(t, rec).MalwareFindings[0]
+	if f.AcceptedUntil == nil || f.AcceptedBy != "default" {
+		t.Fatalf("a malware finding was not accepted: %+v", f)
+	}
+
+	stats, err := store.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.WithFindings["malware"] != 0 {
+		t.Fatalf("with_findings[malware] = %d, want 0", stats.WithFindings["malware"])
 	}
 }

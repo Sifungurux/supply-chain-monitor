@@ -2,8 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -223,4 +225,191 @@ func (h *handler) submitFindings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, updated)
+}
+
+// maxAcceptanceDays bounds how far into the future a risk acceptance
+// may run.
+//
+// The cap is the point of the feature. An acceptance is a decision to
+// ship a known vulnerability, and the only thing separating that from
+// quietly deleting the finding is that it comes back on its own and
+// somebody has to look again. A ten-year "until" is a deletion with
+// extra steps, so the ceiling is a year: long enough for the legitimate
+// "we cannot upgrade this until the next major release" case, short
+// enough that every acceptance is re-examined within one.
+const maxAcceptanceDays = 365
+
+type acceptFindingRequest struct {
+	// Until is when the acceptance expires, RFC3339
+	// ("2026-12-31T00:00:00Z"). Decoded as a string rather than a
+	// time.Time so a malformed timestamp gets a message naming the
+	// field and the format, instead of the generic "invalid request
+	// body" a decode failure into a time.Time would produce -- the two
+	// are indistinguishable to a caller staring at a 400, and this is
+	// the field most likely to be got wrong.
+	Until string `json:"until"`
+	// Reason is why this risk is being accepted, in the accepter's own
+	// words. Required: see AcceptanceReason.
+	Reason string `json:"reason"`
+}
+
+// acceptFinding records a time-boxed risk acceptance against one
+// finding: "this is real, we know, and we are choosing to live with it
+// until <date>."
+//
+// The gap this fills sits between the two things that already existed.
+// A VEX "not_affected" says the finding does not apply here, which is a
+// technical assertion and often untrue of the thing an operator
+// actually wants to say; deleting the artifact or ignoring the
+// dashboard says nothing at all and leaves the policy gate red forever,
+// which is how a team learns to stop reading it. An acceptance is the
+// honest middle: the finding stays on record, visibly accepted, out of
+// the counts and the policy gate, and RETURNS on its own when the
+// acceptance lapses.
+//
+// Admin-scoped, unlike the findings and VEX endpoints next to it (which
+// are ScopeScan, since submitting results is what a CI scanner does).
+// Accepting risk is not a scan result -- it is a decision about what
+// this organization will tolerate, and a CI scanner holding the ability
+// to make it would mean any compromised pipeline could silence its own
+// findings. AcceptedBy comes from the authenticated client rather than
+// the body for the same reason: an accountability record a caller can
+// write is not one.
+//
+// Applied to EVERY bucket carrying the id, not just the first found.
+// One id legitimately appears in more than one bucket (a CVE arriving
+// both from trivy and inside a SARIF import lands in "cve" and "other"
+// -- see classifyBucket), and an acceptance that silenced one of them
+// while the other kept failing the policy gate would look like the
+// endpoint had simply not worked. Same reason uploadVEX applies a
+// statement across all five.
+func (h *handler) acceptFinding(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	findingID := r.PathValue("findingID")
+
+	limitBody(w, r, maxSmallJSONBytes)
+	var req acceptFindingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeBodyError(w, err, "invalid request body")
+		return
+	}
+
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		writeError(w, http.StatusBadRequest, "reason is required: an acceptance with no stated reason is indistinguishable from hiding the finding")
+		return
+	}
+	if strings.TrimSpace(req.Until) == "" {
+		writeError(w, http.StatusBadRequest, `until is required, as an RFC3339 timestamp (e.g. "2026-12-31T00:00:00Z")`)
+		return
+	}
+	until, err := time.Parse(time.RFC3339, req.Until)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, `until must be an RFC3339 timestamp (e.g. "2026-12-31T00:00:00Z"): `+err.Error())
+		return
+	}
+	until = until.UTC()
+
+	now := time.Now().UTC()
+	// An already-expired acceptance would be recorded, change nothing,
+	// and read to whoever set it as though the finding had been
+	// suppressed -- the worst failure direction this feature has.
+	if !until.After(now) {
+		writeError(w, http.StatusBadRequest, "until must be in the future -- an acceptance that has already expired suppresses nothing")
+		return
+	}
+	if until.After(now.Add(maxAcceptanceDays * 24 * time.Hour)) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("until may be at most %d days out -- a longer acceptance is a deletion with extra steps", maxAcceptanceDays))
+		return
+	}
+
+	// Never from the body. See the handler comment.
+	acceptedBy := ClientFromContext(r.Context())
+
+	found := false
+	updated, err := h.store.Update(id, func(art *artifact.Artifact) {
+		found = applyToFindingID(art, findingID, func(f *artifact.Finding) {
+			f.AcceptedUntil = &until
+			f.AcceptedBy = acceptedBy
+			f.AcceptanceReason = reason
+		})
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "no finding "+findingID+" on artifact "+id)
+		return
+	}
+
+	slog.Info("finding risk accepted",
+		"artifact_id", id, "finding_id", findingID,
+		"accepted_by", acceptedBy, "accepted_until", until.Format(time.RFC3339))
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// revokeFindingAcceptance ends an acceptance early, putting the finding
+// straight back into every count and policy evaluation.
+//
+// Idempotent: revoking an acceptance that isn't there is a 200, not a
+// 404. The caller asked for a state ("this finding is not accepted")
+// and that state holds when the call returns, which is the only thing
+// it can act on -- and an acceptance that lapsed on its own between the
+// decision to revoke and the call arriving is not an error anybody can
+// do anything about. A 404 is reserved for the two things that really
+// are the caller's mistake: an artifact or a finding id that does not
+// exist.
+//
+// Clears the reason and accepter alongside the expiry rather than
+// leaving them as a partial record: they describe an acceptance that is
+// no longer in force, and a finding showing "accepted by X because Y"
+// with no date would read as a suppression with no end.
+func (h *handler) revokeFindingAcceptance(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	findingID := r.PathValue("findingID")
+
+	found := false
+	updated, err := h.store.Update(id, func(art *artifact.Artifact) {
+		found = applyToFindingID(art, findingID, func(f *artifact.Finding) {
+			f.AcceptedUntil = nil
+			f.AcceptedBy = ""
+			f.AcceptanceReason = ""
+		})
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "no finding "+findingID+" on artifact "+id)
+		return
+	}
+
+	slog.Info("finding risk acceptance revoked",
+		"artifact_id", id, "finding_id", findingID,
+		"client", ClientFromContext(r.Context()))
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// applyToFindingID runs apply against every finding carrying findingID,
+// in all five buckets, and reports whether it matched anything.
+//
+// Takes a *Artifact and indexes the slices rather than ranging over
+// copies -- `for _, f := range art.CVEFindings` hands out a copy per
+// iteration, so mutating it would write to nothing at all, silently.
+func applyToFindingID(art *artifact.Artifact, findingID string, apply func(*artifact.Finding)) bool {
+	found := false
+	for _, bucket := range [][]artifact.Finding{
+		art.CVEFindings, art.MalwareFindings, art.MisconfigFindings,
+		art.SecretFindings, art.OtherFindings,
+	} {
+		for i := range bucket {
+			if bucket[i].ID == findingID {
+				apply(&bucket[i])
+				found = true
+			}
+		}
+	}
+	return found
 }
