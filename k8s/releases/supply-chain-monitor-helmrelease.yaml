@@ -157,3 +157,40 @@ spec:
       # deleting artifacts can. Raise this value or delete artifacts if
       # the dashboard starts reporting refused registrations.
       maxArtifacts: 500
+      # Cap concurrent image extraction. Set here rather than in the
+      # chart for the same reason as maxArtifacts: the chart default
+      # stays 0 (bounded only by the global scanConcurrency), so no
+      # other deployment silently gains a limit it did not ask for.
+      #
+      # Why this exists at all: until unpacker 0.7.1, 47 of the 95 image
+      # references in this cluster were OCI indexes, and every one of
+      # them unpacked to an EMPTY directory. Half the fleet extracted
+      # nothing, so every disk measurement taken here described a
+      # scanner doing no work for half its inputs. Within ten minutes of
+      # deploying the fix, scm-clamav, scm-postgres and a scan Job were
+      # all evicted for ephemeral-storage.
+      #
+      # 2, not 3: three concurrent scans is what produced those
+      # evictions.
+      #
+      # This bounds whole IMAGE scans, not just the malware leg, and
+      # that is the point rather than a side effect. Scan slots are
+      # acquired all-or-nothing across scanner kinds (see
+      # tryAcquireScanSlots), so a scan that cannot get an unpacker slot
+      # is refused entirely -- and trivy's image-mode Jobs extract the
+      # whole image too, so bounding image scans bounds both extractors.
+      # file/sbom/sarif artifacts never take an unpacker slot and are
+      # unaffected; they still use the global scanConcurrency.
+      #
+      # A refused scan is a 429 with Retry-After, never a queue. The
+      # sweep CronJob treats that as routine and retries on its next
+      # run; a CI caller has to retry, which is why
+      # examples/tekton/scm-tasks.yaml does.
+      #
+      # This is the cheap half of the fix. The real one is moving scan
+      # scratch off node disk with monitorApi.scanScratch.storageClass
+      # -- all four k3d "nodes" share one 42.3GB filesystem, so the node
+      # count does not multiply the disk and this cap is the only thing
+      # actually limiting simultaneous extraction on it.
+      scanConcurrencyPerKind:
+        unpacker: 2
