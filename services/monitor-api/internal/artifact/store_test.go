@@ -1,6 +1,7 @@
 package artifact_test
 
 import (
+	"runtime"
 	"testing"
 	"time"
 
@@ -563,6 +564,28 @@ func mustCreateStore(t *testing.T, s *artifact.MemStore, ref string) *artifact.A
 	if err != nil {
 		t.Fatalf("Create(%s): %v", ref, err)
 	}
+	// WAIT OUT THE CLOCK'S GRANULARITY before returning, so the next
+	// artifact this helper creates is strictly NEWER than this one.
+	//
+	// Create stamps UpdatedAt from time.Now().UTC(), and .UTC() strips
+	// the monotonic reading, leaving the wall clock -- whose
+	// granularity is a microsecond on macOS. Three consecutive Creates
+	// finish well inside one of those: measured over 2000 rounds, two
+	// of three shared an instant in 1967 of them.
+	//
+	// That made TestMemStore_DeleteOlderThanTakesOldestFirst flaky
+	// (~2 failures in 10 package runs) for a reason that was NOT a bug
+	// in DeleteOlderThan: with the timestamps tied it falls back to its
+	// documented ID tie-break, exactly as designed, and the IDs are
+	// random hex -- so "the oldest one" was a coin toss over data that
+	// could not answer the question the test asked.
+	//
+	// Fixed in the shared helper rather than in that one test: every
+	// retention test creates artifacts through here, and the next one
+	// to assert an ordering would land on the same 98%.
+	for start := a.UpdatedAt; !time.Now().UTC().After(start); {
+		runtime.Gosched()
+	}
 	return a
 }
 
@@ -613,10 +636,21 @@ func TestMemStore_CountAndDeleteOlderThan(t *testing.T) {
 // the actually-stale rows behind and removing newer ones instead.
 func TestMemStore_DeleteOlderThanTakesOldestFirst(t *testing.T) {
 	s := artifact.NewMemStore()
-	// Created in order, so their UpdatedAt increases in the same order.
+	// Created in order, so their UpdatedAt increases in the same order --
+	// which mustCreateStore has to work for, see its own comment.
 	oldest := mustCreateStore(t, s, "oldest:1.0")
 	middle := mustCreateStore(t, s, "middle:1.0")
 	newest := mustCreateStore(t, s, "newest:1.0")
+
+	// Asserted, not assumed. If the three ever tie again,
+	// DeleteOlderThan falls back to its ID tie-break and this test
+	// starts failing at random with "the wrong artifact was deleted" --
+	// which reads as a bug in the store rather than in the fixture. Say
+	// so here instead.
+	if !oldest.UpdatedAt.Before(middle.UpdatedAt) || !middle.UpdatedAt.Before(newest.UpdatedAt) {
+		t.Fatalf("fixture is not ordered by age -- the clock did not advance between Creates: %v / %v / %v",
+			oldest.UpdatedAt, middle.UpdatedAt, newest.UpdatedAt)
+	}
 
 	deleted, err := s.DeleteOlderThan(futureCutoff(), 1)
 	if err != nil {
