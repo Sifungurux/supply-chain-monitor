@@ -7,7 +7,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/2.44.0/iconfont/tabler-icons.min.css" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Mona+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <style>
   /* Nordkeel design system -- tokens/components ported verbatim from
      nordkeel/src/styles/tokens/*.css and components.css (this project's
@@ -17,57 +17,59 @@
      dropped in favor of Nordkeel's own token names directly, so this
      stylesheet reads the same as the source system rather than as a
      second, differently-named copy of it. */
+  /* Dark admin re-skin. Palette, type and badge treatment come from the
+     Free Dark Admin Dashboards kit; the variable NAMES below are unchanged
+     from the previous navy/sky theme so every component rule keeps working
+     untouched. This theme is dark-only -- the kit ships no light palette,
+     so the prefers-color-scheme block that used to live here is gone
+     rather than inventing one the design does not have. */
   :root {
-    --c-navy: #1c4f8a;
-    --c-navy-deep: #163d70;
-    --c-sky: #3b91f0;
-    --c-sky-light: #60a5fa;
-    --c-blue-mid: #2563c4;
-    --c-surface: #f5f9ff;
-    --c-border: #bfdbfe;
-    --c-text-dark: #1c4f8a;
-    --c-text-muted: #3b82c4;
-    --c-text-light: #dbeafe;
+    --c-navy: #0b1739;
+    --c-navy-deep: #0a1330;
+    --c-sky: #00c2ff;
+    --c-sky-light: #57c3ff;
+    --c-blue-mid: #1d88fe;
+    --c-surface: #081028;
+    --c-border: #343b4f;
+    --c-text-dark: #d1dbf9;
+    --c-text-muted: #7e89ac;
+    --c-text-light: #ffffff;
     --c-white: #ffffff;
 
-    --steel-600: #475569;
-    --steel-500: #64748b;
-    --steel-400: #94a3b8;
-    --steel-100: #f1f5f9;
+    --steel-600: #aeb9e1;
+    --steel-500: #7e89ac;
+    --steel-400: #5d6788;
+    --steel-100: rgba(174, 185, 225, 0.14);
 
-    --green-600: #16a34a;
-    --green-100: #dcfce7;
-    --red-600: #dc2626;
-    --red-100: #fee2e2;
-    --yellow-600: #ca8a04;
-    --yellow-100: #fef9c3;
+    --green-600: #05c168;
+    --green-100: rgba(5, 193, 104, 0.18);
+    --red-600: #ff5a65;
+    --red-100: rgba(255, 90, 101, 0.18);
+    --yellow-600: #ff9e2c;
+    --yellow-100: rgba(255, 158, 44, 0.18);
 
     --color-bg: var(--c-surface);
-    --color-surface: var(--c-white);
-    --color-surface-sunken: #eef4ff;
+    --color-surface: var(--c-navy);
+    --color-surface-sunken: var(--c-navy-deep);
 
-    --text-strong: var(--c-navy);
+    --text-strong: var(--c-text-light);
     --text: var(--c-text-dark);
     --text-muted: var(--c-text-muted);
-    --text-subtle: #4a6fa5;
-    /* Bold gray, not the default UA blue -- links (currently just the
-       maintainer mailto:) had never had their own rule at all, so they
-       rendered in the browser's own default link color, unreadable
-       against this app's surfaces. */
-    --link: var(--steel-600);
+    --text-subtle: #5d6788;
+    --link: var(--c-sky);
 
     --border: var(--c-border);
-    --border-strong: #93c5fd;
-    --border-faint: #eff6ff;
+    --border-strong: #3f4861;
+    --border-faint: #1c2745;
 
-    --primary: var(--c-navy);
-    --primary-hover: var(--c-navy-deep);
-    --primary-active: #112a50;
+    --primary: #cb3cff;
+    --primary-hover: #d95dff;
+    --primary-active: #b92ff0;
     --on-primary: var(--c-white);
 
     --accent: var(--c-sky);
-    --accent-hover: #2563c4;
-    --accent-soft: #eff6ff;
+    --accent-hover: var(--c-sky);
+    --accent-soft: rgba(0, 194, 255, 0.14);
 
     --success: var(--green-600);
     --success-soft: var(--green-100);
@@ -76,49 +78,29 @@
     --warning: var(--yellow-600);
     --warning-soft: var(--yellow-100);
 
-    --focus-ring: color-mix(in srgb, var(--c-sky) 50%, transparent);
+    --focus-ring: color-mix(in srgb, var(--c-sky) 55%, transparent);
 
-    --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
-    --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    /* One typeface throughout: the kit uses no monospace, so --font-mono
+       is kept (many rules reference it) but points at the same family.
+       Columns of digits get font-variant-numeric: tabular-nums instead. */
+    --font-sans: 'Mona Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --font-mono: 'Mona Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
 
     --radius-sm: 6px;
     --radius-md: 8px;
     --radius-lg: 12px;
     --radius-pill: 20px;
 
-    --shadow-sm: 0 1px 2px rgba(7, 19, 28, 0.08), 0 1px 1px rgba(7, 19, 28, 0.04);
-    --shadow-lg: 0 12px 28px -8px rgba(7, 19, 28, 0.20), 0 4px 10px -4px rgba(7, 19, 28, 0.10);
-    --shadow-xl: 0 28px 60px -16px rgba(7, 19, 28, 0.30);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.30), 0 1px 1px rgba(0, 0, 0, 0.20);
+    --shadow-lg: 0 12px 28px -8px rgba(0, 0, 0, 0.55), 0 4px 10px -4px rgba(0, 0, 0, 0.40);
+    --shadow-xl: 0 28px 60px -16px rgba(0, 0, 0, 0.70);
 
     --dur-fast: 120ms;
     --dur: 200ms;
     --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
     --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   }
-  /* Dark ("hull") theme -- same values as nordkeel's [data-theme="dark"],
-     delivered via prefers-color-scheme instead: this dashboard has no
-     theme-toggle UI of its own, only ever the OS-level signal. */
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --color-bg: #0b1e38;
-      --color-surface: #112a50;
-      --color-surface-sunken: #0b1e38;
 
-      --text-strong: var(--c-text-light);
-      --text: #93c5fd;
-      --text-muted: #60a5fa;
-      --text-subtle: #3b91f0;
-      --link: var(--steel-400);
-
-      --border: rgba(59, 145, 240, 0.22);
-      --border-strong: rgba(59, 145, 240, 0.38);
-      --border-faint: rgba(59, 145, 240, 0.12);
-
-      --primary: var(--c-sky-light);
-      --primary-hover: var(--c-text-light);
-      --on-primary: var(--c-navy);
-    }
-  }
   * { box-sizing: border-box; }
   body {
     margin: 0;
@@ -128,15 +110,15 @@
     -webkit-font-smoothing: antialiased;
   }
   ::selection { background: var(--border); color: var(--text-strong); }
-  .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px 64px; }
+  .wrap { max-width: 1360px; margin: 0 auto; padding: 32px 40px 64px; }
   header { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
   /* display:contents keeps api-row/refresh/status as direct flex items of
      header when visible, so wrapping them for a single hide toggle below
      doesn't change header's existing flex layout at all. */
   #conn-settings { display: contents; }
   #conn-settings[hidden] { display: none; }
-  h1 { font-family: var(--font-sans); font-size: 20px; font-weight: 600; color: var(--text-strong); letter-spacing: -0.01em; margin: 0; flex: 1 1 auto; min-width: 200px; }
-  h2 { font-family: var(--font-sans); font-size: 15px; font-weight: 600; color: var(--text-strong); margin: 0 0 10px; }
+  h1 { font-family: var(--font-sans); font-size: 24px; font-weight: 600; color: var(--text-strong); letter-spacing: -0.01em; margin: 0; flex: 1 1 auto; min-width: 200px; }
+  h2 { font-family: var(--font-sans); font-size: 18px; font-weight: 600; color: var(--text-strong); margin: 0 0 10px; }
   .api-row { display: flex; align-items: center; gap: 8px; }
   .api-row label { color: var(--text-muted); font-size: 12px; }
   input, select {
@@ -167,10 +149,11 @@
   #status { font-size: 12px; color: var(--text-muted); }
   #status.error { color: var(--danger); }
   section { margin-bottom: 28px; }
-  .search-row { display: flex; justify-content: center; margin: 0 0 8px; }
-  #search-input { width: 320px; max-width: 100%; }
-  .filter-row { display: flex; justify-content: center; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 6px; }
-  .search-note { text-align: center; font-size: 12px; color: var(--text-muted); margin: 0 0 14px; }
+  .search-row { display: flex; justify-content: flex-start; gap: 12px; margin: 0 0 12px; }
+  #search-input { width: 100%; }
+  .search-row > input { flex: 1 1 260px; min-width: 0; }
+  .filter-row { display: flex; justify-content: flex-start; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 14px; }
+  .search-note { text-align: left; font-size: 12px; color: var(--text-muted); margin: 0 0 14px; }
   /* The component picker: matching packages, one per row, click to see
      the artifacts containing that exact purl. Deliberately not the
      artifact table -- these are packages, and reusing eleven columns
@@ -186,14 +169,18 @@
   .pkg-purl { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; font-family: var(--font-mono, monospace); font-size: 12px; color: var(--text-muted); }
   .pkg-count { flex: 0 0 auto; font-size: 12px; color: var(--text-muted); }
-  .pager { display: flex; justify-content: center; align-items: center; gap: 10px; margin: 12px 0 0; font-size: 13px; }
-  .pager .range { color: var(--text-muted); font-family: var(--font-mono); }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .pager { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 14px 0 0; font-size: 13px; }
+  .pager .range { color: var(--text-muted); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
   .card {
     background: var(--color-surface); border: 1px solid var(--border);
-    border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); padding: 14px 16px;
+    border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); padding: 18px 20px;
+    /* column-reverse puts .l (the label) above .n (the number) without
+       reordering the markup renderCards emits, which tests index by position. */
+    display: flex; flex-direction: column-reverse; gap: 8px;
   }
-  .card .n { font-family: var(--font-mono); font-size: 24px; font-weight: 600; color: var(--text-strong); }
+  .card .n { font-family: var(--font-mono); font-size: 28px; font-weight: 600; color: var(--text-strong);
+    font-variant-numeric: tabular-nums; line-height: 1.1; }
   .card .l { font-size: 12px; color: var(--text-muted); }
   .card-danger { border-color: var(--danger); }
   .card-danger .n { color: var(--danger); }
@@ -204,28 +191,34 @@
     border-radius: var(--radius-pill); padding: 6px 14px; font-size: 13px; white-space: nowrap;
   }
   .stage-pill .count {
-    font-family: var(--font-mono); background: var(--accent-soft); color: var(--accent-hover);
-    border-radius: var(--radius-pill); padding: 1px 8px; font-size: 12px; font-weight: 600;
+    font-family: var(--font-mono); background: var(--color-bg); color: var(--accent);
+    border-radius: var(--radius-pill); padding: 2px 9px; font-size: 12px; font-weight: 600;
+    font-variant-numeric: tabular-nums;
   }
   .register-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .register-form input[type="text"], .register-form input[type="email"] { flex: 1 1 260px; }
   table { width: 100%; border-collapse: collapse; background: var(--color-surface); border-radius: var(--radius-lg); overflow: hidden; border: 1px solid var(--border); box-shadow: var(--shadow-sm); }
-  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border-faint); font-size: 13px; vertical-align: middle; }
-  th { color: var(--text-muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  th, td { text-align: left; padding: 12px; border-bottom: 1px solid var(--border-faint); font-size: 13px; vertical-align: middle; font-variant-numeric: tabular-nums; }
+  th { color: var(--text-muted); font-weight: 500; font-size: 11.5px; letter-spacing: 0.02em; }
   tr:last-child td { border-bottom: none; }
   .ref { font-family: var(--font-mono); font-size: 12.5px; }
   .badge {
     display: inline-flex; align-items: center; font-family: var(--font-mono);
-    border-radius: var(--radius-sm); padding: 3px 8px; font-size: 11px; font-weight: 500;
-    letter-spacing: 0.03em; text-transform: uppercase; border: 1px solid transparent;
+    border-radius: var(--radius-sm); padding: 3px 9px; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.01em; border: 1px solid transparent;
+  }
+  /* The kit marks every badge with a leading dot in the badge's own colour. */
+  .badge::before {
+    content: ""; flex: 0 0 auto; width: 5px; height: 5px; margin-right: 6px;
+    border-radius: 50%; background: currentColor;
   }
   .badge-neutral { background: var(--steel-100); color: var(--steel-600); }
   .badge-accent { background: var(--accent-soft); color: var(--accent-hover); }
   .badge-success { background: var(--success-soft); color: var(--success); }
   .badge-warning { background: var(--warning-soft); color: var(--warning); }
   .badge-danger { background: var(--danger-soft); color: var(--danger); }
-  .count-zero { color: var(--text-muted); }
-  .count-nonzero { color: var(--danger); font-weight: 600; }
+  .count-zero { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .count-nonzero { color: var(--text-strong); font-weight: 600; font-variant-numeric: tabular-nums; }
   .maintainer-link { color: var(--link); font-weight: 600; }
   .maintainer-link:hover { text-decoration: underline; }
   .actions { display: flex; gap: 6px; }
@@ -244,7 +237,7 @@
   .errs { color: var(--danger); font-size: 12.5px; }
   i.ti { font-size: 16px; vertical-align: -2px; }
   .modal-overlay {
-    position: fixed; inset: 0; background: rgba(11, 30, 56, 0.55);
+    position: fixed; inset: 0; background: rgba(3, 7, 18, 0.66);
     display: flex; align-items: center; justify-content: center;
     padding: 20px; z-index: 100;
   }
@@ -275,7 +268,7 @@
   .detail-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
   .detail-actions { display: flex; gap: 6px; }
   .detail-ref {
-    font-family: var(--font-mono); font-size: 26px; font-weight: 600; color: var(--text-strong);
+    font-family: var(--font-mono); font-size: 22px; font-weight: 600; color: var(--text-strong);
     margin: 0 0 4px; word-break: break-all;
   }
   .detail-digest {
@@ -283,13 +276,13 @@
     color: var(--text-muted); margin-bottom: 14px; word-break: break-all;
   }
   .risk-spectrum, .risk-spectrum-empty { margin: 4px 0 26px; }
-  .risk-bar { display: flex; height: 10px; border-radius: var(--radius-pill); overflow: hidden; background: var(--border); }
+  .risk-bar { display: flex; height: 10px; border-radius: var(--radius-pill); overflow: hidden; background: var(--border-faint); gap: 3px; }
   .risk-seg { display: block; }
   .risk-danger { background: var(--danger); }
   .risk-warning { background: var(--warning); }
-  .risk-neutral { background: var(--steel-400); }
+  .risk-neutral { background: var(--steel-500); }
   .risk-label { margin-top: 6px; font-family: var(--font-mono); font-size: 12.5px; color: var(--text-muted); }
-  .detail-section-title { font-size: 12px; color: var(--text-muted); font-weight: 600; margin: 0 0 8px; }
+  .detail-section-title { font-size: 15px; color: var(--text-strong); font-weight: 600; margin: 0 0 10px; }
   .sbom-diff-group { margin-bottom: 12px; }
   .sbom-diff-label { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
   .sbom-diff-range { font-size: 11px; margin-bottom: 8px; }
