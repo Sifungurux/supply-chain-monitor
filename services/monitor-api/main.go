@@ -111,6 +111,59 @@ func singleAuth(registryAddr, username, password string) map[string]any {
 // the same JSON shape, so both are read.
 var dockerConfigFileNames = map[string]bool{"config.json": true, ".dockerconfigjson": true}
 
+// registryUsernameFile / registryPasswordFile are the two file names a
+// monitorApi.registryCredentials entry using usernameSecretRef arrives
+// under. The chart projects whatever keys the operator's Secret
+// actually uses onto exactly these two names
+// (templates/monitor-api/deployment.yaml), so this side never has to
+// know what they were called in the Secret.
+//
+// THE DIRECTORY NAME IS THE HOST. A dockerconfigjson carries its own
+// host inside the JSON; a bare username/password pair does not, so the
+// only place left to put it is the mount path -- the chart mounts each
+// pair at <authDir>/<host>. A host is allowed to contain a colon
+// ("registry.internal:5000") and a path component never contains a
+// slash, so the host survives the round trip verbatim.
+const (
+	registryUsernameFile = "username"
+	registryPasswordFile = "password"
+)
+
+// authSource is one mounted credential: either a docker config file or
+// the directory of a username/password pair. Both carry their path so
+// the merge below can order every source, of both kinds, by one rule.
+type authSource struct {
+	path     string
+	userPair bool
+}
+
+// readUserPair builds an "auths" entry from a username/password pair
+// mounted in dir, taking the host from dir's own name.
+//
+// Trailing newlines are stripped, and that is not cosmetic: `kubectl
+// create secret generic --from-file` keeps the newline the editor put
+// at the end of the file, and a password with a stray "\n" fails
+// authentication with a 401 that looks exactly like a wrong password.
+// Only CR/LF go -- a password may legitimately end in a space, and
+// TrimSpace would silently corrupt it.
+func readUserPair(dir string) (host string, entry map[string]string, err error) {
+	user, err := os.ReadFile(filepath.Join(dir, registryUsernameFile))
+	if err != nil {
+		return "", nil, err
+	}
+	pass, err := os.ReadFile(filepath.Join(dir, registryPasswordFile))
+	if err != nil {
+		return "", nil, err
+	}
+	u := strings.TrimRight(string(user), "\r\n")
+	p := strings.TrimRight(string(pass), "\r\n")
+	return filepath.Base(dir), map[string]string{
+		"username": u,
+		"password": p,
+		"auth":     base64.StdEncoding.EncodeToString([]byte(u + ":" + p)),
+	}, nil
+}
+
 // mergeRegistryAuths merges the legacy single-registry credential pair
 // with every docker config mounted under authDir, and returns the
 // combined "auths" map.
@@ -124,14 +177,21 @@ var dockerConfigFileNames = map[string]bool{"config.json": true, ".dockerconfigj
 // certifies nothing. Mounting each source and merging them in the pod
 // is the only shape where an externally-managed Secret works at all.
 //
-// Files are merged in sorted path order and a later host entry wins, so
-// the result does not depend on directory iteration order. The legacy
-// pair goes first: an explicitly configured entry for the same host is
-// meant to override the account the chart derives from dockerAuth.
+// Sources are merged in sorted path order and a later host entry wins,
+// so the result does not depend on directory iteration order. Docker
+// configs and username/password pairs are sorted TOGETHER, by path,
+// rather than one kind after the other: two rules would mean the
+// winner between a dockerconfigjson and a usernameSecretRef for the
+// same host depended on which kind it was, which is not something an
+// operator reading values.yaml top to bottom would predict.
+//
+// The legacy pair goes first: an explicitly configured entry for the
+// same host is meant to override the account the chart derives from
+// dockerAuth.
 func mergeRegistryAuths(registryAddr, username, password, authDir string) map[string]any {
 	auths := singleAuth(registryAddr, username, password)
 
-	var paths []string
+	var sources []authSource
 	if authDir != "" {
 		// A missing directory is the normal "no extra registries
 		// configured" case, not an error -- WalkDir reports it through
@@ -140,15 +200,56 @@ func mergeRegistryAuths(registryAddr, username, password, authDir string) map[st
 			if err != nil {
 				return nil //nolint:nilerr // an unreadable entry is skipped, not fatal -- see below
 			}
-			if !d.IsDir() && dockerConfigFileNames[d.Name()] {
-				paths = append(paths, path)
+			if d.IsDir() {
+				// A Kubernetes Secret volume is not a flat directory:
+				// the atomic writer keeps the real files in a
+				// timestamped "..2026_08_22_15_44_23.381250005"
+				// directory and symlinks "..data" at it, so every key
+				// is visible TWICE -- once at <dir>/username and once
+				// at <dir>/..2026_.../username. WalkDir does not follow
+				// the "..data" symlink, but the timestamped directory
+				// is real and it does descend into that.
+				//
+				// Harmless for a docker config (the same hosts merged
+				// twice), fatal for a username/password pair, whose
+				// HOST IS ITS DIRECTORY NAME: the second copy would
+				// register credentials for a registry called
+				// "..2026_08_22_15_44_23.381250005". Verified against a
+				// real kubelet, not reasoned about.
+				if path != authDir && strings.HasPrefix(d.Name(), ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			switch {
+			case dockerConfigFileNames[d.Name()]:
+				sources = append(sources, authSource{path: path})
+			case d.Name() == registryUsernameFile:
+				// Keyed off the username file, not the directory, so a
+				// half-populated mount (a Secret missing the password
+				// key) is reported below rather than skipped in
+				// silence -- the whole point of the error legs here.
+				sources = append(sources, authSource{path: filepath.Dir(path), userPair: true})
 			}
 			return nil
 		})
 	}
-	sort.Strings(paths)
+	sort.Slice(sources, func(i, j int) bool { return sources[i].path < sources[j].path })
 
-	for _, path := range paths {
+	for _, src := range sources {
+		if src.userPair {
+			host, entry, err := readUserPair(src.path)
+			if err != nil {
+				// Same reasoning as the docker config legs below: loud,
+				// because the symptom otherwise arrives much later as a
+				// 401 from a registry nobody connected to this mount.
+				slog.Error("registry auth: could not read mounted username/password pair", "dir", src.path, "err", err)
+				continue
+			}
+			auths[host] = entry
+			continue
+		}
+		path := src.path
 		data, err := os.ReadFile(path)
 		if err != nil {
 			// Skipped rather than fatal, but LOUDLY: a credential that

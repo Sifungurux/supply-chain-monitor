@@ -113,3 +113,125 @@ func TestMergeRegistryAuths_MissingDirIsNotAnError(t *testing.T) {
 		t.Errorf("legacy pair lost when the mount directory is absent: %v", got)
 	}
 }
+
+// writeUserPair lays out a username/password pair the way a mounted
+// Secret actually arrives: the real files in a timestamped "..2026_..."
+// directory, a "..data" symlink pointing at it, and the two visible
+// names symlinked through that. Reproduced faithfully rather than
+// simplified to two plain files, because the timestamped directory is
+// the entire reason mergeRegistryAuths skips dot-directories -- a test
+// against plain files would pass with that skip removed.
+func writeUserPair(t *testing.T, dir, host, user, pass string) {
+	t.Helper()
+	base := filepath.Join(dir, host)
+	data := filepath.Join(base, "..2026_08_22_15_44_23.3812500056")
+	if err := os.MkdirAll(data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"username": user, "password": pass} {
+		if err := os.WriteFile(filepath.Join(data, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join("..data", name), filepath.Join(base, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(data, filepath.Join(base, "..data")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestMergeRegistryAuths_ReadsUsernameSecretRefPairs covers the
+// usernameSecretRef shape: a Secret holding a bare username and
+// password, whose host is carried by the mount path rather than by any
+// file content.
+func TestMergeRegistryAuths_ReadsUsernameSecretRefPairs(t *testing.T) {
+	dir := t.TempDir()
+	writeUserPair(t, dir, "registry.internal:5000", "svc", "hunter2")
+
+	auths := mergeRegistryAuths("", "", "", dir)
+
+	if got := hostsIn(t, auths); !got["registry.internal:5000"] {
+		t.Fatalf("usernameSecretRef host missing from merged auths: %v", got)
+	}
+	// The timestamped directory must NOT have become a host of its own
+	// -- that is the bug the dot-directory skip exists to prevent, and
+	// it is invisible unless asserted, since the real host is present
+	// either way.
+	if len(auths) != 1 {
+		t.Errorf("want exactly one host, got %d: %v", len(auths), hostsIn(t, auths))
+	}
+
+	entry, ok := auths["registry.internal:5000"].(map[string]string)
+	if !ok {
+		t.Fatalf("entry has unexpected type %T", auths["registry.internal:5000"])
+	}
+	if want := base64.StdEncoding.EncodeToString([]byte("svc:hunter2")); entry["auth"] != want {
+		t.Errorf("auth = %q, want %q", entry["auth"], want)
+	}
+}
+
+// TestMergeRegistryAuths_UserPairTrailingNewlineStripped is the failure
+// this project would otherwise debug as "the password is wrong":
+// `kubectl create secret generic --from-file` keeps the newline at the
+// end of the file, and a credential with a stray "\n" 401s exactly the
+// way a wrong password does.
+func TestMergeRegistryAuths_UserPairTrailingNewlineStripped(t *testing.T) {
+	dir := t.TempDir()
+	writeUserPair(t, dir, "ghcr.io", "bot\n", "token\r\n")
+
+	auths := mergeRegistryAuths("", "", "", dir)
+
+	entry, ok := auths["ghcr.io"].(map[string]string)
+	if !ok {
+		t.Fatalf("entry has unexpected type %T", auths["ghcr.io"])
+	}
+	if entry["username"] != "bot" || entry["password"] != "token" {
+		t.Errorf("username/password not trimmed: %q / %q", entry["username"], entry["password"])
+	}
+	if want := base64.StdEncoding.EncodeToString([]byte("bot:token")); entry["auth"] != want {
+		t.Errorf("auth = %q, want %q", entry["auth"], want)
+	}
+}
+
+// TestMergeRegistryAuths_HalfPopulatedUserPairIsSkipped: a Secret whose
+// password key is missing (or misnamed in usernameSecretRef) must not
+// register half a credential. Anonymous is the correct outcome; a
+// username with an empty password would authenticate as something.
+func TestMergeRegistryAuths_HalfPopulatedUserPairIsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "ghcr.io")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "username"), []byte("bot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if auths := mergeRegistryAuths("", "", "", dir); len(auths) != 0 {
+		t.Errorf("half-populated pair produced auths: %v", hostsIn(t, auths))
+	}
+}
+
+// TestMergeRegistryAuths_UserPairAndDockerConfigOrderByPath pins the
+// precedence rule ACROSS the two kinds. Both are sorted by path
+// together, so "z-config" beats the pair mounted at "ghcr.io" -- the
+// point being that the winner does not depend on which KIND of source
+// it is, which is not something values.yaml could otherwise predict.
+func TestMergeRegistryAuths_UserPairAndDockerConfigOrderByPath(t *testing.T) {
+	dir := t.TempDir()
+	writeUserPair(t, dir, "ghcr.io", "pair", "wins-if-later")
+	writeAuthFile(t, dir, "z-config", `{"auths":{"ghcr.io":{"auth":"Y29uZmlnOndpbnM="}}}`)
+
+	auths := mergeRegistryAuths("", "", "", dir)
+
+	body, err := json.Marshal(auths["ghcr.io"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "z-config" sorts after "ghcr.io", so the docker config is applied
+	// last and wins.
+	if want := base64.StdEncoding.EncodeToString([]byte("config:wins")); !strings.Contains(string(body), want) {
+		t.Errorf("later path did not win across source kinds: %s", body)
+	}
+}

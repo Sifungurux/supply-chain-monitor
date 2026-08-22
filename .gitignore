@@ -6,3 +6,7 @@ node_modules/
 # Dockerfile builds its own; a committed host binary is the exact
 # "unverified binary in the repo" pattern this product detects elsewhere.
 services/monitor-api/monitor-api
+
+# Extracted from the built image by `make test-image` so the tool-gated
+# scanner tests can run against the real binaries; removed by that target.
+.tool-bin/

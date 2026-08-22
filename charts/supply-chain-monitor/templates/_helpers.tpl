@@ -87,6 +87,10 @@ monitor-api on every reconcile for no reason.
 {{- range .Values.monitorApi.registryCredentials -}}
 {{- if .username -}}
 {{- $names = append $names "scm-registry-credentials-inline" -}}
+{{- else if and .usernameSecretRef .host -}}
+{{- /* handled by registryUserSecrets below -- listed here so an entry
+       carrying BOTH does not also mount its dockerconfigjson and end
+       up with two entries racing for the same host. */ -}}
 {{- else if .existingDockerConfigSecret -}}
 {{- $names = append $names .existingDockerConfigSecret -}}
 {{- end -}}
@@ -109,4 +113,55 @@ shape and same reasoning as registryAuthSecrets above.
 {{- end -}}
 {{- end -}}
 {{- join "," ($names | uniq | sortAlpha) -}}
+{{- end -}}
+
+{{/*
+supply-chain-monitor.registryUserSecrets renders every
+registryCredentials entry that names a usernameSecretRef -- an
+operator-managed Secret holding a bare username and password -- as a
+JSON array.
+
+JSON rather than the comma-separated shape the two helpers above use,
+because this one carries FOUR fields per entry and one of them is a
+registry host. A host legitimately contains a colon
+("registry.internal:5000"), which rules out the obvious inner
+separator, and every other candidate is a character that eventually
+turns up in a Secret name or key. See internal/k8sjob/job.go's
+registryUserSecret.
+
+Precedence, matching values.yaml: an inline `username` wins outright,
+then usernameSecretRef, then existingDockerConfigSecret. They are
+alternatives, not layers.
+
+Sorted by host for the same reason the others are sorted: an unstable
+value would roll monitor-api on every reconcile for no reason.
+*/}}
+{{- define "supply-chain-monitor.registryUserSecrets" -}}
+{{- $byHost := dict -}}
+{{- range .Values.monitorApi.registryCredentials -}}
+{{- /* `.host` is REQUIRED here, not merely expected. Without it the
+       mount path collapses to the auth directory's own root, and that
+       mount shadows every other credential underneath it -- the one
+       failure in this file that hides working credentials rather than
+       failing closed to an anonymous pull. Dropped silently for the
+       same reason the rest of this helper is forgiving: one malformed
+       entry must not take out the registries that are fine. */ -}}
+{{- if and .usernameSecretRef .host (not .username) -}}
+{{- $_ := set $byHost .host (dict
+    "host" .host
+    "secret" .usernameSecretRef.name
+    "usernameKey" (default "username" .usernameSecretRef.usernameKey)
+    "passwordKey" (default "password" .usernameSecretRef.passwordKey)) -}}
+{{- end -}}
+{{- end -}}
+{{- if $byHost -}}
+{{- $out := list -}}
+{{- /* `range` over a dict visits keys in sorted order, which is what
+       makes this value stable -- sprig has no sortBy for a list of
+       dicts, so the dict IS the sort. */ -}}
+{{- range $host, $entry := $byHost -}}
+{{- $out = append $out $entry -}}
+{{- end -}}
+{{- $out | toJson -}}
+{{- end -}}
 {{- end -}}

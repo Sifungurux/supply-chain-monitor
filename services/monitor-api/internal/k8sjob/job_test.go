@@ -437,3 +437,64 @@ func hasEnv(env []EnvVar, name, value string) bool {
 	}
 	return false
 }
+
+// TestNewScanJob_MountsUsernameSecretRefPairs is the isolated-path half
+// of usernameSecretRef: a scan-worker Job must authenticate to the same
+// registries this pod does. The in-process path is the one unit tests
+// naturally cover, so the Job manifest is where this silently drifts.
+func TestNewScanJob_MountsUsernameSecretRefPairs(t *testing.T) {
+	t.Setenv("SCAN_WORKER_REGISTRY_USER_SECRETS",
+		`[{"host":"registry.internal:5000","secret":"harbor-creds","usernameKey":"user","passwordKey":"pass"}]`)
+
+	job := NewScanJob(ScanJobConfig{Name: "scm-scan-x", Namespace: "scm"})
+	c := job.Spec.Template.Spec.Containers[0]
+
+	// THE MOUNT PATH CARRIES THE HOST -- including its colon, which a
+	// volume name could not hold (a volume name is a DNS-1123 label).
+	// main.go's mergeRegistryAuths reads the host back from exactly
+	// this path, so this assertion is the contract between the two.
+	wantPath := "/etc/scm/registry-auth/registry.internal:5000"
+	if !hasMountPath(c.VolumeMounts, wantPath) {
+		t.Errorf("no volume mounted at %q: %+v", wantPath, c.VolumeMounts)
+	}
+	if !hasSecretVolume(job.Spec.Template.Spec.Volumes, "harbor-creds") {
+		t.Errorf("no volume sourced from Secret %q: %+v", "harbor-creds", job.Spec.Template.Spec.Volumes)
+	}
+
+	// The operator's own key names are projected onto the two fixed
+	// names the reader expects. Without this the mount is present,
+	// readable, and holds files nothing looks for.
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Secret == nil || v.Secret.SecretName != "harbor-creds" {
+			continue
+		}
+		got := map[string]string{}
+		for _, item := range v.Secret.Items {
+			got[item.Key] = item.Path
+		}
+		if got["user"] != "username" || got["pass"] != "password" {
+			t.Errorf("keys not projected onto username/password: %+v", v.Secret.Items)
+		}
+	}
+
+	// Set even though SCAN_WORKER_REGISTRY_AUTH_SECRETS is unset: a
+	// deployment using only usernameSecretRef has credentials mounted
+	// and nothing reading them without this.
+	if !hasEnv(c.Env, "REGISTRY_AUTH_DIR", "/etc/scm/registry-auth") {
+		t.Errorf("REGISTRY_AUTH_DIR not set with only usernameSecretRef configured: %+v", c.Env)
+	}
+}
+
+// TestRegistryUserSecrets_MalformedJSONIsDroppedNotFatal: one bad entry
+// must not take scanning down for every other registry.
+func TestRegistryUserSecrets_MalformedJSONIsDroppedNotFatal(t *testing.T) {
+	t.Setenv("SCAN_WORKER_REGISTRY_USER_SECRETS", "{not json")
+
+	if got := registryUserSecrets(); got != nil {
+		t.Errorf("malformed JSON produced entries: %+v", got)
+	}
+	job := NewScanJob(ScanJobConfig{Name: "scm-scan-x", Namespace: "scm"})
+	if c := job.Spec.Template.Spec.Containers[0]; hasEnv(c.Env, "REGISTRY_AUTH_DIR", "/etc/scm/registry-auth") {
+		t.Error("REGISTRY_AUTH_DIR set with no usable credential source")
+	}
+}
