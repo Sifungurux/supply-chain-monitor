@@ -146,7 +146,12 @@ func (u *UnpackerScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 	slog.Info("unpacker: image unpacked, scanning files with clamav", "scanner", "clamav", "clam_addr", u.clamAddr)
 
 	var findings []artifact.Finding
-	var attempted, failed int
+	// found counts every regular file in the unpacked image; attempted
+	// counts the ones actually sent to clamd. They differ by skipped,
+	// and keeping them apart is the whole point: "no findings" is only
+	// good news next to a non-zero attempted, and the two ways of
+	// reaching zero need different error messages.
+	var found, skipped, attempted, failed int
 	var lastErr error
 
 	walkErr := filepath.WalkDir(imageDir, func(path string, d fs.DirEntry, err error) error {
@@ -160,7 +165,9 @@ func (u *UnpackerScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 		if err != nil {
 			return nil // skip files we can't stat rather than aborting the whole walk
 		}
+		found++
 		if info.Size() > u.maxFileSize {
+			skipped++
 			return nil
 		}
 
@@ -189,11 +196,37 @@ func (u *UnpackerScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 		return findings, fmt.Errorf("failed walking unpacked image: %w", walkErr)
 	}
 	slog.Info("unpacker: clamav scan complete",
-		"scanner", "clamav", "files_scanned", attempted, "files_failed", failed, "count", len(findings))
-	// If every single file failed to scan (e.g. clamd was unreachable
-	// for the whole run), surface that as an error rather than quietly
-	// reporting a "clean" scan that never actually happened.
-	if attempted > 0 && failed == attempted {
+		"scanner", "clamav", "files_found", found, "files_scanned", attempted,
+		"files_skipped", skipped, "files_failed", failed, "count", len(findings))
+
+	// Nothing was opened. Reporting no findings here would record the
+	// artifact as malware-clean on the strength of a scan that never
+	// looked at a byte -- and an image whose unpack produced nothing is
+	// indistinguishable, from this side, from one that is genuinely
+	// clean.
+	//
+	// That is not hypothetical: unpacker exits 0 having downloaded no
+	// blobs at all for some references (a multi-arch index, measured),
+	// leaving an empty image/ behind. The stat above passes, this walk
+	// finds nothing, and the artifact comes back clean.
+	//
+	// The two ways of reaching zero are reported differently because
+	// they need different fixes: an empty directory is an unpack that
+	// silently produced nothing, while an all-skipped directory is
+	// maxFileSize set below everything in the image.
+	if attempted == 0 {
+		if found == 0 {
+			return findings, fmt.Errorf("clamav scanned nothing: the unpacked image at %q contains no regular files -- "+
+				"treating that as clean would record an image nobody opened", imageDir)
+		}
+		return findings, fmt.Errorf("clamav scanned nothing: all %d files in the unpacked image are larger than the "+
+			"%d byte limit (monitorApi.unpacker.maxFileMB) -- treating that as clean would record an image nobody opened",
+			skipped, u.maxFileSize)
+	}
+
+	// If every file that WAS attempted failed (e.g. clamd was
+	// unreachable for the whole run), surface that for the same reason.
+	if failed == attempted {
 		return findings, fmt.Errorf("clamav scan failed for all %d files in unpacked image (e.g. %w)", attempted, lastErr)
 	}
 

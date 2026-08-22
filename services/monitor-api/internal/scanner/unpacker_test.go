@@ -85,10 +85,16 @@ printf 'malware content' > "$2/image/sub/bad.txt"
 // path outside the ephemeral scm-unpack-* dir Scan creates and cleans
 // up itself, so it survives long enough for this test to read it back.
 func TestUnpackerScanner_Scan_DockerConfigPathIsPassedThrough(t *testing.T) {
+	// A real (clean) file and a reachable clamd, because this test is
+	// about argv and wants the scan itself to succeed. An empty image/
+	// is now an error in its own right -- see
+	// TestUnpackerScanner_Scan_EmptyImageDirIsAnError.
+	addr := startFakeClamd(t, func([]byte) string { return "stream: OK" })
 	argvFile := filepath.Join(t.TempDir(), "argv.txt")
 	script := `mkdir -p "$2/image"
+printf 'clean' > "$2/image/f.txt"
 echo "$@" > ` + argvFile
-	s := newTestUnpackerScanner(t, "127.0.0.1:1", script, 0)
+	s := newTestUnpackerScanner(t, addr, script, 0)
 	s.dockerConfigPath = "/creds/dockerconfig.json"
 
 	if _, err := s.Scan(context.Background(), "ref-does-not-matter:latest"); err != nil {
@@ -136,17 +142,22 @@ func TestUnpackerScanner_Scan_MissingImageDirIsAnError(t *testing.T) {
 	}
 }
 
-func TestUnpackerScanner_Scan_FilesOverMaxSizeAreSkipped(t *testing.T) {
-	// Every connection would be reported as malware if scanFileWithClamd
-	// were ever actually called -- so an empty findings result here can
-	// only mean the oversized file was skipped before reaching clamd at
-	// all, not that clamd happened to report it clean.
+// Skipping oversized files must not stop the rest of the image being
+// scanned. Split from the all-skipped case below, which is now an error:
+// the two used to be one test asserting only "no error", which could not
+// tell "skipped the big one, scanned the small one" from "scanned
+// nothing at all".
+func TestUnpackerScanner_Scan_OversizedFilesAreSkippedButTheRestIsScanned(t *testing.T) {
+	// Everything clamd sees is reported as malware, so a finding count
+	// of exactly one proves the oversized file never reached it -- and
+	// that the small one did.
 	addr := startFakeClamd(t, func(received []byte) string {
 		return "stream: Eicar-Test-Signature FOUND"
 	})
 	script := `
 mkdir -p "$2/image"
 printf 'this content is well over the ten byte limit' > "$2/image/big.txt"
+printf 'small' > "$2/image/small.txt"
 `
 	s := newTestUnpackerScanner(t, addr, script, 10) // maxFileSize=10 bytes
 
@@ -154,8 +165,51 @@ printf 'this content is well over the ten byte limit' > "$2/image/big.txt"
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	if len(findings) != 0 {
-		t.Fatalf("findings = %+v, want none -- the only file present is over maxFileSize and should have been skipped", findings)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %+v, want exactly one -- big.txt is over maxFileSize and must never reach clamd", findings)
+	}
+	if !strings.Contains(findings[0].Title, "small.txt") {
+		t.Errorf("finding = %q, want it to name small.txt", findings[0].Title)
+	}
+}
+
+// An image where EVERY file is over the limit means clamd was handed
+// nothing. Reporting that as clean records the artifact malware-free on
+// the strength of a scan that opened no bytes, so it is an error -- and
+// the message has to name the limit, because raising
+// monitorApi.unpacker.maxFileMB is the fix.
+func TestUnpackerScanner_Scan_EveryFileSkippedIsAnError(t *testing.T) {
+	addr := startFakeClamd(t, func([]byte) string { return "stream: OK" })
+	script := `
+mkdir -p "$2/image"
+printf 'this content is well over the ten byte limit' > "$2/image/big.txt"
+`
+	s := newTestUnpackerScanner(t, addr, script, 10)
+
+	_, err := s.Scan(context.Background(), "ref")
+	if err == nil {
+		t.Fatal("Scan returned nil error with every file skipped -- that records an image nobody opened as clean")
+	}
+	if !strings.Contains(err.Error(), "maxFileMB") {
+		t.Errorf("error = %q, want it to name the limit that has to be raised", err)
+	}
+}
+
+// The failure this whole guard exists for: unpacker exits 0 having
+// produced an empty image/ (measured against a multi-arch index, where
+// it downloads no blobs at all). The stat succeeds, the walk finds
+// nothing, and before this the artifact came back malware-clean.
+func TestUnpackerScanner_Scan_EmptyImageDirIsAnError(t *testing.T) {
+	addr := startFakeClamd(t, func([]byte) string { return "stream: OK" })
+	s := newTestUnpackerScanner(t, addr, `mkdir -p "$2/image"`, 0)
+
+	findings, err := s.Scan(context.Background(), "ref")
+	if err == nil {
+		t.Fatalf("Scan returned nil error and %d findings for an empty image dir -- "+
+			"an unpack that produced nothing must not read as clean", len(findings))
+	}
+	if !strings.Contains(err.Error(), "no regular files") {
+		t.Errorf("error = %q, want it to say the unpacked image had no files", err)
 	}
 }
 
@@ -311,10 +365,14 @@ func TestUnpackerScanner_Scan_InsecureIsScopedToTheLocalRegistry(t *testing.T) {
 			t.Setenv(RegistryAddrEnv, tc.registryEnv)
 			t.Setenv(RefHostAllowlistEnv, tc.allowlist)
 
+			// As above: one clean file and a reachable clamd, so the
+			// scan succeeds and this stays a test about argv.
+			clam := startFakeClamd(t, func([]byte) string { return "stream: OK" })
 			argvFile := filepath.Join(t.TempDir(), "argv.txt")
 			script := `mkdir -p "$2/image"
+printf 'clean' > "$2/image/f.txt"
 echo "$@" > ` + argvFile
-			s := NewUnpackerScanner("127.0.0.1:1", writeFakeUnpacker(t, script), true, false, 0, "")
+			s := NewUnpackerScanner(clam, writeFakeUnpacker(t, script), true, false, 0, "")
 
 			if _, err := s.Scan(context.Background(), tc.ref); err != nil {
 				t.Fatalf("Scan(%q): %v", tc.ref, err)
