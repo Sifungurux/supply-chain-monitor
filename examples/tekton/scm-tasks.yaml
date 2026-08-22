@@ -174,13 +174,42 @@ spec:
         auth="Authorization: Bearer ${API_KEY}"
         art="$(params.api)/api/v1/artifacts/$(params.artifact-id)"
 
-        curl -fsS -o /dev/null -X POST "$art/scan" -H "$auth"
+        # A saturated scan-concurrency cap answers 429 with Retry-After.
+        # That is a "come back", not a failure -- and it is NOT rare:
+        # SCAN_CONCURRENCY_UNPACKER bounds concurrent image scans, so any
+        # deployment that caps it will 429 pipelines that arrive together.
+        # curl -f treats 429 as an error, which would fail the build for
+        # a queue that cleared seconds later.
+        waited=0
+        while :; do
+          code=$(curl -sS -o /dev/null -D /tmp/scan-headers -w '%{http_code}' \
+            -X POST "$art/scan" -H "$auth")
+          case "$code" in
+            202) break ;;
+            429)
+              # Honour the server's own Retry-After rather than guessing.
+              retry=$(sed -n 's/^[Rr]etry-[Aa]fter:[ ]*\([0-9][0-9]*\).*/\1/p' /tmp/scan-headers | head -1)
+              [ -n "$retry" ] || retry=10
+              if [ "$waited" -ge "$(params.timeout-seconds)" ]; then
+                echo "scan capacity never freed up within $(params.timeout-seconds)s" >&2
+                exit 1
+              fi
+              echo "scan concurrency cap saturated -- retrying in ${retry}s"
+              sleep "$retry"
+              waited=$((waited + retry)) ;;
+            *)
+              echo "scan request failed (HTTP $code)" >&2
+              exit 1 ;;
+          esac
+        done
         echo "scan requested for $(params.artifact-id)"
 
         # Poll rather than sleep-then-assume. "scanning" is a real state
         # and a pipeline that reads findings too early sees an empty set,
         # which looks exactly like a clean image.
-        waited=0
+        # Continues from the same budget: time spent waiting for a slot
+        # is time the scan was not running, and a Task that reset the
+        # clock here could sit for twice its declared timeout.
         while [ "$waited" -lt "$(params.timeout-seconds)" ]; do
           status=$(curl -fsS "$art" -H "$auth" | jq -r .status)
           if [ "$status" != "scanning" ]; then
