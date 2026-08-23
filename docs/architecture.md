@@ -163,8 +163,9 @@ blast radius. **By digest** the product *is* the artifact: one match,
 narrow by construction. **By component purl** the product is something
 artifacts *contain*, resolved through `FindByComponentPURL`, so one
 line can cover the entire estate. That breadth is the point, and it is
-also why the endpoint returns `artifacts_updated` and the ids rather
-than a bare "applied" — a fleet suppression that silently covered 400
+also why the endpoint returns `artifacts_updated` and the ids (capped
+at 200, with `artifacts_truncated` saying so) rather than a bare
+"applied" — a fleet suppression that silently covered 400
 artifacts is exactly the kind of thing this codebase keeps having to
 learn to make visible. A statement naming **no** product matches
 nothing and is counted in `statements_naming_no_product`; the other
@@ -193,9 +194,13 @@ tree rather than naming an identifier — resolving those means resolving
 a whole BOM. A CycloneDX document posted here is rejected with a 400
 saying so, rather than accepted as one that silently matches nothing.
 
-Fleet documents are read and parsed on **every scan**, uncached. That
-is a deliberate call at this scale: a handful of documents against a
-scan that spends seconds to minutes in trivy/grype is noise, and a
+Fleet documents are read and parsed on **every scan**, uncached, and
+the ceiling to watch is *bytes* rather than document count —
+`ListFleetVEX` selects the full content column, so the cost is total
+stored bytes × scans in flight, and at `maxVEXBytes` each a handful of
+documents is already tens of MB per scan. That is still a deliberate
+call at this scale: against a scan that spends seconds to minutes in
+trivy/grype it is noise, and a
 process-local cache would go stale on the other replica the moment
 somebody uploaded a document. If the count ever makes it measurable,
 the upgrade is a short-TTL cache keyed on row count plus newest

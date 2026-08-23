@@ -459,7 +459,7 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 	// per-artifact "affected" over a fleet "not_affected" un-suppresses
 	// exactly as it would over a per-artifact one -- there is no
 	// separate retraction path to keep in step.
-	vex := h.fleetVEXFor(a)
+	vex := h.fleetVEXFor(a, digest)
 	if perArtifact := h.vexFor(id); len(perArtifact) > 0 {
 		if vex == nil {
 			vex = make(map[string]artifact.VEXStatement, len(perArtifact))

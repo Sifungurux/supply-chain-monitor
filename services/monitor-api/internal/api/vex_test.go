@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/api"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/pipeline"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
 )
 
@@ -540,5 +542,48 @@ func TestFleetVEX_UploadDoesNotOverrideAnExistingPerArtifactStatement(t *testing
 	}
 	if f := findingsByID(*got)["CVE-2021-44228"]; f.Status != artifact.FindingStatusOpen {
 		t.Errorf("fleet upload overrode the per-artifact assessment: %+v, want still open", f)
+	}
+}
+
+// TestFleetVEX_MatchesTheDigestResolvedByThisVeryScan is the ordering
+// trap in runScan: the digest is resolved into a LOCAL variable, and
+// only written onto the artifact inside the store.Update callback that
+// runs afterwards. Matching against the artifact struct loaded before
+// the scan therefore sees the OLD digest -- empty, on the first scan of
+// a freshly registered artifact, which is exactly when a fleet document
+// naming it by digest most needs to apply.
+//
+// The sibling test above cannot catch this: it stamps the digest on via
+// store.Update before scanning, so the loaded artifact already has one.
+func TestFleetVEX_MatchesTheDigestResolvedByThisVeryScan(t *testing.T) {
+	const digest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": digest}}
+	trivyLike := &fakeScanner{findings: []artifact.Finding{{ID: "CVE-2024-7", Severity: "high", Source: "trivy"}}}
+	store := artifact.NewMemStore()
+	h := api.NewRouter(api.Config{
+		Store:          store,
+		Tracker:        pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"}),
+		Scanners:       scanner.Registry{artifact.TypeImage: {trivyLike}},
+		APIKey:         testAPIKey,
+		DigestResolver: resolver,
+	})
+
+	// Registered with NO digest on record. The scan below resolves it.
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	if created.Digest != "" {
+		t.Fatalf("fixture is wrong: artifact already has digest %q, so this proves nothing", created.Digest)
+	}
+
+	if rec := doRaw(t, h, http.MethodPost, "/api/v1/vex", "application/json",
+		fleetDoc("CVE-2024-7", "not_affected", digest)); rec.Code != http.StatusOK {
+		t.Fatalf("fleet upload status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	_, scanned := scanAndWait(t, h, store, created.ID)
+	if scanned.Digest != digest {
+		t.Fatalf("scan did not resolve the digest (got %q) -- fixture broken", scanned.Digest)
+	}
+	if f := findingsByID(*scanned)["CVE-2024-7"]; f.Status != artifact.FindingStatusNotAffected {
+		t.Errorf("finding = %+v, want not_affected -- the fleet document named the digest this scan resolved", f)
 	}
 }

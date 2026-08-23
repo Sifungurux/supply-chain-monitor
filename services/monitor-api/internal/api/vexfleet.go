@@ -14,6 +14,11 @@ import (
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
 )
 
+// maxFleetVEXArtifactIDs bounds how many artifact ids the response
+// lists. Same reasoning and same shape as maxListLimit: the count is
+// always exact, the enumeration is capped.
+const maxFleetVEXArtifactIDs = 200
+
 // uploadFleetVEX ingests an OpenVEX document that applies FLEET-WIDE
 // rather than to one artifact: "CVE-2024-1234 does not apply to
 // log4j-core 2.14.1 the way we build it, wherever it appears."
@@ -86,6 +91,18 @@ func (h *handler) uploadFleetVEX(w http.ResponseWriter, r *http.Request) {
 		"document_id", doc.ID, "statements", len(statements),
 		"artifacts_updated", applied, "statements_naming_no_product", unmatched)
 
+	// The id list is CAPPED and the true total is reported separately,
+	// the same contract SearchComponents uses. A component-purl match
+	// legitimately spans the whole estate, and an unbounded array of
+	// ids would make the response size a function of how many artifacts
+	// exist -- which is exactly the shape maxListLimit exists to stop.
+	// artifacts_updated is the number that matters; the ids are a
+	// convenience for the common small case.
+	truncated := false
+	if len(matched) > maxFleetVEXArtifactIDs {
+		matched = matched[:maxFleetVEXArtifactIDs]
+		truncated = true
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":                       "applied",
 		"document_id":                  doc.ID,
@@ -93,6 +110,9 @@ func (h *handler) uploadFleetVEX(w http.ResponseWriter, r *http.Request) {
 		"artifacts_updated":            applied,
 		"statements_naming_no_product": unmatched,
 		"artifacts":                    matched,
+		// Stated rather than left to be inferred from a short array:
+		// silent truncation reads as "these are all of them".
+		"artifacts_truncated": truncated,
 	})
 }
 
@@ -235,20 +255,35 @@ func applyVEXToEveryBucket(art *artifact.Artifact, vex map[string]artifact.VEXSt
 // artifact's component purls in ONE query rather than asking the store
 // per product identifier.
 //
+// digest is passed in rather than read off a.Digest, and that is not
+// defensive: runScan resolves the digest into a LOCAL variable and only
+// writes it onto the artifact inside the store.Update that comes
+// afterwards, so on the first scan of a freshly registered artifact
+// a.Digest is still empty. Reading it here would mean a fleet document
+// naming that artifact by digest silently did nothing until the NEXT
+// scan -- see TestFleetVEX_MatchesTheDigestResolvedByThisVeryScan,
+// which fails on exactly that.
+//
 // ponytail: every fleet document is read and parsed per scan, with no
-// cache. Deliberate at this scale -- a handful of documents against a
-// scan that spends seconds to minutes in trivy/grype is noise, and a
-// process-local cache would go stale on the OTHER replica the moment
-// somebody uploaded a document (this runs two). If the document count
-// ever makes this measurable, the upgrade is a short-TTL cache keyed on
-// the row count plus newest uploaded_at, NOT a lifetime one.
+// cache. Deliberate at this scale, and the ceiling is BYTES rather than
+// document count -- ListFleetVEX selects the full content column, so
+// the cost is (total stored bytes x scans in flight), and at
+// maxVEXBytes each a handful of documents is already tens of MB per
+// scan. Against a scan that spends seconds to minutes in trivy/grype
+// that is still noise, which is why it stays uncached; a process-local
+// cache would also go stale on the OTHER replica the moment somebody
+// uploaded a document (this runs two).
+//
+// Measure total bytes in vex_documents, not the row count, before
+// deciding this needs fixing. The upgrade is a short-TTL cache keyed on
+// row count plus newest uploaded_at, NOT a lifetime one.
 //
 // Best-effort in the same spirit as vexFor: a document that cannot be
 // read or parsed drops out with a log line rather than failing the
 // scan. Suppression already stamped onto findings persists regardless
 // (see MergeFindings), so this can only fail to apply a statement to a
 // finding seen for the first time this round.
-func (h *handler) fleetVEXFor(a *artifact.Artifact) map[string]artifact.VEXStatement {
+func (h *handler) fleetVEXFor(a *artifact.Artifact, digest string) map[string]artifact.VEXStatement {
 	docs, err := h.store.ListFleetVEX()
 	if err != nil {
 		slog.Warn("could not list fleet VEX documents (continuing without them)", "artifact_id", a.ID, "err", err)
@@ -280,7 +315,7 @@ func (h *handler) fleetVEXFor(a *artifact.Artifact) map[string]artifact.VEXState
 			continue
 		}
 		for _, st := range statements {
-			if statementMatches(st.Products, a, has) {
+			if statementMatches(st.Products, digest, has) {
 				out[st.VulnID] = st.VEXStatement
 			}
 		}
@@ -293,12 +328,13 @@ func (h *handler) fleetVEXFor(a *artifact.Artifact) map[string]artifact.VEXState
 
 // statementMatches is artifactsMatching in the other direction: given
 // one artifact already in hand, does this statement name it? Same two
-// arms -- the artifact's own digest, or a purl in its inventory --
-// answered locally against data the caller already loaded, with no
-// query per product.
-func statementMatches(products []string, a *artifact.Artifact, hasPURL map[string]bool) bool {
+// arms -- the artifact's digest, or a purl in its inventory -- answered
+// locally against data the caller already loaded, with no query per
+// product.
+func statementMatches(products []string, digest string, hasPURL map[string]bool) bool {
+	digest = strings.ToLower(strings.TrimSpace(digest))
 	for _, product := range products {
-		if a.Digest != "" && digestFromProduct(product) == strings.ToLower(a.Digest) {
+		if digest != "" && digestFromProduct(product) == digest {
 			return true
 		}
 		if hasPURL[product] {

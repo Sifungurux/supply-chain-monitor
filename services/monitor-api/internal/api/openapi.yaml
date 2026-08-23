@@ -865,7 +865,16 @@ paths:
                   artifacts:
                     type: array
                     items: { type: string }
-                    description: The ids of the artifacts that changed.
+                    description: >-
+                      The ids of the artifacts that changed, capped at
+                      200. `artifacts_updated` is always the exact
+                      total.
+                  artifacts_truncated:
+                    type: boolean
+                    description: >-
+                      True when more artifacts changed than `artifacts`
+                      lists.
+                    example: false
         "400": { $ref: "#/components/responses/BadRequest" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "403": { $ref: "#/components/responses/Forbidden" }
