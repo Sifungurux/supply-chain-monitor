@@ -150,6 +150,58 @@ one artifact, so the operator has already scoped it (matching purls
 would be the change needed if VEX ever arrives fleet-wide rather than
 per-artifact).
 
+**Accepting the risk of a finding.** VEX answers "this doesn't apply
+here." The far more common situation has no VEX statement that is
+honest: the vulnerability is real, it does apply, and there is no fix
+yet — or the fix is a major-version upgrade that isn't happening this
+quarter. Before this, the only options were to leave the policy gate red
+forever (which teaches a team to stop reading it) or to assert a
+`not_affected` nobody believes.
+`POST /api/v1/artifacts/{id}/findings/{findingID}/acceptance`
+(`internal/api/findings.go`) is the honest third option: a time-boxed
+risk acceptance carrying `AcceptedUntil`, `AcceptedBy` and
+`AcceptanceReason`.
+
+The expiry is the whole design. An acceptance with no end date is a
+deletion with extra steps, so `until` is required, must be in the
+future, and is capped at 365 days — every accepted risk is re-examined
+within a year, and it comes back on its own with nothing scheduled to
+run and nobody to remember. An expired `accepted_until` is kept on the
+finding rather than cleared, so "never accepted" and "accepted and
+lapsed" stay distinguishable.
+
+Three things follow from where the rule lives:
+
+- **It is one predicate, honoured everywhere.** `Finding.IsActive`
+  excludes an in-force acceptance alongside `fixed` and `not_affected`,
+  so `internal/policy`, `GET /api/v1/stats`, the finding search and
+  every dashboard count respect acceptances with no code of their own.
+  `IsActive` reads the wall clock for this — `Finding.Accepted(t)` is
+  the clock-injectable half the tests and the SQL are checked against.
+  The Postgres backend computes the same population in SQL
+  (`activeFindingSQL`), which has to be kept in step by hand: a
+  backend-dependent answer to "how many artifacts have active CVEs"
+  would only show up in production.
+- **It survives rescans, and never blocks fix-detection.**
+  `MergeFindings` carries the three fields across every merge, like
+  `Justification` — a scanner re-reporting the finding is not news about
+  the decision. But an accepted finding that stops being reported still
+  flips to `fixed`: an accepted problem actually getting fixed is good
+  news, and swallowing it would leave a resolved finding looking like
+  one somebody chose to tolerate.
+- **Admin scope, and `AcceptedBy` is never from the body.** Submitting
+  findings and uploading VEX are `scan`-scoped, because reporting a
+  result is what a CI scanner does. Deciding what the organization will
+  tolerate is not, and a scanner able to make that call could silence
+  whatever it found. The accepter is taken from the authenticated client
+  (`ClientFromContext`) — an accountability record a caller can write is
+  not one — and `MergeFindings` clears these fields on anything reported,
+  so a `POST .../findings` caller can't accept its own findings' risk.
+
+`DELETE` on the same path revokes early, and is idempotent: the caller
+asked for a state ("not accepted"), and that state holds either way. A
+404 is reserved for an artifact or finding id that doesn't exist.
+
 **Indexing SBOM components.** An SBOM's whole point is the inventory it
 carries, but as a stored blob that inventory can only be read one
 downloaded document at a time. So `uploadDocument`

@@ -571,6 +571,125 @@ func TestPostgresStore_VEXSuppressionRoundTrips(t *testing.T) {
 	assertSuppressed("ListPage (fillChildrenBatch)", listed.CVEFindings)
 }
 
+// TestPostgresStore_RiskAcceptanceRoundTrips is the same argument as
+// TestPostgresStore_VEXSuppressionRoundTrips for the three acceptance
+// columns -- but with a second failure mode the VEX one doesn't have.
+//
+// Acceptance is enforced in TWO places that must agree: Finding.IsActive
+// in Go (which is what MemStore, internal/policy and every handler use)
+// and activeFindingSQL here (which is what Stats, SearchFindings and
+// FindByFindingID use). A change to one and not the other gives two
+// different answers to "how many artifacts have an active CVE"
+// depending on the backend -- invisible to `go test ./...`, since that
+// runs entirely against MemStore.
+func TestPostgresStore_RiskAcceptanceRoundTrips(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	a, err := s.Create("alpine:3.19-acceptance", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	now := time.Now().UTC()
+	until := now.Add(30 * 24 * time.Hour)
+	accept := func(t *testing.T, at time.Time) {
+		t.Helper()
+		if _, err := s.Update(a.ID, func(art *artifact.Artifact) {
+			art.CVEFindings = artifact.MergeFindings(art.CVEFindings, []artifact.Finding{
+				{ID: "CVE-accept-1", Severity: "critical", Source: "trivy"},
+			}, now, true, nil)
+			for i := range art.CVEFindings {
+				art.CVEFindings[i].AcceptedUntil = &at
+				art.CVEFindings[i].AcceptedBy = "security-team"
+				art.CVEFindings[i].AcceptanceReason = "no upstream fix yet"
+			}
+		}); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+	}
+	accept(t, until)
+
+	assertAccepted := func(where string, findings []artifact.Finding) {
+		t.Helper()
+		if len(findings) != 1 {
+			t.Fatalf("%s: cve findings = %+v, want 1", where, findings)
+		}
+		f := findings[0]
+		if f.AcceptedUntil == nil {
+			t.Fatalf("%s: accepted_until came back nil -- a column missing from this read path's SELECT", where)
+		}
+		// Postgres stores microseconds; compare at that resolution
+		// rather than demanding an exact Go-side round-trip.
+		if diff := f.AcceptedUntil.Sub(until); diff > time.Millisecond || diff < -time.Millisecond {
+			t.Errorf("%s: accepted_until = %v, want %v", where, f.AcceptedUntil, until)
+		}
+		if f.AcceptedBy != "security-team" || f.AcceptanceReason != "no upstream fix yet" {
+			t.Errorf("%s: accepted_by/reason = %q/%q, want them persisted", where, f.AcceptedBy, f.AcceptanceReason)
+		}
+		// Still open: an acceptance concedes the finding is real.
+		if f.Status != artifact.FindingStatusOpen {
+			t.Errorf("%s: status = %q, want %q", where, f.Status, artifact.FindingStatusOpen)
+		}
+		if f.IsActive() {
+			t.Errorf("%s: an accepted finding reports itself active", where)
+		}
+	}
+
+	got, err := s.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	assertAccepted("Get (loadFindings)", got.CVEFindings)
+
+	// ListPage, not List: the batch loader the dashboard's poll uses,
+	// and the one a forgotten column actually hides in.
+	page, _, err := s.ListPage(200, 0, "", "", "")
+	if err != nil {
+		t.Fatalf("ListPage: %v", err)
+	}
+	var listed *artifact.Artifact
+	for _, art := range page {
+		if art.ID == a.ID {
+			listed = art
+		}
+	}
+	if listed == nil {
+		t.Fatalf("artifact %s not in the first page of ListPage", a.ID)
+	}
+	assertAccepted("ListPage (fillChildrenBatch)", listed.CVEFindings)
+
+	// The SQL half. These go through activeFindingSQL, never through
+	// Finding.IsActive, so they are the only thing that can catch the
+	// two definitions drifting apart.
+	affected, err := s.FindByFindingID("CVE-accept-1")
+	if err != nil {
+		t.Fatalf("FindByFindingID: %v", err)
+	}
+	for _, art := range affected {
+		if art.ID == a.ID {
+			t.Fatal("FindByFindingID returned an artifact whose only match is under an in-force acceptance")
+		}
+	}
+
+	// And the same finding counts again once the acceptance lapses --
+	// asserted through the SQL path, because an acceptance that never
+	// expires in the database is the failure this cap exists to prevent.
+	accept(t, now.Add(-time.Second))
+	affected, err = s.FindByFindingID("CVE-accept-1")
+	if err != nil {
+		t.Fatalf("FindByFindingID after expiry: %v", err)
+	}
+	found := false
+	for _, art := range affected {
+		if art.ID == a.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("an EXPIRED acceptance still suppresses the finding in SQL -- it would never come back")
+	}
+}
+
 // TestPostgresStore_ComponentInventory exercises the components table
 // end to end against a real database -- the migration, the purl index's
 // query, the replace-on-re-upload transaction, and the foreign key's

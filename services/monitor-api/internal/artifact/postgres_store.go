@@ -228,6 +228,15 @@ var schemaStatements = []string{
 	// above are; pre-existing rows get '', which is also what every
 	// finding no VEX document has spoken about carries.
 	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS justification TEXT NOT NULL DEFAULT ''`,
+	// Risk acceptance (see Finding.AcceptedUntil and
+	// internal/api/findings.go's acceptFinding). accepted_until is
+	// NULLABLE rather than defaulted, unlike the two text columns beside
+	// it: NULL means "never accepted", and there is no sentinel timestamp
+	// that could stand in for that without also being a real, comparable
+	// date in activeFindingSQL.
+	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS accepted_until TIMESTAMPTZ`,
+	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS accepted_by TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE findings ADD COLUMN IF NOT EXISTS acceptance_reason TEXT NOT NULL DEFAULT ''`,
 	// Powers FindByFindingID -- "every artifact still affected by
 	// CVE-2024-X" -- without scanning every artifact's findings, which
 	// is exactly the query the old JSONB-blob schema couldn't answer
@@ -648,8 +657,8 @@ func insertFinding(ctx context.Context, q pgxIface, artifactID, bucket string, f
 	if firstSeenAt.IsZero() {
 		firstSeenAt = time.Now().UTC()
 	}
-	_, err := q.Exec(ctx, `INSERT INTO findings (artifact_id, bucket, finding_id, severity, title, source, status, first_seen_at, resolved_at, justification, epss_score, known_exploited) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-		artifactID, bucket, f.ID, f.Severity, f.Title, f.Source, status, firstSeenAt, f.ResolvedAt, f.Justification, f.EPSSScore, f.KnownExploited)
+	_, err := q.Exec(ctx, `INSERT INTO findings (artifact_id, bucket, finding_id, severity, title, source, status, first_seen_at, resolved_at, justification, epss_score, known_exploited, accepted_until, accepted_by, acceptance_reason) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+		artifactID, bucket, f.ID, f.Severity, f.Title, f.Source, status, firstSeenAt, f.ResolvedAt, f.Justification, f.EPSSScore, f.KnownExploited, f.AcceptedUntil, f.AcceptedBy, f.AcceptanceReason)
 	return err
 }
 
@@ -776,7 +785,7 @@ func loadStageHistory(ctx context.Context, q pgxIface, artifactID string) ([]Sta
 }
 
 func loadFindings(ctx context.Context, q pgxIface, artifactID, bucket string) ([]Finding, error) {
-	rows, err := q.Query(ctx, `SELECT finding_id, severity, title, source, status, first_seen_at, resolved_at, justification, epss_score, known_exploited FROM findings WHERE artifact_id = $1 AND bucket = $2 ORDER BY id`, artifactID, bucket)
+	rows, err := q.Query(ctx, `SELECT finding_id, severity, title, source, status, first_seen_at, resolved_at, justification, epss_score, known_exploited, accepted_until, accepted_by, acceptance_reason FROM findings WHERE artifact_id = $1 AND bucket = $2 ORDER BY id`, artifactID, bucket)
 	if err != nil {
 		return nil, err
 	}
@@ -785,7 +794,7 @@ func loadFindings(ctx context.Context, q pgxIface, artifactID, bucket string) ([
 	out := make([]Finding, 0)
 	for rows.Next() {
 		var f Finding
-		if err := rows.Scan(&f.ID, &f.Severity, &f.Title, &f.Source, &f.Status, &f.FirstSeenAt, &f.ResolvedAt, &f.Justification, &f.EPSSScore, &f.KnownExploited); err != nil {
+		if err := rows.Scan(&f.ID, &f.Severity, &f.Title, &f.Source, &f.Status, &f.FirstSeenAt, &f.ResolvedAt, &f.Justification, &f.EPSSScore, &f.KnownExploited, &f.AcceptedUntil, &f.AcceptedBy, &f.AcceptanceReason); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
@@ -990,14 +999,14 @@ func (s *PostgresStore) fillChildrenBatch(ctx context.Context, ids []string, byI
 	// exactly that way, so the dashboard -- which renders detail pages
 	// from the LIST payload -- showed no KEV badges while the artifact
 	// endpoint returned them correctly.
-	findingRows, err := s.pool.Query(ctx, `SELECT artifact_id, bucket, finding_id, severity, title, source, status, first_seen_at, resolved_at, justification, epss_score, known_exploited FROM findings WHERE artifact_id = ANY($1) ORDER BY artifact_id, id`, ids)
+	findingRows, err := s.pool.Query(ctx, `SELECT artifact_id, bucket, finding_id, severity, title, source, status, first_seen_at, resolved_at, justification, epss_score, known_exploited, accepted_until, accepted_by, acceptance_reason FROM findings WHERE artifact_id = ANY($1) ORDER BY artifact_id, id`, ids)
 	if err != nil {
 		return fmt.Errorf("batch load findings: %w", err)
 	}
 	for findingRows.Next() {
 		var artifactID, bucket string
 		var f Finding
-		if err := findingRows.Scan(&artifactID, &bucket, &f.ID, &f.Severity, &f.Title, &f.Source, &f.Status, &f.FirstSeenAt, &f.ResolvedAt, &f.Justification, &f.EPSSScore, &f.KnownExploited); err != nil {
+		if err := findingRows.Scan(&artifactID, &bucket, &f.ID, &f.Severity, &f.Title, &f.Source, &f.Status, &f.FirstSeenAt, &f.ResolvedAt, &f.Justification, &f.EPSSScore, &f.KnownExploited, &f.AcceptedUntil, &f.AcceptedBy, &f.AcceptanceReason); err != nil {
 			findingRows.Close()
 			return fmt.Errorf("scan findings row: %w", err)
 		}
@@ -1227,11 +1236,27 @@ func (s *PostgresStore) FindByFindingID(findingID string) ([]*Artifact, error) {
 }
 
 // activeFindingSQL is Finding.IsActive as a predicate: not fixed, not
-// VEX-suppressed. NOT IN rather than `= 'open'` for the same reason
-// IsActive is written as an exclusion -- a row persisted before the
-// status column existed carries whatever the migration defaulted it to,
-// and anything unrecognized should count as still-a-problem.
-const activeFindingSQL = `status NOT IN ('fixed', 'not_affected')`
+// VEX-suppressed, not under an in-force risk acceptance. NOT IN rather
+// than `= 'open'` for the same reason IsActive is written as an
+// exclusion -- a row persisted before the status column existed carries
+// whatever the migration defaulted it to, and anything unrecognized
+// should count as still-a-problem.
+//
+// The acceptance half must stay in step with Finding.Accepted, which is
+// the Go definition MemStore uses: a backend-dependent answer to "how
+// many artifacts have active CVEs" is the kind of drift that only shows
+// up in production, since the unit tests run against MemStore and only
+// the integration tests reach this SQL at all.
+//
+// `accepted_until <= now()` (not `<`) mirrors Accepted's `t.Before` --
+// an acceptance expiring exactly now has expired, and the finding is
+// active again. NULL is the never-accepted case and must be spelled out
+// because a NULL comparison is neither true nor false.
+//
+// Parenthesized as a whole: this is interpolated into WHERE clauses
+// that AND further terms onto it, and an unbracketed OR inside would
+// quietly swallow them.
+const activeFindingSQL = `(status NOT IN ('fixed', 'not_affected') AND (accepted_until IS NULL OR accepted_until <= now()))`
 
 // severityRankSQL mirrors artifact.severityRank (model.go) so "worst
 // severity seen" means the same thing in the database as it does in

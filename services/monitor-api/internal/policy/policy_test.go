@@ -343,3 +343,64 @@ func TestEvaluate_ViolationOrderIsStable(t *testing.T) {
 		t.Fatalf("violation order = %q, want %q (buckets in sorted order)", got, want)
 	}
 }
+
+// The payoff for putting acceptance inside Finding.IsActive: internal/
+// policy has no idea this feature exists, and respects it anyway.
+// Nothing in Evaluate or evaluateBucket was changed for it -- if these
+// pass, the same is automatically true of GET /api/v1/stats and every
+// finding count in the service, which are built on the same predicate.
+//
+// The acceptance dates are relative to the WALL CLOCK rather than to
+// this file's fixed `now`, deliberately: Evaluate's now parameter
+// governs the scan-age rule, while acceptance expiry is judged by
+// IsActive against time.Now(). Deriving these from `now` (a fixed
+// instant in the past) would make the "in force" case an expired
+// acceptance and quietly invert the test.
+func TestEvaluate_MaxSeverity_RiskAcceptance(t *testing.T) {
+	p := mustLoad(t, `{"maxSeverity": {"cve": "high"}}`)
+
+	accepted := func(until time.Time) artifact.Artifact {
+		return artifact.Artifact{CVEFindings: []artifact.Finding{{
+			ID: "CVE-BAD", Severity: "critical", Title: "very bad",
+			Status:        artifact.FindingStatusOpen,
+			AcceptedUntil: &until, AcceptedBy: "security-team",
+			AcceptanceReason: "no upstream fix yet",
+		}}}
+	}
+
+	t.Run("an accepted finding does not violate the threshold", func(t *testing.T) {
+		got := policy.Evaluate(p, accepted(time.Now().Add(30*24*time.Hour)), now)
+		if !got.Pass {
+			t.Fatalf("an accepted critical CVE failed a high threshold: %+v", got.Violations)
+		}
+	})
+
+	// The half that matters most. A test asserting only the suppression
+	// above passes even if the acceptance never expires at all -- which
+	// is the difference between this feature and deleting the finding.
+	t.Run("it violates again the moment the acceptance expires", func(t *testing.T) {
+		got := policy.Evaluate(p, accepted(time.Now().Add(-time.Second)), now)
+		if got.Pass {
+			t.Fatal("an EXPIRED acceptance still suppressed the finding -- the policy gate would never go red again")
+		}
+		if len(got.Violations) != 1 || got.Violations[0].FindingID != "CVE-BAD" {
+			t.Fatalf("violations = %+v, want the expired-acceptance finding", got.Violations)
+		}
+	})
+
+	// An acceptance concedes the finding is real, so it must not be
+	// usable to dodge a "none" threshold either -- same code path, but
+	// this is the rule an operator is most likely to have set on
+	// malware, where accepting risk is least defensible.
+	t.Run("none is subject to the same acceptance", func(t *testing.T) {
+		none := mustLoad(t, `{"maxSeverity": {"malware": "none"}}`)
+		until := time.Now().Add(24 * time.Hour)
+		a := artifact.Artifact{MalwareFindings: []artifact.Finding{{
+			ID: "M1", Severity: "negligible", Title: "eicar",
+			AcceptedUntil: &until, AcceptedBy: "security-team", AcceptanceReason: "test fixture image",
+		}}}
+		if got := policy.Evaluate(none, a, now); !got.Pass {
+			t.Fatalf("an accepted malware finding failed a none threshold: %+v", got.Violations)
+		}
+	})
+}

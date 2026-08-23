@@ -100,6 +100,40 @@ type Finding struct {
 	// assessed.
 	Justification string `json:"justification,omitempty"`
 
+	// AcceptedUntil, AcceptedBy and AcceptanceReason record a RISK
+	// ACCEPTANCE: "yes, this is real, and we are choosing to live with it
+	// until <date>." Distinct from a VEX "not_affected", which asserts
+	// the finding does not apply here at all -- an acceptance concedes
+	// that it does, which is why it EXPIRES and a VEX statement does not.
+	// A suppression with no end date is how a known vulnerability quietly
+	// becomes permanent; this one comes back on its own.
+	//
+	// nil AcceptedUntil is the overwhelmingly common case: no acceptance
+	// has ever been recorded for this finding. A non-nil one in the PAST
+	// is deliberately left in place rather than cleared -- the same
+	// "keep history, don't overwrite it" instinct as ResolvedAt, so the
+	// record of who accepted what, and until when, survives the expiry
+	// that made the finding active again. See Accepted, which is what
+	// every consumer asks instead of reading the field directly.
+	//
+	// Written only by POST/DELETE .../findings/{findingID}/acceptance
+	// (internal/api/findings.go) and carried across merges by
+	// MergeFindings, never trusted from a reported finding -- exactly
+	// like Justification, and for a sharper version of the same reason:
+	// submitFindings decodes findings straight from caller JSON, so a
+	// caller that could set these would be able to accept the risk of its
+	// own findings, which is the one thing this endpoint's admin scope
+	// exists to prevent.
+	AcceptedUntil *time.Time `json:"accepted_until,omitempty"`
+	// AcceptedBy is the authenticated client name that recorded the
+	// acceptance (ClientFromContext), never anything the request body
+	// supplied -- an accountability record nobody can self-attribute.
+	AcceptedBy string `json:"accepted_by,omitempty"`
+	// AcceptanceReason is why, in the accepter's own words. Required by
+	// the endpoint: an acceptance with no stated reason is indis-
+	// tinguishable from a finding somebody silently hid.
+	AcceptanceReason string `json:"acceptance_reason,omitempty"`
+
 	// EPSSScore is FIRST's Exploit Prediction Scoring System value for
 	// this CVE: the probability (0..1) that it will be exploited in the
 	// wild in the next 30 days. 0 means "no score", which is NOT the
@@ -795,15 +829,44 @@ func SeverityRankOK(severity string) (int, bool) {
 }
 
 // IsActive reports whether a finding still counts as a live problem:
-// anything that is not fixed and not VEX-suppressed. Written as an
-// exclusion rather than `== FindingStatusOpen` because a finding
-// persisted before the lifecycle columns existed (or submitted by a
-// caller that never set one) has an empty status, and the dashboard has
-// always treated those as open -- see openFindings in
-// dashboard/index.html. Failing toward "still a problem" is the safe
-// direction.
+// anything that is not fixed, not VEX-suppressed, and not under an
+// in-force risk acceptance. Written as an exclusion rather than
+// `== FindingStatusOpen` because a finding persisted before the
+// lifecycle columns existed (or submitted by a caller that never set
+// one) has an empty status, and the dashboard has always treated those
+// as open -- see openFindings in dashboard/index.html. Failing toward
+// "still a problem" is the safe direction.
+//
+// This is the single definition every count in this service is built on
+// -- internal/policy's Evaluate, GET /api/v1/stats, the finding search
+// -- so an acceptance takes effect everywhere by being honoured here,
+// with no rule to remember at any of those call sites. The Postgres
+// backend computes the same population in SQL rather than in Go; see
+// activeFindingSQL, which must be kept in step with this.
+//
+// Reads the wall clock, deliberately and unlike every other method on
+// this type: an acceptance expires on its own, so "is this active" is a
+// question about NOW, and threading a clock through every caller would
+// be a signature change to the whole read path to buy testability the
+// Accepted(t) split below already provides.
 func (f Finding) IsActive() bool {
-	return f.Status != FindingStatusFixed && f.Status != FindingStatusNotAffected
+	if f.Status == FindingStatusFixed || f.Status == FindingStatusNotAffected {
+		return false
+	}
+	return !f.Accepted(time.Now())
+}
+
+// Accepted reports whether a risk acceptance is in force at t.
+//
+// Exported as the one place the rule lives, so a caller that needs to
+// ask about a specific moment (a test, the dashboard's badge, the SQL
+// predicate this is checked against) agrees with IsActive by
+// construction rather than by re-deriving "not nil and in the future"
+// and getting the boundary wrong. An acceptance that expires exactly at
+// t has expired: the finding is active again, which is the direction
+// that fails toward showing a problem rather than hiding one.
+func (f Finding) Accepted(t time.Time) bool {
+	return f.AcceptedUntil != nil && t.Before(*f.AcceptedUntil)
 }
 
 // Enrichment is what the KEV/EPSS feeds know about one CVE.

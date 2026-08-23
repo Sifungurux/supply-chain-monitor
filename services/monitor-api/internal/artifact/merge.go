@@ -63,6 +63,17 @@ import (
 // That's what makes this stick across scans rather than depending on
 // every caller remembering to re-read the document -- see
 // docs/architecture.md ("Suppressing findings with VEX").
+//
+// A RISK ACCEPTANCE (Finding.AcceptedUntil/AcceptedBy/AcceptanceReason)
+// survives every merge the same way, and for the same reason: it is a
+// decision recorded about a finding, not an observation a scan can
+// make, so re-reporting the finding must not revoke it. It differs from
+// a VEX suppression in one respect, deliberately: it never blocks
+// fix-detection. A finding that stops being reported while accepted is
+// marked "fixed" exactly as it would be otherwise, keeping the
+// acceptance alongside as history -- an accepted finding actually
+// getting fixed is good news, and swallowing it would leave a resolved
+// problem looking like an outstanding one somebody chose to tolerate.
 // MergePartition merges only the part of a bucket one producer owns,
 // carrying every other finding in it through completely untouched.
 //
@@ -120,6 +131,28 @@ func MergeFindings(existing, reported []Finding, now time.Time, detectFixed bool
 	for _, old := range existing {
 		seen[old.ID] = true
 		stillReported, isReported := reportedByID[old.ID]
+
+		// A risk acceptance is a property of the finding on record, not
+		// of anything a scanner or a submitFindings caller reported, so
+		// it is carried across from old BEFORE any branch below can
+		// return stillReported in old's place. Done once here rather
+		// than in each of the three branches that do that: this is
+		// exactly how Justification lost its way into being re-derived
+		// per-branch, and a branch added later that forgets the carry
+		// would silently revoke acceptances the moment a scan re-reports
+		// the finding.
+		//
+		// Also the trust boundary. Whatever a caller supplied in these
+		// three fields is discarded here, so submitFindings -- which
+		// decodes findings straight from request JSON -- cannot accept
+		// the risk of its own findings; that requires the admin-scoped
+		// acceptance endpoint. New findings get the same treatment in
+		// the reported-only loop below.
+		if isReported {
+			stillReported.AcceptedUntil = old.AcceptedUntil
+			stillReported.AcceptedBy = old.AcceptedBy
+			stillReported.AcceptanceReason = old.AcceptanceReason
+		}
 
 		// An explicit "affected" statement revokes an earlier
 		// suppression: an assessment that turned out to be wrong has to
@@ -247,6 +280,13 @@ func MergeFindings(existing, reported []Finding, now time.Time, detectFixed bool
 		f.FirstSeenAt = now
 		f.ResolvedAt = nil
 		f.Justification = ""
+		// Nothing can arrive already accepted: an acceptance is recorded
+		// against a finding that is on record, by an admin-scoped call
+		// naming it. See the carry above for the trust-boundary half of
+		// this.
+		f.AcceptedUntil = nil
+		f.AcceptedBy = ""
+		f.AcceptanceReason = ""
 		// A VEX document can speak about a vulnerability before any scan
 		// ever reports it -- the first scan that does find it comes in
 		// already suppressed, rather than being open until the next
