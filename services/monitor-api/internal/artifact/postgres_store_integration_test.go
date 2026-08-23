@@ -2334,3 +2334,120 @@ func TestPostgresStore_ProvenanceRoundTrips(t *testing.T) {
 		}
 	}
 }
+
+// TestPostgresStore_FleetVEXRoundTrips exercises the vex_documents
+// table for real: the CREATE TABLE, the ON CONFLICT upsert that makes a
+// re-upload idempotent, and the ORDER BY the scan path relies on. None
+// of that is proved by MemStore passing -- MemStore is a map, and the
+// SQL is what production runs.
+func TestPostgresStore_FleetVEXRoundTrips(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	older := artifact.FleetVEXDocument{
+		ID:          "fleetvex-older",
+		ContentType: "application/json",
+		Content:     []byte(`{"statements":[{"vulnerability":"CVE-1","status":"not_affected"}]}`),
+		UploadedAt:  base.Add(-time.Hour),
+	}
+	newer := artifact.FleetVEXDocument{
+		ID:          "fleetvex-newer",
+		ContentType: "application/json",
+		Content:     []byte(`{"statements":[{"vulnerability":"CVE-2","status":"affected"}]}`),
+		UploadedAt:  base,
+	}
+	// No cleanup: vex_documents belongs to no artifact, so there is no
+	// cascade to lean on and the store exposes no delete for it (there
+	// is no endpoint that removes one either). The container `make
+	// test-postgres` starts is thrown away with the target, and the
+	// assertions below are written to tolerate rows other runs left --
+	// they check these two documents relative to each other, not the
+	// absolute contents of the table.
+	for _, d := range []artifact.FleetVEXDocument{older, newer} {
+		if err := s.SaveFleetVEX(d); err != nil {
+			t.Fatalf("SaveFleetVEX(%s): %v", d.ID, err)
+		}
+	}
+
+	// Re-saving the same id must UPDATE rather than fail on the primary
+	// key -- that is the whole point of the ON CONFLICT clause.
+	changed := older
+	changed.Content = []byte(`{"statements":[{"vulnerability":"CVE-1","status":"affected"}]}`)
+	if err := s.SaveFleetVEX(changed); err != nil {
+		t.Fatalf("re-saving the same document id failed: %v", err)
+	}
+
+	got, err := s.ListFleetVEX()
+	if err != nil {
+		t.Fatalf("ListFleetVEX: %v", err)
+	}
+	byID := map[string]artifact.FleetVEXDocument{}
+	for _, d := range got {
+		byID[d.ID] = d
+	}
+	if len(byID) < 2 {
+		t.Fatalf("got %d documents, want at least the 2 saved here", len(byID))
+	}
+	if string(byID["fleetvex-older"].Content) != string(changed.Content) {
+		t.Errorf("re-save did not replace the content: %s", byID["fleetvex-older"].Content)
+	}
+	if byID["fleetvex-newer"].ContentType != "application/json" {
+		t.Errorf("content type did not round-trip: %q", byID["fleetvex-newer"].ContentType)
+	}
+
+	// Newest first, among the two this test controls.
+	var seenNewer, seenOlder int
+	for i, d := range got {
+		switch d.ID {
+		case "fleetvex-newer":
+			seenNewer = i
+		case "fleetvex-older":
+			seenOlder = i
+		}
+	}
+	if seenNewer > seenOlder {
+		t.Errorf("ORDER BY uploaded_at DESC is not holding: newer at %d, older at %d", seenNewer, seenOlder)
+	}
+}
+
+// TestPostgresStore_ComponentPURLs covers the one-query lookup fleet
+// VEX matching does on every scan, against the real components table.
+func TestPostgresStore_ComponentPURLs(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	a, err := s.Create("componentpurls-test:1.0", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Delete(a.ID) })
+
+	if err := s.SaveComponents(a.ID, []artifact.Component{
+		{PURL: "pkg:maven/com.example/one@1.0", Name: "one", Version: "1.0"},
+		{PURL: "pkg:apk/alpine/openssl@3.1.4-r5", Name: "openssl", Version: "3.1.4-r5"},
+	}); err != nil {
+		t.Fatalf("SaveComponents: %v", err)
+	}
+
+	got, err := s.ComponentPURLs(a.ID)
+	if err != nil {
+		t.Fatalf("ComponentPURLs: %v", err)
+	}
+	want := map[string]bool{
+		"pkg:maven/com.example/one@1.0":   true,
+		"pkg:apk/alpine/openssl@3.1.4-r5": true,
+	}
+	for _, p := range got {
+		delete(want, p)
+	}
+	if len(want) != 0 {
+		t.Errorf("missing purls %v (got %v)", want, got)
+	}
+
+	none, err := s.ComponentPURLs("no-such-artifact-id")
+	if err != nil {
+		t.Errorf("ComponentPURLs for an unknown artifact returned an error: %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("got %v for an unknown artifact, want empty", none)
+	}
+}

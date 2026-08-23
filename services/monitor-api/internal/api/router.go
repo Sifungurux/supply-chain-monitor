@@ -200,6 +200,12 @@ func NewRouter(cfg Config) http.Handler {
 	// CI scanner full authority, which is worse than no scopes at all.
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/findings", requireScope(ScopeScan, h.submitFindings))
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/vex", requireScope(ScopeScan, h.uploadVEX))
+	// Fleet-wide VEX: one OpenVEX document applied to every artifact
+	// its `products` match. Same scope as the per-artifact upload --
+	// both are "assert something about findings", and a caller trusted
+	// to suppress a finding on one artifact is trusted to do it on the
+	// artifacts a document names.
+	mux.HandleFunc("POST /api/v1/vex", requireScope(ScopeScan, h.uploadFleetVEX))
 	// Risk acceptance is NOT a scan result, which is why it sits under
 	// admin while its two neighbours above do not: it is a decision to
 	// ship a known vulnerability, and a CI scanner able to make that

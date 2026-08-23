@@ -446,7 +446,28 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 	// that was assessed weeks ago. Findings suppressed on a previous
 	// round stay suppressed with or without this (see MergeFindings), so
 	// a missing or unreadable document costs nothing already decided.
-	vex := h.vexFor(id)
+	//
+	// Fleet documents (POST /api/v1/vex) are consulted alongside the
+	// per-artifact one, and the per-artifact one is layered ON TOP: it
+	// is the more specific claim, so an operator who assessed THIS
+	// image is never overridden by a fleet statement about a package it
+	// happens to contain.
+	//
+	// Layering rather than filtering is also what makes revocation work
+	// across the two. MergeFindings revokes an earlier suppression when
+	// it sees status "affected" (see its `revoked` branch), so a
+	// per-artifact "affected" over a fleet "not_affected" un-suppresses
+	// exactly as it would over a per-artifact one -- there is no
+	// separate retraction path to keep in step.
+	vex := h.fleetVEXFor(a)
+	if perArtifact := h.vexFor(id); len(perArtifact) > 0 {
+		if vex == nil {
+			vex = make(map[string]artifact.VEXStatement, len(perArtifact))
+		}
+		for vulnID, st := range perArtifact {
+			vex[vulnID] = st
+		}
+	}
 	updated, updErr := h.store.Update(id, func(art *artifact.Artifact) {
 		art.Status = status
 		art.Digest = digest

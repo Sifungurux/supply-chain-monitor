@@ -160,3 +160,100 @@ func TestParseVEX_SkipsStatementsWithoutAnID(t *testing.T) {
 		t.Fatalf("statements = %+v, want only the one with an id", statements)
 	}
 }
+
+// TestParseVEXProducts_BothProductShapes covers the two `products`
+// encodings that exist in the wild together, since a fleet document is
+// exactly where a 0.0.1-era bare purl and a 0.2.0 object turn up in the
+// same file.
+func TestParseVEXProducts_BothProductShapes(t *testing.T) {
+	doc := []byte(`{
+	  "@context": "https://openvex.dev/ns/v0.2.0",
+	  "statements": [
+	    {
+	      "vulnerability": {"name": "CVE-2024-1111"},
+	      "status": "not_affected",
+	      "justification": "vulnerable_code_not_in_execute_path",
+	      "products": ["pkg:apk/wolfi/bash@1.0.0"]
+	    },
+	    {
+	      "vulnerability": "CVE-2024-2222",
+	      "status": "affected",
+	      "products": [
+	        {
+	          "@id": "pkg:oci/app@sha256:aaaa",
+	          "identifiers": {"purl": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"},
+	          "hashes": {"sha-256": "BBBB"}
+	        }
+	      ]
+	    }
+	  ]
+	}`)
+
+	got, err := scanner.ParseVEXProducts(doc)
+	if err != nil {
+		t.Fatalf("ParseVEXProducts: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d statements, want 2: %+v", len(got), got)
+	}
+
+	if got[0].VulnID != "CVE-2024-1111" || got[0].Status != artifact.FindingStatusNotAffected {
+		t.Errorf("first statement = %+v", got[0].VEXStatement)
+	}
+	if len(got[0].Products) != 1 || got[0].Products[0] != "pkg:apk/wolfi/bash@1.0.0" {
+		t.Errorf("bare-string product not read: %+v", got[0].Products)
+	}
+
+	// The object form must yield ALL THREE identifiers: which one
+	// matches an artifact is the store's decision, not the parser's.
+	want := map[string]bool{
+		"pkg:oci/app@sha256:aaaa":                              true,
+		"pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1": true,
+		// Hex lowercased and prefixed with the algorithm, so it is
+		// directly comparable to Artifact.Digest.
+		"sha256:bbbb": true,
+	}
+	for _, id := range got[1].Products {
+		delete(want, id)
+	}
+	if len(want) != 0 {
+		t.Errorf("object-form identifiers missing %v (got %v)", want, got[1].Products)
+	}
+	// "affected" must survive parsing verbatim -- it is what revokes an
+	// earlier suppression in MergeFindings.
+	if got[1].Status != artifact.VEXStatusAffected {
+		t.Errorf("status = %q, want %q", got[1].Status, artifact.VEXStatusAffected)
+	}
+}
+
+// TestParseVEXProducts_StatementWithNoProductMatchesNothing: an empty
+// Products must NOT read as "applies to everything". Fleet-wide that
+// would let one malformed document suppress the estate.
+func TestParseVEXProducts_StatementWithNoProductMatchesNothing(t *testing.T) {
+	got, err := scanner.ParseVEXProducts([]byte(`{"statements":[{"vulnerability":"CVE-2024-3333","status":"not_affected"}]}`))
+	if err != nil {
+		t.Fatalf("ParseVEXProducts: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d statements, want 1", len(got))
+	}
+	// Kept, not dropped: the handler reports the count of statements
+	// that matched nothing, which is how an operator finds out.
+	if len(got[0].Products) != 0 {
+		t.Errorf("Products = %v, want empty", got[0].Products)
+	}
+}
+
+// TestParseVEXProducts_CycloneDXIsNotAnOpenVEXDocument: a CycloneDX VEX
+// has no products array, and must fail loudly here rather than parse to
+// zero statements that silently match nothing.
+func TestParseVEXProducts_CycloneDXIsNotAnOpenVEXDocument(t *testing.T) {
+	cdx := []byte(`{"vulnerabilities":[{"id":"CVE-2024-4444","analysis":{"state":"not_affected"}}]}`)
+	if _, err := scanner.ParseVEXProducts(cdx); err == nil {
+		t.Error("a CycloneDX document was accepted by the OpenVEX-only fleet parser")
+	}
+	// ...and the per-artifact parser must still take it, unchanged.
+	if got, err := scanner.ParseVEX(cdx); err != nil || len(got) != 1 {
+		t.Errorf("ParseVEX regressed on CycloneDX: %d statements, err=%v", len(got), err)
+	}
+}

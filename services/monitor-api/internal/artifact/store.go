@@ -137,6 +137,32 @@ type Store interface {
 	// answers. Returns an empty slice (not an error) when nothing
 	// matches, exactly like FindByFindingID.
 	FindByComponentPURL(purl string) ([]*Artifact, error)
+	// ComponentPURLs returns just the purls in one artifact's
+	// inventory. The inverse direction of FindByComponentPURL, and it
+	// exists for the scan path specifically: matching fleet VEX
+	// products against an artifact needs "what does THIS artifact
+	// contain", and answering that with one FindByComponentPURL call
+	// per product identifier would be a query per product on every
+	// scan. This is one query, and the matching is then a set lookup.
+	//
+	// Empty slice, not an error, for an artifact with no indexed SBOM
+	// -- much the most common case before the first scan.
+	ComponentPURLs(artifactID string) ([]string, error)
+	// SaveFleetVEX stores an OpenVEX document that applies fleet-wide
+	// rather than to one artifact. Keyed by content hash, so
+	// re-uploading the same document replaces the row rather than
+	// adding a second one saying the same thing.
+	//
+	// Named SaveFleetVEX, not SaveVEXDocument, because SaveDocument
+	// above already stores per-artifact VEX under kind "vex" and the
+	// two are genuinely different things -- see FleetVEXDocument.
+	SaveFleetVEX(doc FleetVEXDocument) error
+	// ListFleetVEX returns every stored fleet document, newest first.
+	// The whole set: callers parse them and narrow by product, which
+	// cannot be pushed into the query because the match is against
+	// digests and component purls the document names, not against
+	// anything indexed on this table.
+	ListFleetVEX() ([]FleetVEXDocument, error)
 	// SearchComponents finds DISTINCT packages whose name or purl
 	// contains query (case-insensitive substring), each with the number
 	// of artifacts containing it -- the discovery step that makes
@@ -307,6 +333,11 @@ type MemStore struct {
 	// endpoint, oldest first, capped at MaxComponentSnapshots. Mirrors
 	// PostgresStore's components_history table.
 	componentHistory map[string][]componentSnapshot
+	// fleetVEX mirrors PostgresStore's vex_documents table, keyed by
+	// the document's content hash so a re-upload replaces rather than
+	// accumulates -- the same idempotence the real table gets from its
+	// primary key.
+	fleetVEX map[string]FleetVEXDocument
 	// scanSlots is the process-local equivalent of PostgresStore's
 	// scan_slots table, keyed by holder id. Process-local is the honest
 	// implementation for a store that is itself process-local: it gives
@@ -336,7 +367,51 @@ func NewMemStore() *MemStore {
 		components:       make(map[string][]Component),
 		componentHistory: make(map[string][]componentSnapshot),
 		scanSlots:        make(map[string][]scanSlot),
+		fleetVEX:         make(map[string]FleetVEXDocument),
 	}
+}
+
+func (s *MemStore) ComponentPURLs(artifactID string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, 0, len(s.components[artifactID]))
+	for _, c := range s.components[artifactID] {
+		if c.PURL != "" {
+			out = append(out, c.PURL)
+		}
+	}
+	return out, nil
+}
+
+func (s *MemStore) SaveFleetVEX(doc FleetVEXDocument) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fleetVEX == nil {
+		s.fleetVEX = make(map[string]FleetVEXDocument)
+	}
+	s.fleetVEX[doc.ID] = doc
+	return nil
+}
+
+func (s *MemStore) ListFleetVEX() ([]FleetVEXDocument, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]FleetVEXDocument, 0, len(s.fleetVEX))
+	for _, doc := range s.fleetVEX {
+		out = append(out, doc)
+	}
+	// Newest first, with the content hash as the tie-break: two
+	// documents uploaded in the same instant is routine in tests (see
+	// the clock-granularity note in store_test.go's mustCreateStore),
+	// and an unstable order here would make any assertion over the list
+	// flaky for reasons that have nothing to do with VEX.
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].UploadedAt.Equal(out[j].UploadedAt) {
+			return out[i].UploadedAt.After(out[j].UploadedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
 }
 
 // newID generates the random hex artifact ID used by every Store
