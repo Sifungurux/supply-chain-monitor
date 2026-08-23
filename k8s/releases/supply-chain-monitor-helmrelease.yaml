@@ -170,8 +170,31 @@ spec:
       # deploying the fix, scm-clamav, scm-postgres and a scan Job were
       # all evicted for ephemeral-storage.
       #
-      # 2, not 3: three concurrent scans is what produced those
-      # evictions.
+      # 2 was correct for a 42.3GB filesystem at 82% full. It is not
+      # correct for this one. Re-derived by ramp on 2026-08-23 against
+      # the rebuilt 100GB VM (docs/scan-concurrency-2026-08-23.md):
+      # 2, 3, 4, 6 and 8 each completed their batch with zero failures,
+      # zero evictions and DiskPressure=False throughout. Peak disk
+      # never left a +8.4..+12.5GB band against ~76GB free, so the
+      # extraction-disk ceiling this cap was invented to enforce is no
+      # longer the binding constraint.
+      #
+      # 8, not higher, and the reason is blast radius rather than a
+      # measured cliff. Scan slots are all-or-nothing across kinds, so
+      # any unpacker value above the global scanConcurrency (8) does
+      # nothing unless that global is raised too -- and raising the
+      # global changes every scanner kind, not just image scans. 8 is
+      # the largest value that needs no such change. A controlled A/B
+      # over the same 36 images also had 12 running SLOWER than 8
+      # (1475s vs 1066s), so there is no throughput argument for it.
+      #
+      # No clean break was found at any value tested. What fails on
+      # heavy images is per-scan MEMORY, not disk: grype's scan-worker
+      # Job limit is hardcoded 1Gi (isolated_grype.go) and grype's RSS
+      # lands at ~1.043GiB on images like dotnet/sdk and mssql/server,
+      # so it is OOM-killed just over the line regardless of this cap.
+      # That is independent of concurrency and is the thing to fix if
+      # heavy-image scans matter -- see the report.
       #
       # This bounds whole IMAGE scans, not just the malware leg, and
       # that is the point rather than a side effect. Scan slots are
@@ -193,4 +216,4 @@ spec:
       # count does not multiply the disk and this cap is the only thing
       # actually limiting simultaneous extraction on it.
       scanConcurrencyPerKind:
-        unpacker: 2
+        unpacker: 8
