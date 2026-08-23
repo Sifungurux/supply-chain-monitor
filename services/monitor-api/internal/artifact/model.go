@@ -668,6 +668,59 @@ type VEXStatement struct {
 	Justification string
 }
 
+// ProductVEXStatement is a VEX statement that still knows WHICH
+// products it was made about -- the OpenVEX `products` array, which the
+// per-artifact path deliberately ignores (see scanner.ParseVEX's
+// comment: an upload to POST /artifacts/{id}/vex has already named its
+// artifact).
+//
+// A separate type rather than a Products field on VEXStatement,
+// because VEXByID collapses statements into map[string]VEXStatement
+// keyed by vulnerability ID alone. That is exactly right per-artifact
+// and exactly wrong fleet-wide: two fleet documents can both speak
+// about CVE-2024-1234 about DIFFERENT products, and keying by ID would
+// silently keep whichever was parsed last. Product scoping has to
+// survive until after the statements have been narrowed to one
+// artifact -- only then is "one statement per vulnerability" true
+// again.
+type ProductVEXStatement struct {
+	VEXStatement
+	// Products holds every identifier the document offered for the
+	// products this statement is about: OpenVEX 0.0.1 bare purl
+	// strings, and 0.2.0's `@id`, `identifiers.*` and `hashes.*`. All
+	// of them, unparsed, because which one matches an artifact depends
+	// on what the artifact has on record -- a digest for one, a
+	// component purl for another.
+	//
+	// Empty means the statement named no product at all, which
+	// fleet-wide can only mean "matches nothing". That is the safe
+	// direction: the alternative reading, "applies to everything",
+	// would let a document with a typo suppress the estate.
+	Products []string
+}
+
+// FleetVEXDocument is an OpenVEX document uploaded fleet-wide
+// (POST /api/v1/vex) rather than against one artifact.
+//
+// Deliberately NOT a row in artifact_documents with kind "vex", even
+// though that table already stores per-artifact VEX: that one is keyed
+// by (artifact_id, kind), which is precisely the thing a fleet document
+// does not have. The two coexist and neither supersedes the other -- a
+// fleet document says "this assessment holds wherever these products
+// appear", a per-artifact one says "this assessment holds here" -- and
+// on conflict the per-artifact statement wins, because it is the more
+// specific claim. See internal/api/vexfleet.go.
+type FleetVEXDocument struct {
+	// ID is the SHA-256 of Content, which makes re-uploading the same
+	// document an idempotent no-op rather than a second row saying the
+	// same thing. An operator re-running the same `vexctl` pipeline in
+	// CI is the expected case, not an unusual one.
+	ID          string
+	ContentType string
+	Content     []byte
+	UploadedAt  time.Time
+}
+
 // The two VEX statuses that aren't also finding statuses. Constants
 // because both this package (MergeFindings) and internal/scanner
 // (ParseVEX's normalizeVEXStatus) compare against them, and a typo in

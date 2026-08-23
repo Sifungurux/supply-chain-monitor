@@ -844,3 +844,92 @@ func TestMemStore_DeleteDropsComponentHistory(t *testing.T) {
 		t.Errorf("deleted artifact still has %d snapshots", len(snaps))
 	}
 }
+
+// TestMemStore_SaveFleetVEXIsIdempotentByContentHash: re-uploading the
+// same document -- what a CI pipeline re-running `vexctl` does -- must
+// replace the row, not add a second one saying the same thing. The ID
+// is the content hash precisely so this holds.
+func TestMemStore_SaveFleetVEXIsIdempotentByContentHash(t *testing.T) {
+	s := artifact.NewMemStore()
+	doc := artifact.FleetVEXDocument{
+		ID:          "hash-aaa",
+		ContentType: "application/json",
+		Content:     []byte(`{"statements":[]}`),
+		UploadedAt:  time.Now().UTC(),
+	}
+	for i := 0; i < 3; i++ {
+		if err := s.SaveFleetVEX(doc); err != nil {
+			t.Fatalf("SaveFleetVEX: %v", err)
+		}
+	}
+	got, err := s.ListFleetVEX()
+	if err != nil {
+		t.Fatalf("ListFleetVEX: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d documents after 3 identical uploads, want 1", len(got))
+	}
+}
+
+// TestMemStore_ListFleetVEXIsNewestFirst pins the order the scan path
+// depends on: fleetVEXFor walks this list backwards so a NEWER document
+// wins for the same vulnerability. An unstable order would make which
+// statement applies depend on map iteration.
+func TestMemStore_ListFleetVEXIsNewestFirst(t *testing.T) {
+	s := artifact.NewMemStore()
+	base := time.Now().UTC()
+	for _, d := range []artifact.FleetVEXDocument{
+		{ID: "older", UploadedAt: base.Add(-time.Hour)},
+		{ID: "newest", UploadedAt: base},
+		{ID: "middle", UploadedAt: base.Add(-time.Minute)},
+	} {
+		if err := s.SaveFleetVEX(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ListFleetVEX()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"newest", "middle", "older"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d documents, want %d", len(got), len(want))
+	}
+	for i, id := range want {
+		if got[i].ID != id {
+			t.Errorf("position %d = %q, want %q", i, got[i].ID, id)
+		}
+	}
+}
+
+// TestMemStore_ComponentPURLs covers the inverse of
+// FindByComponentPURL that fleet VEX matching uses on the scan path,
+// including the case that is by far the most common in practice: an
+// artifact whose SBOM has not been indexed yet, which must be an empty
+// slice rather than an error.
+func TestMemStore_ComponentPURLs(t *testing.T) {
+	s := artifact.NewMemStore()
+	a := mustCreateStore(t, s, "app:1.0")
+	if err := s.SaveComponents(a.ID, []artifact.Component{
+		{PURL: "pkg:maven/com.example/one@1.0"},
+		{PURL: "pkg:apk/alpine/openssl@3.1.4-r5"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ComponentPURLs(a.ID)
+	if err != nil {
+		t.Fatalf("ComponentPURLs: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %v, want 2 purls", got)
+	}
+
+	none, err := s.ComponentPURLs("no-such-artifact")
+	if err != nil {
+		t.Errorf("ComponentPURLs for an unknown artifact returned an error: %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("got %v for an unknown artifact, want empty", none)
+	}
+}

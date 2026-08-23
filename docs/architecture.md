@@ -145,10 +145,66 @@ documents are stored through the same `artifact_documents` table as
 SBOM/SARIF (kind `vex`) but deliberately aren't accepted by the generic
 `POST .../documents/{kind}` endpoint — that one stores bytes, and a VEX
 document that stored but suppressed nothing would be worse than a
-rejection. OpenVEX `products[]` is ignored: the document was uploaded to
-one artifact, so the operator has already scoped it (matching purls
-would be the change needed if VEX ever arrives fleet-wide rather than
-per-artifact).
+rejection. OpenVEX `products[]` is ignored *on this endpoint*: the
+document was uploaded to one artifact, so the operator has already
+scoped it.
+
+**Fleet-wide VEX.** `POST /api/v1/vex` (`internal/api/vexfleet.go`)
+takes one OpenVEX document that applies wherever its products appear,
+rather than to a named artifact — "CVE-2021-44228 does not apply to
+log4j-core 2.14.1 the way we build it, wherever it ships." With no
+artifact in the URL, `products[]` becomes the addressing, and
+`scanner.ParseVEXProducts` reads it (0.0.1 bare purl strings, 0.2.0's
+`@id`/`identifiers`/`hashes`, the last normalized into `sha256:<hex>`
+so it compares directly against `Artifact.Digest`).
+
+Each identifier is matched two ways, and they differ enormously in
+blast radius. **By digest** the product *is* the artifact: one match,
+narrow by construction. **By component purl** the product is something
+artifacts *contain*, resolved through `FindByComponentPURL`, so one
+line can cover the entire estate. That breadth is the point, and it is
+also why the endpoint returns `artifacts_updated` and the ids (capped
+at 200, with `artifacts_truncated` saying so) rather than a bare
+"applied" — a fleet suppression that silently covered 400
+artifacts is exactly the kind of thing this codebase keeps having to
+learn to make visible. A statement naming **no** product matches
+nothing and is counted in `statements_naming_no_product`; the other
+reading, "applies to everything", would let one malformed document
+suppress the fleet.
+
+Documents live in their own `vex_documents` table keyed by content hash
+(so re-running a `vexctl` pipeline in CI is idempotent), *not* in
+`artifact_documents` — that table is keyed `(artifact_id, kind)` and
+cascades from `artifacts`, which is precisely what a document belonging
+to no single artifact cannot have. The two kinds coexist.
+
+On conflict **the per-artifact statement wins**, being the more
+specific claim: an operator who assessed *this* image is not overridden
+by a statement about a package it happens to contain. That precedence
+is applied by layering the per-artifact map over the fleet one, both at
+upload time and on every scan (`runScan`), which is also what makes
+revocation work across the two for free — `MergeFindings` already
+revokes a suppression when it sees `affected`, so a per-artifact
+`affected` over a fleet `not_affected` un-suppresses through the
+existing path, with no separate retraction mechanism to keep in step.
+
+`ParseVEXProducts` is OpenVEX-only. CycloneDX expresses the same idea
+through `affects[].ref`, which points into the document's own component
+tree rather than naming an identifier — resolving those means resolving
+a whole BOM. A CycloneDX document posted here is rejected with a 400
+saying so, rather than accepted as one that silently matches nothing.
+
+Fleet documents are read and parsed on **every scan**, uncached, and
+the ceiling to watch is *bytes* rather than document count —
+`ListFleetVEX` selects the full content column, so the cost is total
+stored bytes × scans in flight, and at `maxVEXBytes` each a handful of
+documents is already tens of MB per scan. That is still a deliberate
+call at this scale: against a scan that spends seconds to minutes in
+trivy/grype it is noise, and a
+process-local cache would go stale on the other replica the moment
+somebody uploaded a document. If the count ever makes it measurable,
+the upgrade is a short-TTL cache keyed on row count plus newest
+`uploaded_at` — not a lifetime one.
 
 **Accepting the risk of a finding.** VEX answers "this doesn't apply
 here." The far more common situation has no VEX statement that is

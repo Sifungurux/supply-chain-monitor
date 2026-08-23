@@ -283,6 +283,26 @@ var schemaStatements = []string{
 	// duplicate would be its own row, so one artifact would appear
 	// repeatedly for one purl query. It also makes SaveComponents'
 	// insert idempotent if it's ever retried mid-flight.
+	// Fleet-wide OpenVEX documents (POST /api/v1/vex) -- assessments
+	// that hold wherever their products appear, rather than against one
+	// artifact.
+	//
+	// NOT artifact_documents with kind "vex", and the difference is not
+	// cosmetic: that table is keyed (artifact_id, kind) and cascades
+	// from artifacts, which is exactly what a document belonging to no
+	// single artifact cannot have. The two coexist -- see
+	// FleetVEXDocument for which wins on conflict (the per-artifact
+	// one, being the more specific claim).
+	//
+	// id is the SHA-256 of content, so re-uploading the same document
+	// from a CI pipeline replaces the row instead of adding another
+	// saying the same thing.
+	`CREATE TABLE IF NOT EXISTS vex_documents (
+		id           TEXT PRIMARY KEY,
+		content_type TEXT NOT NULL,
+		content      BYTEA NOT NULL,
+		uploaded_at  TIMESTAMPTZ NOT NULL
+	)`,
 	`CREATE TABLE IF NOT EXISTS components (
 		id          BIGSERIAL PRIMARY KEY,
 		artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
@@ -1721,6 +1741,73 @@ func (s *PostgresStore) SaveDocument(artifactID, kind, contentType string, conte
 		return fmt.Errorf("save %s document for %q: %w", kind, artifactID, err)
 	}
 	return nil
+}
+
+func (s *PostgresStore) ComponentPURLs(artifactID string) ([]string, error) {
+	ctx := context.Background()
+	rows, err := s.pool.Query(ctx, `SELECT purl FROM components WHERE artifact_id = $1`, artifactID)
+	if err != nil {
+		return nil, fmt.Errorf("list component purls for %q: %w", artifactID, err)
+	}
+	defer rows.Close()
+
+	out := make([]string, 0)
+	for rows.Next() {
+		var purl string
+		if err := rows.Scan(&purl); err != nil {
+			return nil, fmt.Errorf("scan component purl: %w", err)
+		}
+		if purl != "" {
+			out = append(out, purl)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list component purls for %q: %w", artifactID, err)
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) SaveFleetVEX(doc FleetVEXDocument) error {
+	ctx := context.Background()
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO vex_documents (id, content_type, content, uploaded_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (id) DO UPDATE SET content_type = $2, content = $3, uploaded_at = $4
+	`, doc.ID, doc.ContentType, doc.Content, doc.UploadedAt)
+	if err != nil {
+		return fmt.Errorf("save fleet VEX document %q: %w", doc.ID, err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListFleetVEX() ([]FleetVEXDocument, error) {
+	ctx := context.Background()
+	// Ordered here rather than left to the scan path to sort: this is
+	// read on every scan (see internal/api/scan.go's fleetVEXFor), and
+	// an unstable order would make which of two documents wins for the
+	// same vulnerability depend on the plan Postgres happened to pick.
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, content_type, content, uploaded_at
+		FROM vex_documents
+		ORDER BY uploaded_at DESC, id ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list fleet VEX documents: %w", err)
+	}
+	defer rows.Close()
+
+	var out []FleetVEXDocument
+	for rows.Next() {
+		var doc FleetVEXDocument
+		if err := rows.Scan(&doc.ID, &doc.ContentType, &doc.Content, &doc.UploadedAt); err != nil {
+			return nil, fmt.Errorf("scan fleet VEX document: %w", err)
+		}
+		out = append(out, doc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list fleet VEX documents: %w", err)
+	}
+	return out, nil
 }
 
 // SaveComponents replaces this artifact's component inventory in one

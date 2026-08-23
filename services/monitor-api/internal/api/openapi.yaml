@@ -790,6 +790,95 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/vex:
+    post:
+      tags: [findings]
+      summary: Upload a fleet-wide VEX document
+      description: >-
+        Accepts one OpenVEX document (raw bytes, max 4MiB) whose
+        statements apply wherever their `products` appear, rather than
+        to one artifact.
+
+
+        Products are the addressing. Each identifier is matched two
+        ways: as an artifact **digest** (`sha256:...`, or a purl
+        carrying one such as `pkg:oci/app@sha256:...`), which matches
+        that one artifact; and as a **component purl**
+        (`pkg:maven/.../log4j-core@2.14.1`), which matches every
+        artifact whose indexed SBOM lists it. The second is deliberately
+        broad -- one line can cover the whole estate -- so the response
+        reports how many artifacts were updated and names them.
+
+
+        A statement naming no product matches **nothing**, and the count
+        of such statements comes back as
+        `statements_naming_no_product`. It is never read as "applies to
+        everything".
+
+
+        OpenVEX only: CycloneDX expresses this through `affects[].ref`,
+        which points into the document's own component tree rather than
+        naming an identifier, and is rejected with 400 rather than
+        accepted as a document that silently matches nothing. Use
+        POST /api/v1/artifacts/{id}/vex for CycloneDX.
+
+
+        Statements are applied immediately to every matching artifact,
+        and re-consulted on every subsequent scan. On conflict a
+        per-artifact document **wins**, being the more specific claim;
+        an `affected` status revokes an earlier suppression exactly as
+        it does per-artifact. Re-uploading the same bytes is idempotent
+        -- documents are keyed by content hash.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Applied.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: applied }
+                  document_id:
+                    type: string
+                    description: SHA-256 of the document, its storage key.
+                    example: 9f2c...
+                  statements:
+                    type: integer
+                    description: How many statements were understood.
+                    example: 3
+                  artifacts_updated:
+                    type: integer
+                    description: How many artifacts the document changed.
+                    example: 12
+                  statements_naming_no_product:
+                    type: integer
+                    description: >-
+                      Statements that named no product and therefore
+                      matched nothing. Non-zero usually means the
+                      document was written for a different fleet.
+                    example: 0
+                  artifacts:
+                    type: array
+                    items: { type: string }
+                    description: >-
+                      The ids of the artifacts that changed, capped at
+                      200. `artifacts_updated` is always the exact
+                      total.
+                  artifacts_truncated:
+                    type: boolean
+                    description: >-
+                      True when more artifacts changed than `artifacts`
+                      lists.
+                    example: false
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
   /api/v1/artifacts/{id}/findings/{findingID}/acceptance:
     parameters:
       - $ref: "#/components/parameters/ArtifactID"
