@@ -61,6 +61,22 @@ data:
   # reachable, un-rate-limited, and still serving the same tag. The
   # original ref is kept on the artifact as source_ref. Costs registry
   # disk -- see values.yaml.
+  # Scan-worker Job resource envelope -- see values.yaml for why the
+  # REQUESTS are what bound achievable scan concurrency.
+  SCAN_JOB_CPU_REQUEST: {{ .Values.monitorApi.scanJobResources.cpuRequest | quote }}
+  SCAN_JOB_MEMORY_REQUEST: {{ .Values.monitorApi.scanJobResources.memoryRequest | quote }}
+  SCAN_JOB_MEMORY_LIMIT: {{ .Values.monitorApi.scanJobResources.memoryLimit | quote }}
+{{- range $kind, $cfg := .Values.monitorApi.scanJobResources.perKind }}
+{{- if $cfg.cpuRequest }}
+  SCAN_JOB_CPU_REQUEST_{{ $kind | upper }}: {{ $cfg.cpuRequest | quote }}
+{{- end }}
+{{- if $cfg.memoryRequest }}
+  SCAN_JOB_MEMORY_REQUEST_{{ $kind | upper }}: {{ $cfg.memoryRequest | quote }}
+{{- end }}
+{{- if $cfg.memoryLimit }}
+  SCAN_JOB_MEMORY_LIMIT_{{ $kind | upper }}: {{ $cfg.memoryLimit | quote }}
+{{- end }}
+{{- end }}
   MIRROR_ARTIFACTS: {{ .Values.monitorApi.mirrorArtifacts.enabled | quote }}
   MIRROR_REPO_PREFIX: {{ .Values.monitorApi.mirrorArtifacts.repoPrefix | quote }}
   # Postgres holds every artifact/finding/stage-history record -- see
