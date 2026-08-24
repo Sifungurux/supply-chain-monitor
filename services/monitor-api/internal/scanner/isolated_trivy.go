@@ -106,7 +106,24 @@ type IsolatedTrivyConfig struct {
 	// Empty SecretName disables this, the pre-registry-auth default.
 	RegistryCredentialsSecretName string
 	RegistryUsernameKey           string
-	RegistryPasswordKey           string
+	// RegistryAddr is forwarded to the worker as REGISTRY_ADDR, and
+	// without it the credentials above are USELESS. runScanWorker builds
+	// its dockerconfig.json with writeDockerConfig(REGISTRY_ADDR, user,
+	// pass), which keys the auth entry BY HOST -- so an empty
+	// REGISTRY_ADDR files scm-registry's credentials under "" and trivy,
+	// looking them up by the host it is actually pulling from, finds
+	// nothing and gets a 401.
+	//
+	// IsolatedGrypeConfig and IsolatedUnpackerConfig have always
+	// forwarded this; only trivy did not, and the gap was invisible for
+	// as long as every image scan targeted an anonymous public registry
+	// where no credential was needed. It surfaced the moment artifact
+	// mirroring pointed refs at scm-registry: trivy 401'd on every
+	// mirrored artifact while grype and unpacker succeeded, so the
+	// artifact still reported "scanned" with its CVE coverage quietly
+	// halved.
+	RegistryAddr        string
+	RegistryPasswordKey string
 }
 
 func (c IsolatedTrivyConfig) withDefaults() IsolatedTrivyConfig {
@@ -267,6 +284,11 @@ func (s *IsolatedTrivyScanner) ScanForArtifact(ctx context.Context, ref, artifac
 	// calls the same RegistryFetcher.Fetch -> ValidateRef this process
 	// does, reading the same variable. Without it a Job would refuse the
 	// in-cluster registry it exists to pull the SBOM from.
+	// Must accompany REGISTRY_USERNAME/PASSWORD below -- see the field's
+	// own comment for why the credentials do nothing without it.
+	if s.cfg.RegistryAddr != "" {
+		env["REGISTRY_ADDR"] = s.cfg.RegistryAddr
+	}
 	if allow := os.Getenv(RefHostAllowlistEnv); allow != "" {
 		env[RefHostAllowlistEnv] = allow
 	}
