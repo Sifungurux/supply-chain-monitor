@@ -817,7 +817,14 @@ keeps its original ref and the next scan tries again.
   cannot each wait for a full pull-and-push, so those artifacts keep
   their original ref until their first scan mirrors them -- which the
   `sweep-registered` CronJob already triggers. That same path backfills
-  artifacts registered before you turned this on.
+  artifacts registered before you turned this on. Those first scans
+  still pull from upstream; the copy happens once, after the scan.
+- **monitor-api gets push credentials.** Mirroring writes to
+  `scm-registry`, so enabling it switches monitor-api from the read-only
+  `scm-reader` account to `scm-writer`. `cluster/chart-secrets.sh`
+  already generates that password; the chart refuses to render without
+  it. If you manage `dockerAuth.existingSecret` yourself, point
+  `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` at an account that can push.
 
 Signature verification keeps running against `source_ref`: cosign
 signatures live at a sibling tag that a copy does not bring along, and

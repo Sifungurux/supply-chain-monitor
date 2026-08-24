@@ -137,6 +137,13 @@ func mirrorRepoPath(repo string) string {
 // Returns tag == "" when ref names a digest, and digest == "" when it
 // names a tag. A ref with neither gets the "latest" tag, the same
 // default every registry client applies.
+//
+// A ref carrying BOTH ("nginx:1.2@sha256:ab...") is split on the "@",
+// so the tag stays in the repo half and is sanitized into the
+// destination path ("mirror/docker.io/library/nginx-1.2:sha256-ab...").
+// Deliberate: the digest is the identity, the tag is decoration, and
+// keeping the decoration in the path costs nothing and reads better
+// than dropping it.
 func splitRefTag(ref string) (repo, tag, digest string) {
 	if i := strings.Index(ref, "@"); i >= 0 {
 		return ref[:i], "", ref[i+1:]

@@ -1005,7 +1005,17 @@ monitorApi:
   #     pull-and-push before it answers. Bulk registration deliberately
   #     does NOT (500 refs in one request cannot each wait for that) --
   #     those artifacts are mirrored by their first scan instead, which
-  #     the sweep-registered CronJob below already triggers.
+  #     the sweep-registered CronJob below already triggers. That copy
+  #     runs AFTER the scan and outside its concurrency slot, so a slow
+  #     or failing copy never blocks the scan pipeline.
+  #
+  # ALSO CHANGES monitor-api's REGISTRY ACCOUNT. Mirroring pushes, and
+  # the scm-reader account this service normally uses is pull-only, so
+  # turning this on switches scm-registry-credentials to
+  # dockerAuth.accounts.writer -- which must therefore have a password
+  # (cluster/chart-secrets.sh generates one; the chart refuses to render
+  # otherwise). Deployments using dockerAuth.existingSecret must point
+  # REGISTRY_USERNAME/PASSWORD at an account that can push.
   #
   # Off by default: turning it on changes what a registered ref means and
   # starts consuming registry disk, which should be a deliberate choice.

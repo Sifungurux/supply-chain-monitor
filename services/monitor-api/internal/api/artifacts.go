@@ -163,7 +163,7 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 	// Best-effort digest resolution + duplicate check, before Create --
 	// see resolveDigest's own comment for why an empty digest here just
 	// means "proceed without dedup," not a failure.
-	digest := h.resolveDigest(r.Context(), req.Ref, t)
+	digest := h.resolveDigest(r.Context(), req.Ref)
 
 	// unsafe (REQUIRE_DIGEST only) and the reject-on-mismatch path below
 	// (the pre-existing, opt-in-per-request behavior) are mutually
@@ -378,7 +378,7 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 					refErrs[i] = err
 					return
 				}
-				digests[i] = h.resolveDigest(r.Context(), ref, t)
+				digests[i] = h.resolveDigest(r.Context(), ref)
 			}(i, item.Ref, t)
 		}
 		wg.Wait()

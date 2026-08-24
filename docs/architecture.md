@@ -339,6 +339,32 @@ scan. `runScan` calls the same `mirrorArtifact`, which makes the existing
 skipped: bulk batches, artifacts registered before this feature existed,
 and copies that failed the first time.
 
+`runScan` mirrors **after** the scan and **outside** the scan slot. A
+copy is bounded by `mirrorTimeout` (15 minutes); run inside the slot, an
+artifact whose copy is slow or failing would hold that slot for the full
+timeout without scanning anything, and the sweep would re-enter it every
+15 minutes on every un-mirrored artifact at once. Scanning first costs
+one upstream pull on an artifact's *first* scan — which is what happens
+today anyway; every scan after it reads the mirrored ref.
+
+A copy that started before another one finished is refused at the
+`Update`, which re-checks `ref`/`source_ref` against the row as it is
+*now* rather than the snapshot the copy began with. Nothing serializes
+scans of one artifact (slots are per scanner kind), and the loser of that
+race would otherwise write the winner's mirrored ref into `source_ref`,
+destroying the upstream ref permanently.
+
+**Credentials.** Mirroring PUSHES, and monitor-api's usual account is
+`scm-reader`, whose docker_auth ACL is `actions: ["pull"]`. Enabling
+`mirrorArtifacts` switches `scm-registry-credentials` to `scm-writer`
+(`["pull", "push"]` on every repository, so the `mirror/` prefix needs no
+new ACL) and the chart refuses to render if that account has no password
+— with the reader account every copy would 403, and because mirroring is
+best-effort the only symptom would be "mirroring silently never sticks."
+A deployment using `dockerAuth.existingSecret` supplies
+`REGISTRY_USERNAME`/`REGISTRY_PASSWORD` itself and must point them at an
+account that can push.
+
 **Signature verification still runs against `source_ref`.** cosign's
 classic signatures live at a sibling `sha256-<digest>.sig` *tag*, which
 is not an OCI referrer and so is not something `oras copy --recursive`
