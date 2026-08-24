@@ -998,44 +998,59 @@ func runSweepRegistered() {
 	// those rescans then all age out together on the same future day.
 	// The batch is what keeps that from becoming a thundering herd
 	// against the (now cluster-wide) scan concurrency cap.
-	if days := getenvInt("SWEEP_RESCAN_STALE_AFTER_DAYS", 0); days > 0 {
-		cutoff := time.Now().UTC().AddDate(0, 0, -days)
-		if scanned, err := listByStatusFromAPI(ctx, apiBase, apiKey, artifact.StatusScanned); err != nil {
-			log.Printf("sweep-registered: could not list scanned artifacts for stale rescan (continuing): %v", err)
-		} else if stale := staleScans(scanned, cutoff); len(stale) > 0 {
-			log.Printf("sweep-registered: %d artifact(s) last scanned before %s -- rescanning (SWEEP_RESCAN_STALE_AFTER_DAYS=%d)",
-				len(stale), cutoff.Format(time.RFC3339), days)
-			all = append(all, stale...)
-		}
-		// No separate pass for "failed" here: every failed artifact is
-		// already collected above, on every run, rather than only once
-		// it has aged out.
-	}
-
-	// Artifacts that have never had mirroring settled (source_ref empty),
-	// when the deployment mirrors at all.
-	//
-	// THIS IS THE BACKFILL FOR THE FLEET THAT ALREADY EXISTS. Mirroring
-	// happens as a side effect of registration and of scanning, so an
-	// artifact registered before the feature was turned on -- or in bulk,
-	// which never copies inline -- sits at status "scanned" and is
-	// touched by none of the passes above: staleness is off by default,
-	// and a successfully-scanned artifact is neither "registered" nor
-	// "failed". Without this pass, "copy what is already registered"
-	// would simply never happen for the population it was about.
-	//
-	// Converges: every scan settles source_ref one way or the other --
-	// to the mirrored ref, or (for a local path or a ref already in this
-	// registry) to the ref itself, see internal/api's mirrorArtifact --
-	// so this list shrinks to nothing and then costs one page request.
-	// Paced by SWEEP_BATCH_SIZE like every other pass, so turning
-	// mirroring on does not rescan the whole fleet at once.
-	if getenvBool("SWEEP_MIRROR_BACKFILL", false) {
-		if scanned, err := listByStatusFromAPI(ctx, apiBase, apiKey, artifact.StatusScanned); err != nil {
-			log.Printf("sweep-registered: could not list scanned artifacts for mirror backfill (continuing): %v", err)
-		} else if unmirrored := unmirroredArtifacts(scanned); len(unmirrored) > 0 {
-			log.Printf("sweep-registered: %d scanned artifact(s) not mirrored into the local registry yet -- rescanning to mirror them", len(unmirrored))
-			all = append(all, unmirrored...)
+	// The two passes below both work off the SAME population -- every
+	// artifact at status "scanned" -- so it is listed once and shared.
+	// Listing it twice would be two full paginations of the largest
+	// status there is, and ListPage batch-loads each artifact's findings
+	// and stage history (see listArtifacts' own comment on why that
+	// payload is worth not asking for twice).
+	staleDays := getenvInt("SWEEP_RESCAN_STALE_AFTER_DAYS", 0)
+	mirrorBackfill := getenvBool("SWEEP_MIRROR_BACKFILL", false)
+	if staleDays > 0 || mirrorBackfill {
+		scanned, err := listByStatusFromAPI(ctx, apiBase, apiKey, artifact.StatusScanned)
+		if err != nil {
+			log.Printf("sweep-registered: could not list scanned artifacts (continuing without stale rescan or mirror backfill): %v", err)
+		} else {
+			if staleDays > 0 {
+				cutoff := time.Now().UTC().AddDate(0, 0, -staleDays)
+				if stale := staleScans(scanned, cutoff); len(stale) > 0 {
+					log.Printf("sweep-registered: %d artifact(s) last scanned before %s -- rescanning (SWEEP_RESCAN_STALE_AFTER_DAYS=%d)",
+						len(stale), cutoff.Format(time.RFC3339), staleDays)
+					all = append(all, stale...)
+				}
+				// No separate pass for "failed" here: every failed
+				// artifact is already collected above, on every run,
+				// rather than only once it has aged out.
+			}
+			// Artifacts that have never had mirroring settled (source_ref
+			// empty).
+			//
+			// THIS IS THE BACKFILL FOR THE FLEET THAT ALREADY EXISTS.
+			// Mirroring happens as a side effect of registration and of
+			// scanning, so an artifact registered before the feature was
+			// turned on -- or in bulk, which never copies inline -- sits
+			// at "scanned" and is touched by none of the passes above:
+			// staleness is off by default, and a successfully-scanned
+			// artifact is neither "registered" nor "failed". Without this
+			// pass, "copy what is already registered" would simply never
+			// happen for the population it was about.
+			//
+			// Converges as WORK, though not as a query: every scan
+			// settles source_ref one way or the other -- to the mirrored
+			// ref, or (for a local path or a ref already in this
+			// registry) to the ref itself, see internal/api's
+			// mirrorArtifact -- so this stops queueing anything. The
+			// listing itself still happens each run; sharing it with the
+			// stale pass above is what keeps that from costing anything
+			// extra. Paced by SWEEP_BATCH_SIZE like every other pass, so
+			// turning mirroring on does not rescan the whole fleet at
+			// once.
+			if mirrorBackfill {
+				if unmirrored := unmirroredArtifacts(scanned); len(unmirrored) > 0 {
+					log.Printf("sweep-registered: %d scanned artifact(s) not mirrored into the local registry yet -- rescanning to mirror them", len(unmirrored))
+					all = append(all, unmirrored...)
+				}
+			}
 		}
 	}
 
@@ -1089,7 +1104,23 @@ func pickArtifactsToSweep(all []artifact.Artifact, batchSize int) []artifact.Art
 	if batchSize <= 0 {
 		return nil
 	}
-	eligible := append([]artifact.Artifact(nil), all...)
+	// Deduplicated by id, because the passes feeding `all` are no longer
+	// disjoint. They used to be -- one per status, with an explicit
+	// "failed artifacts are already collected above" note keeping it that
+	// way -- but the mirror backfill selects on source_ref, not status,
+	// so an artifact that is BOTH stale and unmirrored arrives twice.
+	// Left in, it would eat two of the batch's slots and be POSTed to
+	// /scan twice in one run, the second call racing the first for a
+	// scan slot it does not need.
+	seen := make(map[string]struct{}, len(all))
+	eligible := make([]artifact.Artifact, 0, len(all))
+	for _, a := range all {
+		if _, dup := seen[a.ID]; dup {
+			continue
+		}
+		seen[a.ID] = struct{}{}
+		eligible = append(eligible, a)
+	}
 	sort.Slice(eligible, func(i, j int) bool {
 		// LEAST RECENTLY ATTEMPTED first, which is what keeps a
 		// permanently-broken artifact from monopolising every batch.

@@ -381,13 +381,21 @@ before the feature was enabled sits at `status=scanned` and is touched by
 none of the sweep's usual passes — it is neither `registered` nor
 `failed`, and staleness rescanning is off by default. `SWEEP_MIRROR_BACKFILL`
 (set from the same values key) adds one pass over scanned artifacts with
-an empty `source_ref`, paced by `SWEEP_BATCH_SIZE` like everything else.
+an empty `source_ref`, paced by `SWEEP_BATCH_SIZE` like everything else
+and sharing its listing with the stale-rescan pass, which reads the same
+population.
 
-It converges because *every* scan settles `source_ref`: to the mirrored
-ref, or — for a local path or a ref already in this registry — to the
-artifact's own ref. Without that second case, "not mirrored yet" and
-"never mirrorable" would look identical and the backfill would revisit
-the same artifacts forever.
+It converges as work — every scan settles `source_ref`, to the mirrored
+ref or (for a local path or a ref already in this registry) to the
+artifact's own ref, so the pass stops queueing anything. Without that
+second case "not mirrored yet" and "never mirrorable" would look
+identical and the backfill would revisit the same artifacts forever.
+
+This is also the first sweep pass that selects on something other than
+status, so `all` can now contain the same artifact twice (stale *and*
+unmirrored). `pickArtifactsToSweep` deduplicates by id: a duplicate would
+otherwise eat two of the batch's slots and issue a second `POST /scan`
+racing the first.
 
 **Signature verification still runs against `source_ref`.** cosign's
 classic signatures live at a sibling `sha256-<digest>.sig` *tag*, which
