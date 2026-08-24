@@ -151,13 +151,27 @@ registry:
     # ranking, putting this pod at the front of the queue under node
     # DiskPressure. Pushed images land on the PVC (persistence.size
     # above), so what's left here is upload staging and logs.
+    #
+    # MEMORY IS SIZED FOR CONCURRENT BLOB SERVING, NOT FOR IDLE. This pod
+    # idles at 26Mi, which is why 512Mi looked generous -- but with
+    # monitorApi.mirrorArtifacts on, every image scan in the fleet pulls
+    # from here instead of from Docker Hub, and at 16 concurrent scans
+    # (each running trivy, grype and unpacker, each pulling separately)
+    # it was OOMKilled 4 times with exit 137. Measured 2026-08-24: see
+    # docs/scan-concurrency-2026-08-24.md, where that is the thing that
+    # broke first -- before disk, node memory or the scan workers.
+    #
+    # Before mirroring this pod served a handful of SBOM blobs and 512Mi
+    # was never tested. Raise this before raising the scan cap: at 512Mi,
+    # "can the cluster scan at concurrency N" is really a question about
+    # one under-provisioned pod.
     requests:
       cpu: 100m
-      memory: 128Mi
+      memory: 256Mi
       ephemeral-storage: 256Mi
     limits:
-      cpu: 500m
-      memory: 512Mi
+      cpu: "1"
+      memory: 2Gi
       ephemeral-storage: 256Mi
 
 # dockerAuth runs cesanta/docker_auth, a token-authentication server for
