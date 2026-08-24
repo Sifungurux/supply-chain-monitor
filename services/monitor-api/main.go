@@ -1986,6 +1986,7 @@ func runAPIServer() {
 			CacheMountPath:                getenv("TRIVY_CACHE_DIR", "/trivy-cache"),
 			VerboseLogs:                   verboseScanLogs,
 			ActiveDeadlineSeconds:         int64(scanWorkerActiveDeadlineSeconds),
+			RegistryAddr:                  registryAddr,
 			RegistryCredentialsSecretName: registryCredentialsSecretName,
 			// Lets each "image" scan-worker Job upload a generated
 			// SBOM/SARIF document back to this Service once it's done
@@ -2027,6 +2028,7 @@ func runAPIServer() {
 			FetchPlainHTTP:                fetchPlainHTTP,
 			VerboseLogs:                   verboseScanLogs,
 			ActiveDeadlineSeconds:         int64(scanWorkerActiveDeadlineSeconds),
+			RegistryAddr:                  registryAddr,
 			RegistryCredentialsSecretName: registryCredentialsSecretName,
 		})
 		// Only actually constructed when something will use them --

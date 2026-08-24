@@ -386,3 +386,51 @@ func TestIsolatedTrivy_NoHostAgnosticCredentialsInJobEnv(t *testing.T) {
 		t.Error("REGISTRY_USERNAME missing from the scan Job -- the in-cluster registry would be pulled anonymously")
 	}
 }
+
+// REGISTRY_ADDR must reach the Job, because runScanWorker keys the
+// docker config it builds BY HOST: without it, scm-registry's
+// credentials are filed under "" and trivy -- looking them up by the
+// host it is pulling from -- finds none and gets a 401.
+//
+// The credentials being present is not enough and was exactly the shape
+// of the live defect: REGISTRY_USERNAME/PASSWORD were forwarded, this
+// was not, and every scan of a mirrored artifact lost its trivy CVE
+// coverage while still reporting "scanned". Asserted alongside the
+// credentials so the three cannot drift apart again.
+func TestIsolatedTrivyJobForwardsRegistryAddrWithCredentials(t *testing.T) {
+	client := &recordingJobClient{fakeJobClient: fakeJobClient{
+		namespace:      "supply-chain-monitor",
+		statusSequence: []jobStatusResult{{succeeded: true}},
+		podName:        "p",
+		logs:           `{"findings":[]}`,
+	}}
+	s := NewIsolatedTrivyScanner(client, IsolatedTrivyConfig{
+		Image:                         "monitor-api:dev",
+		SubCommand:                    "image",
+		PollInterval:                  time.Millisecond,
+		RegistryAddr:                  "scm-registry.scm.svc.cluster.local:5000",
+		RegistryCredentialsSecretName: "scm-registry-credentials",
+		RegistryUsernameKey:           "REGISTRY_USERNAME",
+		RegistryPasswordKey:           "REGISTRY_PASSWORD",
+	})
+	if _, err := s.Scan(context.Background(), "scm-registry.scm.svc.cluster.local:5000/mirror/app:1.0"); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	var addr string
+	creds := map[string]bool{}
+	for _, e := range client.createdJobs[0].Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "REGISTRY_ADDR" {
+			addr = e.Value
+		}
+		if e.Name == "REGISTRY_USERNAME" || e.Name == "REGISTRY_PASSWORD" {
+			creds[e.Name] = true
+		}
+	}
+	if addr != "scm-registry.scm.svc.cluster.local:5000" {
+		t.Errorf("REGISTRY_ADDR = %q -- the Job's docker config would key its credentials under the wrong host and trivy would 401", addr)
+	}
+	if len(creds) != 2 {
+		t.Errorf("credentials missing from the Job env: %v", creds)
+	}
+}
