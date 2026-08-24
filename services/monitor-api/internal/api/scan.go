@@ -163,6 +163,16 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 	ctx, cancel := context.WithTimeout(context.Background(), h.effectiveScanTimeout())
 	defer cancel()
 
+	// Mirror before scanning, not after: the whole point is that the
+	// scanners below pull from the in-cluster registry rather than from
+	// docker.io/ghcr.io. This is also the backfill path for everything
+	// registration did not mirror -- bulk registrations, artifacts that
+	// predate the feature, and copies that failed the first time -- so
+	// the existing sweep-registered CronJob drains the fleet without
+	// needing an endpoint or a Job of its own. A no-op (and untimed)
+	// once an artifact is already mirrored. See mirrorArtifact.
+	a = h.mirrorArtifact(ctx, a)
+
 	// Every scanner registered for this artifact type runs concurrently,
 	// not one after another: they're independent (each gets the same ref
 	// and ctx, none depends on another's output), and a single shared
@@ -227,7 +237,11 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 				// per signed image would bury the unsigned ones -- so
 				// without this a signed image is indistinguishable from
 				// this scanner being switched off.
-				findings, provenance, provenanceTrustRoot, scanErr = impl.ScanProvenance(ctx, a.Ref)
+				// provenanceRef, not a.Ref: a mirrored copy does not
+				// carry cosign's sibling .sig tag, and the signature was
+				// made about the original identity anyway. See
+				// mirror.go's provenanceRef.
+				findings, provenance, provenanceTrustRoot, scanErr = impl.ScanProvenance(ctx, provenanceRef(a))
 			case scanner.ArtifactAwareScanner:
 				// Isolated scanners: the Job uploads its own documents
 				// back through POST /documents (main.go's

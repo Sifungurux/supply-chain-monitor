@@ -291,6 +291,66 @@ Three things this gets right that are easy to get wrong:
   explicitly, or the two formats disagree by exactly one row for the
   same image.
 
+### Mirroring artifacts into the local registry
+
+With `monitorApi.mirrorArtifacts.enabled` (`MIRROR_ARTIFACTS`) on,
+registration copies the artifact into `scm-registry` and rewrites
+`Artifact.Ref` to the copy, keeping the ref it was registered with in
+`Artifact.SourceRef`. Because every scanner reads `Ref`, that one
+rewrite is what takes the public registry out of the scanning path:
+
+    registered:  ghcr.io/acme/checkout:2.4.1
+    stored ref:  scm-registry:5000/mirror/ghcr.io/acme/checkout:2.4.1
+    source_ref:  ghcr.io/acme/checkout:2.4.1
+
+The public registry is the least reliable participant in a scan.
+Anonymous Docker Hub pull limits are the most common single cause of a
+scan failing here; an upstream tag can move or vanish under an artifact
+that has already been assessed; and every re-scan re-downloads the same
+gigabytes. Mirrored, an artifact is pulled from upstream once and every
+scan after that is a same-cluster pull of the exact bytes registered.
+
+**Mechanics** (`internal/scanner/mirror.go`, `internal/api/mirror.go`):
+
+- `oras copy --recursive` does the copy — the same binary already used
+  for `oras pull`/`oras manifest fetch`, authenticating to both ends from
+  the one merged docker config (`--from-registry-config` /
+  `--to-registry-config`). Only the destination may be downgraded to
+  plain HTTP, and only when `InsecureTransportAllowed` agrees it is this
+  deployment's own registry.
+- **A zero exit is not proof.** The destination ref is then resolved and
+  required to equal the source digest before anything is rewritten. OCI
+  refs are content-addressed, so a mismatch — or a destination that will
+  not resolve — means a partial push or a wrong destination name, both of
+  which otherwise produce a ref that looks fine and scans as nothing.
+- `ref` and `source_ref` are written in **one** `Update`. A half-applied
+  rewrite would leave a local ref with no record of where it came from,
+  and there is no way back from that.
+- **Best-effort throughout.** A registry that is unreachable, refusing
+  the push, or out of disk leaves the artifact on its original ref; the
+  next scan retries. Nothing fails a registration or a scan over it.
+
+**Who mirrors what.** `POST /api/v1/artifacts` copies inline and answers
+with the rewritten ref. `POST /api/v1/artifacts/bulk` deliberately does
+not — 500 refs in one request cannot each wait for a full pull-and-push
+— so bulk-registered artifacts keep their original ref until their first
+scan. `runScan` calls the same `mirrorArtifact`, which makes the existing
+`sweep-registered` CronJob the backfill for everything registration
+skipped: bulk batches, artifacts registered before this feature existed,
+and copies that failed the first time.
+
+**Signature verification still runs against `source_ref`.** cosign's
+classic signatures live at a sibling `sha256-<digest>.sig` *tag*, which
+is not an OCI referrer and so is not something `oras copy --recursive`
+brings along; verifying the copy would report every signed image in the
+fleet as unsigned. It is also the more correct answer on its own terms —
+the signer signed that identity, not a path in this cluster's registry.
+
+**Cost:** registry disk. Every distinct artifact is stored in full and
+`registry.persistence.size` defaults to 5Gi, which holds only a handful
+of real images. Size it for the fleet being registered before turning
+this on.
+
 ## Scanning pipeline
 
 `internal/scanner/scanner.go`'s `Registry` maps an artifact type to a

@@ -2027,6 +2027,30 @@ func runAPIServer() {
 	// image refs never use it regardless of this setting.
 	digestResolver := digestResolverFor(dockerConfigPath, registryUsername, registryPassword)
 
+	// MIRROR_ARTIFACTS: copy every registered artifact into this
+	// cluster's own registry and scan the copy, instead of pulling from
+	// docker.io/ghcr.io on every single scan. One switch, deliberately:
+	// an empty REGISTRY_ADDR already means "there is no local registry",
+	// and NewOrasMirror returns nil for it -- which is exactly what the
+	// handler reads as "off". Off by default here so the chart, not the
+	// binary's default, is what turns it on; see values.yaml for the
+	// registry-disk cost it carries.
+	//
+	// The same merged docker config every other registry path uses:
+	// `oras copy` has to authenticate to BOTH ends, and this one file
+	// already holds the public source's credentials and scm-registry's
+	// keyed by host.
+	var artifactMirror scanner.Mirror
+	if getenvBool("MIRROR_ARTIFACTS", false) {
+		if m := scanner.NewOrasMirror(registryAddr, getenv("MIRROR_REPO_PREFIX", scanner.DefaultMirrorRepoPrefix), fetchPlainHTTP, dockerConfigPath, digestResolver); m != nil {
+			artifactMirror = m
+			slog.Info("artifact mirroring is on: registered artifacts are copied into the local registry and scanned from there",
+				"registry", registryAddr, "repo_prefix", m.RepoPrefix)
+		} else {
+			log.Printf("MIRROR_ARTIFACTS=true but REGISTRY_ADDR is empty -- nothing to mirror into, artifacts keep their original refs")
+		}
+	}
+
 	// REQUIRE_DIGEST -- see NewRouter's own comment for the full
 	// behavior this gates. Off by default: turning it on is a real
 	// policy change (expected_digest becomes a required field on every
@@ -2134,6 +2158,7 @@ func runAPIServer() {
 		RateLimitRPS:       rateLimitRPS,
 		RateLimitBurst:     rateLimitBurst,
 		DigestResolver:     digestResolver,
+		Mirror:             artifactMirror,
 		FetchPlainHTTP:     fetchPlainHTTP,
 		ScanTimeout:        scanTimeout,
 		RequireDigest:      requireDigest,

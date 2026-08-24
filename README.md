@@ -776,6 +776,53 @@ curl -s -X POST localhost:8080/api/v1/artifacts/bulk "${AUTH[@]}" \
 # => {"created":100,"failed":0,"duplicates":0,"results":[{"ref":"alpine:3.19","type":"image","artifact":{...}}, ...]}
 ```
 
+### Scanning from your own registry instead of Docker Hub
+
+The public registry is the least reliable participant in a scan.
+Anonymous Docker Hub pull limits are the most common single cause of a
+scan failing here, an upstream tag can move or be deleted under an
+artifact you have already assessed, and every re-scan re-downloads the
+same gigabytes.
+
+Turn on `monitorApi.mirrorArtifacts.enabled` and registration copies each
+artifact into `scm-registry` and points the artifact at the copy, keeping
+the ref you registered as `source_ref`:
+
+```bash
+curl -s -X POST localhost:8080/api/v1/artifacts "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d '{"ref":"ghcr.io/acme/checkout:2.4.1","type":"image"}'
+# => {"id":"...",
+#     "ref":"scm-registry...:5000/mirror/ghcr.io/acme/checkout:2.4.1",
+#     "source_ref":"ghcr.io/acme/checkout:2.4.1", ...}
+```
+
+Every scanner reads `ref`, so from then on each scan is a same-cluster
+pull of the exact bytes that were registered. `source_ref` is shown in
+the dashboard, returned by the API, matched by search, and still counted
+as a duplicate if you re-register the original ref.
+
+The copy is verified before the rewrite: the mirrored ref is resolved and
+required to have the same digest as the source, because a zero exit from
+`oras copy` is not evidence of a usable copy. If anything fails --
+registry unreachable, out of disk, push refused -- the artifact simply
+keeps its original ref and the next scan tries again.
+
+**Two things to know before turning it on:**
+
+- **Registry disk.** Every artifact is stored in full.
+  `registry.persistence.size` defaults to `5Gi`, which holds only a
+  handful of real images; size it for the fleet you register.
+- **Bulk registration does not copy inline.** 500 refs in one request
+  cannot each wait for a full pull-and-push, so those artifacts keep
+  their original ref until their first scan mirrors them -- which the
+  `sweep-registered` CronJob already triggers. That same path backfills
+  artifacts registered before you turned this on.
+
+Signature verification keeps running against `source_ref`: cosign
+signatures live at a sibling tag that a copy does not bring along, and
+the signer signed that identity, not a path in your registry.
+
 ### Duplicate registration is caught by content, not by ref string
 
 Both `POST /api/v1/artifacts` and the bulk endpoint above resolve each

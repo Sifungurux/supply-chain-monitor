@@ -28,6 +28,13 @@ type handler struct {
 	// not an error.
 	digestResolver scanner.DigestResolver
 	fetchPlainHTTP bool
+	// mirror copies newly-registered artifacts into the in-cluster
+	// registry and rewrites their ref to the copy, so later scans pull
+	// from scm-registry rather than docker.io/ghcr.io. nil disables the
+	// whole feature -- which is how every deployment behaved before it
+	// existed, how a deployment with no REGISTRY_ADDR behaves, and how
+	// every test that doesn't care about it behaves. See mirror.go.
+	mirror scanner.Mirror
 	// scanTimeout bounds the shared budget scanArtifact gives every
 	// scanner registered for one artifact type (see that method's own
 	// comment on why it's deliberately not derived from r.Context()).

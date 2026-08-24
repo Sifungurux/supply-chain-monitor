@@ -77,6 +77,12 @@ type Config struct {
 	// constructed with (FETCH_PLAIN_HTTP in main.go) -- see resolveDigest's
 	// comment for why it only ever applies to non-image artifact types.
 	FetchPlainHTTP bool
+	// Mirror copies registered artifacts into the in-cluster registry
+	// and rewrites their ref to the copy (MIRROR_ARTIFACTS in main.go)
+	// -- nil disables it entirely, which is exactly how every
+	// registration and scan behaved before this existed. See
+	// mirror.go's mirrorArtifact.
+	Mirror scanner.Mirror
 	// ScanTimeout is the shared per-scan budget scanArtifact gives every
 	// scanner registered for one artifact type (see handler.scanTimeout's
 	// own comment) -- zero gets the 5-minute default.
@@ -152,7 +158,7 @@ type Config struct {
 // method+wildcard routing, so no external router dependency is needed.
 // See Config for what each field does and what its zero value means.
 func NewRouter(cfg Config) http.Handler {
-	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher, licenseDenylist: cfg.LicenseDenylist, staleAfterDays: cfg.StaleAfterDays, policy: cfg.Policy, enricher: cfg.Enricher}
+	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, mirror: cfg.Mirror, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher, licenseDenylist: cfg.LicenseDenylist, staleAfterDays: cfg.StaleAfterDays, policy: cfg.Policy, enricher: cfg.Enricher}
 	h.metrics = newMetrics()
 	h.scanCaps = cfg.ScanLimits.caps()
 

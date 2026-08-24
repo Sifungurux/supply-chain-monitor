@@ -1182,7 +1182,10 @@ func (s *MemStore) FindByRef(ref string) (*Artifact, error) {
 
 	var match *Artifact
 	for _, a := range s.data {
-		if a.Ref != ref {
+		// SourceRef too -- see PostgresStore.FindByRef for why a
+		// mirrored artifact must still be found by the ref it was
+		// originally registered under.
+		if a.Ref != ref && a.SourceRef != ref {
 			continue
 		}
 		if match == nil || a.CreatedAt.Before(match.CreatedAt) {

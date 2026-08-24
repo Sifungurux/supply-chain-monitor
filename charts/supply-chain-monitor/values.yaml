@@ -110,6 +110,18 @@ registry:
   # today, but cheap to leave on for a throwaway dev registry).
   deleteEnabled: true
   persistence:
+    # 5Gi is enough for the handful of SBOM/SARIF blobs this registry
+    # held before monitorApi.mirrorArtifacts existed. TURN THAT ON AND
+    # THIS IS THE BINDING CONSTRAINT: every registered image is stored
+    # here in full, and single images in this project's own test corpus
+    # run past 1.5GB. Size it for the fleet you register, not for the
+    # default -- a push that fills the PVC fails the copy (the artifact
+    # keeps its upstream ref and the next scan retries), so the symptom
+    # is "mirroring silently never sticks" rather than an outage.
+    #
+    # Raising this on a live cluster needs a StorageClass with
+    # allowVolumeExpansion: true; k3d's local-path provisioner does not
+    # have it, so there it means recreating the PVC.
     size: 5Gi
   service:
     # NodePort so the registry is reachable from outside the cluster too
@@ -963,6 +975,46 @@ monitorApi:
   # one switch instead of a trade-off. See
   # internal/scanner/insecuretransport.go.
   fetchPlainHTTP: "false"
+  # Copy every registered artifact into scm-registry and scan the copy
+  # instead of pulling from docker.io/ghcr.io on every scan.
+  #
+  # WHY: the public registry is the least reliable thing in the scanning
+  # path. Anonymous Docker Hub pull limits are the most common single
+  # cause of a scan failing here, an upstream tag can be moved or deleted
+  # out from under an artifact that has already been assessed, and every
+  # re-scan re-downloads the same gigabytes across the internet. Mirrored,
+  # each artifact is pulled once from upstream and every scan after that
+  # is a same-cluster pull of the exact bytes that were registered.
+  #
+  # WHAT IT CHANGES: the artifact's `ref` is rewritten to
+  # scm-registry/<repoPrefix>/<original repo path>:<tag>, and the ref it
+  # was registered with is kept on the artifact as `source_ref` (shown in
+  # the dashboard, returned by the API, and still matched by search and
+  # by duplicate detection). Signature verification keeps running against
+  # source_ref -- cosign signatures live at a sibling tag that a copy
+  # does not bring along, see internal/api/mirror.go's provenanceRef.
+  #
+  # COSTS, both real:
+  #   * REGISTRY DISK. Every distinct artifact is stored in full. Size
+  #     registry.persistence.size for the fleet you actually register --
+  #     a single database or SDK image runs past 1.5GB, and the default
+  #     5Gi holds only a handful of them. A push that runs the PVC out of
+  #     space fails the copy; the artifact then keeps its original ref
+  #     and the next scan retries, so this degrades rather than breaks.
+  #   * REGISTRATION LATENCY. POST /api/v1/artifacts now waits for a full
+  #     pull-and-push before it answers. Bulk registration deliberately
+  #     does NOT (500 refs in one request cannot each wait for that) --
+  #     those artifacts are mirrored by their first scan instead, which
+  #     the sweep-registered CronJob below already triggers.
+  #
+  # Off by default: turning it on changes what a registered ref means and
+  # starts consuming registry disk, which should be a deliberate choice.
+  mirrorArtifacts:
+    enabled: false
+    # One repository path everything mirrored lands under, so the copies
+    # are distinguishable from anything pushed to this registry by hand
+    # and deletable as a group.
+    repoPrefix: "mirror"
   # Credentials for registries OTHER than the in-cluster scm-registry.
   #
   # scm-registry's own account is not listed here and never needs to be:

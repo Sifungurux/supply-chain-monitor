@@ -1416,7 +1416,24 @@ components:
       type: object
       properties:
         id: { type: string }
-        ref: { type: string }
+        ref:
+          type: string
+          description: >-
+            Where this artifact is scanned FROM. Normally the ref it was
+            registered with -- but when artifact mirroring is enabled
+            (monitorApi.mirrorArtifacts) this is rewritten to the copy in
+            the in-cluster registry, and source_ref below holds the ref
+            it was registered with.
+        source_ref:
+          type: string
+          description: >-
+            The original, upstream ref this artifact was registered with,
+            set only once `ref` has been rewritten to an in-cluster
+            mirror of it. Absent on every artifact that has not been
+            mirrored. Duplicate detection and search still match on it,
+            so re-registering the original ref is still a 409, and
+            signature verification runs against this rather than the
+            mirrored copy.
         digest:
           type: string
           description: Resolved OCI content digest, if available.

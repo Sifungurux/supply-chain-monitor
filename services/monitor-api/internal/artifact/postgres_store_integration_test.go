@@ -2451,3 +2451,54 @@ func TestPostgresStore_ComponentPURLs(t *testing.T) {
 		t.Errorf("got %v for an unknown artifact, want empty", none)
 	}
 }
+
+// The mirror rewrite, against real SQL. MemStore's Update mutates the
+// stored struct directly, so it cannot tell whether ref/source_ref
+// actually made it into the UPDATE statement's SET clause -- exactly the
+// trap the digest column's own comment in postgres_store.go calls out.
+// Left out, the rewrite would apply to the returned artifact, be
+// reported as a success, and silently never persist: every scan would
+// keep pulling from the public registry while the API claimed otherwise.
+func TestPostgresStore_MirrorRewriteRoundTrips(t *testing.T) {
+	s := newTestPostgresStore(t)
+	source := fmt.Sprintf("ghcr.io/acme/mirror-test-%d:1.0", time.Now().UnixNano())
+	local := "scm-registry:5000/mirror/" + strings.TrimPrefix(source, "ghcr.io/")
+
+	a, err := s.Create(source, artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Delete(a.ID) })
+
+	if _, err := s.Update(a.ID, func(art *artifact.Artifact) {
+		art.SourceRef = art.Ref
+		art.Ref = local
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := s.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Ref != local {
+		t.Errorf("ref = %q after reload, want the mirror %q -- the rewrite never persisted", got.Ref, local)
+	}
+	if got.SourceRef != source {
+		t.Errorf("source_ref = %q after reload, want %q", got.SourceRef, source)
+	}
+
+	// And the original ref still finds it: a mirrored artifact
+	// re-registered under the ref it came from is still a duplicate.
+	found, err := s.FindByRef(source)
+	if err != nil {
+		t.Fatalf("FindByRef(source): %v", err)
+	}
+	if found == nil || found.ID != a.ID {
+		t.Fatalf("FindByRef(%q) = %v, want artifact %s -- a mirrored artifact must still be found by its original ref", source, found, a.ID)
+	}
+	// As does the new one.
+	if found, err = s.FindByRef(local); err != nil || found == nil || found.ID != a.ID {
+		t.Fatalf("FindByRef(%q) = %v, %v -- want artifact %s", local, found, err, a.ID)
+	}
+}

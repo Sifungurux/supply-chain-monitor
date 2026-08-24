@@ -56,6 +56,13 @@ data:
   POLICY_JSON: {{ .Values.monitorApi.policy | toJson | quote }}
   CLAMAV_ADDR: {{ printf "%s.%s.svc.cluster.local:%s" .Values.monitorApi.clamav.service .Release.Namespace .Values.monitorApi.clamav.port | quote }}
   REGISTRY_ADDR: {{ printf "%s.%s.svc.cluster.local:%s" .Values.monitorApi.registry.service .Release.Namespace .Values.monitorApi.registry.port | quote }}
+  # Copy every registered artifact into scm-registry (above) and scan the
+  # copy, so scanning stops depending on docker.io/ghcr.io being
+  # reachable, un-rate-limited, and still serving the same tag. The
+  # original ref is kept on the artifact as source_ref. Costs registry
+  # disk -- see values.yaml.
+  MIRROR_ARTIFACTS: {{ .Values.monitorApi.mirrorArtifacts.enabled | quote }}
+  MIRROR_REPO_PREFIX: {{ .Values.monitorApi.mirrorArtifacts.repoPrefix | quote }}
   # Postgres holds every artifact/finding/stage-history record -- see
   # docs/architecture.md for why the in-memory store was replaced.
   # POSTGRES_PASSWORD is deliberately absent here: it comes from the
