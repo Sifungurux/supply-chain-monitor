@@ -171,8 +171,6 @@ spec:
       # limit before raising this again -- at cap 16 the failure was
       # scm-registry being OOMKilled, not anything about scanning.
       scanConcurrency: 12
-      scanConcurrencyPerKind:
-        unpacker: 12
       # Cap how many artifacts may exist at once. Set here rather than in
       # the chart, same reasoning as the two dashboard values above: the
       # chart default stays 0 (unlimited), which is what every other
@@ -228,4 +226,13 @@ spec:
       # count does not multiply the disk and this cap is the only thing
       # actually limiting simultaneous extraction on it.
       scanConcurrencyPerKind:
-        unpacker: 2
+        # 2 -> 12. The 2 was derived on a 42.3GB VM where three concurrent
+        # image scans caused ephemeral-storage evictions. That VM is gone;
+        # the cluster is 300GB and the 2026-08-24 ramp put peak disk in a
+        # 92-96GB band with DiskPressure never true. 12 is the highest rung
+        # that completed clean -- 16 OOMKilled the registry.
+        #
+        # Kept equal to scanConcurrency above on purpose: image scans take
+        # an unpacker slot, so a lower value here silently caps the global
+        # number and makes it a lie.
+        unpacker: 12
