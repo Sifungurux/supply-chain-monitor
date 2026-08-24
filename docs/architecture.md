@@ -557,6 +557,79 @@ in-cluster Service, stored in `artifact_documents` and downloadable via
 failure here never fails the scan or blocks findings from being
 recorded.
 
+**SBOM re-evaluation sweep.** `POST /api/v1/artifacts/{id}/scan?mode=sbom-only`
+re-derives an image artifact's CVEs from the SBOM document a previous
+full scan already stored, by running grype against that document in a
+scan-worker Job (`SCM_SCAN_MODE=sbom-doc`). No image pull, no unpack,
+no malware scan.
+
+The trade-off, stated plainly:
+
+- **What it buys.** A CVE published today surfaces against the whole
+  fleet tomorrow morning, at a small fraction of the IO. The
+  vulnerability-DB refresh `CronJob`s only update the *databases* --
+  without something that re-derives findings, a fresh DB changes
+  nothing anyone can see. A full rescan is the other way to get that,
+  and it costs a pull, an unpack and a malware scan per artifact;
+  measured on this project's own fleet, mirroring alone (a comparable
+  full-pull workload) runs tens of GB. Scheduling the re-evaluation an
+  hour after `grypeCache.refreshSchedule` is what makes "within a day
+  of the DB refresh" true.
+- **What it does not cover.** Malware findings still require the full
+  sweep, and always will: the SBOM is a component inventory, and no
+  amount of re-reading it can notice a file that was never a package.
+  The same goes for secrets and misconfigurations, which trivy derives
+  from the image filesystem. It also does no digest backfill and no
+  mirroring.
+- **Only the cve bucket is merged.** The other four buckets are not
+  passed to `MergeFindings` at all, and this is load-bearing rather
+  than tidy. Bucket affinity (`Bucket() "cve"`) governs only what a
+  *failed* scanner blocks; a *successful* re-evaluation blocks nothing,
+  so merging an empty malware set against an unblocked bucket would
+  mark every existing malware finding "fixed" -- silently, on every
+  artifact, every night the `CronJob` runs.
+- **It does not touch the freshness clock.** `last_scan_at` stays where
+  the last full scan left it. Stamping it would make every artifact
+  look permanently freshly-scanned, so the staleness badge would go
+  dark and the full sweep's own rescan population would empty out --
+  malware coverage decaying while the dashboard stayed green. The cheap
+  path must not be able to satisfy the expensive path's clock. The
+  artifact's `status` is left alone for the same reason.
+- **It is refused, never quietly upgraded.** A non-image artifact gets
+  400, an image with no stored SBOM gets 409, and a deployment with no
+  re-evaluation scanner configured gets 501. Falling back to a full
+  scan would turn one nightly `CronJob` into a complete re-scan of the
+  fleet -- the exact cost the mode exists to avoid, and invisible in
+  the sweep's own logs.
+- **It is not counted in `scm_scans_*`.** The `ScanFailureRate` alert
+  compares `rate(scm_scans_failed_total)` against
+  `rate(scm_scans_succeeded_total)`; a nightly fleet-wide burst of
+  re-evaluations lands inside one 30m window and would move that ratio,
+  potentially masking a genuine run of scan failures. A broken
+  re-evaluation shows up as the `CronJob`'s own non-zero exit and run
+  summary, and per-artifact in `last_scan_errors`.
+- **Throughput is bounded by `scanConcurrencyPerKind.grype`**, not by
+  `sweepSbom.batchSize`: each re-evaluation is still a grype Job taking
+  a grype scan slot. A saturated cap is *waited out* rather than
+  skipped -- the full sweep can skip a 429 because it runs again in
+  fifteen minutes, but this runs once a day, so skipping would mean
+  skipping until tomorrow, every day, for whichever artifacts keep
+  losing the race.
+
+The Job downloads the SBOM from `monitor-api` rather than fetching it
+from a registry, because that is where it lives (`artifact_documents`
+in Postgres -- nothing ever pushes it to a registry). It authenticates
+with the same per-Job scan token the image worker uses to *upload*
+documents, spending a namespaced `sbom:read` entry so a download can
+never consume the upload the token was minted for, and there is
+deliberately no fallback to the master API key.
+
+Requires grype (`monitorApi.cveScanner` `grype` or `both`): the grype
+DB cache primer and refresh `CronJob` are gated on that value, so a
+trivy-only deployment has no vulnerability database for these Jobs to
+mount. The chart fails to render rather than deploying a sweep that
+would fail every run.
+
 ## API
 
 - `Authorization: Bearer <key>` required on every route except
@@ -833,12 +906,24 @@ a rebuild, so nothing else notices a new image is available.
   and an alerting threshold are different questions, and sharing one
   value leaves the badge permanently lit, since rescans are paced at
   `batchSize` per run and a full pass takes hours.
+- **SBOM re-evaluation sweep** — the same `sweep-registered` binary
+  with `SWEEP_MODE=sbom-only`, run as a second daily `CronJob`
+  (`monitorApi.sweepSbom.*`, **off by default**, `0 5 * * *` — shortly
+  after the grype DB refresh). Re-derives *only* the cve bucket for
+  every image artifact that already has a stored SBOM, by running grype
+  against that document instead of re-pulling the image. Covers the
+  whole eligible fleet in one run by default (`batchSize: 0`) rather
+  than a small batch, because a re-evaluation deliberately does not
+  stamp `last_scan_at` and so has no per-artifact clock to rotate
+  through. Malware findings still come from the full sweep and nowhere
+  else. See "SBOM re-evaluation sweep" above for the full trade-off.
 - **DB cache refresh** — daily `CronJob`s per active CVE scanner keep
   the shared Trivy/Grype vulnerability-DB PVCs current, staggered an
   hour apart so they don't compete for disk/CPU on a small node. Note
   these only refresh the *databases*: nothing re-derives findings for
-  an already-scanned artifact, so the refresh is only worth anything
-  in combination with the auto-rescan above.
+  an already-scanned artifact, so a refresh is only worth anything in
+  combination with something that re-scans — either the auto-rescan
+  above, or the (much cheaper, cve-only) SBOM re-evaluation sweep.
 
 ## Known limitations
 

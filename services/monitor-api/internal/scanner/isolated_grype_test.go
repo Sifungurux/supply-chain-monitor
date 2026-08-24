@@ -246,3 +246,102 @@ func TestIsolatedGrypeScanner_Bucket(t *testing.T) {
 		t.Errorf("Bucket() = %q, want %q", got, "cve")
 	}
 }
+
+// TestIsolatedGrypeScanner_SBOMDocJobShape covers the Job the sbom
+// re-evaluation mode creates. It is the one grype mode that calls back
+// into monitor-api, and the one that must NOT touch a registry.
+func TestIsolatedGrypeScanner_SBOMDocJobShape(t *testing.T) {
+	client := &recordingJobClient{
+		fakeJobClient: fakeJobClient{
+			namespace:      "test-ns",
+			statusSequence: []jobStatusResult{{succeeded: true}},
+			podName:        "scm-scan-abc-xyz",
+			logs:           `{"findings":[]}`,
+		},
+	}
+	var mintedFor string
+	s := NewIsolatedGrypeScanner(client, IsolatedGrypeConfig{
+		SubCommand:     "sbom-doc",
+		CacheClaimName: "scm-grype-db-cache",
+		PollInterval:   time.Millisecond,
+		APIBaseURL:     "http://monitor-api:8080",
+		MintScanToken: func(artifactID string) (string, error) {
+			mintedFor = artifactID
+			return "tok-123", nil
+		},
+	})
+
+	if _, err := s.ScanForArtifact(context.Background(), "alpine:3.19", "artifact-1"); err != nil {
+		t.Fatalf("ScanForArtifact: %v", err)
+	}
+	if mintedFor != "artifact-1" {
+		t.Errorf("minted a token for %q, want %q", mintedFor, "artifact-1")
+	}
+
+	env := map[string]string{}
+	for _, ev := range client.createdJobs[0].Spec.Template.Spec.Containers[0].Env {
+		env[ev.Name] = ev.Value
+	}
+	for name, want := range map[string]string{
+		"SCM_SCAN_TOOL":    "grype",
+		"SCM_SCAN_MODE":    "sbom-doc",
+		"SCM_ARTIFACT_ID":  "artifact-1",
+		"SCM_API_BASE_URL": "http://monitor-api:8080",
+		"SCM_SCAN_TOKEN":   "tok-123",
+	} {
+		if env[name] != want {
+			t.Errorf("%s = %q, want %q", name, env[name], want)
+		}
+	}
+	// No registry involvement at all: this Job downloads one JSON
+	// document from monitor-api and runs grype over it.
+	if _, ok := env["REGISTRY_ADDR"]; ok {
+		t.Errorf("REGISTRY_ADDR set on an sbom-doc Job, which never talks to a registry: %+v", env)
+	}
+}
+
+// TestIsolatedGrypeScanner_SBOMDocMintFailureIsAnError proves a minting
+// failure fails the scan instead of falling back to the master API key
+// the way IsolatedTrivyScanner's superficially-identical block does.
+// Losing one re-evaluation round is cheap; handing a pod built to
+// process untrusted content the fleet-wide credential is not.
+func TestIsolatedGrypeScanner_SBOMDocMintFailureIsAnError(t *testing.T) {
+	client := &recordingJobClient{
+		fakeJobClient: fakeJobClient{
+			namespace:      "test-ns",
+			statusSequence: []jobStatusResult{{succeeded: true}},
+			podName:        "scm-scan-abc-xyz",
+			logs:           `{"findings":[]}`,
+		},
+	}
+	s := NewIsolatedGrypeScanner(client, IsolatedGrypeConfig{
+		SubCommand:     "sbom-doc",
+		CacheClaimName: "scm-grype-db-cache",
+		PollInterval:   time.Millisecond,
+		APIBaseURL:     "http://monitor-api:8080",
+		MintScanToken:  func(string) (string, error) { return "", errors.New("store unavailable") },
+	})
+
+	if _, err := s.ScanForArtifact(context.Background(), "alpine:3.19", "artifact-1"); err == nil {
+		t.Fatal("expected an error when the scan token cannot be minted")
+	}
+	if len(client.createdJobs) != 0 {
+		t.Errorf("created %d Job(s) despite failing to mint a token", len(client.createdJobs))
+	}
+}
+
+// TestIsolatedGrypeScanner_SBOMDocUsesSmallScratch pins that "sbom-doc"
+// is sized like "sbom" and not like "image": it reads one JSON
+// document, so it must not request image-sized disk or a per-Job
+// scratch PVC.
+func TestIsolatedGrypeScanner_SBOMDocUsesSmallScratch(t *testing.T) {
+	if got, want := ephemeralStorageRequestFor("sbom-doc"), ephemeralStorageRequestFor("sbom"); got != want {
+		t.Errorf("ephemeral-storage request for sbom-doc = %q, want %q (same as sbom)", got, want)
+	}
+	if got, want := ephemeralStorageLimitFor("sbom-doc"), ephemeralStorageLimitFor("sbom"); got != want {
+		t.Errorf("ephemeral-storage limit for sbom-doc = %q, want %q (same as sbom)", got, want)
+	}
+	if got, want := scratchClassFor("sbom-doc"), scratchClassFor("sbom"); got != want {
+		t.Errorf("scratch class for sbom-doc = %q, want %q (same as sbom)", got, want)
+	}
+}

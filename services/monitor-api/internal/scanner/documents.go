@@ -144,3 +144,67 @@ func UploadDocument(ctx context.Context, apiBaseURL, apiKey, artifactID, kind, c
 	}
 	return nil
 }
+
+// maxDocumentDownloadBytes bounds what DownloadDocument will read into
+// memory. Generated SBOMs for real-world images run 10-20MB (see
+// UploadDocument), so this leaves an order of magnitude of headroom
+// while still refusing to be fed an unbounded stream by a compromised
+// or misbehaving API.
+const maxDocumentDownloadBytes = 256 << 20
+
+// DownloadDocument GETs a stored document back from monitor-api's
+// GET /api/v1/artifacts/{id}/documents/{kind} endpoint and writes it to
+// a file in dir, returning that path.
+//
+// The read counterpart of UploadDocument, and it exists for exactly one
+// caller: the sbom re-evaluation worker (runScanWorker's "sbom-doc"
+// mode), which re-runs grype against an image's already-generated SBOM
+// instead of pulling and re-scanning the image. That document lives in
+// Postgres, so unlike "sbom" mode there is no registry ref to fetch --
+// this is the only way into the Job.
+//
+// Written to disk rather than returned as bytes because that is what
+// GrypeSBOMScanner takes ("sbom:<path>", see grype_sbom.go), and the
+// caller is responsible for cleaning the file up.
+func DownloadDocument(ctx context.Context, apiBaseURL, apiKey, artifactID, kind, dir string) (string, error) {
+	url := strings.TrimRight(apiBaseURL, "/") + "/api/v1/artifacts/" + artifactID + "/documents/" + kind
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("build %s document download request: %w", kind, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("download %s document: %w", kind, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("download %s document: server returned %d: %s", kind, resp.StatusCode, string(body))
+	}
+
+	f, err := os.CreateTemp(dir, "scm-"+kind+"-*.json")
+	if err != nil {
+		return "", fmt.Errorf("create local %s document file: %w", kind, err)
+	}
+	defer f.Close()
+
+	written, err := io.Copy(f, io.LimitReader(resp.Body, maxDocumentDownloadBytes))
+	if err != nil {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("write local %s document file: %w", kind, err)
+	}
+	// An empty document is a real failure mode worth naming here rather
+	// than letting grype report a confusing parse error: it is what a
+	// deployment sees when HasSBOM is true but the stored bytes never
+	// made it (see the project's own "zero files scanned reads as
+	// clean" lesson -- an empty input that scans cleanly is worse than
+	// an error).
+	if written == 0 {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("download %s document: server returned an empty document", kind)
+	}
+	return f.Name(), nil
+}

@@ -103,6 +103,14 @@ type handler struct {
 	// doesn't care about it, and any deployment without a registry
 	// fetcher configured, behaves exactly as before it existed.
 	fetcher scanner.Fetcher
+
+	// sbomReeval is the single scanner an sbom-only scan runs: grype
+	// against the SBOM document already stored for an image artifact
+	// (see scanModeSBOMOnly in scan.go). nil means the mode is not
+	// configured on this deployment, and scanArtifact answers 501 --
+	// never a silent fall back to the full scanner set, which would
+	// make a "cheap" nightly CronJob re-scan the whole fleet.
+	sbomReeval scanner.Scanner
 	// licenseDenylist flags components whose license this deployment
 	// refuses (LICENSE_DENYLIST). The zero value denies nothing, which
 	// is what every caller that doesn't configure it gets.

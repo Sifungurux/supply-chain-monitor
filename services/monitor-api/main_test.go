@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -793,5 +794,91 @@ func TestScanJobResourceDefaultsAndOverrides(t *testing.T) {
 	}
 	if got := scanJobMem("trivy"); got != "128Mi" {
 		t.Errorf("global request not applied to trivy: got %q, want 128Mi", got)
+	}
+}
+
+// --- sbom-only sweep (SWEEP_MODE=sbom-only) ---
+
+// TestSBOMReevalEligible pins the narrow population an sbom-only sweep
+// may touch. Both conditions matter, and getting either wrong is a
+// silent waste rather than a visible bug: an ineligible artifact is
+// POSTed, takes a grype scan slot, and comes back 400/409 -- so the run
+// looks busy while re-evaluating nothing.
+func TestSBOMReevalEligible(t *testing.T) {
+	all := []artifact.Artifact{
+		{ID: "image-with-sbom", Type: artifact.TypeImage, HasSBOM: true},
+		{ID: "image-without-sbom", Type: artifact.TypeImage},
+		// An sbom-TYPE artifact is the document; the normal scan path
+		// already scans it directly, and re-evaluation has no stored
+		// document of its own to read (indexSBOMTypeComponents
+		// deliberately does not save one -- see its comment).
+		{ID: "sbom-type", Type: artifact.TypeSBOM, HasSBOM: true},
+		{ID: "file-type", Type: artifact.TypeFile, HasSBOM: true},
+		{ID: "sarif-type", Type: artifact.TypeSARIF, HasSBOM: true},
+		{ID: "another-image", Type: artifact.TypeImage, HasSBOM: true},
+	}
+
+	got := sbomReevalEligible(all)
+	want := []string{"image-with-sbom", "another-image"}
+	if len(got) != len(want) {
+		t.Fatalf("eligible = %d artifacts, want %d: %+v", len(got), len(want), got)
+	}
+	for i, id := range want {
+		if got[i].ID != id {
+			t.Errorf("eligible[%d] = %q, want %q", i, got[i].ID, id)
+		}
+	}
+}
+
+// TestSBOMReevalEligible_Empty covers the fleet that has never been
+// fully scanned: nothing is eligible, and the sweep must produce an
+// empty batch rather than falling back to "everything".
+func TestSBOMReevalEligible_Empty(t *testing.T) {
+	all := []artifact.Artifact{
+		{ID: "a", Type: artifact.TypeImage},
+		{ID: "b", Type: artifact.TypeSBOM, HasSBOM: true},
+	}
+	if got := sbomReevalEligible(all); len(got) != 0 {
+		t.Fatalf("eligible = %+v, want none", got)
+	}
+}
+
+// TestParseRetryAfter covers the header the sbom-only sweep waits on.
+// An unparseable or absent value must read as 0 so the caller falls
+// back to its own backoff instead of trusting something it did not
+// understand -- and an absurd value must be bounded, or one artifact
+// could park the whole run.
+func TestParseRetryAfter(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want time.Duration
+	}{
+		{"5", 5 * time.Second},
+		{" 30 ", 30 * time.Second},
+		{"", 0},
+		{"0", 0},
+		{"-1", 0},
+		{"soon", 0},
+		{"Wed, 21 Oct 2026 07:28:00 GMT", 0}, // HTTP-date form: not sent by this API
+		{"99999", 120 * time.Second},         // bounded
+	} {
+		if got := parseRetryAfter(tc.in); got != tc.want {
+			t.Errorf("parseRetryAfter(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestCapSaturatedIsErrScanCapSaturated pins the sentinel relationship
+// the sweep's own control flow depends on: every existing
+// errors.Is(err, errScanCapSaturated) check must keep matching now that
+// a struct carrying Retry-After is what actually gets returned.
+func TestCapSaturatedIsErrScanCapSaturated(t *testing.T) {
+	err := error(capSaturated{retryAfter: 7 * time.Second})
+	if !errors.Is(err, errScanCapSaturated) {
+		t.Fatal("capSaturated must satisfy errors.Is(err, errScanCapSaturated)")
+	}
+	var sat capSaturated
+	if !errors.As(err, &sat) || sat.retryAfter != 7*time.Second {
+		t.Fatalf("errors.As did not recover the Retry-After: %+v", sat)
 	}
 }

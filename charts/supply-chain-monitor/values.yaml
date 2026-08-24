@@ -1701,6 +1701,59 @@ monitorApi:
       limits:
         cpu: 250m
         memory: 256Mi
+  # SBOM RE-EVALUATION sweep -- `monitor-api sweep-registered` with
+  # SWEEP_MODE=sbom-only. See templates/monitor-api/
+  # sweep-sbom-cronjob.yaml, main.go's sweepSBOMOnly, and
+  # docs/architecture.md ("SBOM re-evaluation sweep").
+  #
+  # Re-derives ONLY the cve bucket for every image artifact that already
+  # has a stored SBOM, by running grype against that document instead of
+  # pulling and re-scanning the image. A CVE published today therefore
+  # shows up against the whole fleet tomorrow morning at a small
+  # fraction of the IO a full sweep costs.
+  #
+  # WHAT IT DOES NOT DO, and why the full sweep above stays on:
+  # no malware scan, no secret/misconfiguration scan, no digest
+  # backfill, no mirroring, and it deliberately does not refresh
+  # last_scan_at -- so the staleness badge and the full sweep's own
+  # rescan population keep working exactly as before. Malware coverage
+  # comes from the full sweep and nowhere else.
+  #
+  # Off by default: it only pays for itself once a fleet is big enough
+  # that full rescans cannot keep up, and it requires grype (see the
+  # `fail` guard in the template -- cveScanner "trivy" deploys no grype
+  # DB cache for these Jobs to mount).
+  sweepSbom:
+    enabled: false
+    # Deliberately shortly AFTER grypeCache.refreshSchedule (04:00 UTC):
+    # re-evaluating against yesterday's vulnerability DB would buy
+    # nothing, so this must not race the refresh that gives it a reason
+    # to run.
+    schedule: "0 5 * * *" # daily at 05:00 UTC
+    # 0 means "every eligible artifact in one run", which is the point
+    # of the mode -- unlike the full sweep above, a re-evaluation is
+    # cheap enough to run fleet-wide, and it cannot be paced across runs
+    # anyway (it does not stamp last_scan_at, so there is no clock for
+    # oldest-first ordering to rotate through). Set a positive number to
+    # cap it.
+    #
+    # THROUGHPUT IS BOUNDED BY scanConcurrencyPerKind.grype, not by this:
+    # each re-evaluation is still a grype Job taking a grype scan slot.
+    # A saturated cap is waited out, not skipped, so the run takes as
+    # long as the cap makes it take -- raise timeoutMinutes rather than
+    # lowering this if runs start hitting their budget.
+    batchSize: 0
+    # The whole run's budget. Comfortably under the CronJob's own
+    # activeDeadlineSeconds in the template, so the sweep reports its
+    # own summary rather than being killed mid-run.
+    timeoutMinutes: 55
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
   # Age-based retention: `monitor-api prune` deletes artifacts nothing
   # has touched in `days`, oldest first, up to `maxPerRun` per run.
   #

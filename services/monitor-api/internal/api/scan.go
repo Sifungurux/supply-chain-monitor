@@ -18,6 +18,22 @@ import (
 
 const defaultScanTimeout = 5 * time.Minute
 
+// Scan modes, selected by the `mode` query parameter on POST
+// /api/v1/artifacts/{id}/scan.
+//
+// scanModeFull is the default and is what this endpoint has always
+// done: every scanner registered for the artifact's type.
+//
+// scanModeSBOMOnly re-derives CVEs for an `image` artifact from the
+// SBOM document a previous full scan already stored, against today's
+// vulnerability DB -- no image pull, no unpack, no malware scan. It is
+// a CHEAP REFRESH OF ONE BUCKET, not a scan, and everything below that
+// treats it differently follows from that one sentence.
+const (
+	scanModeFull     = "full"
+	scanModeSBOMOnly = "sbom-only"
+)
+
 // scanArtifact starts a scan and returns 202 immediately -- it does not
 // wait for the scan to finish. The scan runs in a background goroutine
 // and the caller polls GET /api/v1/artifacts/{id} (the Location header
@@ -38,6 +54,15 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 	a, err := h.store.Get(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	mode := r.URL.Query().Get("mode")
+	if mode == "" {
+		mode = scanModeFull
+	}
+	if mode != scanModeFull && mode != scanModeSBOMOnly {
+		writeError(w, http.StatusBadRequest, "unknown scan mode "+mode+" (want "+scanModeFull+" or "+scanModeSBOMOnly+")")
 		return
 	}
 
@@ -72,6 +97,31 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 	if !ok || len(scanners) == 0 {
 		writeError(w, http.StatusNotImplemented, "no scanner registered for type "+string(a.Type))
 		return
+	}
+
+	if mode == scanModeSBOMOnly {
+		// EVERY refusal here is a refusal, never a quiet fall back to a
+		// full scan. This mode exists to be cheap; silently upgrading it
+		// would turn one nightly CronJob into a full re-scan of the
+		// whole fleet -- exactly the IO the caller asked to avoid, and
+		// invisible in the sweep's own logs.
+		if a.Type != artifact.TypeImage {
+			writeError(w, http.StatusBadRequest, "sbom-only scans apply to image artifacts, not "+string(a.Type))
+			return
+		}
+		if !a.HasSBOM {
+			// Not an error state: an image registered but never fully
+			// scanned has no SBOM yet, and the full sweep is what gets
+			// it one. 409 rather than 400 -- the request is well-formed,
+			// the artifact just is not ready for it.
+			writeError(w, http.StatusConflict, "artifact has no stored SBOM document to re-evaluate -- a full scan generates one")
+			return
+		}
+		if h.sbomReeval == nil {
+			writeError(w, http.StatusNotImplemented, "sbom re-evaluation is not configured on this deployment")
+			return
+		}
+		scanners = []scanner.Scanner{h.sbomReeval}
 	}
 
 	// Take a scan slot before touching anything -- deliberately after
@@ -114,7 +164,7 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 	// The slot is released by runScan itself, not deferred here: it has
 	// to travel with the work, or it would cap request duration
 	// (milliseconds) instead of concurrent scans.
-	go h.runScan(a, scanners, release)
+	go h.runScan(a, scanners, release, mode)
 
 	w.Header().Set("Location", "/api/v1/artifacts/"+id)
 	writeJSON(w, http.StatusAccepted, updated)
@@ -135,8 +185,17 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 // Scanning first costs one upstream pull on an artifact's FIRST scan,
 // which is exactly what happens today; every scan after it reads the
 // mirrored ref and never leaves the cluster.
-func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, release func()) {
-	h.scanHoldingSlot(a, scanners, release)
+func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, release func(), mode string) {
+	h.scanHoldingSlot(a, scanners, release, mode)
+	if mode == scanModeSBOMOnly {
+		// No mirroring on a re-evaluation. Mirroring is a full
+		// pull-and-push of the artifact -- the single most expensive
+		// thing this service does, and the exact IO an sbom-only round
+		// exists to avoid. It is also converging work owned by the full
+		// sweep (SWEEP_MIRROR_BACKFILL), so skipping it here delays
+		// nothing: the next full scan still settles source_ref.
+		return
+	}
 	// Deliberately not derived from any request context, and outside the
 	// slot: see mirrorArtifact, which is also what registration calls.
 	// This is the backfill path -- bulk-registered artifacts, artifacts
@@ -149,12 +208,29 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 // must release it on every path, including a panic -- a leaked slot
 // permanently shrinks the cap, and enough of them would stop scanning
 // entirely.
-func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scanner, release func()) {
+func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scanner, release func(), mode string) {
 	defer release()
+	// See scanModeSBOMOnly. Read once into a local so every branch below
+	// asks the same question the same way.
+	sbomOnly := mode == scanModeSBOMOnly
 	// Counted here rather than in scanArtifact: this is the funnel every
 	// scan actually passes through, and a request that was rejected
 	// (bad type, saturated cap) never started a scan to count.
-	h.metrics.recordScanStarted()
+	//
+	// AN SBOM-ONLY ROUND IS NOT COUNTED, consistent with it not
+	// setting a status or stamping the scan clock -- it is a refresh
+	// of one bucket, not a scan. The concrete reason is the
+	// ScanFailureRate alert, which compares
+	// rate(scm_scans_failed_total) against
+	// rate(scm_scans_succeeded_total): a nightly fleet-wide burst of
+	// re-evaluations lands in one 30m window and would move that
+	// ratio, diluting a genuine run of scan failures happening at the
+	// same time. A broken re-evaluation is reported by its own
+	// CronJob's exit status and run summary, and per-artifact in
+	// LastScanErrors.
+	if !sbomOnly {
+		h.metrics.recordScanStarted()
+	}
 	defer func() {
 		if rec := recover(); rec != nil {
 			// Nothing is listening on an HTTP response any more, so an
@@ -166,7 +242,10 @@ func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scann
 			// to record its own -- otherwise started would outrun
 			// succeeded+failed by exactly the number of panics, which is
 			// the one failure mode nobody would think to look for.
-			h.metrics.recordScanResult(true)
+			// Skipped for an sbom-only round, which recorded no start.
+			if !sbomOnly {
+				h.metrics.recordScanResult(true)
+			}
 			if _, err := h.store.Update(a.ID, func(art *artifact.Artifact) {
 				art.Status = artifact.StatusFailed
 				art.LastScanErrors = []string{"scan panicked -- see server logs"}
@@ -320,7 +399,9 @@ func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scann
 	// recorded scan errors, and counting it as failed would make the
 	// failure rate track "any scanner had a bad day" instead of "this
 	// scan produced nothing".
-	h.metrics.recordScanResult(status == artifact.StatusFailed)
+	if !sbomOnly {
+		h.metrics.recordScanResult(status == artifact.StatusFailed)
+	}
 
 	// Every scan error, from whichever layer it originated at (an
 	// in-process scanner, a scan-worker Job's own orchestration
@@ -421,9 +502,19 @@ func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scann
 	// set (digest just passes through unchanged) or resolution fails
 	// again (digest stays "", same as before this scan).
 	digest := a.Digest
-	if digest == "" {
+	if digest == "" && !sbomOnly {
 		// context.Background(), not a request context: the HTTP request
 		// that started this scan returned 202 long ago.
+		//
+		// Skipped entirely on an sbom-only round, which is the same
+		// judgement the mirroring skip in runScan makes: this is a real
+		// registry round-trip (up to digestResolveTimeout, 8s) per
+		// artifact, the re-evaluation never writes the result anyway
+		// (see the Update below), and digest backfill is converging
+		// work the full sweep already owns. Nightly across a whole
+		// fleet it would be the single most expensive thing the cheap
+		// path does. `digest` therefore stays whatever the artifact
+		// already has, which is exactly what fleetVEXFor wants.
 		digest = h.resolveDigest(context.Background(), a.Ref)
 	}
 
@@ -498,8 +589,39 @@ func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scann
 		}
 	}
 	updated, updErr := h.store.Update(id, func(art *artifact.Artifact) {
-		art.Status = status
-		art.Digest = digest
+		if sbomOnly {
+			// A re-evaluation does not change what we know about the
+			// artifact's SCAN state, only about its CVEs, so it restores
+			// the status the artifact already had instead of reporting
+			// one of its own. Two things break if it does not:
+			//
+			//   - On success it would be indistinguishable from a full
+			//     scan, and the full sweep's own populations (failed,
+			//     stale) are keyed off exactly this.
+			//   - On failure it would flip a perfectly healthy artifact
+			//     to "failed", which the full sweep then retries with a
+			//     COMPLETE scan -- turning the cheap path into an IO
+			//     amplifier for the fleet.
+			//
+			// The errors are still recorded below, so a broken
+			// re-evaluation is visible without being mistaken for a
+			// broken artifact.
+			//
+			// StatusScanning as the prior value would be a snapshot
+			// taken mid-scan (this handler sets it before dispatching);
+			// restoring it would strand the artifact. It cannot happen
+			// on the eligible population -- HasSBOM implies a completed
+			// scan -- but failing to "scanned" is the recoverable
+			// answer if it ever does.
+			if a.Status == artifact.StatusScanning {
+				art.Status = artifact.StatusScanned
+			} else {
+				art.Status = a.Status
+			}
+		} else {
+			art.Status = status
+			art.Digest = digest
+		}
 		// Recorded only when a check actually ran. A scan where the
 		// provenance scanner is disabled must not overwrite a verdict
 		// an earlier scan reached -- and must not replace it with
@@ -513,6 +635,35 @@ func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scann
 		}
 
 		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, cveFindings, now, detectFixedFor("cve"), vex)
+		// Only overwrite when this scan actually produced errors. An
+		// unconditional assignment meant a clean scan's empty slice
+		// erased the previous failure, so an artifact that broke and
+		// recovered looked like it had never broken at all. The record
+		// is replaced by the NEXT failure, never by a success --
+		// LastScanErrorAt vs LastScanAt tells the two apart.
+		if len(scanErrors) > 0 {
+			art.LastScanErrors = scanErrors
+			art.LastScanErrorAt = &now
+		}
+		if sbomOnly {
+			// THE OTHER FOUR BUCKETS ARE NOT MERGED AT ALL. This is the
+			// single most important line in this mode, and skipping the
+			// calls is the only correct way to express it.
+			//
+			// Bucket()/blockedBuckets governs what a FAILED scanner
+			// blocks; it says nothing about a scanner that never ran. A
+			// successful sbom-only round has no failures, so
+			// detectFixedFor("malware") is true, and merging an empty
+			// malware set against it marks every existing malware
+			// finding FIXED -- silently, on every artifact, every night.
+			// Same for misconfiguration, secret, and the non-license
+			// half of other.
+			//
+			// Declaring the grype scanner's Bucket() is necessary but
+			// nowhere near sufficient: it only helps on the failure
+			// path. Success is what does the damage.
+			return
+		}
 		art.MalwareFindings = artifact.MergeFindings(art.MalwareFindings, malwareFindings, now, detectFixedFor("malware"), vex)
 		art.MisconfigFindings = artifact.MergeFindings(art.MisconfigFindings, misconfigFindings, now, detectFixedFor("misconfiguration"), vex)
 		art.SecretFindings = artifact.MergeFindings(art.SecretFindings, secretFindings, now, detectFixedFor("secret"), vex)
@@ -529,22 +680,22 @@ func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scann
 			art.OtherFindings, otherFindings,
 			func(f artifact.Finding) bool { return f.Source != artifact.LicenseFindingSource },
 			now, detectFixedFor("other"), vex)
-		// Only overwrite when this scan actually produced errors. An
-		// unconditional assignment meant a clean scan's empty slice
-		// erased the previous failure, so an artifact that broke and
-		// recovered looked like it had never broken at all. The record
-		// is replaced by the NEXT failure, never by a success --
-		// LastScanErrorAt vs LastScanAt tells the two apart.
-		if len(scanErrors) > 0 {
-			art.LastScanErrors = scanErrors
-			art.LastScanErrorAt = &now
-		}
 		// Unlike the errors above, this one tracks CURRENT status and
 		// must still clear: leaving it set would badge a healthy
 		// artifact with the reason it failed last week.
 		art.LastScanFailureReason = failureReason
+		// FULL SCANS ONLY (the sbom-only path returned above).
+		// LastScanAt is the freshness clock the staleness badge,
+		// Store.CountStaleScans and the full sweep's own rescan
+		// population all read. A nightly re-evaluation that stamped it
+		// would make every artifact look permanently freshly-scanned,
+		// the full sweep would stop finding anything stale, and malware
+		// coverage would quietly decay while the dashboard stayed
+		// green. The cheap path must not be able to satisfy the
+		// expensive path's clock.
 		art.LastScanAt = &now
 	})
+
 	if updErr != nil {
 		// Nobody to return a 500 to -- the artifact is left at whatever
 		// the store last persisted (status "scanning"), which the sweep

@@ -61,7 +61,35 @@ func HashScanToken(token string) string {
 // nothing else, so the match must not be a prefix test that a crafted
 // path could widen.
 func documentUploadTarget(method, path string) (artifactID, kind string, ok bool) {
-	if method != "POST" {
+	return documentTarget("POST", method, path)
+}
+
+// documentDownloadTarget is the read counterpart: GET
+// /api/v1/artifacts/{id}/documents/{kind}.
+//
+// Exists for ONE caller -- the sbom re-evaluation scan worker, which
+// re-runs grype against an image's already-stored SBOM and therefore
+// has to read that document back out (see runScanWorker's "sbom-doc"
+// mode). The document lives in Postgres, not in any registry, so the
+// fetch-it-yourself shape every other isolated sbom scan uses has
+// nothing to point at.
+//
+// A read is NOT the same authority as a write, so it consumes its own
+// pseudo-kind (documentReadKind below) rather than the plain one: a
+// token that downloaded the SBOM has not spent its right to upload one,
+// and a token that uploaded one has not gained the right to read
+// anything. Each stays single-use in its own direction.
+func documentDownloadTarget(method, path string) (artifactID, kind string, ok bool) {
+	return documentTarget("GET", method, path)
+}
+
+// documentReadKind namespaces the used_kinds entry a download burns, so
+// it can never collide with the upload of the same kind. Stored as an
+// ordinary string in the same text[] column -- no schema change.
+func documentReadKind(kind string) string { return kind + ":read" }
+
+func documentTarget(want, method, path string) (artifactID, kind string, ok bool) {
+	if method != want {
 		return "", "", false
 	}
 	rest, found := strings.CutPrefix(path, "/api/v1/artifacts/")

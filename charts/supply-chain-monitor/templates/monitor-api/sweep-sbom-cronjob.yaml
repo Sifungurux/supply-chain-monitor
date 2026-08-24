@@ -1,0 +1,92 @@
+# Runs `monitor-api sweep-registered` with SWEEP_MODE=sbom-only --
+# re-derives the cve bucket for every image artifact that already has a
+# stored SBOM, by running grype against that document instead of pulling
+# and re-scanning the image. See main.go's sweepSBOMOnly and
+# docs/architecture.md ("SBOM re-evaluation sweep").
+#
+# A SECOND CronJob rather than a mode of the existing one, deliberately:
+# the two run on completely different cadences (every 15 minutes vs
+# daily), cover different populations, and neither can substitute for
+# the other -- malware findings come only from the full sweep. Folding
+# them together would mean one schedule serving two jobs badly.
+#
+# Scheduled shortly after grypeCache.refreshSchedule (04:00 UTC by
+# default): re-evaluating against yesterday's vulnerability DB would buy
+# nothing at all, so this must not race the refresh that gives it a
+# reason to run.
+#
+# Same image, ServiceAccount-less shape and hardening as
+# sweep-registered-cronjob.yaml -- see that file's own comment for the
+# general pattern and for why calling back through the API needs no
+# Kubernetes access.
+{{- if .Values.monitorApi.sweepSbom.enabled }}
+{{- if eq .Values.monitorApi.cveScanner "trivy" }}
+{{- fail "monitorApi.sweepSbom.enabled requires grype: set monitorApi.cveScanner to \"grype\" or \"both\". SBOM re-evaluation runs grype against the stored SBOM, and cveScanner=\"trivy\" deploys no grype DB cache primer or refresh CronJob for those Jobs to mount -- every re-evaluation would fail." }}
+{{- end }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scm-sweep-sbom
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: scm-sweep-sbom
+spec:
+  schedule: {{ .Values.monitorApi.sweepSbom.schedule | quote }}
+  # Forbid, same as the full sweep: a run that outlives its schedule is
+  # already covering the whole fleet, and a second concurrent one would
+  # just contend for the same grype scan slots.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: scm-sweep-sbom
+    spec:
+      backoffLimit: 1
+      # Comfortably above sweepSbom.timeoutMinutes, so the sweep's own
+      # budget is what fires first and the run gets to log its summary
+      # ("N re-evaluated, N failed, N skipped") rather than being killed
+      # mid-loop with nothing said.
+      activeDeadlineSeconds: {{ add (mul .Values.monitorApi.sweepSbom.timeoutMinutes 60) 300 }}
+      template:
+        metadata:
+          labels:
+            app: scm-sweep-sbom
+        spec:
+          restartPolicy: Never
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+          containers:
+            - name: sweep-sbom
+              image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              args: ["sweep-registered"]
+              env:
+                - name: SWEEP_API_BASE_URL
+                  value: "http://monitor-api:8080"
+                # The one variable that makes this a different sweep.
+                - name: SWEEP_MODE
+                  value: "sbom-only"
+                # 0 = every eligible artifact in one run. See
+                # values.yaml for why this mode is not paced in batches
+                # the way the full sweep is.
+                - name: SWEEP_BATCH_SIZE
+                  value: {{ .Values.monitorApi.sweepSbom.batchSize | quote }}
+                - name: SWEEP_TIMEOUT_MINUTES
+                  value: {{ .Values.monitorApi.sweepSbom.timeoutMinutes | quote }}
+                - name: SWEEP_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: scm-monitor-api-auth
+                      key: API_KEY
+              resources:
+                {{- toYaml .Values.monitorApi.sweepSbom.resources | nindent 16 }}
+{{- end }}

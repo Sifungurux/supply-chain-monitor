@@ -195,3 +195,139 @@ func TestScanToken_UploadAuth(t *testing.T) {
 		}
 	})
 }
+
+// TestScanToken_DownloadAuth covers the read half of the scan-token
+// grant, added for the sbom re-evaluation worker: that Job re-runs
+// grype against an image's stored SBOM, and the document lives in
+// Postgres, so downloading it is the only way into the Job.
+//
+// The security property worth pinning is that a read is not a write and
+// vice versa: each direction is single-use in its own namespaced kind,
+// so downloading the SBOM must not spend the upload the token was
+// minted for, and neither must widen to another artifact.
+func TestScanToken_DownloadAuth(t *testing.T) {
+	newSetup := func(t *testing.T) (http.Handler, *artifact.MemStore, string, string) {
+		t.Helper()
+		store := artifact.NewMemStore()
+		a, err := store.Create("example.com/app:1", artifact.TypeImage)
+		if err != nil {
+			t.Fatalf("seed artifact: %v", err)
+		}
+		if err := store.SaveDocument(a.ID, artifact.DocumentKindSBOM, "application/json", []byte(`{"bomFormat":"CycloneDX"}`)); err != nil {
+			t.Fatalf("seed document: %v", err)
+		}
+		token, hash, err := api.NewScanToken()
+		if err != nil {
+			t.Fatalf("mint: %v", err)
+		}
+		if err := store.CreateScanToken(a.ID, hash, time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("store token: %v", err)
+		}
+		h := api.NewRouter(api.Config{
+			Store:      store,
+			Tracker:    pipeline.NewTracker([]string{"build", "scan"}),
+			APIKey:     testAPIKey,
+			ScanTokens: store.ConsumeScanToken,
+		})
+		return h, store, a.ID, token
+	}
+
+	download := func(h http.Handler, id, kind, cred string) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/"+id+"/documents/"+kind, nil)
+		req.Header.Set("Authorization", "Bearer "+cred)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	upload := func(h http.Handler, id, kind, cred string) int {
+		req := httptest.NewRequest(http.MethodPost,
+			"/api/v1/artifacts/"+id+"/documents/"+kind,
+			strings.NewReader(`{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}`))
+		req.Header.Set("Authorization", "Bearer "+cred)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	t.Run("valid token downloads its own artifact's sbom", func(t *testing.T) {
+		h, _, id, token := newSetup(t)
+		if code := download(h, id, "sbom", token); code != http.StatusOK {
+			t.Errorf("got %d, want 200", code)
+		}
+	})
+
+	t.Run("a download does not spend the upload", func(t *testing.T) {
+		h, _, id, token := newSetup(t)
+		if code := download(h, id, "sbom", token); code != http.StatusOK {
+			t.Fatalf("download got %d, want 200", code)
+		}
+		// The namespaced read kind is the whole point: without it the
+		// download would burn "sbom" and this upload would 401.
+		if code := upload(h, id, "sbom", token); code != http.StatusOK {
+			t.Errorf("upload after download got %d, want 200 -- a read must not consume the write grant", code)
+		}
+	})
+
+	t.Run("an upload does not grant a second download", func(t *testing.T) {
+		h, _, id, token := newSetup(t)
+		if code := upload(h, id, "sbom", token); code != http.StatusOK {
+			t.Fatalf("upload got %d, want 200", code)
+		}
+		if code := download(h, id, "sbom", token); code != http.StatusOK {
+			t.Fatalf("download got %d, want 200", code)
+		}
+		if code := download(h, id, "sbom", token); code != http.StatusUnauthorized {
+			t.Errorf("second download got %d, want 401 -- each direction is single-use", code)
+		}
+	})
+
+	t.Run("single use", func(t *testing.T) {
+		h, _, id, token := newSetup(t)
+		if code := download(h, id, "sbom", token); code != http.StatusOK {
+			t.Fatalf("first download got %d, want 200", code)
+		}
+		if code := download(h, id, "sbom", token); code != http.StatusUnauthorized {
+			t.Errorf("replayed download got %d, want 401", code)
+		}
+	})
+
+	t.Run("wrong artifact is refused", func(t *testing.T) {
+		h, store, _, token := newSetup(t)
+		other, err := store.Create("example.com/other:1", artifact.TypeImage)
+		if err != nil {
+			t.Fatalf("seed second artifact: %v", err)
+		}
+		if code := download(h, other.ID, "sbom", token); code != http.StatusUnauthorized {
+			t.Errorf("got %d, want 401 -- a token is scoped to one artifact", code)
+		}
+	})
+
+	t.Run("does not widen to other routes", func(t *testing.T) {
+		h, _, id, token := newSetup(t)
+		// The artifact itself, not a document under it. A scan token
+		// must not be a read key for the whole API.
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/"+id, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("GET artifact with a scan token got %d, want 401", rec.Code)
+		}
+		// And not the artifact list either.
+		req = httptest.NewRequest(http.MethodGet, "/api/v1/artifacts", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("GET artifact list with a scan token got %d, want 401", rec.Code)
+		}
+	})
+
+	t.Run("garbage token is refused", func(t *testing.T) {
+		h, _, id, _ := newSetup(t)
+		if code := download(h, id, "sbom", "not-a-real-token"); code != http.StatusUnauthorized {
+			t.Errorf("got %d, want 401", code)
+		}
+	})
+}

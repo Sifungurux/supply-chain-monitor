@@ -1314,3 +1314,391 @@ func TestScanArtifact_NewFailureReplacesPreviousErrors(t *testing.T) {
 		t.Fatalf("expected LastScanErrorAt to advance on a new failure: got %v, previous %v", second.LastScanErrorAt, firstAt)
 	}
 }
+
+// --- sbom-only re-evaluation (POST .../scan?mode=sbom-only) ---
+
+// newSBOMReevalRouter builds a router with both a full image scanner set
+// and an sbom re-evaluation scanner, which is the only configuration in
+// which the two modes are distinguishable.
+func newSBOMReevalRouter(full scanner.Registry, reeval scanner.Scanner) (http.Handler, *artifact.MemStore) {
+	store := artifact.NewMemStore()
+	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
+	return api.NewRouter(api.Config{
+		Store: store, Tracker: tracker, Scanners: full,
+		SBOMReevalScanner: reeval, APIKey: testAPIKey,
+	}), store
+}
+
+// scanModeAndWait is scanAndWait with an explicit ?mode=.
+func scanModeAndWait(t *testing.T, h http.Handler, store *artifact.MemStore, id, mode string) (*httptest.ResponseRecorder, *artifact.Artifact) {
+	t.Helper()
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+id+"/scan?mode="+mode, nil)
+	if rec.Code != http.StatusAccepted {
+		return rec, nil
+	}
+	return rec, waitForScan(t, store, id)
+}
+
+// grypeSBOMLike stands in for the isolated grype sbom-doc scanner. It
+// mirrors the real one's INTERFACE SET, not just its behaviour:
+// Bucket() "cve" like GrypeSBOMScanner/IsolatedGrypeScanner, and
+// ScanForArtifact because scanArtifact type-switches on
+// scanner.ArtifactAwareScanner and production takes that branch. A fake
+// implementing only Scan would send every test down the `default:` arm
+// instead, so the artifact ID could stop being threaded to the Job --
+// the one hop between "the API picked the scanner" and "the Job can
+// find the document" -- with every test still green.
+type grypeSBOMLike struct {
+	findings []artifact.Finding
+	err      error
+
+	mu             sync.Mutex
+	gotArtifactID  string
+	gotRef         string
+	scanForCalls   int
+	plainScanCalls int
+}
+
+func (g *grypeSBOMLike) Scan(_ context.Context, ref string) ([]artifact.Finding, error) {
+	g.mu.Lock()
+	g.plainScanCalls++
+	g.gotRef = ref
+	g.mu.Unlock()
+	return g.findings, g.err
+}
+
+func (g *grypeSBOMLike) ScanForArtifact(_ context.Context, ref, artifactID string) ([]artifact.Finding, error) {
+	g.mu.Lock()
+	g.scanForCalls++
+	g.gotArtifactID = artifactID
+	g.gotRef = ref
+	g.mu.Unlock()
+	return g.findings, g.err
+}
+
+func (g *grypeSBOMLike) Bucket() string { return "cve" }
+
+func (g *grypeSBOMLike) observed() (artifactID string, scanFor, plain int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.gotArtifactID, g.scanForCalls, g.plainScanCalls
+}
+
+// TestScanArtifact_SBOMOnlyLeavesOtherBucketsUntouched is the test the
+// whole mode hinges on.
+//
+// A successful sbom-only round runs ONE scanner, which reports only
+// CVEs. Nothing fails, so blockedBuckets is empty and detectFixedFor
+// returns true for every bucket -- which means that if the malware,
+// secret, misconfiguration and other buckets were merged against that
+// round's (empty) results, every finding in them would be marked
+// "fixed". Silently, on every artifact, every night the CronJob runs.
+//
+// Declaring Bucket() "cve" on the scanner does NOT prevent this:
+// bucket affinity only governs what a FAILED scanner blocks. Success is
+// what does the damage, which is why this test drives a SUCCESSFUL
+// re-evaluation and not a failing one.
+func TestScanArtifact_SBOMOnlyLeavesOtherBucketsUntouched(t *testing.T) {
+	// A full image scan first, so there is something in every bucket to
+	// lose. One scanner per bucket, sorted by classifyBucket.
+	trivyLike := &fakeScanner{findings: []artifact.Finding{
+		{ID: "CVE-2024-1", Severity: "high", Source: "trivy"},
+		{ID: "generic-api-key", Severity: "critical", Source: "trivy", Category: "secret"},
+		{ID: "KSV001", Severity: "medium", Source: "trivy", Category: "misconfiguration"},
+		{ID: "SAST-1", Severity: "low", Source: "trivy", Category: "other"},
+	}}
+	clamavLike := &fakeScanner{findings: []artifact.Finding{
+		{ID: "Eicar-Test-Signature", Severity: "critical", Source: "clamav"},
+	}}
+	reeval := &grypeSBOMLike{findings: []artifact.Finding{
+		{ID: "CVE-2024-2", Severity: "critical", Source: "grype"},
+	}}
+
+	h, store := newSBOMReevalRouter(scanner.Registry{
+		artifact.TypeImage: {trivyLike, clamavLike},
+	}, reeval)
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	if _, full := scanAndWait(t, h, store, created.ID); full.Status != artifact.StatusScanned {
+		t.Fatalf("full scan status = %q, want %q", full.Status, artifact.StatusScanned)
+	}
+	// HasSBOM is the eligibility gate, and it is set by a document
+	// arriving -- the same way a real image gets one (the scan-worker
+	// generates a CycloneDX document and uploads it back).
+	if err := store.SaveDocument(created.ID, artifact.DocumentKindSBOM, "application/json", []byte(`{"bomFormat":"CycloneDX"}`)); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+
+	before, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if len(before.MalwareFindings) != 1 || len(before.SecretFindings) != 1 ||
+		len(before.MisconfigFindings) != 1 || len(before.OtherFindings) != 1 {
+		t.Fatalf("precondition: want one finding in each non-cve bucket, got malware=%d secret=%d misconfig=%d other=%d",
+			len(before.MalwareFindings), len(before.SecretFindings),
+			len(before.MisconfigFindings), len(before.OtherFindings))
+	}
+
+	rec, after := scanModeAndWait(t, h, store, created.ID, "sbom-only")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// THE ASSERTION THIS TEST EXISTS FOR.
+	for _, b := range []struct {
+		name string
+		got  []artifact.Finding
+	}{
+		{"malware", after.MalwareFindings},
+		{"secret", after.SecretFindings},
+		{"misconfiguration", after.MisconfigFindings},
+		{"other", after.OtherFindings},
+	} {
+		if len(b.got) != 1 {
+			t.Fatalf("%s bucket = %d findings after an sbom-only scan, want 1 (untouched)", b.name, len(b.got))
+		}
+		if b.got[0].Status != artifact.FindingStatusOpen {
+			t.Errorf("%s finding %q status = %q after an sbom-only scan, want %q -- a re-evaluation that never looked at this bucket must not resolve it",
+				b.name, b.got[0].ID, b.got[0].Status, artifact.FindingStatusOpen)
+		}
+	}
+
+	// And the cve bucket DID get re-evaluated: the new CVE is present,
+	// and the one the previous round reported is gone (fixed), because
+	// that bucket genuinely was re-derived.
+	var sawNew bool
+	for _, f := range after.CVEFindings {
+		if f.ID == "CVE-2024-2" && f.Status == artifact.FindingStatusOpen {
+			sawNew = true
+		}
+		if f.ID == "CVE-2024-1" && f.Status != artifact.FindingStatusFixed {
+			t.Errorf("CVE-2024-1 status = %q, want %q -- the cve bucket is the one bucket an sbom-only scan does re-derive",
+				f.Status, artifact.FindingStatusFixed)
+		}
+	}
+	if !sawNew {
+		t.Errorf("cve findings = %+v, want the re-evaluation's CVE-2024-2 open among them", after.CVEFindings)
+	}
+}
+
+// TestScanArtifact_SBOMOnlyDoesNotRefreshTheScanClock pins the other
+// half of the trade-off: a re-evaluation must not satisfy the full
+// sweep's freshness clock.
+//
+// LastScanAt drives the staleness badge, Store.CountStaleScans, and the
+// full sweep's own rescan population. If a nightly sbom-only round
+// stamped it, every artifact would look permanently freshly-scanned,
+// the full sweep would stop finding anything stale, and malware
+// coverage would decay while the dashboard stayed green.
+func TestScanArtifact_SBOMOnlyDoesNotRefreshTheScanClock(t *testing.T) {
+	reeval := &grypeSBOMLike{findings: []artifact.Finding{{ID: "CVE-2024-9", Source: "grype"}}}
+	h, store := newSBOMReevalRouter(scanner.Registry{
+		artifact.TypeImage: {&fakeScanner{}},
+	}, reeval)
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	_, full := scanAndWait(t, h, store, created.ID)
+	if full.LastScanAt == nil {
+		t.Fatal("precondition: a full scan must stamp LastScanAt")
+	}
+	stamped := *full.LastScanAt
+	if err := store.SaveDocument(created.ID, artifact.DocumentKindSBOM, "application/json", []byte(`{}`)); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+
+	_, after := scanModeAndWait(t, h, store, created.ID, "sbom-only")
+	if after.LastScanAt == nil || !after.LastScanAt.Equal(stamped) {
+		t.Errorf("LastScanAt = %v after an sbom-only scan, want it unchanged at %v", after.LastScanAt, stamped)
+	}
+	// The artifact also keeps the status it had -- a re-evaluation
+	// reports on CVEs, not on whether the artifact scans.
+	if after.Status != artifact.StatusScanned {
+		t.Errorf("status = %q after an sbom-only scan, want %q", after.Status, artifact.StatusScanned)
+	}
+}
+
+// TestScanArtifact_SBOMOnlyRefusesRatherThanFallingBack covers the three
+// refusals, all of which exist for the same reason: an sbom-only
+// request that quietly ran a FULL scan would turn one nightly CronJob
+// into a complete re-scan of the fleet -- the exact IO the mode exists
+// to avoid, and invisible in the sweep's own logs.
+func TestScanArtifact_SBOMOnlyRefusesRatherThanFallingBack(t *testing.T) {
+	reeval := &grypeSBOMLike{}
+	full := scanner.Registry{
+		artifact.TypeImage: {&fakeScanner{}},
+		artifact.TypeSBOM:  {&fakeScanner{}},
+	}
+
+	t.Run("no stored sbom", func(t *testing.T) {
+		h, store := newSBOMReevalRouter(full, reeval)
+		created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+		rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan?mode=sbom-only", nil)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("not an image", func(t *testing.T) {
+		h, store := newSBOMReevalRouter(full, reeval)
+		created := mustCreate(t, store, "some.sbom.json", artifact.TypeSBOM)
+		rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan?mode=sbom-only", nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("mode not configured", func(t *testing.T) {
+		h, store := newSBOMReevalRouter(full, nil)
+		created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+		if err := store.SaveDocument(created.ID, artifact.DocumentKindSBOM, "application/json", []byte(`{}`)); err != nil {
+			t.Fatalf("SaveDocument: %v", err)
+		}
+		rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan?mode=sbom-only", nil)
+		if rec.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want 501, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("unknown mode", func(t *testing.T) {
+		h, store := newSBOMReevalRouter(full, reeval)
+		created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+		rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+created.ID+"/scan?mode=everything", nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+// TestScanArtifact_SBOMOnlyDoesNotResolveDigests pins the other IO an
+// sbom-only round deliberately skips.
+//
+// Digest resolution is a real registry round trip (up to 8s) that the
+// re-evaluation never records anyway -- and this mode is meant to run
+// nightly across an entire fleet, so it would be the single most
+// expensive thing the cheap path does. Backfill is converging work the
+// full sweep already owns.
+func TestScanArtifact_SBOMOnlyDoesNotResolveDigests(t *testing.T) {
+	store := artifact.NewMemStore()
+	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
+	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:should-never-be-fetched"}}
+	h := api.NewRouter(api.Config{
+		Store: store, Tracker: tracker, APIKey: testAPIKey, DigestResolver: resolver,
+		Scanners:          scanner.Registry{artifact.TypeImage: {&fakeScanner{}}},
+		SBOMReevalScanner: &grypeSBOMLike{findings: []artifact.Finding{{ID: "CVE-2024-3", Source: "grype"}}},
+	})
+
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	if err := store.SaveDocument(created.ID, artifact.DocumentKindSBOM, "application/json", []byte(`{}`)); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+
+	_, after := scanModeAndWait(t, h, store, created.ID, "sbom-only")
+	if n := resolver.calls.Load(); n != 0 {
+		t.Errorf("digest resolver called %d time(s) during an sbom-only scan, want 0", n)
+	}
+	if after.Digest != "" {
+		t.Errorf("digest = %q after an sbom-only scan, want it left empty -- backfill belongs to the full sweep", after.Digest)
+	}
+}
+
+// TestScanArtifact_SBOMOnlyPassesTheArtifactID pins the hop between the
+// API selecting the re-evaluation scanner and the scan-worker Job being
+// able to find the document.
+//
+// The real scanner is an ArtifactAwareScanner: the SBOM lives in
+// Postgres keyed by artifact ID, and the Job downloads it by that ID,
+// so a re-evaluation that only ever received a ref could not do its
+// job at all. scanArtifact type-switches to decide which method to
+// call, which means this is a wiring property no assertion about
+// findings can reach.
+func TestScanArtifact_SBOMOnlyPassesTheArtifactID(t *testing.T) {
+	reeval := &grypeSBOMLike{findings: []artifact.Finding{{ID: "CVE-2024-4", Source: "grype"}}}
+	h, store := newSBOMReevalRouter(scanner.Registry{
+		artifact.TypeImage: {&fakeScanner{}},
+	}, reeval)
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	// A full scan first, so the artifact reaches the state a real
+	// re-evaluation target is in: scanned, with a stored SBOM. (An
+	// artifact that never had one has status "registered", and
+	// sbom-only correctly restores that -- see
+	// TestScanArtifact_SBOMOnlyDoesNotRefreshTheScanClock.)
+	if _, full := scanAndWait(t, h, store, created.ID); full.Status != artifact.StatusScanned {
+		t.Fatalf("full scan status = %q, want %q", full.Status, artifact.StatusScanned)
+	}
+	if err := store.SaveDocument(created.ID, artifact.DocumentKindSBOM, "application/json", []byte(`{}`)); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+
+	if _, after := scanModeAndWait(t, h, store, created.ID, "sbom-only"); after.Status != artifact.StatusScanned {
+		t.Fatalf("status = %q, want %q", after.Status, artifact.StatusScanned)
+	}
+
+	gotID, scanFor, plain := reeval.observed()
+	if scanFor != 1 {
+		t.Errorf("ScanForArtifact called %d time(s), want 1 -- scanArtifact must take the ArtifactAwareScanner branch", scanFor)
+	}
+	if plain != 0 {
+		t.Errorf("plain Scan called %d time(s), want 0 -- the artifact ID would be lost on that path", plain)
+	}
+	if gotID != created.ID {
+		t.Errorf("ScanForArtifact got artifact id %q, want %q", gotID, created.ID)
+	}
+}
+
+// TestScanArtifact_SBOMOnlyDoesNotMoveScanMetrics pins that a
+// re-evaluation stays out of the scm_scans_* counters.
+//
+// The ScanFailureRate alert compares rate(scm_scans_failed_total)
+// against rate(scm_scans_succeeded_total). A nightly fleet-wide burst
+// of re-evaluations lands inside one 30m window, so counting them would
+// move that ratio and could mask a genuine run of scan failures
+// happening at the same time.
+func TestScanArtifact_SBOMOnlyDoesNotMoveScanMetrics(t *testing.T) {
+	reeval := &grypeSBOMLike{findings: []artifact.Finding{{ID: "CVE-2024-5", Source: "grype"}}}
+	h, store := newSBOMReevalRouter(scanner.Registry{
+		artifact.TypeImage: {&fakeScanner{}},
+	}, reeval)
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	if _, full := scanAndWait(t, h, store, created.ID); full.Status != artifact.StatusScanned {
+		t.Fatal("precondition: the full scan must succeed")
+	}
+	if err := store.SaveDocument(created.ID, artifact.DocumentKindSBOM, "application/json", []byte(`{}`)); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+
+	scrape := func() string {
+		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		req.Header.Set("Authorization", "Bearer "+testAPIKey)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Body.String()
+	}
+	countersLine := func(body, metric string) string {
+		for _, l := range strings.Split(body, "\n") {
+			if strings.HasPrefix(l, metric+" ") {
+				return l
+			}
+		}
+		return ""
+	}
+
+	before := scrape()
+	startedBefore := countersLine(before, "scm_scans_started_total")
+	succeededBefore := countersLine(before, "scm_scans_succeeded_total")
+	if startedBefore == "" || succeededBefore == "" {
+		t.Fatalf("precondition: expected scan counters in /metrics, got:\n%s", before)
+	}
+
+	if _, after := scanModeAndWait(t, h, store, created.ID, "sbom-only"); after.Status != artifact.StatusScanned {
+		t.Fatalf("status = %q, want %q", after.Status, artifact.StatusScanned)
+	}
+
+	got := scrape()
+	if l := countersLine(got, "scm_scans_started_total"); l != startedBefore {
+		t.Errorf("scm_scans_started_total moved on an sbom-only scan: %q -> %q", startedBefore, l)
+	}
+	if l := countersLine(got, "scm_scans_succeeded_total"); l != succeededBefore {
+		t.Errorf("scm_scans_succeeded_total moved on an sbom-only scan: %q -> %q", succeededBefore, l)
+	}
+}

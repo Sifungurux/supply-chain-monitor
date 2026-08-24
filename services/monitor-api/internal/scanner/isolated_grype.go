@@ -13,10 +13,13 @@ import (
 
 // IsolatedGrypeConfig configures the Kubernetes Job IsolatedGrypeScanner
 // creates per scan. Mirrors IsolatedTrivyConfig's shape closely -- see
-// that type's comment for the general pattern. Deliberately has no
-// APIBaseURL/APIKeySecret* fields: unlike trivy, grype doesn't generate
-// an SBOM/SARIF document to upload back (see documents.go), so there's
-// nothing for those fields to configure here.
+// that type's comment for the general pattern.
+//
+// APIBaseURL/MintScanToken are used by the "sbom-doc" SubCommand ONLY,
+// and for the opposite reason trivy's identical pair exists: trivy's
+// worker uploads a document it generated, this one DOWNLOADS a document
+// somebody already stored. Both other SubCommands ("image", "sbom")
+// leave them unset and never call back to the API at all.
 type IsolatedGrypeConfig struct {
 	// Image is the container image the scan-worker Job runs -- almost
 	// always monitor-api's own image (`monitor-api scan-worker` is the
@@ -26,12 +29,28 @@ type IsolatedGrypeConfig struct {
 	// same as every other scan-worker Job.
 	ServiceAccount string
 
-	// SubCommand selects which grype invocation the worker runs: "image"
-	// (GrypeScanner, for `image`-type artifacts) or "sbom"
-	// (GrypeSBOMScanner, for `sbom`-type artifacts). Forwarded to the
-	// worker as SCM_SCAN_MODE, alongside SCM_SCAN_TOOL=grype -- see
+	// SubCommand selects which grype invocation the worker runs:
+	// "image" (GrypeScanner, for `image`-type artifacts), "sbom"
+	// (GrypeSBOMScanner against an SBOM the worker fetches from a
+	// registry ref, for `sbom`-type artifacts), or "sbom-doc"
+	// (GrypeSBOMScanner against the SBOM document already stored for an
+	// `image` artifact, downloaded back from this API). Forwarded to
+	// the worker as SCM_SCAN_MODE, alongside SCM_SCAN_TOOL=grype -- see
 	// main.go's runScanWorker.
 	SubCommand string
+
+	// APIBaseURL is monitor-api's own Service URL, forwarded to the
+	// worker as SCM_SCAN_API_BASE_URL. "sbom-doc" mode only: that is
+	// where the worker GETs the stored SBOM from. Empty disables the
+	// callback, which makes "sbom-doc" fail rather than silently scan
+	// nothing.
+	APIBaseURL string
+	// MintScanToken issues the per-Job credential the worker presents
+	// for that download, scoped to the one artifact being scanned (see
+	// internal/api/scantoken.go). "sbom-doc" mode only. nil means no
+	// token is minted and the download will be refused -- deliberately
+	// a visible failure, not a fallback to the master API key.
+	MintScanToken func(artifactID string) (string, error)
 
 	// FetchPlainHTTP only matters when SubCommand is "sbom": same
 	// reasoning as IsolatedTrivyConfig.FetchPlainHTTP -- the worker has
@@ -167,6 +186,20 @@ func NewIsolatedGrypeScanner(client jobClient, cfg IsolatedGrypeConfig) *Isolate
 func (s *IsolatedGrypeScanner) Bucket() string { return "cve" }
 
 func (s *IsolatedGrypeScanner) Scan(ctx context.Context, ref string) ([]artifact.Finding, error) {
+	return s.scan(ctx, ref, "")
+}
+
+// ScanForArtifact implements ArtifactAwareScanner. Only "sbom-doc" mode
+// has any use for the artifact ID -- it is what the worker downloads
+// the stored SBOM by -- so the other modes ignore it and behave exactly
+// as Scan does. scanArtifact (internal/api/scan.go) prefers this method
+// whenever a scanner offers it, so both paths must stay equivalent for
+// the modes that don't care.
+func (s *IsolatedGrypeScanner) ScanForArtifact(ctx context.Context, ref, artifactID string) ([]artifact.Finding, error) {
+	return s.scan(ctx, ref, artifactID)
+}
+
+func (s *IsolatedGrypeScanner) scan(ctx context.Context, ref, artifactID string) ([]artifact.Finding, error) {
 	name, err := randomJobName()
 	if err != nil {
 		return nil, fmt.Errorf("generate scan job name: %w", err)
@@ -190,6 +223,30 @@ func (s *IsolatedGrypeScanner) Scan(ctx context.Context, ref string) ([]artifact
 	if allow := os.Getenv(RefHostAllowlistEnv); allow != "" {
 		env[RefHostAllowlistEnv] = allow
 	}
+	// "sbom-doc" mode: the SBOM this re-evaluates lives in Postgres, not
+	// in any registry, so unlike "sbom" mode there is no ref for the
+	// worker to fetch. It downloads the document back from monitor-api
+	// instead, which needs the artifact's ID and a credential.
+	//
+	// No fallback to the master API key, deliberately -- the opposite
+	// of IsolatedTrivyScanner's identical-looking block. There, minting
+	// failure falls back so a generated SBOM isn't lost; here the
+	// download simply fails and the scan reports an error, which the
+	// cve bucket then blocks on (see internal/api/scan.go). Losing one
+	// re-evaluation round is cheap; handing untrusted-content pods the
+	// fleet-wide key to avoid it is not.
+	if s.cfg.SubCommand == "sbom-doc" && artifactID != "" && s.cfg.APIBaseURL != "" {
+		env["SCM_ARTIFACT_ID"] = artifactID
+		env["SCM_API_BASE_URL"] = s.cfg.APIBaseURL
+		if s.cfg.MintScanToken != nil {
+			token, err := s.cfg.MintScanToken(artifactID)
+			if err != nil {
+				return nil, fmt.Errorf("mint scan token for sbom re-evaluation of %q: %w", artifactID, err)
+			}
+			env["SCM_SCAN_TOKEN"] = token
+		}
+	}
+
 	var secretEnv []k8sjob.SecretEnvVar
 	if s.cfg.RegistryCredentialsSecretName != "" {
 		// REGISTRY_USERNAME/PASSWORD: consulted by runScanWorker's grype
