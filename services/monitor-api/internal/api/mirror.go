@@ -62,8 +62,18 @@ func (h *handler) mirrorArtifact(ctx context.Context, a *artifact.Artifact) *art
 	}
 	if local == "" {
 		// Nothing to mirror: a local filesystem path, or a ref already
-		// pointing at this registry. Not a failure -- see scanner.Mirror.
-		return a
+		// pointing at this registry. Not a failure -- see scanner.Mirror
+		// -- but it does have to be RECORDED, by setting SourceRef to the
+		// ref itself.
+		//
+		// Otherwise "source_ref is empty" would mean two different things
+		// -- "not mirrored yet" and "never mirrorable" -- and the sweep's
+		// backfill (main.go's SWEEP_MIRROR_BACKFILL) would re-scan every
+		// local-path and already-local artifact on every run, forever,
+		// looking for a copy that is never going to happen. With this,
+		// an empty SourceRef means exactly "mirroring has not been
+		// settled for this artifact yet" and the backfill converges.
+		local = from
 	}
 
 	// One Update, both fields. A rewrite that persisted the new ref
@@ -93,13 +103,17 @@ func (h *handler) mirrorArtifact(ctx context.Context, a *artifact.Artifact) *art
 			"artifact_id", a.ID, "ref", from, "mirror_ref", local, "err", err)
 		return a
 	}
-	if !mirrored {
+	switch {
+	case !mirrored:
 		slog.Info("another scan mirrored this artifact first -- keeping its rewrite",
 			"artifact_id", updated.ID, "ref", updated.Ref, "source_ref", updated.SourceRef)
-		return updated
+	case updated.Ref == updated.SourceRef:
+		slog.Info("artifact needs no mirror (already local, or not a registry ref) -- recorded so the backfill stops revisiting it",
+			"artifact_id", updated.ID, "ref", updated.Ref)
+	default:
+		slog.Info("mirrored artifact into the local registry",
+			"artifact_id", updated.ID, "source_ref", updated.SourceRef, "ref", updated.Ref)
 	}
-	slog.Info("mirrored artifact into the local registry",
-		"artifact_id", updated.ID, "source_ref", updated.SourceRef, "ref", updated.Ref)
 	return updated
 }
 

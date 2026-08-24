@@ -692,3 +692,29 @@ func TestSetupLogging_WritesJSONToStderr(t *testing.T) {
 		t.Errorf("line = %v, want msg and artifact_id carried as fields", line)
 	}
 }
+
+// The mirror backfill's whole job is to find artifacts registration
+// never mirrored -- and, just as importantly, to STOP finding the ones
+// that were settled as unmirrorable. Without the second half the sweep
+// would rescan every local-path artifact on every run, forever, waiting
+// for a copy that is never going to happen.
+func TestUnmirroredArtifacts(t *testing.T) {
+	list := []artifact.Artifact{
+		{ID: "never-mirrored", Ref: "ghcr.io/acme/app:1.0"},
+		{ID: "mirrored", Ref: "scm-registry:5000/mirror/ghcr.io/acme/app:1.0", SourceRef: "ghcr.io/acme/app:1.0"},
+		// Settled as "nothing to copy": source_ref equals ref. Must not
+		// come back, or the backfill never converges.
+		{ID: "not-mirrorable", Ref: "/var/lib/artifacts/report.json", SourceRef: "/var/lib/artifacts/report.json"},
+	}
+	got := unmirroredArtifacts(list)
+	if len(got) != 1 || got[0].ID != "never-mirrored" {
+		ids := make([]string, len(got))
+		for i, a := range got {
+			ids[i] = a.ID
+		}
+		t.Fatalf("unmirroredArtifacts returned %v, want just [never-mirrored]", ids)
+	}
+	if out := unmirroredArtifacts(nil); len(out) != 0 {
+		t.Errorf("unmirroredArtifacts(nil) = %v, want empty", out)
+	}
+}

@@ -10,7 +10,7 @@ import (
 const testRegistry = "scm-registry.supply-chain-monitor.svc.cluster.local:5000"
 
 func testMirror(resolver DigestResolver) *OrasMirror {
-	return NewOrasMirror(testRegistry, "", false, "/tmp/config.json", resolver)
+	return NewOrasMirror(testRegistry, "", false, "/tmp/config.json", "/tmp/push.json", resolver)
 }
 
 // fakeResolver stands in for a real registry -- the destination digest
@@ -48,6 +48,14 @@ func TestMirrorRef(t *testing.T) {
 		// Nothing to do: already in the local registry, or not a
 		// registry ref at all.
 		{testRegistry + "/mirror/ghcr.io/org/app:v1", ""},
+		// The SHORT cluster-DNS forms name the same registry -- README
+		// documents pushing sbom/sarif artifacts by them, and mirroring
+		// one would store a second copy of something already here and
+		// point the artifact at the duplicate.
+		{"scm-registry:5000/sboms/app:1.0", ""},
+		{"scm-registry.supply-chain-monitor:5000/sboms/app:1.0", ""},
+		// A different port is a different registry, short label or not.
+		{"scm-registry:5001/sboms/app:1.0", testRegistry + "/mirror/scm-registry-5001/sboms/app:1.0"},
 		{"/var/lib/artifacts/report.json", ""},
 		{"./report.json", ""},
 	}
@@ -76,7 +84,9 @@ func TestCopyArgs(t *testing.T) {
 	for _, want := range []string{
 		"copy --recursive",
 		"--from-registry-config /tmp/config.json",
-		"--to-registry-config /tmp/config.json",
+		// A DIFFERENT file for the destination: the push credential is
+		// kept out of the config every scan-worker Job also reads.
+		"--to-registry-config /tmp/push.json",
 		"-- docker.io/library/nginx:alpine",
 	} {
 		if !strings.Contains(args, want) {
@@ -133,10 +143,15 @@ func TestMirrorVerification(t *testing.T) {
 // NewOrasMirror returning nil is what the handler reads as "mirroring is
 // off" -- there has to be no way to build one that cannot do its job.
 func TestNewOrasMirrorRefusesAnIncompleteConfig(t *testing.T) {
-	if m := NewOrasMirror("", "mirror", false, "", fakeResolver{}); m != nil {
+	if m := NewOrasMirror("", "mirror", false, "", "", fakeResolver{}); m != nil {
 		t.Error("built a mirror with no destination registry")
 	}
-	if m := NewOrasMirror(testRegistry, "mirror", false, "", nil); m != nil {
+	if m := NewOrasMirror(testRegistry, "mirror", false, "", "", nil); m != nil {
 		t.Error("built a mirror with no resolver -- its copies could never be verified")
+	}
+	// An unset push config falls back to the shared one rather than
+	// silently copying anonymously.
+	if m := NewOrasMirror(testRegistry, "mirror", false, "/tmp/config.json", "", fakeResolver{}); m == nil || m.PushRegistryConfigPath != "/tmp/config.json" {
+		t.Errorf("push config did not fall back to the shared one: %+v", m)
 	}
 }

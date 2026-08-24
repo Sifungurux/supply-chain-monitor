@@ -345,7 +345,7 @@
     <section>
       <h2>Artifacts</h2>
       <div class="search-row">
-        <input type="search" id="search-input" placeholder="Search ref, digest, maintainer, stage, CVE/malware id or title…" />
+        <input type="search" id="search-input" placeholder="Search ref, source ref, digest, maintainer, stage, CVE/malware id or title…" />
       </div>
       <div class="search-row">
         <input type="search" id="component-input" aria-label="Find artifacts containing a component"
@@ -1904,7 +1904,10 @@
       // of something else. Without this the detail page shows only
       // "scm-registry/mirror/docker.io/library/nginx:alpine" and the
       // fact that this IS Docker Hub's nginx is invisible.
-      (a.source_ref
+      // source_ref equal to ref means "mirroring was settled and there
+      // was nothing to copy" (a local path, or a ref already in this
+      // registry) -- a real record, but not a mirror worth announcing.
+      (a.source_ref && a.source_ref !== a.ref
         ? '<div class="detail-source-ref">mirrored from <code>' + esc(a.source_ref) + '</code></div>'
         : '') +
       '<div class="modal-meta">' +

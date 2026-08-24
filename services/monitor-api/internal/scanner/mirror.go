@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -57,11 +58,22 @@ type OrasMirror struct {
 	PlainHTTP bool
 	// RegistryConfigPath is the merged docker config (main.go's
 	// writeDockerConfig) holding credentials for every configured
-	// registry keyed by host. Passed as BOTH --from-registry-config and
-	// --to-registry-config: one file already covers the public source
-	// and the local destination, and the alternative
-	// (--from-password/--to-password) would put both in argv.
+	// registry keyed by host. Used for the SOURCE side of the copy --
+	// docker.io, ghcr.io, whatever the artifact was registered from.
 	RegistryConfigPath string
+	// PushRegistryConfigPath authenticates the DESTINATION, and is a
+	// separate file rather than the same one for a reason that is not
+	// cosmetic: copying needs PUSH on scm-registry, while the shared
+	// credentials above are deliberately read-only because every
+	// scan-worker Job reads them too. Keeping the push credential in its
+	// own file means the only process holding it is the one that copies.
+	// Empty falls back to RegistryConfigPath.
+	//
+	// Two files, two flags -- `oras copy` takes --from-registry-config
+	// and --to-registry-config separately, which is what makes the split
+	// expressible at all. Neither puts a password in argv, which
+	// --from-password/--to-password could never avoid.
+	PushRegistryConfigPath string
 	// Resolver verifies the copy landed -- see Mirror. Required: a nil
 	// resolver means the copy cannot be checked, and an unverified
 	// rewrite is worse than no rewrite.
@@ -72,19 +84,23 @@ type OrasMirror struct {
 // when registryAddr is empty -- there is no local registry to mirror
 // into, which is exactly how every deployment behaved before this
 // existed, and a nil Mirror is what the handler treats as "off".
-func NewOrasMirror(registryAddr, repoPrefix string, plainHTTP bool, registryConfigPath string, resolver DigestResolver) *OrasMirror {
+func NewOrasMirror(registryAddr, repoPrefix string, plainHTTP bool, registryConfigPath, pushRegistryConfigPath string, resolver DigestResolver) *OrasMirror {
 	if registryAddr == "" || resolver == nil {
 		return nil
 	}
 	if repoPrefix == "" {
 		repoPrefix = DefaultMirrorRepoPrefix
 	}
+	if pushRegistryConfigPath == "" {
+		pushRegistryConfigPath = registryConfigPath
+	}
 	return &OrasMirror{
-		RegistryAddr:       registryAddr,
-		RepoPrefix:         repoPrefix,
-		PlainHTTP:          plainHTTP,
-		RegistryConfigPath: registryConfigPath,
-		Resolver:           resolver,
+		RegistryAddr:           registryAddr,
+		RepoPrefix:             repoPrefix,
+		PlainHTTP:              plainHTTP,
+		RegistryConfigPath:     registryConfigPath,
+		PushRegistryConfigPath: pushRegistryConfigPath,
+		Resolver:               resolver,
 	}
 }
 
@@ -199,8 +215,56 @@ func (m *OrasMirror) MirrorRef(ref string) string {
 // AlreadyMirrored reports whether ref already points into the local
 // registry -- either a copy this made earlier, or something an operator
 // pushed there directly. Either way there is nothing to copy.
+//
+// NOT a prefix match on REGISTRY_ADDR, which is the FQDN. A ref may name
+// this same registry by any of the three forms REF_HOST_ALLOWLIST
+// deliberately lists -- "scm-registry:5000",
+// "scm-registry.<ns>:5000", "scm-registry.<ns>.svc.cluster.local:5000" --
+// and README documents pushing `file`/`sbom`/`sarif` artifacts there by
+// the short one. A prefix match misses those, and the consequence is not
+// a missed optimisation: the registry would mirror ITSELF, storing a
+// second copy of something it already holds and rewriting the artifact's
+// ref to point at that duplicate.
 func (m *OrasMirror) AlreadyMirrored(ref string) bool {
-	return strings.HasPrefix(ref, m.RegistryAddr+"/")
+	return sameRegistry(firstSegment(qualifyDockerHubRef(ref)), m.RegistryAddr)
+}
+
+// sameRegistry reports whether two "host[:port]" tokens name the same
+// registry, treating a cluster-DNS short form and its FQDN as equal.
+//
+// The rule is: same port, and same first DNS label. All three forms of an
+// in-cluster Service name share their leading label and differ only in
+// what is appended, so comparing that label plus the port identifies the
+// Service without this needing to know the namespace or cluster domain.
+// A public host is unaffected -- "docker.io" and
+// "scm-registry.<ns>.svc.cluster.local" share no leading label.
+func sameRegistry(refHostPort, addr string) bool {
+	if refHostPort == "" || addr == "" {
+		return false
+	}
+	refHostPort, addr = strings.ToLower(refHostPort), strings.ToLower(addr)
+	if refHostPort == addr {
+		return true
+	}
+	// Ports must match exactly: two Services can share a leading label
+	// on different ports and be different registries.
+	if portOf(refHostPort) != portOf(addr) {
+		return false
+	}
+	label := firstLabel(hostOf(refHostPort))
+	return label != "" && label == firstLabel(hostOf(addr))
+}
+
+func portOf(hostPort string) string {
+	if _, p, err := net.SplitHostPort(hostPort); err == nil {
+		return p
+	}
+	return ""
+}
+
+func firstLabel(host string) string {
+	label, _, _ := strings.Cut(host, ".")
+	return label
 }
 
 func (m *OrasMirror) Mirror(ctx context.Context, ref, srcDigest string) (string, error) {
@@ -279,9 +343,10 @@ func (m *OrasMirror) copyArgs(src, dst string) []string {
 		args = append(args, "--to-plain-http")
 	}
 	if m.RegistryConfigPath != "" {
-		args = append(args,
-			"--from-registry-config", m.RegistryConfigPath,
-			"--to-registry-config", m.RegistryConfigPath)
+		args = append(args, "--from-registry-config", m.RegistryConfigPath)
+	}
+	if m.PushRegistryConfigPath != "" {
+		args = append(args, "--to-registry-config", m.PushRegistryConfigPath)
 	}
 	// "--" ends flag parsing, so a ref that somehow reached here without
 	// passing ValidateRef is a positional argument rather than a flag --

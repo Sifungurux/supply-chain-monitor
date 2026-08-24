@@ -668,8 +668,9 @@ func (h *handler) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	// is a truthful answer to "show me artifacts with status=banana,"
 	// where a 400 would just be a second enum to keep in sync.
 	//
-	// q is the same: a case-insensitive substring across ref, digest,
-	// maintainer team/email and current stage, bound as a parameter
+	// q is the same: a case-insensitive substring across ref,
+	// source_ref, digest, maintainer team/email and current stage,
+	// bound as a parameter
 	// with its LIKE metacharacters escaped by the store. Total counts
 	// the SEARCH result, so X-Total-Count and the Link headers all
 	// describe the same filtered set.

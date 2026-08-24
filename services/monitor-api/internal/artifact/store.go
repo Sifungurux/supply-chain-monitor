@@ -34,8 +34,8 @@ type Store interface {
 	// something each Store re-implements.
 	// ListPage is List plus filtering, paging and a total count.
 	// searchFilter is a case-insensitive SUBSTRING match across ref,
-	// digest, maintainer team/email and current stage -- the fields
-	// somebody actually remembers an artifact by. Empty means no
+	// source_ref, digest, maintainer team/email and current stage -- the
+	// fields somebody actually remembers an artifact by. Empty means no
 	// search, not "match nothing".
 	ListPage(limit, offset int, statusFilter, typeFilter, searchFilter string) ([]*Artifact, int, error)
 	Update(id string, mutate func(*Artifact)) (*Artifact, error)
@@ -1317,7 +1317,7 @@ func (s *MemStore) EnrichmentStatus() (EnrichmentStatus, error) {
 }
 
 // matchesArtifactSearch is MemStore's half of ?q=, and must agree with
-// the ILIKE clause listFilterClause builds for Postgres -- same five
+// the ILIKE clause listFilterClause builds for Postgres -- same six
 // fields, same case-insensitive substring semantics. needle is already
 // lower-cased and trimmed.
 //
@@ -1327,7 +1327,7 @@ func (s *MemStore) EnrichmentStatus() (EnrichmentStatus, error) {
 // differently in tests than in production would be worse than not
 // having one.
 func matchesArtifactSearch(a *Artifact, needle string) bool {
-	for _, field := range []string{a.Ref, a.Digest, a.MaintainerTeam, a.MaintainerEmail, a.CurrentStage} {
+	for _, field := range []string{a.Ref, a.SourceRef, a.Digest, a.MaintainerTeam, a.MaintainerEmail, a.CurrentStage} {
 		if strings.Contains(strings.ToLower(field), needle) {
 			return true
 		}

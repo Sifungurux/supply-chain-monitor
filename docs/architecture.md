@@ -354,16 +354,40 @@ scans of one artifact (slots are per scanner kind), and the loser of that
 race would otherwise write the winner's mirrored ref into `source_ref`,
 destroying the upstream ref permanently.
 
-**Credentials.** Mirroring PUSHES, and monitor-api's usual account is
-`scm-reader`, whose docker_auth ACL is `actions: ["pull"]`. Enabling
-`mirrorArtifacts` switches `scm-registry-credentials` to `scm-writer`
-(`["pull", "push"]` on every repository, so the `mirror/` prefix needs no
-new ACL) and the chart refuses to render if that account has no password
-— with the reader account every copy would 403, and because mirroring is
-best-effort the only symptom would be "mirroring silently never sticks."
-A deployment using `dockerAuth.existingSecret` supplies
-`REGISTRY_USERNAME`/`REGISTRY_PASSWORD` itself and must point them at an
-account that can push.
+**Credentials, and why they are a second pair.** Mirroring PUSHES, and
+monitor-api's usual account is `scm-reader`, whose docker_auth ACL is
+`actions: ["pull"]` — verified against the live registry, a copy
+attempted with it is refused with
+`unauthorized … Action:push Name:mirror/…`. But `REGISTRY_USERNAME`/
+`REGISTRY_PASSWORD` are not monitor-api's alone: every scan-worker Job
+reads those same two Secret keys, and those Jobs run scanner binaries
+over untrusted image content. Giving them push access to the registry
+that holds the mirrored copies — copies this service then scans — would
+put a write path into the artifact store one exploited scanner away.
+
+So the shared pair stays the reader, and `MIRROR_REGISTRY_USERNAME`/
+`PASSWORD` (`scm-writer`, `["pull", "push"]` on every repository, so the
+`mirror/` prefix needs no new ACL) is rendered only when mirroring is on
+and mounted only on the monitor-api Deployment. main.go merges it into
+its own docker config, handed to `oras copy` as `--to-registry-config`
+while the source side keeps the shared one — the split is expressible
+only because `copy` takes the two separately. The chart refuses to render
+if the writer account has no password. A deployment using
+`dockerAuth.existingSecret` supplies both pairs itself.
+
+**Backfilling the fleet that already exists.** Mirroring happens as a
+side effect of registration and of scanning, so an artifact registered
+before the feature was enabled sits at `status=scanned` and is touched by
+none of the sweep's usual passes — it is neither `registered` nor
+`failed`, and staleness rescanning is off by default. `SWEEP_MIRROR_BACKFILL`
+(set from the same values key) adds one pass over scanned artifacts with
+an empty `source_ref`, paced by `SWEEP_BATCH_SIZE` like everything else.
+
+It converges because *every* scan settles `source_ref`: to the mirrored
+ref, or — for a local path or a ref already in this registry — to the
+artifact's own ref. Without that second case, "not mirrored yet" and
+"never mirrorable" would look identical and the backfill would revisit
+the same artifacts forever.
 
 **Signature verification still runs against `source_ref`.** cosign's
 classic signatures live at a sibling `sha256-<digest>.sig` *tag*, which

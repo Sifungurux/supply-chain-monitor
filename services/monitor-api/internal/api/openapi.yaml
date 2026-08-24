@@ -196,9 +196,9 @@ paths:
         - name: q
           in: query
           description: >-
-            Case-insensitive SUBSTRING search across ref, digest,
-            maintainer team, maintainer email and current stage — the
-            fields somebody actually remembers an artifact by.
+            Case-insensitive SUBSTRING search across ref, source_ref,
+            digest, maintainer team, maintainer email and current stage —
+            the fields somebody actually remembers an artifact by.
 
 
             Combined with `status`/`type` rather than replacing them:

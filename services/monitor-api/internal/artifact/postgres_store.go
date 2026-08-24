@@ -940,9 +940,15 @@ func listFilterClause(statusFilter, typeFilter, searchFilter string) (string, []
 		// feel broken for reasons nobody can explain.
 		args = append(args, likePattern(q))
 		n := len(args)
+		// source_ref is in the list because a mirrored artifact's ref
+		// names the local copy: searching for the upstream ref it was
+		// registered with has to keep finding it. The mirror path happens
+		// to CONTAIN the original repo name, so a tag ref would match by
+		// substring anyway -- but a digest-pinned one would not, and
+		// "works for some refs" is not a searchable field.
 		clauses = append(clauses, fmt.Sprintf(
-			"(ref ILIKE $%d OR digest ILIKE $%d OR maintainer_team ILIKE $%d OR maintainer_email ILIKE $%d OR current_stage ILIKE $%d)",
-			n, n, n, n, n))
+			"(ref ILIKE $%d OR source_ref ILIKE $%d OR digest ILIKE $%d OR maintainer_team ILIKE $%d OR maintainer_email ILIKE $%d OR current_stage ILIKE $%d)",
+			n, n, n, n, n, n))
 	}
 	if len(clauses) == 0 {
 		return "", nil
