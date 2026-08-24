@@ -60,7 +60,7 @@ ifeq ($(SCM_RUNTIME),podman)
 export DOCKER_HOST := $(shell (podman system connection ls --format json | jq -r '.[] | select(.Default==true) | .URI') 2>/dev/null)
 endif
 
-.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build test-image vulncheck trivy-config deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap check-alert-rules check-duplicate-keys helm-lint helm-template test-backup-scripts db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
+.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build test-image vulncheck trivy-config deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap check-alert-rules check-duplicate-keys check-k8s-manifests helm-lint helm-template test-backup-scripts db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -394,7 +394,7 @@ test-artifact:
 		-H 'Content-Type: application/json' \
 		-d '{"ref":"alpine:3.19","type":"image"}' | tee /tmp/scm-artifact.json
 
-test: test-api test-dashboard check-dashboard-configmap check-openapi-spec check-alert-rules check-duplicate-keys
+test: test-api test-dashboard check-dashboard-configmap check-openapi-spec check-alert-rules check-duplicate-keys check-k8s-manifests
 
 # Runs services/monitor-api's Go test suite (handlers, store, pipeline)
 # via a containerized golang image -- no local Go install needed, just
@@ -505,6 +505,22 @@ check-duplicate-keys:
 	helm template scm-ci charts/supply-chain-monitor | docker run --rm -i \
 		-v "$(CURDIR)":/src -w /src python:3.13-alpine \
 		sh -c 'pip install --quiet pyyaml && python cluster/check-duplicate-keys.py'
+
+# Same duplicate-key check, but against the SOURCE manifests in k8s/
+# rather than the rendered chart.
+#
+# check-duplicate-keys above renders the chart and inspects the output, so
+# it never sees k8s/ at all -- and k8s/ is where the HelmRelease's own
+# values live. A duplicate key there does not fail a scan or a template:
+# it fails `kustomize build`, which takes the whole Flux Kustomization
+# down and freezes everything in k8s/ at its last good revision, silently.
+# That happened: a scanConcurrencyPerKind block added next to an existing
+# one broke reconciliation, and it went unnoticed because HelmRelease
+# chart upgrades kept flowing (they read the chart directly) while the
+# HelmRelease's own values stayed frozen.
+check-k8s-manifests:
+	@for f in $$(find k8s -name '*.yaml'); do 		docker run --rm -i -v "$(CURDIR)":/src -w /src python:3.13-alpine 			sh -c 'pip install --quiet pyyaml && python cluster/check-duplicate-keys.py' < $$f 			|| { echo "duplicate mapping key in $$f"; exit 1; }; 	done
+	@echo "ok:   no duplicate mapping keys in k8s/"
 
 check-alert-rules:
 	@helm template scm-ci charts/supply-chain-monitor \
