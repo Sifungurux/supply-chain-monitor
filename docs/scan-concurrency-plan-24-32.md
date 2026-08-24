@@ -328,3 +328,89 @@ the answer to the question people are really asking:
   can only produce the same answer.
 - **Give the registry room, or take it off the hot path** (image-level caching
   on the nodes).
+
+
+---
+
+# Execution outcome, 2026-08-24
+
+**Cap 24 and 32 were not reached. The attempt made the cluster worse before it
+was reverted, and the reason is the most useful thing it produced.**
+
+## What shipped and stayed
+
+| PR | change | verdict |
+|----|--------|---------|
+| #153 | Job deadline 600s→1200s, scanTimeout→1320s | kept — B7 was real |
+| #153 | clamav maxReplicas 10→16 | kept |
+| #153 | grype Job memory limit → 1536Mi | kept — B4 was real |
+| #153 | scan Job resources made configurable | kept — right lever |
+| #154 | duplicate key broke the Flux Kustomization | **fixed** |
+| #155 | registry logging an OTel span per blob read | **fixed** |
+| #156 | request 512Mi→256Mi | **reverted** |
+
+## The finding that matters
+
+Phase 3b — lowering the memory request from 512Mi to 256Mi to match measured
+RSS — **took the cluster down**. The VM reached **load average 174 on 6 CPUs**
+with 251MB of 16GB free, one node went `NotReady`, and the Kubernetes API
+server became unreachable with TLS handshake timeouts.
+
+The measurement behind it was correct: across 38 scan-worker Jobs, RSS was
+median 31Mi, p90 264Mi, max 754Mi. A 512Mi request really is ~16x the median.
+
+**The inference was wrong, and this plan contained the reason without drawing
+the conclusion.** B2 records that all four k3d "nodes" are containers sharing
+one VM, each advertising the whole thing, so the scheduler believes it has
+24 CPU / 64GiB against a real 6 and 16. What follows — and what the plan failed
+to state — is that **the request is not a reservation on this topology, it is
+the only admission control there is.** Nothing else bounds how much work reaches
+the hardware. Halving it doubled what the scheduler admitted onto a machine that
+had not grown.
+
+B1's table was therefore directionally right and mechanically wrong. The pinning
+is real (measured: 26 concurrent Jobs on `agent-0`, 21 `Pending` at cap 12), but
+"raise the ceiling by lowering requests" removes the brake rather than widening
+the road.
+
+## Two real defects found on the way
+
+Neither was in the plan, and both were doing damage before this started.
+
+**The Flux Kustomization had been broken for hours.** A duplicate
+`scanConcurrencyPerKind` key introduced in PR #151 failed `kustomize build`,
+freezing everything under `k8s/` at its last good revision. It was invisible
+because HelmRelease *chart* upgrades kept flowing normally — they read the chart
+directly — so only the HelmRelease's own values were stale. The live cluster
+reported `scanConcurrency 8 / unpacker 2` while the committed file said 12.
+`check-duplicate-keys` renders the chart and never looks at `k8s/`;
+`check-k8s-manifests` now does, and fails on this exact defect.
+
+**The registry was logging at debug.** `registry:3` ships a config defaulting to
+`level: debug`, which emits a full OpenTelemetry span as JSON for every storage
+operation on every blob of every pull — on the path every scan now takes.
+Observed alongside 50-64MB blob reads taking ~236s each. Nothing collects them.
+
+## Revised view of what cap 24 needs
+
+The plan's ordering was wrong. Requests cannot be lowered to buy scheduling
+headroom on this topology, so Phase 3b as written is off the table — and with 3a
+already rejected on coverage grounds, **the per-scan footprint cannot come down
+at all**. That leaves:
+
+1. **Grow the VM** (Phase 2) — 6→8 CPU, 16→24GiB, the host's practical limit.
+   Requests then admit proportionally more work onto proportionally more
+   hardware, which is the only safe version of this.
+2. **Un-pin trivy/grype** (Phase 1) — still needed, but clearly *after* Phase 2
+   rather than before. Un-pinning without more hardware only spreads the same
+   overload across four fake nodes on one real machine.
+3. **Re-measure the registry** at whatever cap results, with debug logging off
+   for the first time.
+
+Cap 32 remains out of reach on a 32GiB host, for the reasons already stated.
+
+## Honest status
+
+The cluster is back to a known-good state: all nodes `Ready`, load 9.8, cap
+12/12, requests 512Mi, sweep re-enabled, Flux resumed and reconciling. Nothing
+from this attempt is left running.
