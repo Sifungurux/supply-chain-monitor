@@ -114,7 +114,12 @@ registry:
     # held before monitorApi.mirrorArtifacts existed. With mirroring on,
     # every registered image is stored here IN FULL, and single images in
     # this project's own test corpus run past 1.5GB -- so this is sized
-    # for a mirrored fleet rather than for that original use.
+    # for a mirrored fleet rather than for that original use: the
+    # 95-image corpus in testdata/bulk-test-images.json measures 79.5 GB
+    # once mirrored, because `oras copy --recursive` copies every
+    # platform in an index (5.3 per image on average) and not just the
+    # one that gets scanned. 150Gi leaves room for that plus growth on
+    # the 300 GB dev VM.
     #
     # WHAT THIS NUMBER ACTUALLY DOES DEPENDS ON THE STORAGECLASS, and on
     # the one this project develops against it does very little: k3d's
@@ -132,7 +137,7 @@ registry:
     # allowVolumeExpansion: true; local-path does not have it, so there
     # it means deleting and recreating the PVC (cheap while the registry
     # is empty, a re-push of everything mirrored once it is not).
-    size: 50Gi
+    size: 150Gi
   service:
     # NodePort so the registry is reachable from outside the cluster too
     # (oras/docker pushing test images from your own machine, not just
