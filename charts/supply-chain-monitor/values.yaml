@@ -284,7 +284,11 @@ clamav:
     # just sit Pending regardless of what the HPA wants.
     enabled: true
     minReplicas: 2
-    maxReplicas: 10
+    # 10 -> 16. clamav was already sitting at its ceiling of 10 during the
+    # cap-16 rung, which makes it untestable at higher caps: "clamav is
+    # the bottleneck" and "everything is slow" look identical once it is
+    # saturated. Raised so the ramp can tell them apart.
+    maxReplicas: 16
     targetCPUUtilizationPercentage: 70
   resources:
     # ephemeral-storage is declared, not left implicit, because each pod
@@ -957,7 +961,17 @@ monitorApi:
     # `make load-test-clamav` runs. Must stay below
     # monitorApi.scanTimeoutSeconds below -- main.go's runAPIServer
     # refuses to start otherwise (see that value's own comment).
-    activeDeadlineSeconds: 600
+    # 600 -> 1200. THE DEADLINE HAS TO SCALE WITH THE SCAN CAP. At higher
+    # concurrency a scan's wall time stretches from contention even when
+    # nothing is wrong -- and a Job killed by this deadline is recorded
+    # as a failed scan, which in a concurrency ramp is indistinguishable
+    # from a genuine capacity break. That would have manufactured a
+    # "break" at cap 24 regardless of what else was fixed. See
+    # docs/scan-concurrency-plan-24-32.md (B7).
+    #
+    # Must stay below monitorApi.scanTimeoutSeconds -- main.go refuses to
+    # start otherwise -- so the two moved together.
+    activeDeadlineSeconds: 1200
     # Lets an "image"-mode trivy scan-worker Job upload a generated
     # SBOM/SARIF document back to this Service once it's done scanning
     # (see internal/scanner/isolated_trivy.go's IsolatedTrivyConfig.APIBaseURL
@@ -976,7 +990,40 @@ monitorApi:
   # Kubernetes' own activeDeadlineSeconds would even have killed a
   # genuinely stuck Job. Raise both together, keeping this one larger, if
   # you raise scanWorker.activeDeadlineSeconds.
-  scanTimeoutSeconds: 660
+  scanTimeoutSeconds: 1320
+  # CPU/memory envelope for each isolated scan-worker Job.
+  #
+  # THE REQUESTS DECIDE HOW MANY SCANS CAN RUN AT ONCE. Kubernetes
+  # schedules on requests, and the trivy/grype Jobs are pinned to one node
+  # by their ReadWriteOnce DB-cache PVCs -- so the request is multiplied
+  # by the scan cap against a SINGLE node's allocatable memory, not the
+  # cluster's. Measured at cap 12: 26 concurrent Jobs on that node, 13GiB
+  # of a 16GiB budget, and 21 pods Pending at peak.
+  #
+  # 256Mi is measured, not guessed: across 38 scan-worker Jobs on the
+  # 92-artifact fleet, RSS was median 31Mi, p90 264Mi, max 754Mi. The
+  # previous 512Mi request was ~16x the median and reserved capacity
+  # nothing used. The LIMIT is unchanged, so the heavy tail can still
+  # grow into it -- this makes scans schedulable, not more likely to be
+  # killed.
+  #
+  # Requests also feed the kubelet's eviction ranking, so a lower request
+  # means scan Jobs are evicted before other pods under node pressure.
+  # That is the right order: a scan Job is retryable batch work, postgres
+  # and the registry are not.
+  #
+  # Per-kind overrides (…_TRIVY / _GRYPE / _UNPACKER) win over these.
+  scanJobResources:
+    cpuRequest: 100m
+    memoryRequest: 256Mi
+    # Empty = each scanner's own built-in limit (1Gi). grype gets an
+    # override below: its RSS was measured at ~1.043GiB on heavy images
+    # against a 1Gi limit, so it is OOM-killed and the artifact still
+    # reports "scanned" with half its CVE coverage.
+    memoryLimit: ""
+    perKind:
+      grype:
+        memoryLimit: 1536Mi
   # false here (the real in-cluster deployment, which has the
   # ServiceAccount token isolation needs). true is only ever meant for
   # running the monitor-api binary standalone outside Kubernetes -- see

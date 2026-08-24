@@ -750,3 +750,47 @@ func TestPickArtifactsToSweepDeduplicates(t *testing.T) {
 		t.Fatalf("a duplicate consumed a batch slot -- got %d artifact(s), ids %v", len(got), ids)
 	}
 }
+
+// The scan Job REQUEST is what bounds achievable scan concurrency:
+// Kubernetes schedules on requests, and the trivy/grype Jobs are pinned
+// to one node by their ReadWriteOnce DB-cache PVCs, so the request is
+// multiplied by the scan cap against a single node's memory. The
+// defaults are measured (median 31Mi / p90 264Mi / max 754Mi across 38
+// Jobs), so a silent change to them is a silent change to how many scans
+// the cluster can run -- which is exactly the kind of thing that gets
+// "tidied" back to a rounder number later.
+func TestScanJobResourceDefaultsAndOverrides(t *testing.T) {
+	for _, kind := range []string{"trivy", "grype", "unpacker"} {
+		if got := scanJobCPU(kind); got != "100m" {
+			t.Errorf("scanJobCPU(%s) = %q, want 100m", kind, got)
+		}
+		if got := scanJobMem(kind); got != "256Mi" {
+			t.Errorf("scanJobMem(%s) = %q, want 256Mi", kind, got)
+		}
+		// Empty means "the scanner package's own default" -- not zero.
+		if got := scanJobMemLimit(kind); got != "" {
+			t.Errorf("scanJobMemLimit(%s) = %q, want empty", kind, got)
+		}
+	}
+
+	// Per-kind override beats the global one, which is the whole point:
+	// grype needs a bigger LIMIT than the others without changing
+	// anyone's request.
+	t.Setenv("SCAN_JOB_MEMORY_LIMIT", "1Gi")
+	t.Setenv("SCAN_JOB_MEMORY_LIMIT_GRYPE", "1536Mi")
+	if got := scanJobMemLimit("grype"); got != "1536Mi" {
+		t.Errorf("per-kind limit lost: got %q, want 1536Mi", got)
+	}
+	if got := scanJobMemLimit("trivy"); got != "1Gi" {
+		t.Errorf("global limit not applied to trivy: got %q, want 1Gi", got)
+	}
+
+	t.Setenv("SCAN_JOB_MEMORY_REQUEST", "128Mi")
+	t.Setenv("SCAN_JOB_MEMORY_REQUEST_UNPACKER", "512Mi")
+	if got := scanJobMem("unpacker"); got != "512Mi" {
+		t.Errorf("per-kind request lost: got %q, want 512Mi", got)
+	}
+	if got := scanJobMem("trivy"); got != "128Mi" {
+		t.Errorf("global request not applied to trivy: got %q, want 128Mi", got)
+	}
+}

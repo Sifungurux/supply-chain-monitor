@@ -354,6 +354,49 @@ func registryFetcher(plainHTTP bool, dockerConfigPath, username, password string
 // that has wired one push-capable account everywhere (or is using
 // dockerAuth.existingSecret) keeps working, it just does not get the
 // separation.
+// scanJobResources is the CPU/memory envelope every isolated scan-worker
+// Job is created with. Env-driven because the right numbers are a
+// property of the cluster and its corpus, not of this binary -- and
+// because the defaults below are themselves measured, so re-measuring is
+// the expected way to change them.
+//
+// THE REQUESTS ARE WHAT DECIDE HOW MANY SCANS CAN RUN AT ONCE. Kubernetes
+// schedules on requests, and the trivy/grype Jobs are pinned to a single
+// node by their ReadWriteOnce DB-cache PVCs -- so the request is
+// multiplied by the scan cap against ONE node's allocatable memory. At a
+// 512Mi request, 26 concurrent Jobs on that node consumed 13GiB of a
+// 16GiB budget at cap 12, with 21 pods Pending at peak.
+//
+// Measured across 38 scan-worker Jobs on the 92-artifact fleet:
+// median 31Mi, p90 264Mi, max 754Mi. A 512Mi request was ~16x the median
+// and reserved capacity that was never used. 256Mi covers p90; the
+// LIMIT stays where it was, so the heavy tail is still allowed to grow
+// into it and is not made more likely to be killed.
+//
+// The tradeoff is deliberate: requests also feed the kubelet's eviction
+// ranking, so lowering them makes scan Jobs likelier to be evicted first
+// under node pressure. That is the correct order -- a scan Job is
+// retryable batch work, and postgres and the registry are not.
+func scanJobCPU(kind string) string {
+	up := strings.ToUpper(kind)
+	return getenv("SCAN_JOB_CPU_REQUEST_"+up, getenv("SCAN_JOB_CPU_REQUEST", "100m"))
+}
+
+func scanJobMem(kind string) string {
+	up := strings.ToUpper(kind)
+	return getenv("SCAN_JOB_MEMORY_REQUEST_"+up, getenv("SCAN_JOB_MEMORY_REQUEST", "256Mi"))
+}
+
+// scanJobMemLimit is the per-kind LIMIT override. It exists for grype
+// specifically: its RSS was measured at ~1.043GiB on heavy images against
+// a 1Gi limit, so it gets OOM-killed and the artifact still reports
+// "scanned" with half its CVE coverage. Empty means the scanner
+// package's own default, which is what every other kind uses.
+func scanJobMemLimit(kind string) string {
+	up := strings.ToUpper(kind)
+	return getenv("SCAN_JOB_MEMORY_LIMIT_"+up, getenv("SCAN_JOB_MEMORY_LIMIT", ""))
+}
+
 func mirrorDockerConfig(registryAddr, sharedConfigPath string) string {
 	username := os.Getenv("MIRROR_REGISTRY_USERNAME")
 	if username == "" {
@@ -1953,6 +1996,9 @@ func runAPIServer() {
 		// charts/supply-chain-monitor/templates/registry-credentials-secret.yaml.
 		registryCredentialsSecretName := getenv("REGISTRY_CREDENTIALS_SECRET", "")
 		isolatedUnpacker = scanner.NewIsolatedUnpackerScanner(k8sClient, scanner.IsolatedUnpackerConfig{
+			CPURequest:                    scanJobCPU("unpacker"),
+			MemoryRequest:                 scanJobMem("unpacker"),
+			MemoryLimit:                   scanJobMemLimit("unpacker"),
 			Image:                         workerImage,
 			ClamAddr:                      clamAddr,
 			UnpackerBin:                   unpackerBin,
@@ -1980,6 +2026,9 @@ func runAPIServer() {
 		// IsolatedTrivyScanner's comment for why the DB cache is a
 		// separately-refreshed PVC rather than downloaded per scan.
 		isolatedTrivyImage = scanner.NewIsolatedTrivyScanner(k8sClient, scanner.IsolatedTrivyConfig{
+			CPURequest:                    scanJobCPU("trivy"),
+			MemoryRequest:                 scanJobMem("trivy"),
+			MemoryLimit:                   scanJobMemLimit("trivy"),
 			Image:                         workerImage,
 			SubCommand:                    "image",
 			CacheClaimName:                getenv("TRIVY_CACHE_CLAIM", "scm-trivy-db-cache"),
@@ -2021,6 +2070,9 @@ func runAPIServer() {
 		// IsolatedTrivyConfig.FetchPlainHTTP's own comment and
 		// runScanWorker's "sbom" case for where that actually happens.
 		isolatedTrivySBOM = scanner.NewIsolatedTrivyScanner(k8sClient, scanner.IsolatedTrivyConfig{
+			CPURequest:                    scanJobCPU("trivy"),
+			MemoryRequest:                 scanJobMem("trivy"),
+			MemoryLimit:                   scanJobMemLimit("trivy"),
 			Image:                         workerImage,
 			SubCommand:                    "sbom",
 			CacheClaimName:                getenv("TRIVY_CACHE_CLAIM", "scm-trivy-db-cache"),
@@ -2037,6 +2089,9 @@ func runAPIServer() {
 		// grype Job shape nothing ever selects (see cveScannersFor).
 		if cveScanner != "trivy" {
 			isolatedGrypeImage = scanner.NewIsolatedGrypeScanner(k8sClient, scanner.IsolatedGrypeConfig{
+				CPURequest:                    scanJobCPU("grype"),
+				MemoryRequest:                 scanJobMem("grype"),
+				MemoryLimit:                   scanJobMemLimit("grype"),
 				Image:                         workerImage,
 				SubCommand:                    "image",
 				CacheClaimName:                getenv("GRYPE_CACHE_CLAIM", "scm-grype-db-cache"),
@@ -2051,6 +2106,9 @@ func runAPIServer() {
 			// its own copy of the SBOM before scanning it (runScanWorker's
 			// "grype"+"sbom" case).
 			isolatedGrypeSBOM = scanner.NewIsolatedGrypeScanner(k8sClient, scanner.IsolatedGrypeConfig{
+				CPURequest:                    scanJobCPU("grype"),
+				MemoryRequest:                 scanJobMem("grype"),
+				MemoryLimit:                   scanJobMemLimit("grype"),
 				Image:                         workerImage,
 				SubCommand:                    "sbom",
 				CacheClaimName:                getenv("GRYPE_CACHE_CLAIM", "scm-grype-db-cache"),
