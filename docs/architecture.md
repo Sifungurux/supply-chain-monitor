@@ -404,10 +404,17 @@ brings along; verifying the copy would report every signed image in the
 fleet as unsigned. It is also the more correct answer on its own terms —
 the signer signed that identity, not a path in this cluster's registry.
 
-**Cost:** registry disk. Every distinct artifact is stored in full and
-`registry.persistence.size` defaults to 5Gi, which holds only a handful
-of real images. Size it for the fleet being registered before turning
-this on.
+**Cost:** registry disk. Every distinct artifact is stored in full —
+`registry.persistence.size` is 50Gi for that reason, up from the 5Gi that
+suited a registry holding only SBOM/SARIF blobs.
+
+Whether that number *bounds* anything depends on the StorageClass. On
+k3d's local-path provisioner — what this project develops against — it
+does not: the PVC is a host directory with no quota, copies keep
+succeeding past the declared size, and the real ceiling is node disk. A
+PVC reporting room is not evidence of room. On a StorageClass that does
+enforce capacity, exhausting it fails the copy, the artifact keeps its
+upstream ref, and the next scan retries.
 
 ## Scanning pipeline
 

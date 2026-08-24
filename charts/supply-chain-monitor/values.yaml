@@ -110,19 +110,29 @@ registry:
   # today, but cheap to leave on for a throwaway dev registry).
   deleteEnabled: true
   persistence:
-    # 5Gi is enough for the handful of SBOM/SARIF blobs this registry
-    # held before monitorApi.mirrorArtifacts existed. TURN THAT ON AND
-    # THIS IS THE BINDING CONSTRAINT: every registered image is stored
-    # here in full, and single images in this project's own test corpus
-    # run past 1.5GB. Size it for the fleet you register, not for the
-    # default -- a push that fills the PVC fails the copy (the artifact
-    # keeps its upstream ref and the next scan retries), so the symptom
-    # is "mirroring silently never sticks" rather than an outage.
+    # 5Gi was enough for the handful of SBOM/SARIF blobs this registry
+    # held before monitorApi.mirrorArtifacts existed. With mirroring on,
+    # every registered image is stored here IN FULL, and single images in
+    # this project's own test corpus run past 1.5GB -- so this is sized
+    # for a mirrored fleet rather than for that original use.
+    #
+    # WHAT THIS NUMBER ACTUALLY DOES DEPENDS ON THE STORAGECLASS, and on
+    # the one this project develops against it does very little: k3d's
+    # local-path provisioner hands out a host directory and enforces no
+    # quota at all, so copies keep succeeding past this figure and the
+    # real ceiling is the node's own disk. Do not read a green PVC as
+    # headroom -- watch node disk (see docs/architecture.md's mirroring
+    # section, and the DiskPressure evictions the scan-concurrency work
+    # ran into). On a StorageClass that DOES enforce capacity, a push
+    # that runs out fails the copy, the artifact keeps its upstream ref,
+    # and the next scan retries -- so the symptom there is "mirroring
+    # silently never sticks" rather than an outage.
     #
     # Raising this on a live cluster needs a StorageClass with
-    # allowVolumeExpansion: true; k3d's local-path provisioner does not
-    # have it, so there it means recreating the PVC.
-    size: 5Gi
+    # allowVolumeExpansion: true; local-path does not have it, so there
+    # it means deleting and recreating the PVC (cheap while the registry
+    # is empty, a re-push of everything mirrored once it is not).
+    size: 50Gi
   service:
     # NodePort so the registry is reachable from outside the cluster too
     # (oras/docker pushing test images from your own machine, not just

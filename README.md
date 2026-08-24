@@ -810,9 +810,11 @@ keeps its original ref and the next scan tries again.
 
 **Two things to know before turning it on:**
 
-- **Registry disk.** Every artifact is stored in full.
-  `registry.persistence.size` defaults to `5Gi`, which holds only a
-  handful of real images; size it for the fleet you register.
+- **Registry disk.** Every artifact is stored in full;
+  `registry.persistence.size` is `50Gi` for that reason. Note that on
+  k3d's local-path provisioner the PVC is a host directory with no quota,
+  so that figure bounds nothing and node disk is the real ceiling --
+  watch the node, not the PVC.
 - **Bulk registration does not copy inline.** 500 refs in one request
   cannot each wait for a full pull-and-push, so those artifacts keep
   their original ref until their first scan mirrors them -- which the
