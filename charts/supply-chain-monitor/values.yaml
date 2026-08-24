@@ -105,6 +105,13 @@ registry:
     # for the token-auth wiring this version enables.
     tag: "3"
     pullPolicy: IfNotPresent
+  # registry:3's bundled config defaults to debug, which emits an
+  # OpenTelemetry span as JSON for every storage operation on every blob
+  # of every pull. Harmless when this registry served a few SBOM blobs;
+  # real overhead now that every image scan pulls from it. Nothing
+  # collects those spans. Raise to debug only to diagnose the registry
+  # itself.
+  logLevel: info
   # REGISTRY_STORAGE_DELETE_ENABLED=true is needed for anything that ever
   # deletes a tag/manifest (not exercised by this project's own tooling
   # today, but cheap to leave on for a throwaway dev registry).

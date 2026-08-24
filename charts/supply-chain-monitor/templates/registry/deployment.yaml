@@ -37,6 +37,22 @@ spec:
             - name: debug
               containerPort: 5001
           env:
+            # registry:3 ships a config whose default log level is DEBUG,
+            # and at debug it emits a full OpenTelemetry span as JSON for
+            # every storage operation -- Stat, Reader, RedirectURL,
+            # GetContent -- on every blob of every pull. That is pure
+            # overhead on the path every scan now takes since artifact
+            # mirroring landed. Observed during the cap-12 ramp with the
+            # registry serving 50-64MB blobs in ~236s while logging
+            # several KB of span JSON per blob.
+            #
+            # Nothing here reads those spans: there is no collector, and
+            # the debug listener on 5001 (below) is a health endpoint, not
+            # a trace sink.
+            - name: REGISTRY_LOG_LEVEL
+              value: {{ .Values.registry.logLevel | quote }}
+            - name: OTEL_TRACES_EXPORTER
+              value: "none"
             - name: REGISTRY_STORAGE_DELETE_ENABLED
               value: {{ .Values.registry.deleteEnabled | quote }}
             # Distribution's separate debug listener, unauthenticated
