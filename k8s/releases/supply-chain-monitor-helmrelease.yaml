@@ -138,6 +138,33 @@ spec:
       # other deployment silently loses them.
       showConnectionSettings: false
     monitorApi:
+      # Copy every registered artifact into scm-registry and scan the
+      # copy instead of pulling from docker.io/ghcr.io on every scan.
+      # Chart default is false, set true here for the same reason as
+      # maxArtifacts below: this is a decision about THIS cluster, and no
+      # other deployment of the chart should silently start consuming
+      # registry disk.
+      #
+      # Why here specifically: this cluster's scans pull 40 image
+      # artifacts from public registries on every sweep. Anonymous Docker
+      # Hub pull limits are the most common single cause of a failed scan
+      # here, and re-downloading the same layers every fifteen minutes is
+      # the bulk of the egress this cluster does.
+      #
+      # Costs, both already provisioned: registry disk (registry.
+      # persistence.size is 50Gi -- and on this cluster's local-path
+      # StorageClass that figure enforces nothing, so node disk is the
+      # real ceiling) and a push-capable registry account for monitor-api
+      # (MIRROR_REGISTRY_*, rendered from dockerAuth.accounts.writer,
+      # which valuesFrom above already supplies).
+      #
+      # The 40 artifacts registered before this was enabled are
+      # back-filled by the sweep CronJob, paced by its batch size -- they
+      # are neither "registered" nor "failed", so a dedicated pass picks
+      # them up. Expect the fleet to drain over several sweep cycles, not
+      # in one.
+      mirrorArtifacts:
+        enabled: true
       # Cap how many artifacts may exist at once. Set here rather than in
       # the chart, same reasoning as the two dashboard values above: the
       # chart default stays 0 (unlimited), which is what every other
