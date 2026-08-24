@@ -1007,22 +1007,31 @@ monitorApi:
   # cluster's. Measured at cap 12: 26 concurrent Jobs on that node, 13GiB
   # of a 16GiB budget, and 21 pods Pending at peak.
   #
-  # 256Mi is measured, not guessed: across 38 scan-worker Jobs on the
-  # 92-artifact fleet, RSS was median 31Mi, p90 264Mi, max 754Mi. The
-  # previous 512Mi request was ~16x the median and reserved capacity
-  # nothing used. The LIMIT is unchanged, so the heavy tail can still
-  # grow into it -- this makes scans schedulable, not more likely to be
-  # killed.
+  # 512Mi IS NOT WASTE ON THIS TOPOLOGY, EVEN THOUGH IT IS ~16x THE
+  # MEASURED MEDIAN. It was lowered to 256Mi on the reasoning that RSS
+  # across 38 scan-worker Jobs was median 31Mi / p90 264Mi / max 754Mi,
+  # so the request was reserving capacity nothing used. That reasoning is
+  # correct on a cluster whose node allocatable is real. It is wrong
+  # here, and the cluster proved it: the VM hit load average 174 on 6
+  # CPUs with 251MB of 16GB free, and the Kubernetes API itself became
+  # unreachable.
   #
-  # Requests also feed the kubelet's eviction ranking, so a lower request
-  # means scan Jobs are evicted before other pods under node pressure.
-  # That is the right order: a scan Job is retryable batch work, postgres
-  # and the registry are not.
+  # The reason is the k3d topology. All four "nodes" are containers
+  # sharing ONE podman VM, and each advertises that whole VM's 6 CPU /
+  # 16GiB -- so the scheduler believes it has 24 CPU / 64GiB. Nothing
+  # else bounds how much work lands on the real hardware. The request is
+  # therefore not a reservation, it is the ONLY admission control, and
+  # halving it doubled what the scheduler admitted onto a machine that
+  # had not grown.
+  #
+  # Restored to 512Mi. Treat this number as a concurrency brake, not as a
+  # memory estimate, and re-derive it from the VM's real capacity rather
+  # than from per-Job RSS. See docs/scan-concurrency-plan-24-32.md.
   #
   # Per-kind overrides (…_TRIVY / _GRYPE / _UNPACKER) win over these.
   scanJobResources:
-    cpuRequest: 100m
-    memoryRequest: 256Mi
+    cpuRequest: 200m
+    memoryRequest: 512Mi
     # Empty = each scanner's own built-in limit (1Gi). grype gets an
     # override below: its RSS was measured at ~1.043GiB on heavy images
     # against a 1Gi limit, so it is OOM-killed and the artifact still

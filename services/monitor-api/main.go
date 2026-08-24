@@ -379,12 +379,12 @@ func registryFetcher(plainHTTP bool, dockerConfigPath, username, password string
 // retryable batch work, and postgres and the registry are not.
 func scanJobCPU(kind string) string {
 	up := strings.ToUpper(kind)
-	return getenv("SCAN_JOB_CPU_REQUEST_"+up, getenv("SCAN_JOB_CPU_REQUEST", "100m"))
+	return getenv("SCAN_JOB_CPU_REQUEST_"+up, getenv("SCAN_JOB_CPU_REQUEST", "200m"))
 }
 
 func scanJobMem(kind string) string {
 	up := strings.ToUpper(kind)
-	return getenv("SCAN_JOB_MEMORY_REQUEST_"+up, getenv("SCAN_JOB_MEMORY_REQUEST", "256Mi"))
+	return getenv("SCAN_JOB_MEMORY_REQUEST_"+up, getenv("SCAN_JOB_MEMORY_REQUEST", "512Mi"))
 }
 
 // scanJobMemLimit is the per-kind LIMIT override. It exists for grype

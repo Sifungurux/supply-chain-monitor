@@ -755,17 +755,18 @@ func TestPickArtifactsToSweepDeduplicates(t *testing.T) {
 // Kubernetes schedules on requests, and the trivy/grype Jobs are pinned
 // to one node by their ReadWriteOnce DB-cache PVCs, so the request is
 // multiplied by the scan cap against a single node's memory. The
-// defaults are measured (median 31Mi / p90 264Mi / max 754Mi across 38
-// Jobs), so a silent change to them is a silent change to how many scans
-// the cluster can run -- which is exactly the kind of thing that gets
-// "tidied" back to a rounder number later.
+// On k3d every node advertises the WHOLE shared VM, so the request is
+// the only admission control there is -- it is a concurrency brake, not a
+// memory estimate. Lowering it to match measured RSS (median 31Mi) once
+// took the VM to load average 174 and the API server offline. A silent
+// change here is a silent change to how much work reaches the hardware.
 func TestScanJobResourceDefaultsAndOverrides(t *testing.T) {
 	for _, kind := range []string{"trivy", "grype", "unpacker"} {
-		if got := scanJobCPU(kind); got != "100m" {
-			t.Errorf("scanJobCPU(%s) = %q, want 100m", kind, got)
+		if got := scanJobCPU(kind); got != "200m" {
+			t.Errorf("scanJobCPU(%s) = %q, want 200m", kind, got)
 		}
-		if got := scanJobMem(kind); got != "256Mi" {
-			t.Errorf("scanJobMem(%s) = %q, want 256Mi", kind, got)
+		if got := scanJobMem(kind); got != "512Mi" {
+			t.Errorf("scanJobMem(%s) = %q, want 512Mi", kind, got)
 		}
 		// Empty means "the scanner package's own default" -- not zero.
 		if got := scanJobMemLimit(kind); got != "" {
