@@ -165,6 +165,14 @@ spec:
       # in one.
       mirrorArtifacts:
         enabled: true
+      # Highest rung that completed clean in the 2026-08-24 ramp: 13%
+      # faster than 8, where 16 broke the registry for a further 3%. See
+      # docs/scan-concurrency-2026-08-24.md. Raise the registry's memory
+      # limit before raising this again -- at cap 16 the failure was
+      # scm-registry being OOMKilled, not anything about scanning.
+      scanConcurrency: 12
+      scanConcurrencyPerKind:
+        unpacker: 12
       # Cap how many artifacts may exist at once. Set here rather than in
       # the chart, same reasoning as the two dashboard values above: the
       # chart default stays 0 (unlimited), which is what every other

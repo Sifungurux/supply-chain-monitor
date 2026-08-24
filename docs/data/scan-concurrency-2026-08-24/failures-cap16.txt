@@ -1,0 +1,5 @@
+scm-registry.supply-chain-monitor.svc.cluster.local:5000/mirror/ghcr.i | failed | not_found
+scm-registry.supply-chain-monitor.svc.cluster.local:5000/mirror/public | failed | registry_auth_failed
+scm-registry.supply-chain-monitor.svc.cluster.local:5000/mirror/regist | failed | not_found
+scm-registry.supply-chain-monitor.svc.cluster.local:5000/mirror/public | failed | not_found
+scm-registry.supply-chain-monitor.svc.cluster.local:5000/mirror/public | failed | registry_auth_failed

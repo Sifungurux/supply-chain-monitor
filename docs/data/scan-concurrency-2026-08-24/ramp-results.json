@@ -1,0 +1,47 @@
+[
+ {
+  "cap": 8,
+  "artifacts": 40,
+  "wall_s": 599.4,
+  "accepted": 40,
+  "retries_429": 285,
+  "not_scanned": 0,
+  "scan_error_rows": 14,
+  "evicted_new": 0,
+  "oomkilled_new": 0,
+  "imagepullbackoff": 0,
+  "disk_pressure": false,
+  "peak_disk_used_gb": 92.5,
+  "BROKE": false
+ },
+ {
+  "cap": 12,
+  "artifacts": 40,
+  "wall_s": 521.9,
+  "accepted": 40,
+  "retries_429": 174,
+  "not_scanned": 0,
+  "scan_error_rows": 14,
+  "evicted_new": 0,
+  "oomkilled_new": 0,
+  "imagepullbackoff": 0,
+  "disk_pressure": false,
+  "peak_disk_used_gb": 95.8,
+  "BROKE": false
+ },
+ {
+  "cap": 16,
+  "artifacts": 40,
+  "wall_s": 505.3,
+  "accepted": 40,
+  "retries_429": 126,
+  "not_scanned": 5,
+  "scan_error_rows": 49,
+  "evicted_new": 0,
+  "oomkilled_new": 0,
+  "imagepullbackoff": 0,
+  "disk_pressure": false,
+  "peak_disk_used_gb": 92.9,
+  "BROKE": true
+ }
+]

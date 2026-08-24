@@ -1,0 +1,12 @@
+{
+ "restartCount": 4,
+ "lastState": {
+  "terminated": {
+   "containerID": "containerd://16a5da1d9b80d0ea9ccc0f06694dc66c3508b66ed529d8c2c445350c4b3898fc",
+   "exitCode": 137,
+   "finishedAt": "2026-08-24T16:51:36Z",
+   "reason": "OOMKilled",
+   "startedAt": "2026-08-24T16:44:40Z"
+  }
+ }
+}
