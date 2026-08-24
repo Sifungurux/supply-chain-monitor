@@ -10,3 +10,19 @@ services/monitor-api/monitor-api
 # Extracted from the built image by `make test-image` so the tool-gated
 # scanner tests can run against the real binaries; removed by that target.
 .tool-bin/
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh auth *)",
+      "Bash(gh repo *)",
+      "mcp__plugin_claude-mem_mcp-search__get_observations",
+      "mcp__obsidian-vault__obsidian_list_files_in_dir",
+      "mcp__obsidian-vault__obsidian_get_file_contents",
+      "mcp__obsidian-vault__obsidian_put_content",
+      "mcp__obsidian-vault__obsidian_append_content"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "claude-flow"
+  ]
+}

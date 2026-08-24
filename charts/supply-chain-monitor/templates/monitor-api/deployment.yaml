@@ -215,6 +215,26 @@ spec:
                 secretKeyRef:
                   name: scm-registry-credentials
                   key: REGISTRY_PASSWORD
+{{- if .Values.monitorApi.mirrorArtifacts.enabled }}
+            # The push-capable account, used ONLY for `oras copy`'s
+            # destination (main.go builds a second, mirror-only docker
+            # config from it). Deliberately not the REGISTRY_USERNAME/
+            # PASSWORD pair above: those same two Secret keys are read by
+            # every scan-worker Job, which runs scanner binaries over
+            # untrusted image content and has no business being able to
+            # write to the registry it pulls from. This pair is mounted
+            # here and nowhere else.
+            - name: MIRROR_REGISTRY_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: scm-registry-credentials
+                  key: MIRROR_REGISTRY_USERNAME
+            - name: MIRROR_REGISTRY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: scm-registry-credentials
+                  key: MIRROR_REGISTRY_PASSWORD
+{{- end }}
           readinessProbe:
             httpGet:
               # /readyz, NOT /healthz: this one actually pings Postgres,

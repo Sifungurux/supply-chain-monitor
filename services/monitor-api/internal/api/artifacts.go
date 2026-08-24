@@ -163,7 +163,7 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 	// Best-effort digest resolution + duplicate check, before Create --
 	// see resolveDigest's own comment for why an empty digest here just
 	// means "proceed without dedup," not a failure.
-	digest := h.resolveDigest(r.Context(), req.Ref, t)
+	digest := h.resolveDigest(r.Context(), req.Ref)
 
 	// unsafe (REQUIRE_DIGEST only) and the reject-on-mismatch path below
 	// (the pre-existing, opt-in-per-request behavior) are mutually
@@ -255,6 +255,13 @@ func (h *handler) createArtifact(w http.ResponseWriter, r *http.Request) {
 			a = updated
 		}
 	}
+	// Copy it into the in-cluster registry and answer with the rewritten
+	// ref, so the caller can see immediately what its artifact will
+	// actually be scanned from. Inline (and therefore slow -- this is a
+	// full pull and push) only on this single-artifact path;
+	// bulkCreateArtifacts cannot afford it and leaves the copy to the
+	// first scan instead. Best-effort either way: see mirrorArtifact.
+	a = h.mirrorArtifact(r.Context(), a)
 	writeJSON(w, http.StatusCreated, a)
 }
 
@@ -314,6 +321,15 @@ const maxBulkArtifacts = 500
 // instead of failing the whole request on the first bad one -- the same
 // "one failure shouldn't block everything else" reasoning
 // scanArtifact's own per-scanner error handling already uses.
+//
+// DOES NOT MIRROR, unlike createArtifact. Copying an image into the
+// local registry is a full pull-and-push; 500 of them inside one HTTP
+// request is not a slow endpoint, it is a broken one (see
+// cluster/load-test-clamav.sh, which re-registers 100 images on every
+// run and expects this to stay fast). Entries register with their
+// original ref and the first scan mirrors them -- runScan calls
+// mirrorArtifact too, which makes the sweep-registered CronJob the
+// backfill for the whole batch. See mirror.go.
 func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 	// maxBulkArtifacts (500) below bounds the number of entries, but
 	// only once the whole body is already decoded into memory -- this
@@ -362,7 +378,7 @@ func (h *handler) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 					refErrs[i] = err
 					return
 				}
-				digests[i] = h.resolveDigest(r.Context(), ref, t)
+				digests[i] = h.resolveDigest(r.Context(), ref)
 			}(i, item.Ref, t)
 		}
 		wg.Wait()
@@ -652,8 +668,9 @@ func (h *handler) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	// is a truthful answer to "show me artifacts with status=banana,"
 	// where a 400 would just be a second enum to keep in sync.
 	//
-	// q is the same: a case-insensitive substring across ref, digest,
-	// maintainer team/email and current stage, bound as a parameter
+	// q is the same: a case-insensitive substring across ref,
+	// source_ref, digest, maintainer team/email and current stage,
+	// bound as a parameter
 	// with its LIKE metacharacters escaped by the store. Total counts
 	// the SEARCH result, so X-Total-Count and the Link headers all
 	// describe the same filtered set.

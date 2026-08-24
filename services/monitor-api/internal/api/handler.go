@@ -28,6 +28,13 @@ type handler struct {
 	// not an error.
 	digestResolver scanner.DigestResolver
 	fetchPlainHTTP bool
+	// mirror copies newly-registered artifacts into the in-cluster
+	// registry and rewrites their ref to the copy, so later scans pull
+	// from scm-registry rather than docker.io/ghcr.io. nil disables the
+	// whole feature -- which is how every deployment behaved before it
+	// existed, how a deployment with no REGISTRY_ADDR behaves, and how
+	// every test that doesn't care about it behaves. See mirror.go.
+	mirror scanner.Mirror
 	// scanTimeout bounds the shared budget scanArtifact gives every
 	// scanner registered for one artifact type (see that method's own
 	// comment on why it's deliberately not derived from r.Context()).
@@ -259,17 +266,24 @@ const digestResolveTimeout = 8 * time.Second
 // failure is logged here and nowhere else -- callers should never treat
 // an empty result as a reason to fail the registration it's part of
 // (see Artifact.Digest's own comment).
-func (h *handler) resolveDigest(ctx context.Context, ref string, t artifact.Type) string {
+func (h *handler) resolveDigest(ctx context.Context, ref string) string {
 	if h.digestResolver == nil {
 		return ""
 	}
-	// Image refs point at real, HTTPS-by-default registries (Docker
-	// Hub, ghcr.io, ...). FETCH_PLAIN_HTTP only ever describes the one
-	// local, unauthenticated scm-registry that file/sbom/sarif
-	// registry refs point at (see RegistryFetcher's own comment) --
-	// applying it to image refs too would mean trying plain HTTP
-	// against a real registry and failing every single time.
-	plainHTTP := t != artifact.TypeImage && h.fetchPlainHTTP
+	// FETCH_PLAIN_HTTP describes ONE host: the in-cluster scm-registry.
+	// Applying it to a ref naming docker.io would mean trying plain HTTP
+	// against a real registry and failing every time -- so ask which host
+	// this ref actually names rather than guessing from the artifact
+	// type.
+	//
+	// The type check this replaced ("image refs always point at real,
+	// HTTPS-by-default registries") stopped being true the moment
+	// mirroring landed: a mirrored image ref points at scm-registry, and
+	// on a plain-HTTP quickstart cluster the digest backfill in
+	// scanArtifact would have failed on every one of them. Same
+	// expression OrasMirror.verify uses, and the same host-scoping the
+	// unpacker/fetcher switches already went through (report S4 leg 3).
+	plainHTTP := h.fetchPlainHTTP && scanner.InsecureTransportAllowed(ref)
 
 	rctx, cancel := context.WithTimeout(ctx, digestResolveTimeout)
 	defer cancel()

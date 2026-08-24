@@ -120,11 +120,36 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, updated)
 }
 
-// runScan is everything the old synchronous handler did after the status
-// flip, minus the HTTP response. It owns the scan slot and must release
-// it on every path, including a panic -- a leaked slot permanently
-// shrinks the cap, and enough of them would stop scanning entirely.
+// runScan scans, then mirrors -- in that order, and with the scan slot
+// held only for the first half.
+//
+// MIRRORING AFTER THE SCAN, NOT BEFORE, IS THE WHOLE POINT OF THE SPLIT.
+// A copy is a full pull-and-push bounded by mirrorTimeout; run inside
+// the slot it would, on any artifact whose copy is slow or failing (an
+// unreachable registry, a full PVC, credentials without push), hold that
+// slot for up to fifteen minutes without scanning anything -- and the
+// sweep CronJob would re-enter it every fifteen minutes on every
+// un-mirrored artifact at once, jamming the cap with work that produces
+// no findings.
+//
+// Scanning first costs one upstream pull on an artifact's FIRST scan,
+// which is exactly what happens today; every scan after it reads the
+// mirrored ref and never leaves the cluster.
 func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, release func()) {
+	h.scanHoldingSlot(a, scanners, release)
+	// Deliberately not derived from any request context, and outside the
+	// slot: see mirrorArtifact, which is also what registration calls.
+	// This is the backfill path -- bulk-registered artifacts, artifacts
+	// that predate the feature, and copies that failed last time.
+	h.mirrorArtifact(context.Background(), a)
+}
+
+// scanHoldingSlot is everything the old synchronous handler did after
+// the status flip, minus the HTTP response. It owns the scan slot and
+// must release it on every path, including a panic -- a leaked slot
+// permanently shrinks the cap, and enough of them would stop scanning
+// entirely.
+func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scanner, release func()) {
 	defer release()
 	// Counted here rather than in scanArtifact: this is the funnel every
 	// scan actually passes through, and a request that was rejected
@@ -227,7 +252,11 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 				// per signed image would bury the unsigned ones -- so
 				// without this a signed image is indistinguishable from
 				// this scanner being switched off.
-				findings, provenance, provenanceTrustRoot, scanErr = impl.ScanProvenance(ctx, a.Ref)
+				// provenanceRef, not a.Ref: a mirrored copy does not
+				// carry cosign's sibling .sig tag, and the signature was
+				// made about the original identity anyway. See
+				// mirror.go's provenanceRef.
+				findings, provenance, provenanceTrustRoot, scanErr = impl.ScanProvenance(ctx, provenanceRef(a))
 			case scanner.ArtifactAwareScanner:
 				// Isolated scanners: the Job uploads its own documents
 				// back through POST /documents (main.go's
@@ -395,7 +424,7 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 	if digest == "" {
 		// context.Background(), not a request context: the HTTP request
 		// that started this scan returned 202 long ago.
-		digest = h.resolveDigest(context.Background(), a.Ref, a.Type)
+		digest = h.resolveDigest(context.Background(), a.Ref)
 	}
 
 	now := time.Now().UTC()

@@ -291,6 +291,131 @@ Three things this gets right that are easy to get wrong:
   explicitly, or the two formats disagree by exactly one row for the
   same image.
 
+### Mirroring artifacts into the local registry
+
+With `monitorApi.mirrorArtifacts.enabled` (`MIRROR_ARTIFACTS`) on,
+registration copies the artifact into `scm-registry` and rewrites
+`Artifact.Ref` to the copy, keeping the ref it was registered with in
+`Artifact.SourceRef`. Because every scanner reads `Ref`, that one
+rewrite is what takes the public registry out of the scanning path:
+
+    registered:  ghcr.io/acme/checkout:2.4.1
+    stored ref:  scm-registry:5000/mirror/ghcr.io/acme/checkout:2.4.1
+    source_ref:  ghcr.io/acme/checkout:2.4.1
+
+The public registry is the least reliable participant in a scan.
+Anonymous Docker Hub pull limits are the most common single cause of a
+scan failing here; an upstream tag can move or vanish under an artifact
+that has already been assessed; and every re-scan re-downloads the same
+gigabytes. Mirrored, an artifact is pulled from upstream once and every
+scan after that is a same-cluster pull of the exact bytes registered.
+
+**Mechanics** (`internal/scanner/mirror.go`, `internal/api/mirror.go`):
+
+- `oras copy --recursive` does the copy — the same binary already used
+  for `oras pull`/`oras manifest fetch`, authenticating to both ends from
+  the one merged docker config (`--from-registry-config` /
+  `--to-registry-config`). Only the destination may be downgraded to
+  plain HTTP, and only when `InsecureTransportAllowed` agrees it is this
+  deployment's own registry.
+- **A zero exit is not proof.** The destination ref is then resolved and
+  required to equal the source digest before anything is rewritten. OCI
+  refs are content-addressed, so a mismatch — or a destination that will
+  not resolve — means a partial push or a wrong destination name, both of
+  which otherwise produce a ref that looks fine and scans as nothing.
+- `ref` and `source_ref` are written in **one** `Update`. A half-applied
+  rewrite would leave a local ref with no record of where it came from,
+  and there is no way back from that.
+- **Best-effort throughout.** A registry that is unreachable, refusing
+  the push, or out of disk leaves the artifact on its original ref; the
+  next scan retries. Nothing fails a registration or a scan over it.
+
+**Who mirrors what.** `POST /api/v1/artifacts` copies inline and answers
+with the rewritten ref. `POST /api/v1/artifacts/bulk` deliberately does
+not — 500 refs in one request cannot each wait for a full pull-and-push
+— so bulk-registered artifacts keep their original ref until their first
+scan. `runScan` calls the same `mirrorArtifact`, which makes the existing
+`sweep-registered` CronJob the backfill for everything registration
+skipped: bulk batches, artifacts registered before this feature existed,
+and copies that failed the first time.
+
+`runScan` mirrors **after** the scan and **outside** the scan slot. A
+copy is bounded by `mirrorTimeout` (15 minutes); run inside the slot, an
+artifact whose copy is slow or failing would hold that slot for the full
+timeout without scanning anything, and the sweep would re-enter it every
+15 minutes on every un-mirrored artifact at once. Scanning first costs
+one upstream pull on an artifact's *first* scan — which is what happens
+today anyway; every scan after it reads the mirrored ref.
+
+A copy that started before another one finished is refused at the
+`Update`, which re-checks `ref`/`source_ref` against the row as it is
+*now* rather than the snapshot the copy began with. Nothing serializes
+scans of one artifact (slots are per scanner kind), and the loser of that
+race would otherwise write the winner's mirrored ref into `source_ref`,
+destroying the upstream ref permanently.
+
+**Credentials, and why they are a second pair.** Mirroring PUSHES, and
+monitor-api's usual account is `scm-reader`, whose docker_auth ACL is
+`actions: ["pull"]` — verified against the live registry, a copy
+attempted with it is refused with
+`unauthorized … Action:push Name:mirror/…`. But `REGISTRY_USERNAME`/
+`REGISTRY_PASSWORD` are not monitor-api's alone: every scan-worker Job
+reads those same two Secret keys, and those Jobs run scanner binaries
+over untrusted image content. Giving them push access to the registry
+that holds the mirrored copies — copies this service then scans — would
+put a write path into the artifact store one exploited scanner away.
+
+So the shared pair stays the reader, and `MIRROR_REGISTRY_USERNAME`/
+`PASSWORD` (`scm-writer`, `["pull", "push"]` on every repository, so the
+`mirror/` prefix needs no new ACL) is rendered only when mirroring is on
+and mounted only on the monitor-api Deployment. main.go merges it into
+its own docker config, handed to `oras copy` as `--to-registry-config`
+while the source side keeps the shared one — the split is expressible
+only because `copy` takes the two separately. The chart refuses to render
+if the writer account has no password. A deployment using
+`dockerAuth.existingSecret` supplies both pairs itself.
+
+**Backfilling the fleet that already exists.** Mirroring happens as a
+side effect of registration and of scanning, so an artifact registered
+before the feature was enabled sits at `status=scanned` and is touched by
+none of the sweep's usual passes — it is neither `registered` nor
+`failed`, and staleness rescanning is off by default. `SWEEP_MIRROR_BACKFILL`
+(set from the same values key) adds one pass over scanned artifacts with
+an empty `source_ref`, paced by `SWEEP_BATCH_SIZE` like everything else
+and sharing its listing with the stale-rescan pass, which reads the same
+population.
+
+It converges as work — every scan settles `source_ref`, to the mirrored
+ref or (for a local path or a ref already in this registry) to the
+artifact's own ref, so the pass stops queueing anything. Without that
+second case "not mirrored yet" and "never mirrorable" would look
+identical and the backfill would revisit the same artifacts forever.
+
+This is also the first sweep pass that selects on something other than
+status, so `all` can now contain the same artifact twice (stale *and*
+unmirrored). `pickArtifactsToSweep` deduplicates by id: a duplicate would
+otherwise eat two of the batch's slots and issue a second `POST /scan`
+racing the first.
+
+**Signature verification still runs against `source_ref`.** cosign's
+classic signatures live at a sibling `sha256-<digest>.sig` *tag*, which
+is not an OCI referrer and so is not something `oras copy --recursive`
+brings along; verifying the copy would report every signed image in the
+fleet as unsigned. It is also the more correct answer on its own terms —
+the signer signed that identity, not a path in this cluster's registry.
+
+**Cost:** registry disk. Every distinct artifact is stored in full —
+`registry.persistence.size` is 50Gi for that reason, up from the 5Gi that
+suited a registry holding only SBOM/SARIF blobs.
+
+Whether that number *bounds* anything depends on the StorageClass. On
+k3d's local-path provisioner — what this project develops against — it
+does not: the PVC is a host directory with no quota, copies keep
+succeeding past the declared size, and the real ceiling is node disk. A
+PVC reporting room is not evidence of room. On a StorageClass that does
+enforce capacity, exhausting it fails the copy, the artifact keeps its
+upstream ref, and the next scan retries.
+
 ## Scanning pipeline
 
 `internal/scanner/scanner.go`'s `Registry` maps an artifact type to a

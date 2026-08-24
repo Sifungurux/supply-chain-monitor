@@ -338,6 +338,34 @@ func registryFetcher(plainHTTP bool, dockerConfigPath, username, password string
 	return scanner.NewRegistryFetcher(plainHTTP, username, password)
 }
 
+// mirrorDockerConfig returns the docker config `oras copy` authenticates
+// with, which is NOT the one every other registry path here shares.
+//
+// Copying PUSHES, and the shared REGISTRY_USERNAME/PASSWORD pair is
+// deliberately the read-only account: those exact two Secret keys are
+// also read by every scan-worker Job (see isolated_trivy.go /
+// isolated_grype.go), and a Job running scanner binaries over untrusted
+// image content must not be able to write to the registry whose contents
+// this service then scans. So the push credential lives in its own pair,
+// mounted only on the API pod, and is merged into its own config file
+// that only this one caller is ever handed.
+//
+// Falls back to the shared config when the pair is unset -- a deployment
+// that has wired one push-capable account everywhere (or is using
+// dockerAuth.existingSecret) keeps working, it just does not get the
+// separation.
+func mirrorDockerConfig(registryAddr, sharedConfigPath string) string {
+	username := os.Getenv("MIRROR_REGISTRY_USERNAME")
+	if username == "" {
+		return sharedConfigPath
+	}
+	// authDir "" on purpose: this file exists to authenticate the
+	// DESTINATION, which is always scm-registry. The source side of a
+	// copy is covered by the shared config's other hosts -- see
+	// OrasMirror.copyArgs, which passes them as two different flags.
+	return writeDockerConfig(registryAddr, username, os.Getenv("MIRROR_REGISTRY_PASSWORD"), "")
+}
+
 func digestResolverFor(dockerConfigPath, username, password string) *scanner.OrasDigestResolver {
 	if dockerConfigPath != "" {
 		return scanner.NewOrasDigestResolverWithConfig(dockerConfigPath)
@@ -970,18 +998,60 @@ func runSweepRegistered() {
 	// those rescans then all age out together on the same future day.
 	// The batch is what keeps that from becoming a thundering herd
 	// against the (now cluster-wide) scan concurrency cap.
-	if days := getenvInt("SWEEP_RESCAN_STALE_AFTER_DAYS", 0); days > 0 {
-		cutoff := time.Now().UTC().AddDate(0, 0, -days)
-		if scanned, err := listByStatusFromAPI(ctx, apiBase, apiKey, artifact.StatusScanned); err != nil {
-			log.Printf("sweep-registered: could not list scanned artifacts for stale rescan (continuing): %v", err)
-		} else if stale := staleScans(scanned, cutoff); len(stale) > 0 {
-			log.Printf("sweep-registered: %d artifact(s) last scanned before %s -- rescanning (SWEEP_RESCAN_STALE_AFTER_DAYS=%d)",
-				len(stale), cutoff.Format(time.RFC3339), days)
-			all = append(all, stale...)
+	// The two passes below both work off the SAME population -- every
+	// artifact at status "scanned" -- so it is listed once and shared.
+	// Listing it twice would be two full paginations of the largest
+	// status there is, and ListPage batch-loads each artifact's findings
+	// and stage history (see listArtifacts' own comment on why that
+	// payload is worth not asking for twice).
+	staleDays := getenvInt("SWEEP_RESCAN_STALE_AFTER_DAYS", 0)
+	mirrorBackfill := getenvBool("SWEEP_MIRROR_BACKFILL", false)
+	if staleDays > 0 || mirrorBackfill {
+		scanned, err := listByStatusFromAPI(ctx, apiBase, apiKey, artifact.StatusScanned)
+		if err != nil {
+			log.Printf("sweep-registered: could not list scanned artifacts (continuing without stale rescan or mirror backfill): %v", err)
+		} else {
+			if staleDays > 0 {
+				cutoff := time.Now().UTC().AddDate(0, 0, -staleDays)
+				if stale := staleScans(scanned, cutoff); len(stale) > 0 {
+					log.Printf("sweep-registered: %d artifact(s) last scanned before %s -- rescanning (SWEEP_RESCAN_STALE_AFTER_DAYS=%d)",
+						len(stale), cutoff.Format(time.RFC3339), staleDays)
+					all = append(all, stale...)
+				}
+				// No separate pass for "failed" here: every failed
+				// artifact is already collected above, on every run,
+				// rather than only once it has aged out.
+			}
+			// Artifacts that have never had mirroring settled (source_ref
+			// empty).
+			//
+			// THIS IS THE BACKFILL FOR THE FLEET THAT ALREADY EXISTS.
+			// Mirroring happens as a side effect of registration and of
+			// scanning, so an artifact registered before the feature was
+			// turned on -- or in bulk, which never copies inline -- sits
+			// at "scanned" and is touched by none of the passes above:
+			// staleness is off by default, and a successfully-scanned
+			// artifact is neither "registered" nor "failed". Without this
+			// pass, "copy what is already registered" would simply never
+			// happen for the population it was about.
+			//
+			// Converges as WORK, though not as a query: every scan
+			// settles source_ref one way or the other -- to the mirrored
+			// ref, or (for a local path or a ref already in this
+			// registry) to the ref itself, see internal/api's
+			// mirrorArtifact -- so this stops queueing anything. The
+			// listing itself still happens each run; sharing it with the
+			// stale pass above is what keeps that from costing anything
+			// extra. Paced by SWEEP_BATCH_SIZE like every other pass, so
+			// turning mirroring on does not rescan the whole fleet at
+			// once.
+			if mirrorBackfill {
+				if unmirrored := unmirroredArtifacts(scanned); len(unmirrored) > 0 {
+					log.Printf("sweep-registered: %d scanned artifact(s) not mirrored into the local registry yet -- rescanning to mirror them", len(unmirrored))
+					all = append(all, unmirrored...)
+				}
+			}
 		}
-		// No separate pass for "failed" here: every failed artifact is
-		// already collected above, on every run, rather than only once
-		// it has aged out.
 	}
 
 	toScan := pickArtifactsToSweep(all, batchSize)
@@ -1034,7 +1104,23 @@ func pickArtifactsToSweep(all []artifact.Artifact, batchSize int) []artifact.Art
 	if batchSize <= 0 {
 		return nil
 	}
-	eligible := append([]artifact.Artifact(nil), all...)
+	// Deduplicated by id, because the passes feeding `all` are no longer
+	// disjoint. They used to be -- one per status, with an explicit
+	// "failed artifacts are already collected above" note keeping it that
+	// way -- but the mirror backfill selects on source_ref, not status,
+	// so an artifact that is BOTH stale and unmirrored arrives twice.
+	// Left in, it would eat two of the batch's slots and be POSTed to
+	// /scan twice in one run, the second call racing the first for a
+	// scan slot it does not need.
+	seen := make(map[string]struct{}, len(all))
+	eligible := make([]artifact.Artifact, 0, len(all))
+	for _, a := range all {
+		if _, dup := seen[a.ID]; dup {
+			continue
+		}
+		seen[a.ID] = struct{}{}
+		eligible = append(eligible, a)
+	}
 	sort.Slice(eligible, func(i, j int) bool {
 		// LEAST RECENTLY ATTEMPTED first, which is what keeps a
 		// permanently-broken artifact from monopolising every batch.
@@ -1130,6 +1216,20 @@ func listRegisteredFromAPI(ctx context.Context, apiBase, apiKey string) ([]artif
 // (200 max) newest-first, while pickArtifactsToSweep wants the oldest,
 // so stopping after one page would starve exactly the backlog the sweep
 // exists to work through.
+// unmirroredArtifacts returns the artifacts whose mirroring has never
+// been settled. Empty source_ref means exactly that -- not "could not be
+// mirrored", which mirrorArtifact records by setting source_ref to the
+// ref itself precisely so this filter terminates.
+func unmirroredArtifacts(list []artifact.Artifact) []artifact.Artifact {
+	var out []artifact.Artifact
+	for _, a := range list {
+		if a.SourceRef == "" {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 func listByStatusFromAPI(ctx context.Context, apiBase, apiKey string, status artifact.Status) ([]artifact.Artifact, error) {
 	var all []artifact.Artifact
 	for offset := 0; ; {
@@ -2027,6 +2127,30 @@ func runAPIServer() {
 	// image refs never use it regardless of this setting.
 	digestResolver := digestResolverFor(dockerConfigPath, registryUsername, registryPassword)
 
+	// MIRROR_ARTIFACTS: copy every registered artifact into this
+	// cluster's own registry and scan the copy, instead of pulling from
+	// docker.io/ghcr.io on every single scan. One switch, deliberately:
+	// an empty REGISTRY_ADDR already means "there is no local registry",
+	// and NewOrasMirror returns nil for it -- which is exactly what the
+	// handler reads as "off". Off by default here so the chart, not the
+	// binary's default, is what turns it on; see values.yaml for the
+	// registry-disk cost it carries.
+	//
+	// The same merged docker config every other registry path uses:
+	// `oras copy` has to authenticate to BOTH ends, and this one file
+	// already holds the public source's credentials and scm-registry's
+	// keyed by host.
+	var artifactMirror scanner.Mirror
+	if getenvBool("MIRROR_ARTIFACTS", false) {
+		if m := scanner.NewOrasMirror(registryAddr, getenv("MIRROR_REPO_PREFIX", scanner.DefaultMirrorRepoPrefix), fetchPlainHTTP, dockerConfigPath, mirrorDockerConfig(registryAddr, dockerConfigPath), digestResolver); m != nil {
+			artifactMirror = m
+			slog.Info("artifact mirroring is on: registered artifacts are copied into the local registry and scanned from there",
+				"registry", registryAddr, "repo_prefix", m.RepoPrefix)
+		} else {
+			log.Printf("MIRROR_ARTIFACTS=true but REGISTRY_ADDR is empty -- nothing to mirror into, artifacts keep their original refs")
+		}
+	}
+
 	// REQUIRE_DIGEST -- see NewRouter's own comment for the full
 	// behavior this gates. Off by default: turning it on is a real
 	// policy change (expected_digest becomes a required field on every
@@ -2134,6 +2258,7 @@ func runAPIServer() {
 		RateLimitRPS:       rateLimitRPS,
 		RateLimitBurst:     rateLimitBurst,
 		DigestResolver:     digestResolver,
+		Mirror:             artifactMirror,
 		FetchPlainHTTP:     fetchPlainHTTP,
 		ScanTimeout:        scanTimeout,
 		RequireDigest:      requireDigest,

@@ -288,6 +288,10 @@
     font-family: var(--font-mono); font-size: 13px;
     color: var(--text-muted); margin-bottom: 14px; word-break: break-all;
   }
+  .detail-source-ref {
+    font-size: 13px; color: var(--text-muted); margin: -8px 0 14px; word-break: break-all;
+  }
+  .detail-source-ref code { font-family: var(--font-mono); }
   .risk-spectrum, .risk-spectrum-empty { margin: 4px 0 26px; }
   .risk-bar { display: flex; height: 10px; border-radius: var(--radius-pill); overflow: hidden; background: var(--border-faint); gap: 3px; }
   .risk-seg { display: block; }
@@ -341,7 +345,7 @@
     <section>
       <h2>Artifacts</h2>
       <div class="search-row">
-        <input type="search" id="search-input" placeholder="Search ref, digest, maintainer, stage, CVE/malware id or title…" />
+        <input type="search" id="search-input" placeholder="Search ref, source ref, digest, maintainer, stage, CVE/malware id or title…" />
       </div>
       <div class="search-row">
         <input type="search" id="component-input" aria-label="Find artifacts containing a component"
@@ -1896,6 +1900,16 @@
       '</div>' +
       '<h2 class="detail-ref">' + esc(a.ref) + '</h2>' +
       '<div class="detail-digest">' + (a.digest ? esc(a.digest) : '<span class="muted">digest not resolved</span>') + '</div>' +
+      // Where it came from, when the ref above is an in-cluster mirror
+      // of something else. Without this the detail page shows only
+      // "scm-registry/mirror/docker.io/library/nginx:alpine" and the
+      // fact that this IS Docker Hub's nginx is invisible.
+      // source_ref equal to ref means "mirroring was settled and there
+      // was nothing to copy" (a local path, or a ref already in this
+      // registry) -- a real record, but not a mirror worth announcing.
+      (a.source_ref && a.source_ref !== a.ref
+        ? '<div class="detail-source-ref">mirrored from <code>' + esc(a.source_ref) + '</code></div>'
+        : '') +
       '<div class="modal-meta">' +
         '<span>' + esc(a.type) + '</span>' +
         '<span>' + statusBadge(a) + unsafeBadge(a) + staleBadge(a) + provenanceBadge(a) + '<span id="policy-badge"></span></span>' +

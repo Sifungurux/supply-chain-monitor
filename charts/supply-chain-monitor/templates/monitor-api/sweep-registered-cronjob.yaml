@@ -92,6 +92,16 @@ spec:
                 # this did before the two were split.
                 - name: SWEEP_RESCAN_STALE_AFTER_DAYS
                   value: {{ if .Values.monitorApi.scanFreshness.autoRescan }}{{ default .Values.monitorApi.scanFreshness.warnAfterDays .Values.monitorApi.scanFreshness.rescanAfterDays | quote }}{{ else }}"0"{{ end }}
+                # Adds one more pass: already-scanned artifacts that have
+                # never had mirroring settled (source_ref empty), rescanned
+                # so the copy happens. Without it, "copy what is already
+                # registered" would never reach the artifacts registered
+                # before mirroring was turned on -- they are neither
+                # "registered" nor "failed", and staleness rescanning is
+                # off by default. Paced by SWEEP_BATCH_SIZE and it
+                # converges: each scan settles source_ref either way.
+                - name: SWEEP_MIRROR_BACKFILL
+                  value: {{ .Values.monitorApi.mirrorArtifacts.enabled | quote }}
                 - name: SWEEP_API_KEY
                   valueFrom:
                     secretKeyRef:

@@ -692,3 +692,61 @@ func TestSetupLogging_WritesJSONToStderr(t *testing.T) {
 		t.Errorf("line = %v, want msg and artifact_id carried as fields", line)
 	}
 }
+
+// The mirror backfill's whole job is to find artifacts registration
+// never mirrored -- and, just as importantly, to STOP finding the ones
+// that were settled as unmirrorable. Without the second half the sweep
+// would rescan every local-path artifact on every run, forever, waiting
+// for a copy that is never going to happen.
+func TestUnmirroredArtifacts(t *testing.T) {
+	list := []artifact.Artifact{
+		{ID: "never-mirrored", Ref: "ghcr.io/acme/app:1.0"},
+		{ID: "mirrored", Ref: "scm-registry:5000/mirror/ghcr.io/acme/app:1.0", SourceRef: "ghcr.io/acme/app:1.0"},
+		// Settled as "nothing to copy": source_ref equals ref. Must not
+		// come back, or the backfill never converges.
+		{ID: "not-mirrorable", Ref: "/var/lib/artifacts/report.json", SourceRef: "/var/lib/artifacts/report.json"},
+	}
+	got := unmirroredArtifacts(list)
+	if len(got) != 1 || got[0].ID != "never-mirrored" {
+		ids := make([]string, len(got))
+		for i, a := range got {
+			ids[i] = a.ID
+		}
+		t.Fatalf("unmirroredArtifacts returned %v, want just [never-mirrored]", ids)
+	}
+	if out := unmirroredArtifacts(nil); len(out) != 0 {
+		t.Errorf("unmirroredArtifacts(nil) = %v, want empty", out)
+	}
+}
+
+// The passes feeding pickArtifactsToSweep stopped being disjoint when
+// the mirror backfill started selecting on source_ref rather than on
+// status: an artifact that is both stale and unmirrored arrives twice.
+// A duplicate costs a batch slot AND a second POST /scan for work
+// already in flight.
+func TestPickArtifactsToSweepDeduplicates(t *testing.T) {
+	scanned := time.Now().UTC().Add(-90 * 24 * time.Hour)
+	both := artifact.Artifact{ID: "stale-and-unmirrored", Ref: "ghcr.io/acme/app:1.0", LastScanAt: &scanned}
+	other := artifact.Artifact{ID: "just-registered", Ref: "ghcr.io/acme/other:1.0"}
+
+	got := pickArtifactsToSweep([]artifact.Artifact{both, other, both}, 10)
+	if len(got) != 2 {
+		ids := make([]string, len(got))
+		for i, a := range got {
+			ids[i] = a.ID
+		}
+		t.Fatalf("pickArtifactsToSweep returned %v, want each artifact once", ids)
+	}
+	// And a duplicate must not push a distinct artifact out of a batch
+	// that had room for it. Order is pickArtifactsToSweep's own
+	// least-recently-attempted rule (never-scanned first), so this
+	// checks membership, not position.
+	got = pickArtifactsToSweep([]artifact.Artifact{both, both, other}, 2)
+	ids := map[string]bool{}
+	for _, a := range got {
+		ids[a.ID] = true
+	}
+	if len(got) != 2 || !ids[both.ID] || !ids[other.ID] {
+		t.Fatalf("a duplicate consumed a batch slot -- got %d artifact(s), ids %v", len(got), ids)
+	}
+}

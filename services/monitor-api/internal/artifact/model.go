@@ -206,6 +206,28 @@ type Artifact struct {
 	// don't block on it" spirit as bulkCreateArtifacts's own per-entry
 	// error handling.
 	Digest string `json:"digest,omitempty"`
+	// SourceRef records where this artifact ORIGINALLY came from, once
+	// Ref has been rewritten to point at the in-cluster registry.
+	//
+	// When artifact mirroring is on (MIRROR_ARTIFACTS, see
+	// scanner.OrasMirror), registration copies the artifact into
+	// scm-registry and rewrites Ref to the local copy, so every
+	// subsequent scan pulls from the cluster's own registry instead of
+	// docker.io/ghcr.io -- no rate limits, no dependency on the upstream
+	// tag still existing, and the bytes that were scanned are the bytes
+	// that were kept. SourceRef is the note of what that local copy is a
+	// copy OF, which is otherwise unrecoverable once Ref is rewritten.
+	//
+	// Empty means Ref is still the original: mirroring is off, the copy
+	// hasn't happened yet (bulk registration defers it to the first
+	// scan), or the ref was never a registry reference in the first
+	// place. Ref and SourceRef are always written in ONE Update -- a
+	// half-applied rewrite would leave a local ref with no record of its
+	// origin, and there is no way back from that.
+	//
+	// Also what signature verification runs against: see
+	// internal/api/scan.go's provenanceRef.
+	SourceRef string `json:"source_ref,omitempty"`
 	// Unsafe is set at registration time when REQUIRE_DIGEST is enabled
 	// (monitorApi.requireDigest) and the caller-provided expected_digest
 	// didn't match what actually resolved against the registry -- or

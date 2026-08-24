@@ -140,6 +140,11 @@ var schemaStatements = []string{
 	`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS provenance TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS provenance_checked_at TIMESTAMPTZ`,
 	`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS provenance_trust_root TEXT NOT NULL DEFAULT ''`,
+	// Where ref pointed before it was rewritten to the in-cluster mirror
+	// -- see Artifact.SourceRef. DEFAULT '' (not NULL) for the same
+	// reason digest is: FindByRef matches on it, and a NULL would need
+	// its own IS NULL branch in every comparison.
+	`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS source_ref TEXT NOT NULL DEFAULT ''`,
 	`CREATE TABLE IF NOT EXISTS stage_history (
 		id          BIGSERIAL PRIMARY KEY,
 		artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
@@ -416,7 +421,7 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS scan_tokens_expires_idx ON scan_tokens (expires_at)`,
 }
 
-const selectArtifactColumns = `SELECT id, ref, digest, type, status, current_stage, created_at, updated_at, last_scan_at, last_scan_error_at, maintainer_team, maintainer_email, last_scan_failure_reason, unsafe, provenance, provenance_checked_at, provenance_trust_root FROM artifacts`
+const selectArtifactColumns = `SELECT id, ref, source_ref, digest, type, status, current_stage, created_at, updated_at, last_scan_at, last_scan_error_at, maintainer_team, maintainer_email, last_scan_failure_reason, unsafe, provenance, provenance_checked_at, provenance_trust_root FROM artifacts`
 
 // pgxIface is satisfied by both *pgxpool.Pool and pgx.Tx, so the
 // read/write helpers below can run either directly against the pool
@@ -716,7 +721,7 @@ func scanArtifactRow(row rowScanner) (*Artifact, error) {
 	var a Artifact
 	var typ, status string
 
-	err := row.Scan(&a.ID, &a.Ref, &a.Digest, &typ, &status, &a.CurrentStage, &a.CreatedAt, &a.UpdatedAt, &a.LastScanAt, &a.LastScanErrorAt, &a.MaintainerTeam, &a.MaintainerEmail, &a.LastScanFailureReason, &a.Unsafe, &a.Provenance, &a.ProvenanceCheckedAt, &a.ProvenanceTrustRoot)
+	err := row.Scan(&a.ID, &a.Ref, &a.SourceRef, &a.Digest, &typ, &status, &a.CurrentStage, &a.CreatedAt, &a.UpdatedAt, &a.LastScanAt, &a.LastScanErrorAt, &a.MaintainerTeam, &a.MaintainerEmail, &a.LastScanFailureReason, &a.Unsafe, &a.Provenance, &a.ProvenanceCheckedAt, &a.ProvenanceTrustRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -935,9 +940,15 @@ func listFilterClause(statusFilter, typeFilter, searchFilter string) (string, []
 		// feel broken for reasons nobody can explain.
 		args = append(args, likePattern(q))
 		n := len(args)
+		// source_ref is in the list because a mirrored artifact's ref
+		// names the local copy: searching for the upstream ref it was
+		// registered with has to keep finding it. The mirror path happens
+		// to CONTAIN the original repo name, so a tag ref would match by
+		// substring anyway -- but a digest-pinned one would not, and
+		// "works for some refs" is not a searchable field.
 		clauses = append(clauses, fmt.Sprintf(
-			"(ref ILIKE $%d OR digest ILIKE $%d OR maintainer_team ILIKE $%d OR maintainer_email ILIKE $%d OR current_stage ILIKE $%d)",
-			n, n, n, n, n))
+			"(ref ILIKE $%d OR source_ref ILIKE $%d OR digest ILIKE $%d OR maintainer_team ILIKE $%d OR maintainer_email ILIKE $%d OR current_stage ILIKE $%d)",
+			n, n, n, n, n, n))
 	}
 	if len(clauses) == 0 {
 		return "", nil
@@ -1158,8 +1169,15 @@ func (s *PostgresStore) Update(id string, mutate func(*Artifact)) (*Artifact, er
 	// doesn't have (its Update mutates the stored struct directly), so
 	// this needed calling out explicitly rather than discovering it via
 	// a test that only runs against Postgres.
-	if _, err := tx.Exec(ctx, `UPDATE artifacts SET status = $1, current_stage = $2, digest = $3, updated_at = $4, last_scan_at = $5, last_scan_error_at = $6, maintainer_team = $7, maintainer_email = $8, last_scan_failure_reason = $9, unsafe = $10, provenance = $11, provenance_checked_at = $12, provenance_trust_root = $13 WHERE id = $14`,
-		string(a.Status), a.CurrentStage, a.Digest, a.UpdatedAt, a.LastScanAt, a.LastScanErrorAt, a.MaintainerTeam, a.MaintainerEmail, a.LastScanFailureReason, a.Unsafe, a.Provenance, a.ProvenanceCheckedAt, a.ProvenanceTrustRoot, a.ID); err != nil {
+	//
+	// ref and source_ref are here for a sharper version of the same
+	// reason: mirroring rewrites BOTH (internal/api/mirror.go), and they
+	// have to land together or not at all -- a ref pointing at the local
+	// mirror with no source_ref has lost where it came from, with no way
+	// back. One statement, one transaction, so there is no window in
+	// which only half of that rewrite is on disk.
+	if _, err := tx.Exec(ctx, `UPDATE artifacts SET status = $1, current_stage = $2, digest = $3, updated_at = $4, last_scan_at = $5, last_scan_error_at = $6, maintainer_team = $7, maintainer_email = $8, last_scan_failure_reason = $9, unsafe = $10, provenance = $11, provenance_checked_at = $12, provenance_trust_root = $13, ref = $14, source_ref = $15 WHERE id = $16`,
+		string(a.Status), a.CurrentStage, a.Digest, a.UpdatedAt, a.LastScanAt, a.LastScanErrorAt, a.MaintainerTeam, a.MaintainerEmail, a.LastScanFailureReason, a.Unsafe, a.Provenance, a.ProvenanceCheckedAt, a.ProvenanceTrustRoot, a.Ref, a.SourceRef, a.ID); err != nil {
 		return nil, fmt.Errorf("update artifact: %w", err)
 	}
 
@@ -1706,8 +1724,14 @@ func (s *PostgresStore) FindByRef(ref string) (*Artifact, error) {
 		return nil, nil
 	}
 	ctx := context.Background()
+	// source_ref as well as ref: once an artifact has been mirrored its
+	// ref names the in-cluster copy, and a caller re-registering the
+	// ORIGINAL public ref is still registering the same thing. Matching
+	// only ref would let every mirrored artifact be registered a second
+	// time under its upstream name -- the same duplicate accumulation
+	// this fallback exists to stop.
 	row := s.pool.QueryRow(ctx, selectArtifactColumns+`
-		WHERE ref = $1
+		WHERE ref = $1 OR source_ref = $1
 		ORDER BY created_at ASC
 		LIMIT 1
 	`, ref)
