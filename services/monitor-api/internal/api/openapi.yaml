@@ -324,6 +324,31 @@ paths:
     post:
       tags: [artifacts]
       summary: Start a scan (asynchronous)
+      parameters:
+        - name: mode
+          in: query
+          required: false
+          description: >-
+            "full" (the default) runs every scanner registered for the
+            artifact's type. "sbom-only" re-derives ONLY the cve bucket,
+            by running grype against the SBOM document a previous full
+            scan already stored for this artifact -- no image pull, no
+            unpack, no malware scan.
+
+
+            An sbom-only scan deliberately leaves the malware, secret,
+            misconfiguration and other buckets completely untouched (it
+            did not look at them, so it may not resolve them), does not
+            update last_scan_at (the freshness clock belongs to full
+            scans), and does not change the artifact's status. It is
+            refused rather than silently upgraded to a full scan: 400 if
+            the artifact is not an image, 409 if it has no stored SBOM,
+            501 if the deployment has no sbom re-evaluation scanner
+            configured.
+          schema:
+            type: string
+            enum: [full, sbom-only]
+            default: full
       description: >-
         Starts a scan and returns 202 immediately -- it does not wait for
         the scan to finish. Every scanner registered for the artifact's
@@ -357,8 +382,23 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Artifact" }
+        "400":
+          description: >-
+            Unknown mode, a ref that is refused at scan time, or an
+            sbom-only scan requested for an artifact that is not an
+            image.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >-
+            An sbom-only scan was requested for an image with no stored
+            SBOM document to re-evaluate. A full scan generates one.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "429":
           description: >-
             The scan concurrency cap is saturated. Retry after the
@@ -372,7 +412,10 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "501":
-          description: No scanner is registered for this artifact's type.
+          description: >-
+            No scanner is registered for this artifact's type, or
+            mode=sbom-only was requested on a deployment with no sbom
+            re-evaluation scanner configured.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

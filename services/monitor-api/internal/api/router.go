@@ -115,6 +115,13 @@ type Config struct {
 	// and adding a second context-taking method to that interface would
 	// entrench the wart Stats(ctx) already documents as one.
 	Ready func(context.Context) error
+	// SBOMReevalScanner runs an sbom-only scan: a CVE re-derivation for
+	// an `image` artifact from the SBOM a previous full scan stored,
+	// against today's vulnerability DB, with no image pull, unpack or
+	// malware scan (see scanModeSBOMOnly in scan.go). nil disables the
+	// mode -- POST .../scan?mode=sbom-only then answers 501, which is
+	// what every existing deployment and test gets by not setting it.
+	SBOMReevalScanner scanner.Scanner
 	// Fetcher resolves an sbom-type artifact's ref to a local file after
 	// a scan, so its own component inventory can be indexed the same way
 	// an uploaded SBOM's is (see scan.go's indexSBOMTypeComponents).
@@ -158,7 +165,7 @@ type Config struct {
 // method+wildcard routing, so no external router dependency is needed.
 // See Config for what each field does and what its zero value means.
 func NewRouter(cfg Config) http.Handler {
-	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, mirror: cfg.Mirror, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher, licenseDenylist: cfg.LicenseDenylist, staleAfterDays: cfg.StaleAfterDays, policy: cfg.Policy, enricher: cfg.Enricher}
+	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, mirror: cfg.Mirror, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher, licenseDenylist: cfg.LicenseDenylist, staleAfterDays: cfg.StaleAfterDays, policy: cfg.Policy, enricher: cfg.Enricher, sbomReeval: cfg.SBOMReevalScanner}
 	h.metrics = newMetrics()
 	h.scanCaps = cfg.ScanLimits.caps()
 
@@ -343,10 +350,21 @@ func withAuth(next http.Handler, keys APIKeys, scopes KeyScopes, failures *rateL
 
 		// A scan worker presents a per-Job token, not the API key. It is
 		// tried only AFTER the normal key check fails, so a real key
-		// still takes the ordinary path, and only on the single route
-		// the token is scoped to.
+		// still takes the ordinary path, and only on the two document
+		// routes the token is scoped to (upload, and -- for the sbom
+		// re-evaluation worker -- download).
 		if !ok && scanTokens != nil && strings.HasPrefix(got, prefix) {
-			if id, kind, isUpload := documentUploadTarget(r.Method, r.URL.Path); isUpload {
+			id, kind, isDocRoute := documentUploadTarget(r.Method, r.URL.Path)
+			if !isDocRoute {
+				// The read counterpart, for the sbom re-evaluation
+				// worker only -- see documentDownloadTarget. Burns a
+				// namespaced kind so a download never spends the
+				// upload the same token was minted for.
+				if id, kind, isDocRoute = documentDownloadTarget(r.Method, r.URL.Path); isDocRoute {
+					kind = documentReadKind(kind)
+				}
+			}
+			if isDocRoute {
 				if consumed, err := scanTokens(HashScanToken(got[len(prefix):]), id, kind); err == nil && consumed {
 					// Named for the audit log so an upload is
 					// attributable to the Job that made it, not to

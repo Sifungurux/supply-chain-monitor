@@ -42,15 +42,26 @@ import "github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/k8sjo
 // per-pod limit. Past a certain point that trades one retriable Job
 // failure for node-wide DiskPressure, which evicts clamav and postgres
 // too (see clamav.resources in the chart's values.yaml).
+// isSBOMMode reports whether a SubCommand scans a JSON document rather
+// than pulling and extracting an image. "sbom" fetches that document
+// from a registry ref; "sbom-doc" downloads one already stored for an
+// image artifact (see IsolatedGrypeConfig.SubCommand). Both are the
+// same shape as far as disk is concerned, so the three helpers below
+// share one answer instead of each carrying its own list to forget a
+// mode from.
+func isSBOMMode(subCommand string) bool {
+	return subCommand == "sbom" || subCommand == "sbom-doc"
+}
+
 func ephemeralStorageRequestFor(subCommand string) string {
-	if subCommand == "sbom" {
+	if isSBOMMode(subCommand) {
 		return "128Mi"
 	}
 	return "512Mi"
 }
 
 func ephemeralStorageLimitFor(subCommand string) string {
-	if subCommand == "sbom" {
+	if isSBOMMode(subCommand) {
 		return "256Mi"
 	}
 	return "3Gi"
@@ -73,7 +84,7 @@ func ephemeralStorageLimitFor(subCommand string) string {
 // opts out explicitly (k8sjob.ScratchNone), even where a StorageClass
 // is configured process-wide.
 func scratchClassFor(subCommand string) string {
-	if subCommand == "sbom" {
+	if isSBOMMode(subCommand) {
 		return k8sjob.ScratchNone
 	}
 	return ""
