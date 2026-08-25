@@ -1352,7 +1352,7 @@ func sweepSBOMOnly(ctx context.Context, apiBase, apiKey string, batchSize int) {
 		len(scanned), artifact.StatusScanned, len(eligible), len(toScan), batchSize)
 
 	var reevaluated, failed, capped int
-	for _, a := range toScan {
+	for i, a := range toScan {
 		err := reevaluateSBOM(ctx, apiBase, apiKey, a.ID)
 		switch {
 		case err == nil:
@@ -1376,6 +1376,7 @@ func sweepSBOMOnly(ctx context.Context, apiBase, apiKey string, batchSize int) {
 			failed++
 			log.Printf("sweep-sbom: re-evaluate %s (%s) failed: %v", a.ID, a.Ref, err)
 		}
+		logSweepProgress(i+1, len(toScan), reevaluated, failed, capped)
 	}
 	// Deliberately loud about the remainder, the same way runPrune is:
 	// "0 re-evaluated, 90 not attempted" and "90 re-evaluated" both end
@@ -1407,7 +1408,39 @@ func sbomReevalEligible(all []artifact.Artifact) []artifact.Artifact {
 	return out
 }
 
-// sbomReevalCapRetries is how many times one artifact waits out a
+// sweepProgressEvery is how often sweepSBOMOnly says it is still alive.
+//
+// The full sweep logs a line per artifact, but it is capped at
+// SWEEP_BATCH_SIZE (5 by default) so that is at most five lines. This
+// sweep is deliberately uncapped -- batchSize 0 means the whole
+// eligible fleet -- so per-artifact logging would scale with the fleet
+// while silence scales with it too. Every tenth is the compromise:
+// bounded output, and at the ~10s a measured re-evaluation takes, a
+// line roughly every 100 seconds.
+const sweepProgressEvery = 10
+
+// logSweepProgress emits a heartbeat so a human tailing the CronJob can
+// tell a long run from a hung one.
+//
+// THIS EXISTS BECAUSE THE FIRST REAL RUN LOOKED HUNG. It logged its
+// population line and then nothing for fifteen minutes while it worked
+// through 92 artifacts perfectly well -- the run was only confirmed
+// healthy by querying Postgres directly. An unattended 05:00 CronJob
+// whose output is indistinguishable from a hang is a CronJob nobody
+// can debug at 05:00.
+//
+// The FIRST artifact always logs, whatever the interval: "it started
+// and something completed" is the single most useful line, and waiting
+// ten artifacts to say it defeats the point.
+func logSweepProgress(done, total, reevaluated, failed, capped int) {
+	if done != 1 && done%sweepProgressEvery != 0 && done != total {
+		return
+	}
+	log.Printf("sweep-sbom: progress %d/%d -- %d re-evaluated, %d failed, %d skipped",
+		done, total, reevaluated, failed, capped)
+}
+
+// sbomReevalCapRetries is how many times one artifact waits out a// sbomReevalCapRetries is how many times one artifact waits out a
 // saturated scan cap before the sweep gives up on it for this run.
 //
 // The full sweep skips a 429 outright and lets the next run (fifteen
