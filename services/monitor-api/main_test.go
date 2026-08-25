@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -1062,5 +1063,59 @@ func TestSBOMReevalScanner_NilWhenToolUnavailable(t *testing.T) {
 	}
 	if got := sbomReevalScanner("grype", &stubScanner{name: "trivy"}, nil); got != nil {
 		t.Errorf("cveScanner=grype with no grype scanner should be nil, got %v", got)
+	}
+}
+
+// TestLogSweepProgress_HeartbeatCadence pins the heartbeat that tells a
+// long run apart from a hung one.
+//
+// The first real fleet-wide run logged its population line and then
+// nothing for fifteen minutes while working through 92 artifacts
+// perfectly well; it was only confirmed healthy by querying Postgres.
+// An unattended 05:00 CronJob whose output is indistinguishable from a
+// hang cannot be debugged at 05:00.
+func TestLogSweepProgress_HeartbeatCadence(t *testing.T) {
+	capture := func(total int) []int {
+		var buf bytes.Buffer
+		old := log.Writer()
+		log.SetOutput(&buf)
+		defer log.SetOutput(old)
+		for i := 1; i <= total; i++ {
+			logSweepProgress(i, total, i, 0, 0)
+		}
+		var at []int
+		for _, line := range strings.Split(buf.String(), "\n") {
+			if !strings.Contains(line, "sweep-sbom: progress ") {
+				continue
+			}
+			var done, tot int
+			// "... progress 10/92 -- ..."
+			frag := line[strings.Index(line, "progress ")+len("progress "):]
+			if _, err := fmt.Sscanf(frag, "%d/%d", &done, &tot); err != nil {
+				t.Fatalf("unparseable progress line %q", line)
+			}
+			at = append(at, done)
+		}
+		return at
+	}
+
+	// The FIRST artifact always logs, whatever the interval -- "it
+	// started and something completed" is the most useful single line,
+	// and waiting ten artifacts to say it defeats the point.
+	got := capture(92)
+	want := []int{1, 10, 20, 30, 40, 50, 60, 70, 80, 90, 92}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("progress logged at %v, want %v", got, want)
+	}
+
+	// A run smaller than one interval must still log both ends rather
+	// than going completely silent.
+	if got := capture(3); !reflect.DeepEqual(got, []int{1, 3}) {
+		t.Errorf("short run logged at %v, want [1 3]", got)
+	}
+
+	// A single-artifact run logs exactly once, not twice (first == last).
+	if got := capture(1); !reflect.DeepEqual(got, []int{1}) {
+		t.Errorf("single-artifact run logged at %v, want [1]", got)
 	}
 }
