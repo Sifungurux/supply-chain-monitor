@@ -12,7 +12,20 @@
 # top-level digest it prints, not a per-platform one.
 
 # --- monitor-api build stage ---
-FROM golang:1.26-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS build
+# --platform=$BUILDPLATFORM pins this stage to the machine DOING the
+# build, then Go cross-compiles to the target. The alternative -- letting
+# BuildKit run this stage under the target platform -- means emulating
+# the whole Go toolchain through QEMU, which on this project measurably
+# does not work: building the amd64 image on an Apple Silicon machine
+# died with a register dump inside `go mod download`, so CI's amd64
+# runner was the only place the amd64 branch had ever been built.
+#
+# CGO_ENABLED=0 is what makes cross-compiling free: no C toolchain to
+# match, so GOOS/GOARCH alone produce a correct static binary at native
+# speed. This is the standard buildx pattern for Go, and it makes a
+# multi-arch build cheap enough for CI to produce both arches from one
+# amd64 runner -- which the cluster needs, since it is arm64.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY . .
@@ -44,7 +57,13 @@ RUN go mod download && go mod verify
 # tables, which this binary has no debugger attached to and which are a
 # meaningful share of its size.
 ARG GIT_SHA=unknown
-RUN CGO_ENABLED=0 go build -ldflags "-s -w -X main.buildVersion=${GIT_SHA}" -o /out/monitor-api .
+# TARGETOS/TARGETARCH are set by BuildKit from the --platform being
+# built, and are what turn this into a cross-compile rather than a
+# native build of the builder's own architecture.
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-$(go env GOARCH)} \
+    go build -ldflags "-s -w -X main.buildVersion=${GIT_SHA}" -o /out/monitor-api .
 
 # --- umoci build stage ---
 # Built from source rather than pulling the project's release binary
@@ -53,7 +72,11 @@ RUN CGO_ENABLED=0 go build -ldflags "-s -w -X main.buildVersion=${GIT_SHA}" -o /
 # because umoci's go.mod wants a newer toolchain, bump the golang tag
 # here. (v0.4.7 is old and still builds clean under Go 1.26 -- verified,
 # not assumed, when this was bumped off 1.22.)
-FROM golang:1.26-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS umoci-build
+# Same cross-compile treatment as the monitor-api stage above, for the
+# same reason -- see its comment. This stage's own note about avoiding
+# emulation is now enforced by the build rather than left to whoever
+# happens to be building.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS umoci-build
 # Pinned to a COMMIT, not a tag. `--branch v0.4.7` (what this used to
 # do) looked exactly as pinned as this does while guaranteeing nothing:
 # a tag is a mutable ref the upstream repo can move, or anyone with push
@@ -72,7 +95,10 @@ RUN set -eux; \
     git fetch -q --depth 1 origin "${UMOCI_COMMIT}"; \
     git checkout -q FETCH_HEAD; \
     test "$(git rev-parse HEAD)" = "${UMOCI_COMMIT}"
-RUN CGO_ENABLED=0 go build -o /out/umoci ./cmd/umoci
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-$(go env GOARCH)} \
+    go build -o /out/umoci ./cmd/umoci
 
 # --- tool download + verification stage ---
 # Downloading happens in its own stage so that curl and GNU tar exist
