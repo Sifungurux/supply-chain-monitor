@@ -1737,6 +1737,12 @@ monitorApi:
   # shows up against the whole fleet tomorrow morning at a small
   # fraction of the IO a full sweep costs.
   #
+  # IT NEVER MARKS ANYTHING FIXED, including CVEs. It reports only what
+  # grype finds in the SBOM, while the cve bucket was built by whatever
+  # cveScanner selects -- so with "both" it cannot speak for trivy's
+  # image-filesystem findings and must not resolve them. Fixed CVEs are
+  # detected by the full sweep.
+  #
   # WHAT IT DOES NOT DO, and why the full sweep above stays on:
   # no malware scan, no secret/misconfiguration scan, no digest
   # backfill, no mirroring, and it deliberately does not refresh

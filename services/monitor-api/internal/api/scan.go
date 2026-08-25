@@ -487,7 +487,41 @@ func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scann
 			blockedBuckets[b] = true
 		}
 	}
-	detectFixedFor := func(bucket string) bool { return !blockedBuckets[bucket] }
+	detectFixedFor := func(bucket string) bool {
+		// AN SBOM-ONLY ROUND MAY NEVER MARK ANYTHING FIXED.
+		//
+		// It runs one scanner -- grype against the stored SBOM -- and
+		// reports only what that finds. But the cve bucket it is
+		// merging into was built by whatever CVE_SCANNER selects, and
+		// with "both" (the deployment default here) most of it comes
+		// from trivy scanning the image filesystem directly. Measured
+		// on this project's own fleet: 35,195 of 46,728 open CVE
+		// findings are trivy-only, against 4,557 grype-only.
+		//
+		// With fix-detection on, every one of those trivy-only
+		// findings is absent from the re-evaluation's results and so
+		// gets marked "fixed" -- 75% of the bucket silently resolved,
+		// nightly, on every artifact. Even a grype-only deployment
+		// would lose findings, since image-mode grype and SBOM-mode
+		// grype do not match identically.
+		//
+		// This is the SAME rule blockedBuckets already encodes: a
+		// scanner that cannot honestly promise it would have reported
+		// everything in a bucket must not let that bucket conclude
+		// anything is resolved. The other four buckets express it by
+		// skipping the merge entirely (see the store.Update below);
+		// cve still needs merging -- that is how new CVEs and refreshed
+		// KEV/EPSS annotations land -- so it expresses it here instead.
+		//
+		// The cost is that a genuinely-fixed CVE stays open until the
+		// next FULL scan notices. That is the right trade: a stale
+		// "open" is visible and self-corrects, a wrong "fixed" is
+		// invisible and does not.
+		if sbomOnly {
+			return false
+		}
+		return !blockedBuckets[bucket]
+	}
 
 	// Backfill a missing digest opportunistically on every scan -- see
 	// resolveDigest's own comment for why registration-time resolution
