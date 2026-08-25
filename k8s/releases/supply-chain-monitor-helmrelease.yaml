@@ -164,6 +164,29 @@ spec:
       # track base distro, so it can only be measured, never predicted.
       grypeDB:
         byCVE: true
+      # Daily CVE re-evaluation from each image's stored SBOM. Chart
+      # default is disabled; enabled here now that the mode runs trivy
+      # rather than grype (PR #162) and therefore produces ids that
+      # merge with, enrich, and dedupe against what the image scan
+      # already recorded.
+      #
+      # WHAT THIS BUYS on this cluster: a CVE published today shows up
+      # against the whole fleet the next morning instead of waiting for
+      # each artifact to age past scanFreshness.rescanAfterDays and be
+      # re-pulled. The full sweep still does everything else -- malware,
+      # secrets, digests, mirroring -- and remains the only thing that
+      # can mark a CVE fixed.
+      #
+      # SIZING, for the 92 eligible artifacts here: batchSize 0 means
+      # the whole eligible fleet in one run, and the sweep processes
+      # artifacts SEQUENTIALLY (it waits for each scan to finish so it
+      # can report the outcome). At the ~20s a measured sbom-doc scan
+      # takes, that is ~31 minutes against the 55-minute budget. If the
+      # fleet grows enough to exhaust that budget the run stops
+      # cleanly and logs what it did not reach -- but the next run is
+      # 24h later, so raise timeoutMinutes rather than letting it clip.
+      sweepSbom:
+        enabled: true
       # Copy every registered artifact into scm-registry and scan the
       # copy instead of pulling from docker.io/ghcr.io on every scan.
       # Chart default is false, set true here for the same reason as
