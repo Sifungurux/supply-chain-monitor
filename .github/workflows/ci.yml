@@ -246,3 +246,108 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: make vulncheck
         run: make vulncheck
+
+  # Builds the monitor-api image for BOTH architectures and pushes it to
+  # ghcr.io, then attests its provenance.
+  #
+  # WHY MULTI-ARCH IS NOT OPTIONAL HERE. The runners are amd64 and the
+  # dev cluster is arm64 (k3d on Apple Silicon), so an amd64-only push
+  # would produce an image the only consumer cannot run. Both arches are
+  # cheap now that the Dockerfile's Go stages are pinned to
+  # $BUILDPLATFORM and cross-compile (CGO_ENABLED=0), rather than running
+  # the Go toolchain under QEMU -- which measurably does not work on this
+  # project. QEMU is still set up because the tool-download stages do run
+  # under the target platform, but those are wget and sha256sum, not a
+  # compiler.
+  #
+  # PUSH TO main ONLY, never on pull_request: a PR from a fork must not
+  # be able to publish an image under this repository's name, and
+  # GITHUB_TOKEN is read-only for fork PRs anyway, so the job would fail
+  # confusingly rather than be denied cleanly.
+  #
+  # Gated behind the test jobs. An image that is published before its
+  # own tests pass is an image someone can deploy before its own tests
+  # pass.
+  publish-image:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test-api, test-dashboard, test-image, helm-template]
+    runs-on: ubuntu-latest
+    # Widened here rather than at the top of the file, per the
+    # permissions comment there: the extra scope stays visible in the
+    # diff that introduces it and confined to the one job that needs it.
+    #
+    # id-token/attestations are what actions/attest-build-provenance
+    # needs to mint a signed statement bound to the pushed DIGEST -- the
+    # thing ci.yml's test-image comment said to add "in the same change
+    # that introduces a job which PUSHES a tagged image". This is that
+    # change.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # ghcr.io requires an all-lowercase path, and this repository's
+      # owner is not (Sifungurux). Computed once rather than relying on
+      # ${{ github.repository }} happening to be lowercase.
+      - name: Compute image reference
+        id: ref
+        run: |
+          echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/monitor-api" >> "$GITHUB_OUTPUT"
+          # Short sha, matching what `make build` stamps locally, so a
+          # version string means the same thing wherever it was built.
+          echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: services/monitor-api
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # Both a moving tag and an immutable one. `main` is what a
+          # human reaches for; the sha tag is what a HelmRelease should
+          # actually pin, since a moving tag plus imagePullPolicy
+          # IfNotPresent is how a node ends up running something nobody
+          # can identify.
+          tags: |
+            ${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.sha }}
+            ${{ steps.ref.outputs.image }}:main
+          build-args: |
+            GIT_SHA=${{ steps.ref.outputs.sha }}
+          # Reuses layers across runs; without it every push rebuilds
+          # both architectures from scratch.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Binds a signed statement to the digest just pushed, so a
+      # consumer can verify this image came from this workflow and this
+      # commit: `gh attestation verify oci://<image>@<digest>
+      # --repo <owner>/<repo>`.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.ref.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Report what was published
+        run: |
+          {
+            echo "### Published image"
+            echo ""
+            echo '```'
+            echo "${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.sha }}"
+            echo "digest: ${{ steps.push.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
