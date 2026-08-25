@@ -37,6 +37,10 @@ func (s *GrypeSBOMScanner) Bucket() string { return "cve" }
 // `grype --help`).
 func (s *GrypeSBOMScanner) args(ref string) []string {
 	args := []string{"sbom:" + ref, "-o", "json"}
+	if GrypeByCVE {
+		// See scanner.GrypeByCVE for why this matters here.
+		args = append(args, "--by-cve")
+	}
 	if VerboseScanLogs {
 		args = append(args, "-vv")
 	} else {

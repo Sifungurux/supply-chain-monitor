@@ -264,6 +264,9 @@ data:
   # repository to point at, whereas these two just govern whether the
   # in-process grype fallback updates and age-checks its own DB, which
   # is a question with or without an air-gapped mirror.
+  # Orients grype's results by CVE id instead of the advisory id that
+  # matched (GO-/ELSA-/GHSA-). See monitorApi.grypeDB.byCVE.
+  GRYPE_BY_CVE: {{ .Values.monitorApi.grypeDB.byCVE | quote }}
   GRYPE_SKIP_DB_UPDATE: {{ .Values.monitorApi.grypeDB.skipUpdate | quote }}
   GRYPE_SKIP_AGE_VALIDATION: {{ .Values.monitorApi.grypeDB.skipAgeValidation | quote }}
   # Operator-configured pluggable scanners (a different CVE scanner than

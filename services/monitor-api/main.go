@@ -752,6 +752,10 @@ func runScanWorker() {
 	// package-level variable directly rather than taking it as a
 	// constructor argument.
 	scanner.VerboseScanLogs = getenvBool("SCM_SCAN_VERBOSE", false)
+	// Same shape and the same reason: shared package state every grype
+	// scanner reads directly, set once before any of them runs. See
+	// scanner.GrypeByCVE.
+	scanner.GrypeByCVE = getenvBool("GRYPE_BY_CVE", false)
 
 	// One merged docker config for this whole Job, exported as
 	// DOCKER_CONFIG so every tool the branches below exec inherits it:
@@ -2198,6 +2202,12 @@ func runAPIServer() {
 	// again at its own startup (see runScanWorker).
 	verboseScanLogs := getenvBool("SCAN_WORKER_VERBOSE_LOGS", false)
 	scanner.VerboseScanLogs = verboseScanLogs
+	// Set for the in-process grype path too (DISABLE_SCAN_ISOLATION),
+	// and forwarded into every isolated grype Job below as
+	// GRYPE_BY_CVE, so both paths agree on how a finding is named. See
+	// scanner.GrypeByCVE.
+	grypeByCVE := getenvBool("GRYPE_BY_CVE", true)
+	scanner.GrypeByCVE = grypeByCVE
 
 	// Image malware scanning (unpack + ClamAV) and image CVE scanning
 	// (trivy) both normally run in their own short-lived Kubernetes Job
@@ -2481,6 +2491,7 @@ func runAPIServer() {
 				MemoryLimit:                   scanJobMemLimit("grype"),
 				Image:                         workerImage,
 				SubCommand:                    "image",
+				ByCVE:                         grypeByCVE,
 				CacheClaimName:                getenv("GRYPE_CACHE_CLAIM", "scm-grype-db-cache"),
 				CacheMountPath:                getenv("GRYPE_CACHE_DIR", "/grype-cache"),
 				FetchPlainHTTP:                fetchPlainHTTP,
@@ -2498,6 +2509,7 @@ func runAPIServer() {
 				MemoryLimit:                   scanJobMemLimit("grype"),
 				Image:                         workerImage,
 				SubCommand:                    "sbom",
+				ByCVE:                         grypeByCVE,
 				CacheClaimName:                getenv("GRYPE_CACHE_CLAIM", "scm-grype-db-cache"),
 				CacheMountPath:                getenv("GRYPE_CACHE_DIR", "/grype-cache"),
 				FetchPlainHTTP:                fetchPlainHTTP,
@@ -2529,6 +2541,7 @@ func runAPIServer() {
 				MemoryLimit:           scanJobMemLimit("grype"),
 				Image:                 workerImage,
 				SubCommand:            "sbom-doc",
+				ByCVE:                 grypeByCVE,
 				CacheClaimName:        getenv("GRYPE_CACHE_CLAIM", "scm-grype-db-cache"),
 				CacheMountPath:        getenv("GRYPE_CACHE_DIR", "/grype-cache"),
 				VerboseLogs:           verboseScanLogs,
