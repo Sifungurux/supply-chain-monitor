@@ -1,0 +1,107 @@
+# Populates the KEV/EPSS feeds once, at install/upgrade time, so a
+# freshly-built cluster is not blind until the refresh CronJob's next
+# scheduled run.
+#
+# THE GAP THIS CLOSES. enrich-refresh-cronjob.yaml runs at
+# enrichment.refreshSchedule (04:00 UTC by default). A cluster rebuilt
+# at any time after that has empty cve_enrichment/enrichment_feeds
+# tables until 04:00 the following day -- every finding keeps
+# epss_score 0 and known_exploited false, and the dashboard shows no
+# badges at all. That is indistinguishable from the feature being
+# switched off, which is exactly how it was found: 44,875 CVE findings
+# with zero EPSS scores on a cluster whose enrich CronJob showed
+# LAST SCHEDULE: <none>. trivy and grype already each have a primer Job
+# for precisely this reason (trivy-db-cache-primer-job.yaml,
+# grype-db-cache-primer-job.yaml); enrichment was the one refreshed
+# dataset without one.
+#
+# post-install/post-upgrade, NOT pre-*, unlike the two DB-cache
+# primers. They write to a PVC and can run before anything else exists;
+# this writes to Postgres, which on a pre-install hook has not been
+# created yet. `monitor-api enrich-refresh` retries the connection 12
+# times at 5s intervals (see runEnrichRefresh), which covers Postgres
+# still coming up underneath it -- observed taking one retry on a real
+# cluster, the NetworkPolicy-programming race fresh pods hit.
+#
+# A FAILURE HERE MUST NOT FAIL THE RELEASE, hence the `|| exit 0`. A
+# blocking hook would make an external CDN fetch (CISA's KEV JSON,
+# FIRST's EPSS CSV) a gate on every `helm upgrade` -- and under Flux a
+# failed upgrade rolls back the WHOLE HelmRelease, reverting every
+# unrelated change in the same commit. That trade is badly wrong for a
+# convenience primer: the feeds are refreshed daily anyway, so the cost
+# of this Job failing is being dark until 04:00, which is exactly the
+# situation without this file at all.
+#
+# The failure SIGNAL therefore stays where it already was: the refresh
+# CronJob's own failedJobsHistoryLimit: 3 (see that file's comment on
+# why stale enrichment is dangerously quiet -- a red "Known exploited"
+# badge that never appears reads as good news). This Job is a
+# head start, not the health check.
+{{- if .Values.monitorApi.enrichment.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scm-enrich-primer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    # Same label the refresh CronJob's pods carry: the Postgres
+    # NetworkPolicy allows ingress from app: scm-enrich-refresh, and
+    # this Job talks to Postgres identically. A different label here
+    # would be refused by that policy.
+    app: scm-enrich-refresh
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  # One attempt. A retry loop here would extend how long the hook holds
+  # the release open for a Job whose failure is explicitly tolerated,
+  # and enrich-refresh already retries the only transient thing it
+  # depends on (the Postgres connection) internally.
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: scm-enrich-refresh
+    spec:
+      restartPolicy: Never
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+      containers:
+        - name: enrich-primer
+          image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
+          imagePullPolicy: {{ .Values.monitorApi.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          # The image's ENTRYPOINT is the monitor-api binary, so the
+          # subcommand is invoked explicitly here rather than through
+          # args -- the `|| exit 0` above needs a shell.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              /usr/local/bin/monitor-api enrich-refresh || {
+                echo "enrich-primer: feed refresh failed -- continuing so the release is not rolled back."
+                echo "enrich-primer: the scm-enrich-refresh CronJob retries at the configured schedule; findings keep epss_score 0 until it succeeds."
+                exit 0
+              }
+          envFrom:
+            # The same ConfigMap the API and the refresh CronJob read,
+            # so a mirrored feed URL is configured in exactly one place.
+            - configMapRef:
+                name: monitor-api-config
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: scm-postgres-credentials
+                  key: POSTGRES_PASSWORD
+          resources:
+            {{- toYaml .Values.monitorApi.enrichment.resources | nindent 12 }}
+{{- end }}
