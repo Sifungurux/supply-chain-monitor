@@ -1167,16 +1167,36 @@ func runSweepRegistered() {
 	log.Printf("sweep-registered: %d artifact(s) registered-but-unscanned, scanning %d (SWEEP_BATCH_SIZE=%d)", countByStatus(all, artifact.StatusRegistered), len(toScan), batchSize)
 
 	missingDigest := 0
-	for _, a := range toScan {
+	scanned, failed, skipped := 0, 0, 0
+	for i, a := range toScan {
 		updated, err := scanArtifactViaAPI(ctx, apiBase, apiKey, a.ID)
+		// The run's own budget (SWEEP_TIMEOUT_MINUTES) ran out. Every
+		// artifact after this one would fail the same way and
+		// instantly, so stop rather than logging a line per remaining
+		// artifact that reads as a real scan failure.
+		//
+		// Running out mid-batch is NORMAL and safe, not an error: the
+		// scans themselves run in the API pod and scan-worker Jobs, so
+		// they outlive this process, and pickArtifactsToSweep orders by
+		// least-recently-attempted, so the next run resumes with
+		// whatever was missed. See monitorApi.sweep.timeoutMinutes for
+		// why the budget is deliberately not batchSize x a whole scan.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			skipped += len(toScan) - i
+			log.Printf("sweep-registered: run budget exhausted -- %d artifact(s) not attempted, the next run resumes with them (SWEEP_TIMEOUT_MINUTES)", len(toScan)-i)
+			break
+		}
 		if errors.Is(err, errScanCapSaturated) {
+			skipped++
 			log.Printf("sweep-registered: %s (%s) skipped -- scan concurrency limit reached, next run retries it", a.ID, a.Ref)
 			continue
 		}
 		if err != nil {
+			failed++
 			log.Printf("sweep-registered: scan %s (%s) failed: %v", a.ID, a.Ref, err)
 			continue
 		}
+		scanned++
 		if updated.Digest == "" {
 			missingDigest++
 			log.Printf("sweep-registered: %s (%s) scanned, digest still not resolved", a.ID, a.Ref)
@@ -1184,7 +1204,12 @@ func runSweepRegistered() {
 			log.Printf("sweep-registered: %s (%s) scanned, digest resolved", a.ID, a.Ref)
 		}
 	}
-	log.Printf("sweep-registered: done -- %d scanned, %d still missing a digest", len(toScan), missingDigest)
+	// Counts what actually happened. This used to report len(toScan) as
+	// the number scanned regardless of outcome, so a run in which every
+	// single scan failed still signed off with "5 scanned" -- the one
+	// line an operator reads to decide whether the sweep is healthy.
+	log.Printf("sweep-registered: done -- %d scanned, %d failed, %d not attempted, %d still missing a digest",
+		scanned, failed, skipped, missingDigest)
 }
 
 // sweepSBOMOnly re-derives CVEs for every image artifact that already

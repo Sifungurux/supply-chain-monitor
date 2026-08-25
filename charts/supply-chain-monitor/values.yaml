@@ -1694,6 +1694,31 @@ monitorApi:
     enabled: true
     schedule: "*/15 * * * *" # every 15 minutes
     batchSize: 5
+    # THE WHOLE RUN'S BUDGET, and it must stay above
+    # monitorApi.scanTimeoutSeconds -- the template refuses to render
+    # otherwise.
+    #
+    # The sweep BLOCKS on each scan it starts (it polls the artifact
+    # until it leaves "scanning", so its own log can report the result
+    # rather than the 202). That makes one scan's maximum duration a
+    # hard floor for this value: below it, a run cannot finish even a
+    # single artifact before Kubernetes kills the Job, and every run
+    # with real work ends in DeadlineExceeded.
+    #
+    # That is not hypothetical -- it is what this value was added to
+    # fix. scanTimeoutSeconds was raised 660 -> 1320 when the scan Job
+    # envelope was sized from measurement, while the sweep's Job
+    # deadline stayed at a hardcoded 600s, so one artifact was allowed
+    # more than twice the time the whole sweep of five was given.
+    #
+    # Deliberately NOT batchSize x scanTimeoutSeconds. Running out of
+    # budget mid-batch is normal and safe: the scans themselves run in
+    # the API pod and scan-worker Jobs, not here, so they survive this
+    # pod's death, and the next run picks up whatever was missed
+    # (oldest-attempted first). What must never happen is a run too
+    # short to complete ANY artifact. Requiring the full product would
+    # mean a ~110 minute deadline on a 15-minute schedule.
+    timeoutMinutes: 25
     resources:
       requests:
         cpu: 100m

@@ -23,6 +23,9 @@
 # artifacts twice, which is wasted work, not a correctness problem worth
 # allowing.
 {{- if .Values.monitorApi.sweep.enabled }}
+{{- if le (mul .Values.monitorApi.sweep.timeoutMinutes 60) (int .Values.monitorApi.scanTimeoutSeconds) }}
+{{- fail (printf "monitorApi.sweep.timeoutMinutes (%ds) must exceed monitorApi.scanTimeoutSeconds (%ds). The sweep blocks waiting for each scan it starts, so a budget below one scan's maximum duration cannot finish even a single artifact -- every run with real work would die DeadlineExceeded, which is exactly the regression this guard exists to prevent." (mul .Values.monitorApi.sweep.timeoutMinutes 60) (int .Values.monitorApi.scanTimeoutSeconds)) }}
+{{- end }}
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -41,7 +44,20 @@ spec:
         app: scm-sweep-registered
     spec:
       backoffLimit: 1
-      activeDeadlineSeconds: 600
+      # DERIVED, not a literal, and deliberately larger than the
+      # sweep's own SWEEP_TIMEOUT_MINUTES budget below.
+      #
+      # These two used to be independently hardcoded at the same 600s.
+      # Equal is not safe: this clock starts when the Job is created
+      # (image pull, container start) while the sweep's own starts a
+      # second or two later inside the process, so Kubernetes always
+      # won the race and killed the pod before it could exit gracefully
+      # and log its summary. Every genuinely-busy run was reported as
+      # DeadlineExceeded with no output explaining what it had done.
+      #
+      # The 300s of headroom is the same margin sweep-sbom-cronjob.yaml
+      # uses, for the same reason.
+      activeDeadlineSeconds: {{ add (mul .Values.monitorApi.sweep.timeoutMinutes 60) 300 }}
       template:
         metadata:
           labels:
@@ -78,6 +94,11 @@ spec:
                   value: "http://monitor-api:8080"
                 - name: SWEEP_BATCH_SIZE
                   value: {{ .Values.monitorApi.sweep.batchSize | quote }}
+                # Passed explicitly so the process budget and the Job
+                # deadline above come from ONE value and cannot drift
+                # into agreeing by coincidence again.
+                - name: SWEEP_TIMEOUT_MINUTES
+                  value: {{ .Values.monitorApi.sweep.timeoutMinutes | quote }}
                 # 0 means this sweep never rescans on age alone -- the
                 # staleness WARNING is independent and shows regardless.
                 # See monitorApi.scanFreshness.
