@@ -111,6 +111,9 @@ type handler struct {
 	// never a silent fall back to the full scanner set, which would
 	// make a "cheap" nightly CronJob re-scan the whole fleet.
 	sbomReeval scanner.Scanner
+
+	// buildVersion backs the scm_build_info metric -- see Config.
+	buildVersion string
 	// licenseDenylist flags components whose license this deployment
 	// refuses (LICENSE_DENYLIST). The zero value denies nothing, which
 	// is what every caller that doesn't configure it gets.

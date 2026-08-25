@@ -29,7 +29,22 @@ RUN go mod download && go mod verify
 # CGO_ENABLED=0 makes this a static binary: it needs nothing from the
 # runtime image but a kernel, which is what keeps the runtime stage free
 # to be as bare as its own comment allows.
-RUN CGO_ENABLED=0 go build -o /out/monitor-api .
+# GIT_SHA stamps the commit into the binary so a running pod can say
+# which code it is. Defaults to "unknown" so a bare `docker build` still
+# works -- the Makefile passes the real value.
+#
+# WHY THIS EXISTS. This image is tagged `dev` and imported straight into
+# k3d, so the tag never changes no matter how many times it is rebuilt.
+# Nothing in the cluster recorded which commit was running: not the tag,
+# not an annotation, not the binary. "Is the fix I merged the thing that
+# is actually running?" had no answer, which is an uncomfortable gap in
+# a service whose whole job is artifact provenance.
+#
+# -X sets a string variable at link time; -s -w drop the symbol and DWARF
+# tables, which this binary has no debugger attached to and which are a
+# meaningful share of its size.
+ARG GIT_SHA=unknown
+RUN CGO_ENABLED=0 go build -ldflags "-s -w -X main.buildVersion=${GIT_SHA}" -o /out/monitor-api .
 
 # --- umoci build stage ---
 # Built from source rather than pulling the project's release binary

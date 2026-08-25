@@ -115,6 +115,12 @@ type Config struct {
 	// and adding a second context-taking method to that interface would
 	// entrench the wart Stats(ctx) already documents as one.
 	Ready func(context.Context) error
+	// BuildVersion is the commit this binary was built from, surfaced
+	// as the scm_build_info metric so "which code is running" is
+	// answerable from a scrape rather than from whoever last ran
+	// `make build`. Empty renders as "unknown", which is the honest
+	// answer for a build that was never stamped.
+	BuildVersion string
 	// SBOMReevalScanner runs an sbom-only scan: a CVE re-derivation for
 	// an `image` artifact from the SBOM a previous full scan stored,
 	// against today's vulnerability DB, with no image pull, unpack or
@@ -165,7 +171,7 @@ type Config struct {
 // method+wildcard routing, so no external router dependency is needed.
 // See Config for what each field does and what its zero value means.
 func NewRouter(cfg Config) http.Handler {
-	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, mirror: cfg.Mirror, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher, licenseDenylist: cfg.LicenseDenylist, staleAfterDays: cfg.StaleAfterDays, policy: cfg.Policy, enricher: cfg.Enricher, sbomReeval: cfg.SBOMReevalScanner}
+	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, mirror: cfg.Mirror, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher, licenseDenylist: cfg.LicenseDenylist, staleAfterDays: cfg.StaleAfterDays, policy: cfg.Policy, enricher: cfg.Enricher, sbomReeval: cfg.SBOMReevalScanner, buildVersion: cfg.BuildVersion}
 	h.metrics = newMetrics()
 	h.scanCaps = cfg.ScanLimits.caps()
 

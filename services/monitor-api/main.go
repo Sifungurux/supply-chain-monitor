@@ -587,6 +587,22 @@ func setupLogging() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 }
 
+// buildVersion is the commit this binary was built from, set at link
+// time by the Dockerfile (-X main.buildVersion=$GIT_SHA). It is a
+// plain var rather than a const precisely because the linker writes it.
+//
+// "unknown" is the honest answer for a `go build` or `go test` that
+// never passed the flag, and must stay distinguishable from a real
+// value -- a build that cannot say what it is should say so rather than
+// guess.
+var buildVersion = "unknown"
+
+// BuildVersion is the commit this binary was built from. Exported so
+// the metrics registry and the version subcommand read the same value
+// through one accessor rather than referencing the linker variable in
+// several places.
+func BuildVersion() string { return buildVersion }
+
 func main() {
 	// Before the mode dispatch below, so scan-worker and
 	// sweep-registered log the same way the API server does -- the
@@ -603,6 +619,14 @@ func main() {
 	// per scan, instead of calling UnpackerScanner directly inside the
 	// long-running API server process. See docs/architecture.md
 	// ("Isolating the unpack+scan step").
+	// `monitor-api version` prints the commit this binary was built
+	// from and exits -- deliberately the FIRST mode checked, so it
+	// answers even when the configuration a server would need is
+	// missing or broken. That is exactly when someone asks it.
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Println(BuildVersion())
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "scan-worker" {
 		runScanWorker()
 		return
@@ -1954,6 +1978,11 @@ func registerPluggableScanners(reg scanner.Registry, specs []scanner.PluggableSc
 }
 
 func runAPIServer() {
+	// First line every mode logs, before any configuration is read, so
+	// the "which commit is this?" question is answered by the log even
+	// when startup then fails on something else. Also emitted as
+	// scm_build_info for scraping -- see internal/api/metrics.go.
+	slog.Info("monitor-api starting", "version", BuildVersion())
 	listenAddr := getenv("LISTEN_ADDR", ":8080")
 	clamAddr := getenv("CLAMAV_ADDR", "")
 	registryAddr := getenv("REGISTRY_ADDR", "")
@@ -2750,6 +2779,7 @@ func runAPIServer() {
 		// nil under DISABLE_SCAN_ISOLATION, which makes POST
 		// .../scan?mode=sbom-only answer 501 rather than quietly
 		// running a full scan.
+		BuildVersion:      BuildVersion(),
 		SBOMReevalScanner: sbomReevalScanner(cveScanner, isolatedTrivySBOMDoc, isolatedGrypeSBOMDoc),
 		// Empty = same-origin only. The dashboard proxies through its
 		// own nginx, so it needs no entry here.
