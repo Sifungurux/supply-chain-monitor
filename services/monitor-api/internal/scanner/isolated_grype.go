@@ -62,6 +62,11 @@ type IsolatedGrypeConfig struct {
 	// VerboseScanLogs's own comment in scanner.go.
 	VerboseLogs bool
 
+	// ByCVE, forwarded to the worker as GRYPE_BY_CVE. See
+	// GrypeByCVE's own comment in scanner.go for why a deployment
+	// wants this on.
+	ByCVE bool
+
 	// CacheClaimName is the shared, centrally-refreshed
 	// PersistentVolumeClaim holding the pre-downloaded grype
 	// vulnerability DB (see
@@ -214,6 +219,7 @@ func (s *IsolatedGrypeScanner) scan(ctx context.Context, ref, artifactID string)
 		"GRYPE_CACHE_DIR":  s.cfg.CacheMountPath,
 		"FETCH_PLAIN_HTTP": strconv.FormatBool(s.cfg.FetchPlainHTTP),
 		"SCM_SCAN_VERBOSE": strconv.FormatBool(s.cfg.VerboseLogs),
+		"GRYPE_BY_CVE":     strconv.FormatBool(s.cfg.ByCVE),
 	}
 	if s.cfg.RegistryAddr != "" {
 		env["REGISTRY_ADDR"] = s.cfg.RegistryAddr

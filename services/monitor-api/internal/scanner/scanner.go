@@ -215,3 +215,27 @@ func (r Registry) For(t artifact.Type) ([]Scanner, bool) {
 // explicitly rather than relying on it already being false, since it's
 // shared, mutable package state -- see TestTrivyScanner_Args.
 var VerboseScanLogs bool
+
+// GrypeByCVE adds `--by-cve` to every grype invocation (image and
+// SBOM), which is grype's documented "orient results by CVE instead of
+// the original vulnerability ID when possible".
+//
+// WHY THIS IS ON BY DEFAULT IN THE CHART. grype reports the id of
+// whichever advisory source matched, so a Go module vulnerability comes
+// back as GO-2024-xxxx, an Oracle Linux package as ELSA-xxxx, a
+// npm/PyPI package as GHSA-xxxx. That is correct for grype and close to
+// useless here: measured on this project's own fleet, only 1,547 of
+// 4,512 open grype-only findings carried a CVE id. The other ~3,000
+// cannot be annotated with KEV/EPSS (both keyed by CVE id), cannot
+// dedupe against trivy's finding for the same vulnerability, and cannot
+// be covered by a VEX statement written about a CVE -- the three things
+// this service does with a finding after recording it.
+//
+// "When possible" is load-bearing: a vulnerability with no CVE keeps
+// its original id, so this degrades rather than dropping findings. On
+// one real SBOM it turned 78 findings with 0 CVE ids into 77 with 76.
+//
+// Shared mutable package state, matching VerboseScanLogs above --
+// set once at startup (runAPIServer / runScanWorker) before any scan.
+// Tests must set it explicitly rather than relying on the zero value.
+var GrypeByCVE bool

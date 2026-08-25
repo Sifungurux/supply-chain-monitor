@@ -146,6 +146,10 @@ func (g *GrypeScanner) Bucket() string { return "cve" }
 // probe on every scan.
 func (g *GrypeScanner) args(ref string) []string {
 	args := []string{"registry:" + ref, "-o", "json"}
+	if GrypeByCVE {
+		// See scanner.GrypeByCVE for why this matters here.
+		args = append(args, "--by-cve")
+	}
 	if VerboseScanLogs {
 		args = append(args, "-vv")
 	} else {

@@ -1445,6 +1445,47 @@ monitorApi:
   # considers stale, which is what an air-gapped mirror looks like from
   # grype's point of view.
   grypeDB:
+    # Report findings by CVE id rather than by the advisory id that
+    # matched (`grype --by-cve`).
+    #
+    # WHY THIS DEFAULTS TO FALSE, despite being the better naming.
+    # Measured across nine images, the benefit is real but concentrated:
+    # four (nginx, rabbitmq, haproxy, echoserver) already emit only CVE
+    # ids and the flag changes literally nothing, while three (consul
+    # 0->166, mysql 0->76, mongo 39->109) change dramatically. Which
+    # bucket an image falls into does not track its base distro -- it
+    # depends on which advisory source grype's matcher happens to hit --
+    # so it cannot be predicted, only measured.
+    #
+    # Meanwhile the upgrade cost lands on EVERY deployment: 2,945 of
+    # 11,539 open grype findings here would be renamed, each leaving a
+    # wrong "fixed" record behind (see the churn note below). Charging
+    # a quarter of the fleet's findings to fix something most images do
+    # not have is the wrong default. Turn it on deliberately, after
+    # looking at what your own images report.
+    #
+    # grype names a finding after whichever
+    # advisory source matched -- GO-2024-xxxx for a Go module,
+    # ELSA-xxxx for an Oracle Linux package, GHSA-xxxx for npm/PyPI.
+    # Correct for grype, and close to useless here: measured on this
+    # project's own fleet, only 1,547 of 4,512 open grype-only findings
+    # carried a CVE id. The other ~3,000 could not be annotated with
+    # KEV/EPSS (both keyed by CVE id), could not dedupe against trivy's
+    # finding for the same vulnerability, and could not be covered by a
+    # VEX statement written about a CVE -- which is everything this
+    # service does with a finding after recording it.
+    #
+    # ONE-TIME CHURN ON AN EXISTING DEPLOYMENT, read before upgrading.
+    # Renaming a finding is, to MergeFindings, the old one disappearing
+    # and a new one arriving: on the first scan after this is enabled,
+    # grype findings that gain a CVE id are marked "fixed" and their
+    # CVE-named equivalents are recorded as new. Nothing is lost, but
+    # the fixed records are wrong, first_seen_at resets, and if
+    # notifications are configured the new findings will page. Set this
+    # to false to keep the previous naming -- and do that deliberately
+    # if you have VEX statements or risk acceptances keyed to advisory
+    # ids, since those stop matching.
+    byCVE: false
     skipUpdate: "false"
     skipAgeValidation: "false"
   # Artifact refs naming a file on monitor-api's own filesystem, rather

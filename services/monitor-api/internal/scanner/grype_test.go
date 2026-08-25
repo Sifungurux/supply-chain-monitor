@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -248,5 +249,32 @@ func TestGrypeScanner_Bucket(t *testing.T) {
 	s := NewGrypeScanner(GrypeDBConfig{}, false, "")
 	if got := s.Bucket(); got != "cve" {
 		t.Errorf("Bucket() = %q, want %q", got, "cve")
+	}
+}
+
+// TestGrypeScanner_ByCVEArg pins the flag that decides how a finding is
+// NAMED, which downstream decides whether it can be enriched, deduped
+// or covered by a VEX statement. See scanner.GrypeByCVE.
+func TestGrypeScanner_ByCVEArg(t *testing.T) {
+	// Shared mutable package state -- set explicitly, restore after,
+	// same discipline TestTrivyScanner_Args uses for VerboseScanLogs.
+	prev := GrypeByCVE
+	defer func() { GrypeByCVE = prev }()
+
+	g := NewGrypeScanner(GrypeDBConfig{}, false, "")
+
+	GrypeByCVE = false
+	if got := strings.Join(g.args("alpine:3.19"), " "); strings.Contains(got, "--by-cve") {
+		t.Errorf("args = %q, want no --by-cve when GrypeByCVE is false", got)
+	}
+
+	GrypeByCVE = true
+	got := strings.Join(g.args("alpine:3.19"), " ")
+	if !strings.Contains(got, "--by-cve") {
+		t.Errorf("args = %q, want --by-cve when GrypeByCVE is true", got)
+	}
+	// The ref and output format must survive the extra flag.
+	if !strings.Contains(got, "registry:alpine:3.19") || !strings.Contains(got, "-o json") {
+		t.Errorf("args = %q lost the ref or output format", got)
 	}
 }
