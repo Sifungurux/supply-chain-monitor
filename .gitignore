@@ -10,3 +10,14 @@ services/monitor-api/monitor-api
 # Extracted from the built image by `make test-image` so the tool-gated
 # scanner tests can run against the real binaries; removed by that target.
 .tool-bin/
+
+# Claude Code's per-machine settings. Untracked and unignored, this
+# showed in `git status` on every command, and a settings fragment has
+# now twice been written into .gitignore itself by mistake (see 3002ff1,
+# "drop a settings.local.json fragment that landed in .gitignore") --
+# ignoring the real file removes both the noise and the invitation.
+#
+# Deliberately the .local file only, not the whole .claude/ directory:
+# a shared settings.json or a project skill belongs in the repo, and a
+# blanket ignore would silently swallow it.
+.claude/settings.local.json
