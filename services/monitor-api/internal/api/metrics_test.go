@@ -272,3 +272,52 @@ func TestMetrics_SuccessfulAuthTouchesNeitherCounter(t *testing.T) {
 		t.Errorf("scm_auth_throttled_total = %d after only valid requests, want 0", got)
 	}
 }
+
+// TestMetrics_BuildInfo covers the metric that makes "which commit is
+// running" answerable from a scrape.
+//
+// It follows the Prometheus build-metadata convention: a gauge fixed at
+// 1 whose LABEL carries the information, so the value is useless and
+// the label is joinable. A version change shows as a new series rather
+// than a value change nobody can alert on.
+func TestMetrics_BuildInfo(t *testing.T) {
+	t.Run("reports the configured version", func(t *testing.T) {
+		h := api.NewRouter(api.Config{
+			Store:        artifact.NewMemStore(),
+			Tracker:      pipeline.NewTracker([]string{"build", "scan"}),
+			APIKey:       testAPIKey,
+			BuildVersion: "abc1234",
+		})
+		body := scrapeMetrics(t, h)
+		if !strings.Contains(body, `scm_build_info{version="abc1234"} 1`) {
+			t.Errorf("missing or wrong scm_build_info line:\n%s", body)
+		}
+	})
+
+	// An unstamped build must say "unknown" rather than render an empty
+	// label -- a build that cannot say what it is should say so, not
+	// look like a build whose version happens to be blank.
+	t.Run("unset renders unknown", func(t *testing.T) {
+		h := api.NewRouter(api.Config{
+			Store:   artifact.NewMemStore(),
+			Tracker: pipeline.NewTracker([]string{"build", "scan"}),
+			APIKey:  testAPIKey,
+		})
+		body := scrapeMetrics(t, h)
+		if !strings.Contains(body, `scm_build_info{version="unknown"} 1`) {
+			t.Errorf("expected version=\"unknown\", got:\n%s", body)
+		}
+	})
+}
+
+func scrapeMetrics(t *testing.T, h http.Handler) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/metrics returned %d", rec.Code)
+	}
+	return rec.Body.String()
+}

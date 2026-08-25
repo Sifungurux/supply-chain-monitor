@@ -161,6 +161,18 @@ func (h *handler) metricsHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s %g\n", name, help, name, name, value)
 	}
 
+	// The Prometheus convention for build metadata: a gauge fixed at 1
+	// whose LABEL carries the information. That makes the value
+	// useless and the label joinable -- `scm_build_info * on(instance)
+	// group_left(version) ...` attributes any other series to a
+	// specific commit, and a version change shows as a new series
+	// rather than a value nobody can alert on.
+	version := h.buildVersion
+	if version == "" {
+		version = "unknown"
+	}
+	fmt.Fprintf(w, "# HELP scm_build_info The commit this binary was built from.\n# TYPE scm_build_info gauge\nscm_build_info{version=%q} 1\n", version)
+
 	counter("scm_scans_started_total", "Scans started since process start.", h.metrics.scansStarted.Load())
 	counter("scm_scans_succeeded_total", "Scans that completed with at least one scanner succeeding.", h.metrics.scansSucceeded.Load())
 	counter("scm_scans_failed_total", "Scans where every scanner failed, including panics.", h.metrics.scansFailed.Load())

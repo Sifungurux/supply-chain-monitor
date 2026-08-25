@@ -40,6 +40,17 @@ SCM_RUNTIME := $(shell \
 endif
 SCM_CLUSTER_NAME ?= supply-chain-monitor
 IMAGE            := monitor-api:dev
+# The commit the image is built from, stamped into the binary (see the
+# Dockerfile's GIT_SHA) and used as a second, UNIQUE tag alongside :dev.
+#
+# The unique tag is what makes imagePullPolicy: IfNotPresent safe. With
+# only a floating :dev, a node that already holds any monitor-api:dev
+# keeps it forever -- so a rebuilt binary silently does not deploy, and
+# `kubectl get deploy` shows no change to say so. -dirty marks a build
+# from an uncommitted tree, which is exactly the build you most want to
+# be able to identify later.
+GIT_SHA          := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet 2>/dev/null || echo -dirty)
+IMAGE_SHA        := monitor-api:$(GIT_SHA)
 
 # On the podman runtime, resolve DOCKER_HOST from podman's own current
 # connection list instead of requiring it exported by hand in every
@@ -141,15 +152,17 @@ ifeq ($(SCM_RUNTIME),podman)
 	fi
 	@echo "SCM_RUNTIME=podman -- DOCKER_HOST=$(DOCKER_HOST)"
 endif
-	docker build -t $(IMAGE) services/monitor-api
+	docker build --build-arg GIT_SHA=$(GIT_SHA) -t $(IMAGE) -t $(IMAGE_SHA) services/monitor-api
+	@echo "built $(IMAGE) and $(IMAGE_SHA)"
 ifeq ($(SCM_RUNTIME),podman)
 	@echo "SCM_RUNTIME=podman -- importing docker.io/library/$(IMAGE) into k3d cluster '$(SCM_CLUSTER_NAME)' (see comment above)..."
-	k3d image import docker.io/library/$(IMAGE) -c $(SCM_CLUSTER_NAME)
+	k3d image import docker.io/library/$(IMAGE) docker.io/library/$(IMAGE_SHA) -c $(SCM_CLUSTER_NAME)
 	@# Pin it against kubelet image GC. The import is the only copy --
 	@# nothing pushes this image to a registry, so a collected image
 	@# cannot be re-pulled and any Job landing on that node fails with
 	@# what looks like a credentials error. See cluster/pin-image.sh.
 	./cluster/pin-image.sh docker.io/library/$(IMAGE) $(SCM_CLUSTER_NAME)
+	./cluster/pin-image.sh docker.io/library/$(IMAGE_SHA) $(SCM_CLUSTER_NAME)
 endif
 
 # Builds the image and asserts the properties its Dockerfile is written
