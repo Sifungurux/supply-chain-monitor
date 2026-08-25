@@ -434,3 +434,123 @@ func TestIsolatedTrivyJobForwardsRegistryAddrWithCredentials(t *testing.T) {
 		t.Errorf("credentials missing from the Job env: %v", creds)
 	}
 }
+
+// TestIsolatedTrivyScanner_SBOMDocJobShape covers the Job the sbom
+// re-evaluation mode creates -- the one trivy mode that reads a
+// document back OUT of monitor-api rather than uploading one, and the
+// one that must not touch a registry.
+func TestIsolatedTrivyScanner_SBOMDocJobShape(t *testing.T) {
+	client := &recordingJobClient{
+		fakeJobClient: fakeJobClient{
+			namespace:      "test-ns",
+			statusSequence: []jobStatusResult{{succeeded: true}},
+			podName:        "scm-scan-abc-xyz",
+			logs:           `{"findings":[]}`,
+		},
+	}
+	var mintedFor string
+	s := NewIsolatedTrivyScanner(client, IsolatedTrivyConfig{
+		SubCommand:     "sbom-doc",
+		CacheClaimName: "scm-trivy-db-cache",
+		PollInterval:   time.Millisecond,
+		APIBaseURL:     "http://monitor-api:8080",
+		MintScanToken: func(artifactID string) (string, error) {
+			mintedFor = artifactID
+			return "tok-abc", nil
+		},
+	})
+
+	if _, err := s.ScanForArtifact(context.Background(), "alpine:3.19", "artifact-7"); err != nil {
+		t.Fatalf("ScanForArtifact: %v", err)
+	}
+	if mintedFor != "artifact-7" {
+		t.Errorf("minted for %q, want %q", mintedFor, "artifact-7")
+	}
+
+	env := map[string]string{}
+	for _, ev := range client.createdJobs[0].Spec.Template.Spec.Containers[0].Env {
+		env[ev.Name] = ev.Value
+	}
+	for name, want := range map[string]string{
+		"SCM_SCAN_TOOL":    "trivy",
+		"SCM_SCAN_MODE":    "sbom-doc",
+		"SCM_ARTIFACT_ID":  "artifact-7",
+		"SCM_API_BASE_URL": "http://monitor-api:8080",
+		"SCM_SCAN_TOKEN":   "tok-abc",
+	} {
+		if env[name] != want {
+			t.Errorf("%s = %q, want %q", name, env[name], want)
+		}
+	}
+	if _, ok := env["REGISTRY_ADDR"]; ok {
+		t.Errorf("REGISTRY_ADDR set on an sbom-doc Job, which never talks to a registry: %+v", env)
+	}
+}
+
+// TestIsolatedTrivyScanner_SBOMDocMintFailureIsAnError proves the read
+// path does NOT fall back to the master API key the way "image" mode
+// does. That fallback exists so a generated SBOM is never lost; there
+// is nothing to lose on a download, and a failed re-evaluation is
+// retried next run.
+func TestIsolatedTrivyScanner_SBOMDocMintFailureIsAnError(t *testing.T) {
+	client := &recordingJobClient{
+		fakeJobClient: fakeJobClient{
+			namespace:      "test-ns",
+			statusSequence: []jobStatusResult{{succeeded: true}},
+			podName:        "scm-scan-abc-xyz",
+			logs:           `{"findings":[]}`,
+		},
+	}
+	s := NewIsolatedTrivyScanner(client, IsolatedTrivyConfig{
+		SubCommand:       "sbom-doc",
+		CacheClaimName:   "scm-trivy-db-cache",
+		PollInterval:     time.Millisecond,
+		APIBaseURL:       "http://monitor-api:8080",
+		APIKeySecretName: "scm-monitor-api-auth",
+		APIKeySecretKey:  "API_KEY",
+		MintScanToken:    func(string) (string, error) { return "", errors.New("store unavailable") },
+	})
+
+	if _, err := s.ScanForArtifact(context.Background(), "alpine:3.19", "artifact-7"); err == nil {
+		t.Fatal("expected an error when the scan token cannot be minted")
+	}
+	if len(client.createdJobs) != 0 {
+		t.Errorf("created %d Job(s) despite failing to mint a token", len(client.createdJobs))
+	}
+}
+
+// TestIsolatedTrivyScanner_ImageModeStillFallsBackToAPIKey guards the
+// other half of that asymmetry: the upload path's fallback must stay.
+func TestIsolatedTrivyScanner_ImageModeStillFallsBackToAPIKey(t *testing.T) {
+	client := &recordingJobClient{
+		fakeJobClient: fakeJobClient{
+			namespace:      "test-ns",
+			statusSequence: []jobStatusResult{{succeeded: true}},
+			podName:        "scm-scan-abc-xyz",
+			logs:           `{"findings":[]}`,
+		},
+	}
+	s := NewIsolatedTrivyScanner(client, IsolatedTrivyConfig{
+		SubCommand:       "image",
+		CacheClaimName:   "scm-trivy-db-cache",
+		PollInterval:     time.Millisecond,
+		APIBaseURL:       "http://monitor-api:8080",
+		APIKeySecretName: "scm-monitor-api-auth",
+		APIKeySecretKey:  "API_KEY",
+		MintScanToken:    func(string) (string, error) { return "", errors.New("store unavailable") },
+	})
+
+	if _, err := s.ScanForArtifact(context.Background(), "alpine:3.19", "artifact-7"); err != nil {
+		t.Fatalf("image mode must not fail on a minting error: %v", err)
+	}
+	// SCM_API_KEY arrives as a secretKeyRef, never a plain value.
+	var sawAPIKey bool
+	for _, ev := range client.createdJobs[0].Spec.Template.Spec.Containers[0].Env {
+		if ev.Name == "SCM_API_KEY" && ev.ValueFrom != nil && ev.ValueFrom.SecretKeyRef != nil {
+			sawAPIKey = true
+		}
+	}
+	if !sawAPIKey {
+		t.Error("image mode should fall back to SCM_API_KEY so a generated SBOM is not lost")
+	}
+}

@@ -1750,10 +1750,14 @@ monitorApi:
   # rescan population keep working exactly as before. Malware coverage
   # comes from the full sweep and nowhere else.
   #
+  # Runs whichever tool built the cve bucket -- trivy for cveScanner
+  # "trivy" or "both", grype for "grype" (main.go's sbomReevalScanner).
+  # The two disagree on what a finding is CALLED (grype reports the
+  # matching advisory's id: GO-/ELSA-/GHSA-), and mismatched ids never
+  # merge with what is already stored, so the tool has to match.
+  #
   # Off by default: it only pays for itself once a fleet is big enough
-  # that full rescans cannot keep up, and it requires grype (see the
-  # `fail` guard in the template -- cveScanner "trivy" deploys no grype
-  # DB cache for these Jobs to mount).
+  # that full rescans cannot keep up.
   sweepSbom:
     enabled: false
     # Deliberately shortly AFTER grypeCache.refreshSchedule (04:00 UTC):

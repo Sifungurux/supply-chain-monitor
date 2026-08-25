@@ -1011,3 +1011,56 @@ func TestSweepSummary_AllSucceeded(t *testing.T) {
 		t.Errorf("expected per-artifact digest lines.\ngot log:\n%s", out)
 	}
 }
+
+// --- sbom re-evaluation tool selection ---
+
+// stubScanner is a bare Scanner used only to tell two instances apart.
+type stubScanner struct{ name string }
+
+func (s *stubScanner) Scan(context.Context, string) ([]artifact.Finding, error) { return nil, nil }
+
+// TestSBOMReevalScanner_MatchesTheToolThatBuiltTheBucket pins the rule
+// that makes an sbom-only round useful rather than noisy.
+//
+// The round merges into the cve bucket the IMAGE scan populated, and
+// the two tools disagree on what a finding is CALLED: measured against
+// one real SBOM from this fleet, grype reported 78 findings with zero
+// CVE ids (GO-/ELSA-/GHSA-) while trivy reported 78 with 77 CVE ids.
+// Mismatched ids never merge -- they pile a parallel namespace beside
+// the existing findings that cannot dedupe, cannot be covered by a VEX
+// statement written about a CVE, and cannot carry KEV/EPSS, which are
+// keyed by CVE id.
+func TestSBOMReevalScanner_MatchesTheToolThatBuiltTheBucket(t *testing.T) {
+	trivySBOMDoc := &stubScanner{name: "trivy"}
+	grypeSBOMDoc := &stubScanner{name: "grype"}
+
+	for _, tc := range []struct {
+		cveScanner string
+		want       string
+		why        string
+	}{
+		{"grype", "grype", "the bucket holds grype's advisory ids, so grype must re-evaluate it"},
+		{"trivy", "trivy", "trivy-only deployment"},
+		{"both", "trivy", "under both, trivy's ids dominate the bucket (35195 vs 4557 measured)"},
+		{"", "trivy", "unset falls back to trivy, matching the chart default"},
+	} {
+		got := sbomReevalScanner(tc.cveScanner, trivySBOMDoc, grypeSBOMDoc)
+		s, ok := got.(*stubScanner)
+		if !ok || s.name != tc.want {
+			t.Errorf("cveScanner=%q selected %v, want %q -- %s", tc.cveScanner, got, tc.want, tc.why)
+		}
+	}
+}
+
+// TestSBOMReevalScanner_NilWhenToolUnavailable covers
+// DISABLE_SCAN_ISOLATION, where no isolated scanner is constructed at
+// all. nil must propagate so the mode answers 501 rather than the
+// handler falling back to a full scan.
+func TestSBOMReevalScanner_NilWhenToolUnavailable(t *testing.T) {
+	if got := sbomReevalScanner("both", nil, nil); got != nil {
+		t.Errorf("got %v, want nil", got)
+	}
+	if got := sbomReevalScanner("grype", &stubScanner{name: "trivy"}, nil); got != nil {
+		t.Errorf("cveScanner=grype with no grype scanner should be nil, got %v", got)
+	}
+}
