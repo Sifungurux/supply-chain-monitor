@@ -1464,17 +1464,21 @@ func TestScanArtifact_SBOMOnlyLeavesOtherBucketsUntouched(t *testing.T) {
 		}
 	}
 
-	// And the cve bucket DID get re-evaluated: the new CVE is present,
-	// and the one the previous round reported is gone (fixed), because
-	// that bucket genuinely was re-derived.
+	// And the cve bucket IS the one an sbom-only round merges into, so
+	// the newly-reported CVE lands. What it must NOT do is resolve the
+	// CVE the previous round reported: this round ran one scanner
+	// against an SBOM and cannot speak for what trivy found in the
+	// image filesystem. See
+	// TestScanArtifact_SBOMOnlyNeverResolvesCVEs for the full
+	// reasoning and the measured numbers behind it.
 	var sawNew bool
 	for _, f := range after.CVEFindings {
 		if f.ID == "CVE-2024-2" && f.Status == artifact.FindingStatusOpen {
 			sawNew = true
 		}
-		if f.ID == "CVE-2024-1" && f.Status != artifact.FindingStatusFixed {
-			t.Errorf("CVE-2024-1 status = %q, want %q -- the cve bucket is the one bucket an sbom-only scan does re-derive",
-				f.Status, artifact.FindingStatusFixed)
+		if f.ID == "CVE-2024-1" && f.Status != artifact.FindingStatusOpen {
+			t.Errorf("CVE-2024-1 status = %q, want %q -- an sbom-only round adds and updates, it never resolves",
+				f.Status, artifact.FindingStatusOpen)
 		}
 	}
 	if !sawNew {
@@ -1700,5 +1704,67 @@ func TestScanArtifact_SBOMOnlyDoesNotMoveScanMetrics(t *testing.T) {
 	}
 	if l := countersLine(got, "scm_scans_succeeded_total"); l != succeededBefore {
 		t.Errorf("scm_scans_succeeded_total moved on an sbom-only scan: %q -> %q", succeededBefore, l)
+	}
+}
+
+// TestScanArtifact_SBOMOnlyNeverResolvesCVEs is the counterpart to
+// TestScanArtifact_SBOMOnlyLeavesOtherBucketsUntouched, for the one
+// bucket an sbom-only round DOES merge.
+//
+// The re-evaluation runs grype against the stored SBOM and reports only
+// what that finds. The bucket it merges into was built by whatever
+// CVE_SCANNER selects -- with "both", most of it is trivy scanning the
+// image filesystem directly. Measured on this project's own fleet:
+// 35,195 of 46,728 open CVE findings are trivy-only. With fix-detection
+// on, every one of those is absent from the re-evaluation's results and
+// gets marked "fixed" -- 75% of the bucket silently resolved, nightly.
+//
+// So the round may ADD and UPDATE, never RESOLVE.
+func TestScanArtifact_SBOMOnlyNeverResolvesCVEs(t *testing.T) {
+	trivyLike := &fakeScanner{findings: []artifact.Finding{
+		// The trivy-only majority: found by an image scan, absent from
+		// anything grype derives from the SBOM.
+		{ID: "CVE-TRIVY-ONLY", Severity: "critical", Source: "trivy"},
+		{ID: "CVE-BOTH", Severity: "high", Source: "trivy"},
+	}}
+	reeval := &grypeSBOMLike{findings: []artifact.Finding{
+		{ID: "CVE-BOTH", Severity: "high", Source: "grype"},
+		// A CVE published since the last full scan -- the entire point
+		// of the mode, so it must still land.
+		{ID: "CVE-BRAND-NEW", Severity: "critical", Source: "grype"},
+	}}
+
+	h, store := newSBOMReevalRouter(scanner.Registry{
+		artifact.TypeImage: {trivyLike},
+	}, reeval)
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	if _, full := scanAndWait(t, h, store, created.ID); full.Status != artifact.StatusScanned {
+		t.Fatal("precondition: the full scan must succeed")
+	}
+	if err := store.SaveDocument(created.ID, artifact.DocumentKindSBOM, "application/json", []byte(`{}`)); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+
+	_, after := scanModeAndWait(t, h, store, created.ID, "sbom-only")
+
+	byID := map[string]artifact.Finding{}
+	for _, f := range after.CVEFindings {
+		byID[f.ID] = f
+	}
+
+	// THE ASSERTION THIS TEST EXISTS FOR.
+	if f, ok := byID["CVE-TRIVY-ONLY"]; !ok {
+		t.Fatalf("CVE-TRIVY-ONLY disappeared entirely: %+v", after.CVEFindings)
+	} else if f.Status != artifact.FindingStatusOpen {
+		t.Errorf("CVE-TRIVY-ONLY status = %q, want %q -- an sbom-only round did not look at the image filesystem and must not resolve what trivy found there",
+			f.Status, artifact.FindingStatusOpen)
+	}
+	// Still open, obviously -- it was re-reported.
+	if f := byID["CVE-BOTH"]; f.Status != artifact.FindingStatusOpen {
+		t.Errorf("CVE-BOTH status = %q, want %q", f.Status, artifact.FindingStatusOpen)
+	}
+	// And the mode still does its actual job: new CVEs arrive.
+	if f, ok := byID["CVE-BRAND-NEW"]; !ok || f.Status != artifact.FindingStatusOpen {
+		t.Errorf("CVE-BRAND-NEW missing or not open (%+v) -- blocking fix-detection must not block new findings", f)
 	}
 }

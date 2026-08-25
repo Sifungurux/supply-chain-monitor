@@ -581,6 +581,19 @@ The trade-off, stated plainly:
   The same goes for secrets and misconfigurations, which trivy derives
   from the image filesystem. It also does no digest backfill and no
   mirroring.
+- **It never resolves anything, including in the cve bucket.** The
+  round runs one scanner against the SBOM and reports only what that
+  finds, but the bucket it merges into was built by whatever
+  `cveScanner` selects -- with `both`, most of it is trivy scanning the
+  image filesystem directly. Measured on this project's own fleet:
+  35,195 of 46,728 open CVE findings are trivy-only, against 4,557
+  grype-only. With fix-detection left on, every trivy-only finding is
+  absent from the re-evaluation's results and gets marked "fixed" --
+  three quarters of the bucket silently resolved, nightly, on every
+  artifact. So the round may ADD and UPDATE, never RESOLVE. A
+  genuinely-fixed CVE stays open until the next full scan notices,
+  which is the right trade: a stale "open" is visible and self-corrects,
+  a wrong "fixed" is invisible and does not.
 - **Only the cve bucket is merged.** The other four buckets are not
   passed to `MergeFindings` at all, and this is load-bearing rather
   than tidy. Bucket affinity (`Bucket() "cve"`) governs only what a
