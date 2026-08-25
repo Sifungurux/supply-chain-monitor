@@ -40,6 +40,27 @@ SCM_RUNTIME := $(shell \
 endif
 SCM_CLUSTER_NAME ?= supply-chain-monitor
 IMAGE            := monitor-api:dev
+# The command that BUILDS images, as opposed to the docker CLI used for
+# `docker run` elsewhere in this file.
+#
+# podman build, not docker build, when the runtime is podman: the
+# Dockerfile's Go stages are pinned to $BUILDPLATFORM so they
+# cross-compile instead of running the Go toolchain under emulation
+# (see the Dockerfile's own comment), and that is a BuildKit/buildah
+# feature. The docker CLI here has no buildx component, so it falls back
+# to the legacy builder, which cannot parse $BUILDPLATFORM at all and
+# fails with `"" is an invalid OS component`. buildah handles it
+# natively -- verified by building both linux/amd64 and linux/arm64 on
+# an Apple Silicon machine, which the legacy path could never do.
+# Chosen by CAPABILITY, not by SCM_RUNTIME: what matters is whether the
+# builder understands $BUILDPLATFORM, and that does not line up with
+# which VM the cluster runs in. `docker buildx` does, buildah does, and
+# the legacy docker builder does not -- it fails with `"" is an invalid
+# OS component`, which reads like a Dockerfile typo rather than a
+# missing component. GitHub's ubuntu-latest ships buildx, so CI takes
+# the first branch; a machine whose docker has no buildx plugin falls
+# through to podman.
+CONTAINER_BUILD  := $(shell 	if docker buildx version >/dev/null 2>&1; then echo "docker buildx build"; 	elif command -v podman >/dev/null 2>&1; then echo "podman build"; 	else echo "docker build"; fi)
 # The commit the image is built from, stamped into the binary (see the
 # Dockerfile's GIT_SHA) and used as a second, UNIQUE tag alongside :dev.
 #
@@ -152,7 +173,7 @@ ifeq ($(SCM_RUNTIME),podman)
 	fi
 	@echo "SCM_RUNTIME=podman -- DOCKER_HOST=$(DOCKER_HOST)"
 endif
-	docker build --build-arg GIT_SHA=$(GIT_SHA) -t $(IMAGE) -t $(IMAGE_SHA) services/monitor-api
+	$(CONTAINER_BUILD) --build-arg GIT_SHA=$(GIT_SHA) -t $(IMAGE) -t $(IMAGE_SHA) services/monitor-api
 	@echo "built $(IMAGE) and $(IMAGE_SHA)"
 ifeq ($(SCM_RUNTIME),podman)
 	@echo "SCM_RUNTIME=podman -- importing docker.io/library/$(IMAGE) into k3d cluster '$(SCM_CLUSTER_NAME)' (see comment above)..."
@@ -178,7 +199,7 @@ endif
 # linux/amd64), so a native amd64 runner is the only place the amd64
 # branch actually executes end to end.
 test-image:
-	docker build -t $(IMAGE)-verify services/monitor-api
+	$(CONTAINER_BUILD) -t $(IMAGE)-verify services/monitor-api
 	@echo "== runs as non-root (uid 65534) =="
 	@id="$$(docker run --rm --entrypoint id $(IMAGE)-verify -u)"; \
 		[ "$$id" = "65534" ] || { echo "image runs as uid $$id, want 65534" >&2; exit 1; }
