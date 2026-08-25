@@ -6,9 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -880,5 +884,130 @@ func TestCapSaturatedIsErrScanCapSaturated(t *testing.T) {
 	var sat capSaturated
 	if !errors.As(err, &sat) || sat.retryAfter != 7*time.Second {
 		t.Fatalf("errors.As did not recover the Retry-After: %+v", sat)
+	}
+}
+
+// --- sweep summary reporting ---
+
+// sweepStub serves the three endpoints runSweepRegistered calls, with
+// per-artifact control over what POST /scan answers. It exists because
+// the sweep runs as an unattended CronJob whose single summary log line
+// is the only signal anybody reads -- and that line had no test at all.
+type sweepStub struct {
+	// scanStatus maps artifact id -> HTTP status POST /scan returns.
+	// Anything not listed answers 202 and then reports "scanned".
+	scanStatus map[string]int
+}
+
+func (s *sweepStub) handler(t *testing.T, ids []string) http.Handler {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/artifacts", func(w http.ResponseWriter, r *http.Request) {
+		var out []artifact.Artifact
+		// Only the "registered" pass returns anything; the stuck/failed
+		// passes return empty, keeping the batch exactly `ids`.
+		if r.URL.Query().Get("status") == string(artifact.StatusRegistered) {
+			for _, id := range ids {
+				out = append(out, artifact.Artifact{ID: id, Ref: "example.com/" + id + ":1", Type: artifact.TypeImage, Status: artifact.StatusRegistered})
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"total": len(out), "artifacts": out})
+	})
+	mux.HandleFunc("POST /api/v1/artifacts/{id}/scan", func(w http.ResponseWriter, r *http.Request) {
+		code := http.StatusAccepted
+		if c, ok := s.scanStatus[r.PathValue("id")]; ok {
+			code = c
+		}
+		if code == http.StatusTooManyRequests {
+			w.Header().Set("Retry-After", "1")
+		}
+		w.WriteHeader(code)
+		_ = json.NewEncoder(w).Encode(artifact.Artifact{ID: r.PathValue("id"), Status: artifact.StatusScanning})
+	})
+	mux.HandleFunc("GET /api/v1/artifacts/{id}", func(w http.ResponseWriter, r *http.Request) {
+		// The poll after a 202: already finished, with a digest, so a
+		// success is unambiguous in the summary.
+		_ = json.NewEncoder(w).Encode(artifact.Artifact{
+			ID: r.PathValue("id"), Ref: "example.com/" + r.PathValue("id") + ":1",
+			Status: artifact.StatusScanned, Digest: "sha256:" + r.PathValue("id"),
+		})
+	})
+	return mux
+}
+
+// runSweepCapturingLog runs the sweep against a stub and returns
+// everything it logged.
+func runSweepCapturingLog(t *testing.T, ids []string, stub *sweepStub) string {
+	t.Helper()
+	srv := httptest.NewServer(stub.handler(t, ids))
+	defer srv.Close()
+
+	t.Setenv("SWEEP_API_BASE_URL", srv.URL)
+	t.Setenv("SWEEP_API_KEY", "test-key")
+	t.Setenv("SWEEP_BATCH_SIZE", strconv.Itoa(len(ids)))
+	t.Setenv("SWEEP_MODE", "full")
+	t.Setenv("SWEEP_RESCAN_STALE_AFTER_DAYS", "0")
+	t.Setenv("SWEEP_MIRROR_BACKFILL", "false")
+
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(old)
+
+	runSweepRegistered()
+	return buf.String()
+}
+
+// TestSweepSummary_CountsWhatActuallyHappened is the regression test for
+// a summary line that lied.
+//
+// It used to report len(toScan) as the number scanned regardless of
+// outcome, so a run in which every single scan failed still signed off
+// with "5 scanned" -- on an unattended CronJob whose log is the only
+// thing an operator reads to decide whether the sweep is healthy.
+func TestSweepSummary_CountsWhatActuallyHappened(t *testing.T) {
+	ids := []string{"aaa1", "bbb2", "ccc3", "ddd4"}
+	out := runSweepCapturingLog(t, ids, &sweepStub{scanStatus: map[string]int{
+		"bbb2": http.StatusInternalServerError, // a real failure
+		"ccc3": http.StatusInternalServerError, // another
+		"ddd4": http.StatusTooManyRequests,     // cap saturated -- not a failure
+	}})
+
+	// One scanned (aaa1), two failed, one not attempted.
+	want := "done -- 1 scanned, 2 failed, 1 not attempted"
+	if !strings.Contains(out, want) {
+		t.Errorf("summary line wrong.\nwant substring: %q\ngot log:\n%s", want, out)
+	}
+	// The specific historical bug: never claim the whole batch scanned.
+	if strings.Contains(out, "done -- 4 scanned") {
+		t.Errorf("summary reported the whole batch as scanned despite 2 failures and a 429:\n%s", out)
+	}
+}
+
+// TestSweepSummary_AllFailed is the case the old line got most wrong:
+// nothing worked at all, and it still read as a clean run.
+func TestSweepSummary_AllFailed(t *testing.T) {
+	ids := []string{"aaa1", "bbb2"}
+	out := runSweepCapturingLog(t, ids, &sweepStub{scanStatus: map[string]int{
+		"aaa1": http.StatusInternalServerError,
+		"bbb2": http.StatusInternalServerError,
+	}})
+
+	if !strings.Contains(out, "done -- 0 scanned, 2 failed") {
+		t.Errorf("a run where every scan failed must say so.\ngot log:\n%s", out)
+	}
+}
+
+// TestSweepSummary_AllSucceeded keeps the happy path honest too -- a
+// counter that only ever reports failures would pass the tests above.
+func TestSweepSummary_AllSucceeded(t *testing.T) {
+	ids := []string{"aaa1", "bbb2", "ccc3"}
+	out := runSweepCapturingLog(t, ids, &sweepStub{})
+
+	if !strings.Contains(out, "done -- 3 scanned, 0 failed, 0 not attempted") {
+		t.Errorf("clean run summary wrong.\ngot log:\n%s", out)
+	}
+	if !strings.Contains(out, "digest resolved") {
+		t.Errorf("expected per-artifact digest lines.\ngot log:\n%s", out)
 	}
 }
