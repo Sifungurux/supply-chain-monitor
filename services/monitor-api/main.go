@@ -2206,7 +2206,7 @@ func runAPIServer() {
 	// and forwarded into every isolated grype Job below as
 	// GRYPE_BY_CVE, so both paths agree on how a finding is named. See
 	// scanner.GrypeByCVE.
-	grypeByCVE := getenvBool("GRYPE_BY_CVE", true)
+	grypeByCVE := getenvBool("GRYPE_BY_CVE", false)
 	scanner.GrypeByCVE = grypeByCVE
 
 	// Image malware scanning (unpack + ClamAV) and image CVE scanning
