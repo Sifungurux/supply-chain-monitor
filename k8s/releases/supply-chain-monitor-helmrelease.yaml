@@ -138,6 +138,32 @@ spec:
       # other deployment silently loses them.
       showConnectionSettings: false
     monitorApi:
+      # Report grype findings by CVE id rather than by the advisory id
+      # that matched (grype --by-cve). Chart default is false, set true
+      # here because the cost was measured ON THIS CLUSTER and is
+      # already paid for.
+      #
+      # What it buys here, measured: a full scan of mysql:8.4 went from
+      # 155 open findings to 88 with no loss of coverage -- 21 findings
+      # that were counted twice (once as CVE- from trivy, once as ELSA-
+      # from grype) became one attributed to both, and grype's own
+      # duplicate advisories for a single CVE collapsed. Per-finding
+      # EPSS coverage on that artifact went 0% to 99%.
+      #
+      # What it costs here, also measured: 2,945 of 11,539 open grype
+      # findings get renamed, each leaving a wrong "fixed" record and a
+      # reset first_seen_at. Acceptable on THIS cluster specifically
+      # because nothing keys off those ids -- no notifiers configured
+      # (so nothing pages), no VEX documents, no risk acceptances. A
+      # deployment with any of those should leave the chart default.
+      #
+      # Not every image benefits: of nine surveyed, four (nginx,
+      # rabbitmq, haproxy, echoserver) already emitted only CVE ids and
+      # are completely unaffected. The gain is concentrated in consul
+      # (0 -> 166), mysql (0 -> 76) and mongo (39 -> 109), and does not
+      # track base distro, so it can only be measured, never predicted.
+      grypeDB:
+        byCVE: true
       # Copy every registered artifact into scm-registry and scan the
       # copy instead of pulling from docker.io/ghcr.io on every scan.
       # Chart default is false, set true here for the same reason as
