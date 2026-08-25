@@ -293,7 +293,20 @@ func (s *IsolatedTrivyScanner) ScanForArtifact(ctx context.Context, ref, artifac
 		env[RefHostAllowlistEnv] = allow
 	}
 	var secretEnv []k8sjob.SecretEnvVar
-	if s.cfg.SubCommand == "image" && artifactID != "" && s.cfg.APIBaseURL != "" {
+	// "sbom-doc" mode reads the stored SBOM back out of monitor-api and
+	// re-derives CVEs from it (see runScanWorker). It needs the same
+	// artifact id, base URL and per-Job token "image" mode uses to
+	// UPLOAD documents -- the direction is reversed, the plumbing is
+	// identical -- so both modes share this block.
+	//
+	// The ONE difference is the API-key fallback below: "image" mode
+	// falls back so a generated SBOM is never lost, while "sbom-doc"
+	// must not, because there is nothing to lose. A failed download
+	// fails the scan, which blocks the cve bucket and is retried next
+	// run; handing a pod built for untrusted content the fleet-wide key
+	// to avoid that is a far worse trade.
+	needsAPICallback := s.cfg.SubCommand == "image" || s.cfg.SubCommand == "sbom-doc"
+	if needsAPICallback && artifactID != "" && s.cfg.APIBaseURL != "" {
 		env["SCM_ARTIFACT_ID"] = artifactID
 		env["SCM_API_BASE_URL"] = s.cfg.APIBaseURL
 		// A per-Job token, not the master key. This pod is built to
@@ -310,15 +323,21 @@ func (s *IsolatedTrivyScanner) ScanForArtifact(ctx context.Context, ref, artifac
 		// also read the Secret.
 		minted := false
 		if s.cfg.MintScanToken != nil {
-			if token, err := s.cfg.MintScanToken(artifactID); err == nil && token != "" {
+			token, err := s.cfg.MintScanToken(artifactID)
+			if err == nil && token != "" {
 				env["SCM_SCAN_TOKEN"] = token
 				minted = true
+			} else if s.cfg.SubCommand == "sbom-doc" {
+				// See needsAPICallback above: no silent downgrade to the
+				// master key on the read path.
+				return nil, fmt.Errorf("mint scan token for sbom re-evaluation of %q: %w", artifactID, err)
 			}
-			// A minting failure falls through to the API key below
-			// rather than producing a Job that cannot upload: losing
-			// the SBOM is a worse outcome than the older credential.
+			// For "image" mode a minting failure falls through to the
+			// API key below rather than producing a Job that cannot
+			// upload: losing the SBOM is a worse outcome than the older
+			// credential.
 		}
-		if !minted {
+		if !minted && s.cfg.SubCommand != "sbom-doc" {
 			secretEnv = append(secretEnv, k8sjob.SecretEnvVar{Name: "SCM_API_KEY", SecretName: s.cfg.APIKeySecretName, SecretKey: s.cfg.APIKeySecretKey})
 		}
 	}

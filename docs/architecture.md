@@ -637,11 +637,23 @@ documents, spending a namespaced `sbom:read` entry so a download can
 never consume the upload the token was minted for, and there is
 deliberately no fallback to the master API key.
 
-Requires grype (`monitorApi.cveScanner` `grype` or `both`): the grype
-DB cache primer and refresh `CronJob` are gated on that value, so a
-trivy-only deployment has no vulnerability database for these Jobs to
-mount. The chart fails to render rather than deploying a sweep that
-would fail every run.
+**The re-evaluation runs whichever tool built the bucket** (`main.go`'s
+`sbomReevalScanner`): trivy for `cveScanner` `trivy` or `both`, grype
+for `grype`. This is a correctness rule, not a preference. The two
+tools disagree on what a finding is *called* -- measured against one
+real SBOM from this project's fleet, grype reported 78 findings with
+**zero** CVE ids (46 `GO-`, 17 `ELSA-`, 15 `GHSA-`, whichever advisory
+source matched) while trivy reported 78 with 77 CVE ids from the same
+document. Mismatched ids never merge: they pile a second namespace
+beside the existing findings that can never dedupe against them, can
+never be covered by a VEX statement written about a CVE, and can never
+carry KEV/EPSS, which are keyed by CVE id. Pointed the right way round,
+trivy-on-SBOM refreshed 75 of 75 of an artifact's stored trivy
+findings.
+
+No `cveScanner` guard is needed: trivy's DB cache PVC, primer Job and
+refresh `CronJob` are deployed unconditionally, so every configuration
+has a working tool.
 
 ## API
 
