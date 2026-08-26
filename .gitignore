@@ -21,3 +21,8 @@ services/monitor-api/monitor-api
 # a shared settings.json or a project skill belongs in the repo, and a
 # blanket ignore would silently swallow it.
 .claude/settings.local.json
+
+# Scratch tarball `make build` writes to hand the image to k3d (see the
+# build target: importing by reference silently did nothing, importing a
+# tarball works). Removed on success; committed never.
+.monitor-api-image.tar
