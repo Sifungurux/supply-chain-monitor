@@ -712,7 +712,7 @@ func TestUnmirroredArtifacts(t *testing.T) {
 		// come back, or the backfill never converges.
 		{ID: "not-mirrorable", Ref: "/var/lib/artifacts/report.json", SourceRef: "/var/lib/artifacts/report.json"},
 	}
-	got := unmirroredArtifacts(list)
+	got := unmirroredArtifacts(list, time.Now().UTC().Add(-mirrorRetryInterval))
 	if len(got) != 1 || got[0].ID != "never-mirrored" {
 		ids := make([]string, len(got))
 		for i, a := range got {
@@ -720,7 +720,7 @@ func TestUnmirroredArtifacts(t *testing.T) {
 		}
 		t.Fatalf("unmirroredArtifacts returned %v, want just [never-mirrored]", ids)
 	}
-	if out := unmirroredArtifacts(nil); len(out) != 0 {
+	if out := unmirroredArtifacts(nil, time.Now().UTC()); len(out) != 0 {
 		t.Errorf("unmirroredArtifacts(nil) = %v, want empty", out)
 	}
 }
@@ -1118,4 +1118,136 @@ func TestLogSweepProgress_HeartbeatCadence(t *testing.T) {
 	if got := capture(1); !reflect.DeepEqual(got, []int{1}) {
 		t.Errorf("single-artifact run logged at %v, want [1]", got)
 	}
+}
+
+// TestUnmirroredArtifacts_BacksOffAfterAFailedAttempt covers the one
+// artifact the "this pass converges" reasoning does not cover: one
+// whose copy fails for a reason the UPSTREAM owns.
+//
+// gcr.io/google-samples/hello-app:1.0 returns a Content-Length mismatch
+// from inside this cluster, so source_ref never gets settled, so the
+// backfill selected it again every fifteen minutes -- forever, burning
+// a scan slot each time. Observed doing exactly that on this project's
+// own cluster before the backoff existed.
+func TestUnmirroredArtifacts_BacksOffAfterAFailedAttempt(t *testing.T) {
+	now := time.Now().UTC()
+	recent := now.Add(-1 * time.Hour)
+	old := now.Add(-12 * time.Hour)
+	cutoff := now.Add(-mirrorRetryInterval)
+
+	list := []artifact.Artifact{
+		// Tried an hour ago and still unmirrored -- wait.
+		{ID: "just-tried", LastScanAt: &recent},
+		// Tried twelve hours ago -- worth another attempt, in case the
+		// upstream was only transiently broken.
+		{ID: "tried-long-ago", LastScanAt: &old},
+		// Never scanned at all: a newly registered artifact must be
+		// picked up immediately, never delayed by this backoff.
+		{ID: "never-scanned"},
+	}
+
+	got := unmirroredArtifacts(list, cutoff)
+	ids := make([]string, len(got))
+	for i, a := range got {
+		ids[i] = a.ID
+	}
+	if len(got) != 2 {
+		t.Fatalf("selected %v, want [tried-long-ago never-scanned]", ids)
+	}
+	for _, want := range []string{"tried-long-ago", "never-scanned"} {
+		found := false
+		for _, id := range ids {
+			if id == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%q was not selected (got %v)", want, ids)
+		}
+	}
+	for _, id := range ids {
+		if id == "just-tried" {
+			t.Errorf("just-tried was selected again after 1h -- the backoff is not holding (got %v)", ids)
+		}
+	}
+}
+
+// TestListWithRetry covers the wrapper that keeps one transient failure
+// from throwing away a whole sweep run.
+//
+// Fataling on the initial listing costs the full sweep fifteen minutes
+// and sweep-sbom a full DAY -- and transient is the common case. This
+// was not hypothetical: enabling in-cluster TLS rolled monitor-api
+// while a sweep was starting, and the run died with "server gave HTTP
+// response to HTTPS client", a condition already resolved by the time
+// anyone read the log.
+func TestListWithRetry(t *testing.T) {
+	// Shrunk so the retry paths do not cost 30 seconds of real
+	// sleeping. Restored after, since this is package-level state
+	// other tests could inherit.
+	prev := sweepListRetryDelay
+	sweepListRetryDelay = time.Millisecond
+	defer func() { sweepListRetryDelay = prev }()
+
+	t.Run("succeeds on a later attempt", func(t *testing.T) {
+		calls := 0
+		got, err := listWithRetry(context.Background(), "test", func() ([]artifact.Artifact, error) {
+			calls++
+			if calls < 3 {
+				return nil, errors.New("server gave HTTP response to HTTPS client")
+			}
+			return []artifact.Artifact{{ID: "a"}}, nil
+		})
+		if err != nil {
+			t.Fatalf("err = %v, want nil after a recovering failure", err)
+		}
+		if len(got) != 1 || calls != 3 {
+			t.Errorf("got %d artifacts after %d calls, want 1 after 3", len(got), calls)
+		}
+	})
+
+	t.Run("gives up and reports the last error", func(t *testing.T) {
+		calls := 0
+		_, err := listWithRetry(context.Background(), "test", func() ([]artifact.Artifact, error) {
+			calls++
+			return nil, errors.New("connection refused")
+		})
+		if err == nil {
+			t.Fatal("want an error once the attempts are exhausted")
+		}
+		if calls != sweepListAttempts {
+			t.Errorf("called %d times, want %d", calls, sweepListAttempts)
+		}
+	})
+
+	t.Run("no retry on the first success", func(t *testing.T) {
+		calls := 0
+		if _, err := listWithRetry(context.Background(), "test", func() ([]artifact.Artifact, error) {
+			calls++
+			return nil, nil
+		}); err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		if calls != 1 {
+			t.Errorf("called %d times, want 1 -- a healthy listing must not be delayed", calls)
+		}
+	})
+
+	// The run's own budget is the outer bound. Retrying past a
+	// cancelled context would spend a sweep's whole window failing to
+	// start, which is worse than failing fast.
+	t.Run("stops when the run budget is gone", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		calls := 0
+		if _, err := listWithRetry(ctx, "test", func() ([]artifact.Artifact, error) {
+			calls++
+			return nil, errors.New("nope")
+		}); err == nil {
+			t.Fatal("want the error surfaced")
+		}
+		if calls != 1 {
+			t.Errorf("called %d times with a cancelled context, want 1", calls)
+		}
+	})
 }
