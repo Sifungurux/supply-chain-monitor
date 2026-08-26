@@ -668,7 +668,23 @@ func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scann
 			art.ProvenanceCheckedAt = &checked
 		}
 
-		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, cveFindings, now, detectFixedFor("cve"), vex)
+		reportedCVE := cveFindings
+		if sbomOnly {
+			// A partial round may not NARROW a finding's attribution.
+			// This one ran trivy against the stored SBOM and nothing
+			// else, so a finding grype also reports must keep saying
+			// so -- MergeFindings replaces the stored finding with the
+			// reported one, and without this the nightly sweep rewrote
+			// every finding on the fleet to "trivy" within a day,
+			// erasing grype's corroboration (measured: findings
+			// sourced "grype, trivy" fell from 7,073 to 7 overnight).
+			//
+			// Same rule as detectFixedFor above and the bucket skip
+			// below: a round that did not run a scanner may not draw
+			// conclusions on that scanner's behalf.
+			reportedCVE = artifact.CarrySourcesForward(art.CVEFindings, cveFindings)
+		}
+		art.CVEFindings = artifact.MergeFindings(art.CVEFindings, reportedCVE, now, detectFixedFor("cve"), vex)
 		// Only overwrite when this scan actually produced errors. An
 		// unconditional assignment meant a clean scan's empty slice
 		// erased the previous failure, so an artifact that broke and

@@ -676,3 +676,97 @@ func TestFindingAcceptanceExpires(t *testing.T) {
 		t.Fatal("a nil accepted_until counts as accepted")
 	}
 }
+
+// TestCarrySourcesForward covers the rule that keeps a PARTIAL scan
+// round from erasing another scanner's attribution.
+//
+// MergeFindings replaces a stored finding with the reported one, so
+// Source becomes whatever ran most recently. Correct for a full round;
+// wrong for one that never asked the other scanner. The sbom-only sweep
+// runs trivy alone, and within a day of enabling it findings sourced
+// "grype, trivy" on this project's own fleet fell from 7,073 to 7.
+func TestCarrySourcesForward(t *testing.T) {
+	existing := []artifact.Finding{
+		{ID: "CVE-1", Source: "grype, trivy"},
+		{ID: "CVE-2", Source: "grype"},
+		{ID: "CVE-3", Source: "trivy"},
+	}
+	reported := []artifact.Finding{
+		{ID: "CVE-1", Source: "trivy"},   // both had it; trivy re-reports
+		{ID: "CVE-2", Source: "trivy"},   // grype had it; trivy now sees it too
+		{ID: "CVE-3", Source: "trivy"},   // unchanged
+		{ID: "CVE-NEW", Source: "trivy"}, // no prior record
+	}
+
+	got := artifact.CarrySourcesForward(existing, reported)
+	want := map[string]string{
+		"CVE-1":   "grype, trivy",
+		"CVE-2":   "grype, trivy",
+		"CVE-3":   "trivy",
+		"CVE-NEW": "trivy",
+	}
+	if len(got) != len(reported) {
+		t.Fatalf("returned %d findings, want %d", len(got), len(reported))
+	}
+	for _, f := range got {
+		if want[f.ID] != f.Source {
+			t.Errorf("%s source = %q, want %q", f.ID, f.Source, want[f.ID])
+		}
+	}
+
+	// Must not mutate the caller's slice -- reported is also handed to
+	// the enrichment and notification paths.
+	if reported[0].Source != "trivy" {
+		t.Errorf("caller's slice was mutated: %q", reported[0].Source)
+	}
+}
+
+// TestCarrySourcesForward_Idempotent pins the property that makes this
+// safe to run on every partial round: passing an already-joined value
+// back through must not accumulate duplicates.
+func TestCarrySourcesForward_Idempotent(t *testing.T) {
+	existing := []artifact.Finding{{ID: "CVE-1", Source: "grype, trivy"}}
+	reported := []artifact.Finding{{ID: "CVE-1", Source: "grype, trivy"}}
+
+	once := artifact.CarrySourcesForward(existing, reported)
+	twice := artifact.CarrySourcesForward(existing, once)
+	if once[0].Source != "grype, trivy" || twice[0].Source != "grype, trivy" {
+		t.Errorf("not idempotent: once=%q twice=%q", once[0].Source, twice[0].Source)
+	}
+}
+
+// TestCarrySourcesForward_EmptyInputs covers the degenerate cases
+// rather than leaving them to a nil-deref at 05:00.
+func TestCarrySourcesForward_EmptyInputs(t *testing.T) {
+	if got := artifact.CarrySourcesForward(nil, nil); got != nil {
+		t.Errorf("nil/nil = %+v, want nil", got)
+	}
+	reported := []artifact.Finding{{ID: "CVE-1", Source: "trivy"}}
+	if got := artifact.CarrySourcesForward(nil, reported); len(got) != 1 || got[0].Source != "trivy" {
+		t.Errorf("no existing findings should pass reported through: %+v", got)
+	}
+	if got := artifact.CarrySourcesForward([]artifact.Finding{{ID: "CVE-1", Source: "grype"}}, nil); got != nil {
+		t.Errorf("no reported findings = %+v, want nil", got)
+	}
+}
+
+// TestCarrySourcesForward_DoesNotResurrectFixed guards the boundary
+// with fix detection: carrying a source forward must not carry a
+// finding forward. Only findings the round actually reported are in
+// the result, so a finding absent from the report stays absent and
+// MergeFindings decides its fate as before.
+func TestCarrySourcesForward_DoesNotResurrectFixed(t *testing.T) {
+	existing := []artifact.Finding{
+		{ID: "CVE-1", Source: "grype, trivy"},
+		{ID: "CVE-GONE", Source: "grype"},
+	}
+	reported := []artifact.Finding{{ID: "CVE-1", Source: "trivy"}}
+
+	got := artifact.CarrySourcesForward(existing, reported)
+	if len(got) != 1 {
+		t.Fatalf("returned %d findings, want 1 -- this must not add findings", len(got))
+	}
+	if got[0].ID != "CVE-1" {
+		t.Errorf("returned %q, want CVE-1", got[0].ID)
+	}
+}
