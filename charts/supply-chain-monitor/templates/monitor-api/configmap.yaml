@@ -20,6 +20,12 @@ data:
   # rather than the auth Secret because scopes are not credentials, and
   # that Secret rolls the pod on change via checksum/api-key.
   API_KEY_SCOPES: {{ include "supply-chain-monitor.apiKeyScopes" . | quote }}
+  # Refuse to start when a named key has no scope entry, instead of
+  # running it unrestricted and warning. Off by default so adding a
+  # consumer cannot brick an upgrade before its scopes catch up; on
+  # once a deployment has finished scoping, so it cannot regress
+  # silently (report S2).
+  API_KEY_SCOPES_STRICT: {{ .Values.monitorApi.apiKeyScopesStrict | quote }}
   # cosign signature/provenance verification (report H2). See
   # monitorApi.cosign for the public-vs-private Sigstore choice.
   COSIGN_ENABLED: {{ .Values.monitorApi.cosign.enabled | quote }}

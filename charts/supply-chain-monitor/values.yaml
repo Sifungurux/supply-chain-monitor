@@ -869,6 +869,15 @@ monitorApi:
   # not, runs unrestricted (see KeyScopes.Enforced in
   # internal/api/scopes.go).
   apiKeyScopes: ""
+  # Refuse to start when a named key has no entry in apiKeyScopes above,
+  # rather than running it unrestricted and only warning.
+  #
+  # Off by default: on by default would brick an upgrade the moment a
+  # new consumer is added and its scope entry has not caught up, turning
+  # a security control into an outage. Turn it on once every key is
+  # scoped -- then a consumer added later fails loudly at startup
+  # instead of quietly running with full authority (report S2).
+  apiKeyScopesStrict: false
   # CIDRs whose X-Forwarded-For header the failed-auth throttle believes
   # (TRUSTED_PROXY_CIDRS).
   #

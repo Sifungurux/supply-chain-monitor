@@ -206,3 +206,74 @@ func TestParseKeyScopes(t *testing.T) {
 		}
 	})
 }
+
+// TestScopes_RecommendedGrantsMatchConsumerNeeds pins the scope map
+// this project's own deployment ships against what its in-cluster
+// consumers actually call.
+//
+// Getting this wrong is not a subtle failure: too narrow and the sweep
+// CronJob 403s on every artifact nightly, too wide and the whole point
+// of scoping is lost. Both are configuration, not code, so nothing
+// else in the test suite would notice -- which is exactly why the
+// values.yaml recommendation is asserted here rather than trusted.
+func TestScopes_RecommendedGrantsMatchConsumerNeeds(t *testing.T) {
+	// The recommendation documented at monitorApi.apiKeyScopes.
+	scopes, invalid := api.ParseKeyScopes("dashboard=read|scan;sweep=read|scan")
+	if len(invalid) > 0 {
+		t.Fatalf("the recommended grant string does not parse: %v", invalid)
+	}
+
+	for _, tc := range []struct {
+		client string
+		scope  string
+		want   bool
+		why    string
+	}{
+		// The sweep lists artifacts (GET /artifacts, GET
+		// /artifacts/{id}) and triggers scans (POST .../scan).
+		{"sweep", api.ScopeRead, true, "lists artifacts every run"},
+		{"sweep", api.ScopeScan, true, "posts .../scan for each artifact it picks"},
+		{"sweep", api.ScopeAdmin, false, "never deletes, stages or accepts risk"},
+		{"sweep", api.ScopeRegister, false, "the sweep scans what exists, it does not register"},
+
+		// The dashboard reads every view and has a Scan button.
+		{"dashboard", api.ScopeRead, true, "every view is a GET"},
+		{"dashboard", api.ScopeScan, true, "the Scan button"},
+		// The one that matters: its key is attached by a proxy anyone
+		// who can reach the dashboard can drive (report S1).
+		{"dashboard", api.ScopeAdmin, false, "delete/maintainer/stage/acceptance must be refused"},
+		{"dashboard", api.ScopeDocumentsWrite, false, "scan workers upload documents, not the dashboard"},
+	} {
+		if got := scopes.For(tc.client).Allows(tc.scope); got != tc.want {
+			t.Errorf("%s allowed %q = %v, want %v -- %s", tc.client, tc.scope, got, tc.want, tc.why)
+		}
+	}
+}
+
+// TestScopes_UnscopedNamesEveryHole covers the input to the
+// API_KEY_SCOPES_STRICT refusal: strict mode is only as good as
+// Unscoped's answer, and a client it fails to name is a client that
+// keeps running unrestricted while the deployment believes it is
+// locked down.
+func TestScopes_UnscopedNamesEveryHole(t *testing.T) {
+	scopes, _ := api.ParseKeyScopes("dashboard=read|scan")
+	got := scopes.Unscoped([]string{"dashboard", "sweep", "ci", "default"})
+
+	want := map[string]bool{"sweep": true, "ci": true, "default": true}
+	if len(got) != len(want) {
+		t.Fatalf("unscoped = %v, want the three clients with no entry", got)
+	}
+	for _, c := range got {
+		if !want[c] {
+			t.Errorf("unscoped names %q, which has an entry", c)
+		}
+	}
+
+	// With nothing enforced there are no holes to report -- every key
+	// is unrestricted by design, and naming them all would be noise
+	// that trains people to ignore the warning.
+	none, _ := api.ParseKeyScopes("")
+	if got := none.Unscoped([]string{"dashboard", "sweep"}); len(got) != 0 {
+		t.Errorf("unenforced scopes reported %v, want none", got)
+	}
+}

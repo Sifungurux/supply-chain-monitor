@@ -118,18 +118,34 @@ API_KEY="${API_KEY:-${existing_api_key:-$(openssl rand -hex 32)}}"
 # left postgres-password on a placeholder for weeks, in the opposite
 # direction.
 #
-# "dashboard" is ALWAYS in the set, whether or not the caller listed it.
+# "dashboard" and "sweep" are ALWAYS in the set, whether or not the
+# caller listed them.
 # The dashboard's nginx proxy attaches a key to every request it
 # forwards, and that proxy is reachable by anyone who can reach the
 # dashboard -- so without its own key it falls back to the master one,
 # and "can load the dashboard" becomes "can delete any artifact"
-# (report S1). The chart always deploys a dashboard, so this client
-# always exists; leaving it to be remembered is how the fallback got
-# hit in the first place.
+# (report S1), and the sweep CronJobs had the same problem (report S2).
+# The chart always deploys both, so these clients always exist; leaving
+# them to be remembered is how the fallback gets hit.
+# The base set is what the caller asked for, or -- when they asked for
+# nothing -- whatever already exists, which is what preserves the
+# "unset revokes nothing" rule above. The required clients are then
+# ensured on TOP of that base, so they appear even on a cluster that
+# has never set API_KEY_NAMES (which is exactly the cluster still
+# falling back to the master key, and so the one that needs them most).
 DESIRED_KEY_NAMES="${API_KEY_NAMES:-}"
-if [ -n "$DESIRED_KEY_NAMES" ] && ! printf '%s' "$DESIRED_KEY_NAMES" | tr ',' '\n' | grep -qx dashboard; then
-	DESIRED_KEY_NAMES="${DESIRED_KEY_NAMES},dashboard"
+if [ -z "$DESIRED_KEY_NAMES" ]; then
+	DESIRED_KEY_NAMES="$(printf '%s' "$existing_api_keys" | tr ',;' '\n' | cut -d: -f1 | paste -sd, - 2>/dev/null || true)"
 fi
+for required in dashboard sweep; do
+	if ! printf '%s\n' "$DESIRED_KEY_NAMES" | tr ',' '\n' | grep -qx "$required"; then
+		if [ -n "$DESIRED_KEY_NAMES" ]; then
+			DESIRED_KEY_NAMES="${DESIRED_KEY_NAMES},${required}"
+		else
+			DESIRED_KEY_NAMES="$required"
+		fi
+	fi
+done
 
 if [ -n "$DESIRED_KEY_NAMES" ]; then
 	API_KEYS=""

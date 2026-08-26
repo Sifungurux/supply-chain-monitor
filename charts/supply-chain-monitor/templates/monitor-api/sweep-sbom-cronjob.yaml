@@ -86,11 +86,20 @@ spec:
                   value: {{ .Values.monitorApi.sweepSbom.batchSize | quote }}
                 - name: SWEEP_TIMEOUT_MINUTES
                   value: {{ .Values.monitorApi.sweepSbom.timeoutMinutes | quote }}
+                # The named "sweep" client, NOT the master key. This
+                # used to take API_KEY, which authenticates as client
+                # "default" with unrestricted scope -- so a CronJob that
+                # only lists artifacts and posts scans carried authority
+                # to delete every artifact in the fleet. Scopes key off
+                # the client NAME, so sharing the master key made this
+                # consumer impossible to limit at all (report S2).
+                # Falls back to the master key when no sweep entry
+                # exists; see the namedKey helper.
                 - name: SWEEP_API_KEY
                   valueFrom:
                     secretKeyRef:
                       name: scm-monitor-api-auth
-                      key: API_KEY
+                      key: SWEEP_API_KEY
               resources:
                 {{- toYaml .Values.monitorApi.sweepSbom.resources | nindent 16 }}
 {{- end }}

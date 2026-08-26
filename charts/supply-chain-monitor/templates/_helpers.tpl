@@ -165,3 +165,48 @@ value would roll monitor-api on every reconcile for no reason.
 {{- $out | toJson -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+supply-chain-monitor.namedKey resolves ONE named client's API key out of
+monitorApi.apiKeys, falling back to the master monitorApi.apiKey when
+that client has no entry.
+
+Call as: include "supply-chain-monitor.namedKey" (dict "ctx" . "name" "sweep")
+
+WHY THIS EXISTS. In-cluster consumers -- the dashboard proxy, both sweep
+CronJobs -- were all handed monitorApi.apiKey, the MASTER key, which
+authenticates as client "default" with unrestricted scope (see
+KeyScopes.For in internal/api/scopes.go: a client with no entry runs
+unrestricted). Any one of them being reachable or compromised therefore
+meant admin-equivalent authority over the whole API. Giving each its own
+named client is what makes monitorApi.apiKeyScopes able to limit it at
+all -- scopes key off the CLIENT NAME, so consumers sharing one key can
+never be scoped apart.
+
+The master-key fallback keeps an upgrade working before its keys have
+been regenerated. It is the insecure shape this exists to replace, so
+callers that can warn about it should (the dashboard initContainer
+does), and API_KEY_SCOPES_STRICT refuses to start when a named key is
+left unscoped.
+
+Accepts apiKeys as either a map or the flat "name:key;name:key" string,
+matching supply-chain-monitor.apiKeys above -- valuesFrom injects the
+flat form, values.yaml is edited as a map.
+*/}}
+{{- define "supply-chain-monitor.namedKey" -}}
+{{- $ctx := .ctx -}}
+{{- $name := .name -}}
+{{- $value := $ctx.Values.monitorApi.apiKeys -}}
+{{- $found := "" -}}
+{{- if kindIs "map" $value -}}
+{{- range $n, $k := $value -}}
+{{- if and (eq $n $name) $k -}}{{- $found = $k -}}{{- end -}}
+{{- end -}}
+{{- else if $value -}}
+{{- range $pair := splitList ";" (toString $value) -}}
+{{- $parts := splitn ":" 2 $pair -}}
+{{- if and (eq (trim $parts._0) $name) $parts._1 -}}{{- $found = trim $parts._1 -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $found -}}{{ $found }}{{- else -}}{{ $ctx.Values.monitorApi.apiKey }}{{- end -}}
+{{- end -}}

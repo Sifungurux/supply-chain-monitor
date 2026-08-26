@@ -84,33 +84,21 @@ spec:
               # "can load the dashboard" equal to "can delete any
               # artifact" (report S1).
               #
-              # Pull the named "dashboard" client out of API_KEYS
-              # (name:key;name:key, see the supply-chain-monitor.apiKeys
-              # helper) and use that instead. Scope it via
-              # monitorApi.apiKeyScopes so the admin routes -- delete,
-              # maintainer, stage, risk acceptance -- are refused by the
-              # API itself rather than only by this proxy.
+              # DASHBOARD_API_KEY is resolved by the chart from the named
+              # "dashboard" client (see the namedKey helper), so
+              # monitorApi.apiKeyScopes can limit it -- scopes key off
+              # the client name, and a consumer sharing the master key
+              # cannot be scoped at all.
               #
-              # Falls back to API_KEY when no dashboard entry exists, so
-              # an upgrade that has not regenerated its keys keeps
-              # working; the fallback is logged loudly because it is the
-              # insecure shape this exists to replace.
-              # printf '%s\n', not '%s': without a trailing newline the
-              # final entry has no line terminator, `read` returns
-              # non-zero on it, and the loop body never runs for it --
-              # so a dashboard key that happens to sort last is silently
-              # missed and the master-key fallback kicks in. Caught by
-              # testing the selection rather than reading it.
-              PROXY_KEY=$(printf '%s\n' "${API_KEYS:-}" | tr ';' '\n' | while IFS=: read -r n k; do
-                [ "$n" = "dashboard" ] && printf '%s' "$k"
-              done)
-              if [ -z "$PROXY_KEY" ]; then
-                echo "WARNING: no 'dashboard' entry in API_KEYS -- falling back to the master API_KEY." >&2
+              # The fallback is loud on purpose: it is exactly the
+              # insecure shape this change exists to remove, and a silent
+              # one would look like a working deployment.
+              if [ "$DASHBOARD_API_KEY" = "$API_KEY" ]; then
+                echo "WARNING: dashboard is using the MASTER API key -- no 'dashboard' entry in monitorApi.apiKeys." >&2
                 echo "WARNING: that key is unrestricted, so anyone who can reach this dashboard has admin authority." >&2
-                echo "WARNING: add 'dashboard' to API_KEY_NAMES (cluster/chart-secrets.sh) and scope it in monitorApi.apiKeyScopes." >&2
-                PROXY_KEY="$API_KEY"
+                echo "WARNING: run cluster/chart-secrets.sh to generate one, and scope it in monitorApi.apiKeyScopes." >&2
               fi
-              ESCAPED_KEY=$(printf '%s' "$PROXY_KEY" | sed 's/\\/\\\\/g; s/"/\\"/g')
+              ESCAPED_KEY=$(printf '%s' "$DASHBOARD_API_KEY" | sed 's/\\/\\\\/g; s/"/\\"/g')
               ESCAPED_BASE=$(printf '%s' "$DASHBOARD_API_BASE" | sed 's/\\/\\\\/g; s/"/\\"/g')
               ESCAPED_ALLOW_MANUAL_REG=$(printf '%s' "$DASHBOARD_ALLOW_MANUAL_REGISTRATION" | sed 's/\\/\\\\/g; s/"/\\"/g')
               ESCAPED_SHOW_CONN_SETTINGS=$(printf '%s' "$DASHBOARD_SHOW_CONNECTION_SETTINGS" | sed 's/\\/\\\\/g; s/"/\\"/g')
@@ -174,12 +162,11 @@ spec:
               }
               NGINX_EOF
           env:
-            - name: API_KEYS
+            - name: DASHBOARD_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: scm-monitor-api-auth
-                  key: API_KEYS
-                  optional: true
+                  key: DASHBOARD_API_KEY
             - name: API_KEY
               valueFrom:
                 secretKeyRef:
