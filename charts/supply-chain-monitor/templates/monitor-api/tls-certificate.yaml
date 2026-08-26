@@ -1,0 +1,49 @@
+# monitor-api's own serving certificate, from the same private CA that
+# already issues for the Gateway and the registry
+# (templates/gateway/certificates.yaml).
+#
+# WHY THIS EXISTS. Gateway TLS terminates at the edge, so every
+# in-cluster hop to monitor-api was cleartext -- and those hops carry
+# bearer credentials: the dashboard proxy sends its API key, both sweep
+# CronJobs send theirs, and scan-worker Jobs post generated documents
+# back with a per-Job scan token. Postgres and the registry already
+# serve TLS from this CA; monitor-api was the one credential-carrying
+# hop that did not (report S3).
+#
+# Off by default. Turning it on rewrites every in-cluster caller's URL
+# scheme at once, so it is a deliberate switch rather than something an
+# upgrade does silently -- and on a single-node cluster the risk it
+# addresses is modest.
+{{- if .Values.monitorApi.tls.enabled }}
+{{- if not .Values.gateway.tls.enabled }}
+{{- fail "monitorApi.tls.enabled requires gateway.tls.enabled: the serving certificate is issued by scm-ca-issuer, which templates/gateway/certificates.yaml creates. Enable the gateway CA, or point monitorApi.tls at an externally-managed Secret." }}
+{{- end }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: scm-monitor-api-tls
+  namespace: {{ .Release.Namespace }}
+spec:
+  secretName: scm-monitor-api-tls
+  duration: {{ .Values.monitorApi.tls.duration | quote }}
+  renewBefore: {{ .Values.monitorApi.tls.renewBefore | quote }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    # Same reasoning as the Gateway's cert: rotate the key on renewal
+    # rather than reusing it, since nothing here pins the key.
+    rotationPolicy: Always
+  # The names in-cluster callers actually dial. The short form matters
+  # as much as the FQDN -- the chart's own callers use
+  # http://monitor-api:8080, and a certificate without that SAN fails
+  # verification for every one of them.
+  dnsNames:
+    - monitor-api
+    - {{ printf "monitor-api.%s" .Release.Namespace | quote }}
+    - {{ printf "monitor-api.%s.svc" .Release.Namespace | quote }}
+    - {{ printf "monitor-api.%s.svc.cluster.local" .Release.Namespace | quote }}
+  issuerRef:
+    name: scm-ca-issuer
+    kind: Issuer
+    group: cert-manager.io
+{{- end }}

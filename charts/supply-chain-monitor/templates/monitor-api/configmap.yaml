@@ -26,6 +26,12 @@ data:
   # once a deployment has finished scoping, so it cannot regress
   # silently (report S2).
   API_KEY_SCOPES_STRICT: {{ .Values.monitorApi.apiKeyScopesStrict | quote }}
+  # Optional bearer token for GET /metrics (report S4). Empty leaves the
+  # endpoint open, which is what every existing deployment has. Not a
+  # secret in the credential sense -- it gates reconnaissance-grade
+  # counters, not data -- so it lives here beside the other settings
+  # rather than in the auth Secret, whose checksum rolls the deployment.
+  METRICS_TOKEN: {{ .Values.monitorApi.metricsToken | quote }}
   # cosign signature/provenance verification (report H2). See
   # monitorApi.cosign for the public-vs-private Sigstore choice.
   COSIGN_ENABLED: {{ .Values.monitorApi.cosign.enabled | quote }}
@@ -256,7 +262,14 @@ data:
   # Lets an "image"-mode scan-worker Job upload a generated SBOM/SARIF
   # document back to this Service -- see monitorApi.scanWorker.apiBaseURL's
   # own comment in values.yaml.
-  SCAN_WORKER_API_BASE_URL: {{ .Values.monitorApi.scanWorker.apiBaseURL | quote }}
+  # Scan-worker Jobs post generated SBOM/SARIF documents back here with
+  # their per-Job scan token, so this hop carries a credential too.
+  # When monitorApi.tls.enabled is on the scheme has to follow, or every
+  # document upload fails after a scan has already succeeded -- the
+  # quietest possible breakage, since the scan itself still reports
+  # fine. The configured value is used as-is when TLS is off, so an
+  # operator override still works.
+  SCAN_WORKER_API_BASE_URL: {{ if .Values.monitorApi.tls.enabled }}{{ include "supply-chain-monitor.apiBaseURL" . | quote }}{{ else }}{{ .Values.monitorApi.scanWorker.apiBaseURL | quote }}{{ end }}
   {{- if .Values.monitorApi.trivyDB.enabled }}
   # air-gapped operation -- see cluster/seed-trivy-db.sh and README's
   # "Air-gapped operation".

@@ -150,7 +150,22 @@ spec:
                   limit_except GET HEAD POST {
                     deny all;
                   }
+{{- if .Values.monitorApi.tls.enabled }}
+                  # HTTPS upstream, VERIFIED against the private CA.
+                  # proxy_ssl_verify defaults to off in nginx, which
+                  # would encrypt the hop while accepting any
+                  # certificate -- that stops a passive reader but not
+                  # an active one, and this hop carries the dashboard's
+                  # API key. proxy_ssl_name is what makes the SAN match.
+                  proxy_pass https://${MONITOR_API_ADDR}/;
+                  proxy_ssl_trusted_certificate /ca/scm-ca.crt;
+                  proxy_ssl_verify on;
+                  proxy_ssl_verify_depth 2;
+                  proxy_ssl_name ${MONITOR_API_HOST};
+                  proxy_ssl_server_name on;
+{{- else }}
                   proxy_pass http://${MONITOR_API_ADDR}/;
+{{- end }}
                   proxy_set_header Authorization "Bearer ${API_KEY}";
                   proxy_set_header Host \$host;
                   proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -176,6 +191,12 @@ spec:
                   # same way it did as two separate charts.
                   name: scm-monitor-api-auth
                   key: API_KEY
+{{- if .Values.monitorApi.tls.enabled }}
+            # Hostname alone, for SNI and SAN matching -- MONITOR_API_ADDR
+            # carries the :8080 that proxy_ssl_name must not include.
+            - name: MONITOR_API_HOST
+              value: {{ printf "monitor-api.%s.svc.cluster.local" .Release.Namespace | quote }}
+{{- end }}
             - name: MONITOR_API_ADDR
               value: {{ printf "monitor-api.%s.svc.cluster.local:8080" .Release.Namespace | quote }}
             - name: DASHBOARD_API_BASE
@@ -217,6 +238,16 @@ spec:
             - name: html
               mountPath: /usr/share/nginx/html
               readOnly: true
+{{- if .Values.monitorApi.tls.enabled }}
+            # The private CA nginx verifies the upstream against
+            # (proxy_ssl_trusted_certificate). Without it
+            # proxy_ssl_verify on refuses every request rather than
+            # falling back to unverified -- which is the correct
+            # direction to fail.
+            - name: api-ca
+              mountPath: /ca
+              readOnly: true
+{{- end }}
             # readOnlyRootFilesystem needs these two: nginx writes its
             # pid and client-body temp files under /tmp, and proxy/fastcgi
             # caches under /var/cache/nginx. Without them the container
@@ -247,6 +278,14 @@ spec:
             capabilities:
               drop: ["ALL"]
       volumes:
+{{- if .Values.monitorApi.tls.enabled }}
+        - name: api-ca
+          secret:
+            secretName: scm-ca-tls
+            items:
+              - key: ca.crt
+                path: scm-ca.crt
+{{- end }}
         - name: dashboard-html
           configMap:
             name: scm-dashboard-html
