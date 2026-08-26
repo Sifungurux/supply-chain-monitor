@@ -1155,9 +1155,11 @@ func runSweepRegistered() {
 		return
 	}
 
-	all, err := listRegisteredFromAPI(ctx, apiBase, apiKey)
+	all, err := listWithRetry(ctx, "sweep-registered", func() ([]artifact.Artifact, error) {
+		return listRegisteredFromAPI(ctx, apiBase, apiKey)
+	})
 	if err != nil {
-		fatal("sweep-registered: could not list artifacts", "err", err)
+		fatal("sweep-registered: could not list artifacts after retrying", "err", err, "attempts", sweepListAttempts)
 	}
 
 	// Artifacts stuck at "scanning" get reclaimed here too. A scan runs
@@ -1254,7 +1256,7 @@ func runSweepRegistered() {
 			// turning mirroring on does not rescan the whole fleet at
 			// once.
 			if mirrorBackfill {
-				if unmirrored := unmirroredArtifacts(scanned); len(unmirrored) > 0 {
+				if unmirrored := unmirroredArtifacts(scanned, time.Now().UTC().Add(-mirrorRetryInterval)); len(unmirrored) > 0 {
 					log.Printf("sweep-registered: %d scanned artifact(s) not mirrored into the local registry yet -- rescanning to mirror them", len(unmirrored))
 					all = append(all, unmirrored...)
 				}
@@ -1333,9 +1335,11 @@ func runSweepRegistered() {
 // per-artifact clock for it to rotate through. batchSize <= 0 therefore
 // means "all of them", and that is the chart's default.
 func sweepSBOMOnly(ctx context.Context, apiBase, apiKey string, batchSize int) {
-	scanned, err := listByStatusFromAPI(ctx, apiBase, apiKey, artifact.StatusScanned)
+	scanned, err := listWithRetry(ctx, "sweep-sbom", func() ([]artifact.Artifact, error) {
+		return listByStatusFromAPI(ctx, apiBase, apiKey, artifact.StatusScanned)
+	})
 	if err != nil {
-		fatal("sweep-sbom: could not list scanned artifacts", "err", err)
+		fatal("sweep-sbom: could not list scanned artifacts after retrying", "err", err, "attempts", sweepListAttempts)
 	}
 
 	eligible := sbomReevalEligible(scanned)
@@ -1481,6 +1485,65 @@ func reevaluateSBOM(ctx context.Context, apiBase, apiKey, id string) error {
 	return err
 }
 
+// listWithRetry wraps a sweep's initial artifact listing in a bounded
+// retry.
+//
+// WHY THE SWEEP MUST NOT DIE ON ONE FAILED GET. The listing is the
+// first thing a run does, and fataling on it throws the whole run away
+// -- for the full sweep that is fifteen minutes, for sweep-sbom a full
+// DAY. A single transient failure therefore costs far more than it
+// should, and transient is the common case: a monitor-api rollout, a
+// brief DNS blip, a connection refused while a new pod's NetworkPolicy
+// is still being programmed.
+//
+// This is not hypothetical. Turning on in-cluster TLS rolled
+// monitor-api while a sweep happened to be starting, and the run died
+// with "server gave HTTP response to HTTPS client" -- a condition that
+// had already resolved by the time anyone read the log.
+//
+// Still fatal AFTER the retries: a listing that fails repeatedly means
+// the run genuinely has nothing to work from, and exiting non-zero is
+// what makes that visible as a failed Job rather than a silent no-op.
+func listWithRetry(ctx context.Context, what string, list func() ([]artifact.Artifact, error)) ([]artifact.Artifact, error) {
+	var err error
+	for attempt := 1; attempt <= sweepListAttempts; attempt++ {
+		var out []artifact.Artifact
+		out, err = list()
+		if err == nil {
+			return out, nil
+		}
+		// The run's own budget is the outer bound -- never retry past
+		// it, or a sweep spends its whole window failing to start.
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		if attempt < sweepListAttempts {
+			wait := time.Duration(attempt) * sweepListRetryDelay
+			log.Printf("%s: could not list artifacts (attempt %d/%d), retrying in %s: %v",
+				what, attempt, sweepListAttempts, wait, err)
+			select {
+			case <-ctx.Done():
+				return nil, err
+			case <-time.After(wait):
+			}
+		}
+	}
+	return nil, err
+}
+
+// How hard a sweep tries to get its initial listing before giving up.
+// Linear backoff (5s, 10s) rather than exponential: the failures worth
+// riding out here are a pod rolling or a NetworkPolicy being
+// programmed, both of which resolve in seconds, and a long backoff
+// would just eat the run's budget.
+const sweepListAttempts = 3
+
+// var, not const, solely so tests can shrink it. Left at 5s the retry
+// tests take 30 seconds of real sleeping, and a slow suite is its own
+// reliability problem -- the tests people skip are the ones that stop
+// catching anything.
+var sweepListRetryDelay = 5 * time.Second
+
 // pickArtifactsToSweep selects up to batchSize artifacts to rescan,
 // oldest (by CreatedAt) first -- so a backlog bigger than one batch
 // works through fairly over successive CronJob runs instead of the same
@@ -1623,15 +1686,47 @@ func listRegisteredFromAPI(ctx context.Context, apiBase, apiKey string) ([]artif
 // been settled. Empty source_ref means exactly that -- not "could not be
 // mirrored", which mirrorArtifact records by setting source_ref to the
 // ref itself precisely so this filter terminates.
-func unmirroredArtifacts(list []artifact.Artifact) []artifact.Artifact {
+func unmirroredArtifacts(list []artifact.Artifact, retryBefore time.Time) []artifact.Artifact {
 	var out []artifact.Artifact
 	for _, a := range list {
-		if a.SourceRef == "" {
-			out = append(out, a)
+		if a.SourceRef != "" {
+			continue
 		}
+		// BACKOFF FOR AN ARTIFACT THAT CANNOT BE MIRRORED.
+		//
+		// This pass claims to converge because every scan settles
+		// source_ref one way or the other -- to the mirrored ref, or to
+		// the ref itself when a copy is impossible. That holds for
+		// every artifact except one whose copy fails for a reason the
+		// UPSTREAM owns: gcr.io/google-samples/hello-app:1.0 returns a
+		// Content-Length mismatch from inside this cluster, so
+		// source_ref stays empty, so this pass selects it again fifteen
+		// minutes later -- forever, burning a scan slot every time.
+		//
+		// LastScanAt is the right clock precisely BECAUSE this pass is
+		// the only thing that scans such an artifact: nothing else
+		// selects it, so its last scan IS its last mirror attempt. A
+		// never-scanned artifact (nil) stays eligible, so a newly
+		// registered one is picked up immediately -- this only ever
+		// delays something that has already failed.
+		if a.LastScanAt != nil && a.LastScanAt.After(retryBefore) {
+			continue
+		}
+		out = append(out, a)
 	}
 	return out
 }
+
+// mirrorRetryInterval is how long an artifact that failed to mirror
+// waits before the backfill pass tries again.
+//
+// Six hours rather than the sweep's own fifteen minutes: a copy that
+// failed because the upstream registry is broken will not succeed on
+// the next run, and retrying it 96 times a day costs a scan slot each
+// time while changing nothing. Four attempts a day still recovers
+// promptly from a transient outage, which is the only case where
+// retrying helps at all.
+const mirrorRetryInterval = 6 * time.Hour
 
 func listByStatusFromAPI(ctx context.Context, apiBase, apiKey string, status artifact.Status) ([]artifact.Artifact, error) {
 	var all []artifact.Artifact
