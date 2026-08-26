@@ -1768,3 +1768,68 @@ func TestScanArtifact_SBOMOnlyNeverResolvesCVEs(t *testing.T) {
 		t.Errorf("CVE-BRAND-NEW missing or not open (%+v) -- blocking fix-detection must not block new findings", f)
 	}
 }
+
+// TestScanArtifact_SBOMOnlyKeepsOtherScannersAttribution is the
+// end-to-end guard for the provenance regression the nightly sweep
+// caused in production.
+//
+// The sbom-only round runs trivy against the stored SBOM and nothing
+// else. MergeFindings replaces a stored finding with the reported one,
+// so without CarrySourcesForward every finding the sweep re-reported
+// was rewritten to "trivy" -- on this project's own fleet, findings
+// sourced "grype, trivy" fell from 7,073 to 7 within a day of enabling
+// it, erasing grype's corroboration from the record.
+//
+// A round that did not run grype may not conclude grype stopped
+// reporting, exactly as it may not conclude a finding is fixed.
+func TestScanArtifact_SBOMOnlyKeepsOtherScannersAttribution(t *testing.T) {
+	// A full round where both scanners report the same CVE, which
+	// CoalesceSameIDSources records as "grype, trivy".
+	trivyLike := &fakeScanner{findings: []artifact.Finding{
+		{ID: "CVE-SHARED", Severity: "high", Source: "trivy"},
+	}}
+	grypeLike := &fakeScanner{findings: []artifact.Finding{
+		{ID: "CVE-SHARED", Severity: "high", Source: "grype"},
+		{ID: "CVE-GRYPE-ONLY", Severity: "critical", Source: "grype"},
+	}}
+	// The re-evaluation is trivy alone -- it re-reports the shared CVE
+	// and knows nothing of the grype-only one.
+	reeval := &grypeSBOMLike{findings: []artifact.Finding{
+		{ID: "CVE-SHARED", Severity: "high", Source: "trivy"},
+	}}
+
+	h, store := newSBOMReevalRouter(scanner.Registry{
+		artifact.TypeImage: {trivyLike, grypeLike},
+	}, reeval)
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	_, full := scanAndWait(t, h, store, created.ID)
+	before := map[string]string{}
+	for _, f := range full.CVEFindings {
+		before[f.ID] = f.Source
+	}
+	if before["CVE-SHARED"] != "grype, trivy" {
+		t.Fatalf("precondition: shared CVE source = %q, want %q", before["CVE-SHARED"], "grype, trivy")
+	}
+	if err := store.SaveDocument(created.ID, artifact.DocumentKindSBOM, "application/json", []byte(`{}`)); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+
+	_, after := scanModeAndWait(t, h, store, created.ID, "sbom-only")
+
+	got := map[string]artifact.Finding{}
+	for _, f := range after.CVEFindings {
+		got[f.ID] = f
+	}
+
+	// THE ASSERTION THIS TEST EXISTS FOR.
+	if s := got["CVE-SHARED"].Source; s != "grype, trivy" {
+		t.Errorf("CVE-SHARED source = %q after an sbom-only round, want %q -- a round that never ran grype must not erase grype's attribution",
+			s, "grype, trivy")
+	}
+	// And the grype-only finding, which trivy never reported, keeps
+	// both its source and its open status.
+	if f := got["CVE-GRYPE-ONLY"]; f.Source != "grype" || f.Status != artifact.FindingStatusOpen {
+		t.Errorf("CVE-GRYPE-ONLY = %+v, want source %q and status %q", f, "grype", artifact.FindingStatusOpen)
+	}
+}

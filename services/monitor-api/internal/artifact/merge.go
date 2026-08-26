@@ -385,3 +385,73 @@ func CoalesceSameIDSources(reported []Finding) []Finding {
 
 	return coalesced
 }
+
+// CarrySourcesForward unions each reported finding's Source with the
+// Source already recorded for that finding, and is what a PARTIAL scan
+// round must run its results through before merging them.
+//
+// THE PROBLEM IT SOLVES. MergeFindings replaces a stored finding with
+// the reported one, so Source becomes whatever scanner ran most
+// recently. That is correct for a full round -- if trivy still reports
+// a CVE and grype no longer does, "trivy" is the honest record. It is
+// wrong for a round that never ASKED grype: the sbom-only sweep runs
+// trivy alone, so within a day of enabling it every finding on the
+// fleet claimed to come from trivy, and grype's corroboration was
+// erased. Measured here: findings sourced "grype, trivy" fell from
+// 7,073 to 7 overnight.
+//
+// This is the same rule the fix-detection and bucket-merge decisions
+// already follow (see MergeFindings' detectFixed, and scanArtifact's
+// bucket skip): a round that did not run a scanner may not draw
+// conclusions on that scanner's behalf. It cannot conclude a finding is
+// fixed, it cannot conclude a bucket is empty, and it cannot conclude a
+// tool stopped reporting.
+//
+// Union rather than replace-if-empty, because both directions matter: a
+// finding trivy newly reports that grype already had must end up
+// "grype, trivy", not either one alone.
+//
+// A finding not previously recorded is returned untouched -- there is
+// no prior attribution to carry, and inventing one would be worse than
+// the narrowing this exists to prevent.
+func CarrySourcesForward(existing, reported []Finding) []Finding {
+	if len(existing) == 0 || len(reported) == 0 {
+		return reported
+	}
+	prior := make(map[string]string, len(existing))
+	for _, f := range existing {
+		prior[f.ID] = f.Source
+	}
+	// Copied rather than mutated in place: reported is the caller's
+	// slice and is also handed to notification and enrichment paths.
+	out := make([]Finding, len(reported))
+	copy(out, reported)
+	for i := range out {
+		if old, ok := prior[out[i].ID]; ok {
+			out[i].Source = mergeSourceList(out[i].Source, old)
+		}
+	}
+	return out
+}
+
+// mergeSourceList unions comma-separated Source values into one sorted,
+// comma-joined value. Splitting both sides first is what keeps this
+// idempotent -- an already-joined "grype, trivy" passed back through
+// does not accumulate into "grype, trivy, trivy", the same property
+// CoalesceSameIDSources relies on for the same reason.
+func mergeSourceList(values ...string) string {
+	set := map[string]bool{}
+	for _, v := range values {
+		for _, s := range strings.Split(v, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				set[s] = true
+			}
+		}
+	}
+	sources := make([]string, 0, len(set))
+	for s := range set {
+		sources = append(sources, s)
+	}
+	sort.Strings(sources)
+	return strings.Join(sources, ", ")
+}
