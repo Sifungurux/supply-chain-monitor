@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -115,6 +116,15 @@ type Config struct {
 	// and adding a second context-taking method to that interface would
 	// entrench the wart Stats(ctx) already documents as one.
 	Ready func(context.Context) error
+	// MetricsToken optionally gates GET /metrics on its own bearer
+	// token, separate from the API keys (report S4). Empty leaves the
+	// endpoint open, which is what an in-cluster Prometheus scrape
+	// normally wants and what every existing deployment has.
+	//
+	// Its own token rather than an API key: the scrape is a different
+	// principal with a different lifecycle, and sharing one would make
+	// "let Prometheus scrape" mean "give Prometheus an API key".
+	MetricsToken string
 	// BuildVersion is the commit this binary was built from, surfaced
 	// as the scm_build_info metric so "which code is running" is
 	// answerable from a scrape rather than from whoever last ran
@@ -260,7 +270,7 @@ func NewRouter(cfg Config) http.Handler {
 	// withAudit sits INSIDE withAuth, because it reports the
 	// authenticated client and that only exists in the context after
 	// withAuth has put it there.
-	return withMetrics(withCORS(withAuth(withAudit(top), keys, cfg.KeyScopes, failures, cfg.TrustedProxies, cfg.ScanTokens, h.metrics), cfg.CORSAllowedOrigins), h.metrics)
+	return withMetrics(withCORS(withAuth(withAudit(top), keys, cfg.KeyScopes, failures, cfg.TrustedProxies, cfg.ScanTokens, h.metrics, cfg.MetricsToken), cfg.CORSAllowedOrigins), h.metrics)
 }
 
 // withAuth requires `Authorization: Bearer <apiKey>` on every request
@@ -335,8 +345,34 @@ const (
 // logs rather than a blank client field.
 const legacyClientName = "default"
 
-func withAuth(next http.Handler, keys APIKeys, scopes KeyScopes, failures *rateLimiter, trusted TrustedProxies, scanTokens ScanTokenConsumer, m *metrics) http.Handler {
+func withAuth(next http.Handler, keys APIKeys, scopes KeyScopes, failures *rateLimiter, trusted TrustedProxies, scanTokens ScanTokenConsumer, m *metrics, metricsToken string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /metrics is optionally gated on its own token, separate from
+		// the API keys (report S4).
+		//
+		// Its own token rather than an API key, because the scrape is a
+		// different principal with a different lifecycle: Prometheus
+		// holds it forever and it should grant nothing but this one
+		// read, whereas an API key grants API access and rotates with
+		// the consumers. Sharing one would make "let Prometheus scrape"
+		// mean "give Prometheus an API key".
+		//
+		// Unset leaves the endpoint open, which is what every existing
+		// deployment has and what an in-cluster scrape normally wants.
+		// The exposure is reconnaissance-grade -- scan counts, artifact
+		// totals, build version -- not credentials.
+		if r.URL.Path == "/metrics" && metricsToken != "" {
+			const prefix = "Bearer "
+			got := r.Header.Get("Authorization")
+			if !strings.HasPrefix(got, prefix) ||
+				subtle.ConstantTimeCompare([]byte(got[len(prefix):]), []byte(metricsToken)) != 1 {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="supply-chain-monitor-metrics"`)
+				writeError(w, http.StatusUnauthorized, "missing or invalid metrics token")
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
 		switch r.URL.Path {
 		case "/healthz", "/readyz", "/metrics", "/swagger", "/openapi.yaml":
 			next.ServeHTTP(w, r)

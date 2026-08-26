@@ -210,3 +210,26 @@ flat form, values.yaml is edited as a map.
 {{- end -}}
 {{- if $found -}}{{ $found }}{{- else -}}{{ $ctx.Values.monitorApi.apiKey }}{{- end -}}
 {{- end -}}
+
+{{/*
+supply-chain-monitor.apiBaseURL is the in-cluster URL for monitor-api,
+with the scheme following monitorApi.tls.enabled.
+
+Defined once because EVERY in-cluster caller has to agree: the dashboard
+proxy, both sweep CronJobs, and the scan-worker Jobs that post generated
+documents back. A caller left on http:// when the server moved to TLS
+does not degrade -- it fails outright, and it fails at whatever hour its
+CronJob happens to run rather than at deploy time. One helper is what
+makes "turn TLS on" a single edit instead of five that must not drift.
+
+FQDN, not the short name: the certificate carries both, but a Job in
+another namespace resolving "monitor-api" would reach the wrong Service
+or none at all.
+*/}}
+{{- define "supply-chain-monitor.apiBaseURL" -}}
+{{- if .Values.monitorApi.tls.enabled -}}
+https://monitor-api.{{ .Release.Namespace }}.svc.cluster.local:8080
+{{- else -}}
+http://monitor-api.{{ .Release.Namespace }}.svc.cluster.local:8080
+{{- end -}}
+{{- end -}}

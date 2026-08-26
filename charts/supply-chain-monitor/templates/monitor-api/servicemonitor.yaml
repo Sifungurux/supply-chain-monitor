@@ -34,11 +34,33 @@ spec:
     - port: http
       path: /metrics
       interval: {{ .Values.monitorApi.serviceMonitor.interval }}
+{{- if .Values.monitorApi.metricsToken }}
+      # monitorApi.metricsToken is set, so /metrics now requires a
+      # bearer token and this scrape has to present it (report S4).
+      #
+      # A Secret reference rather than the literal: a ServiceMonitor is
+      # an ordinary namespaced object readable by anything with get on
+      # it, and inlining the token there would defeat gating the
+      # endpoint at all.
+      bearerTokenSecret:
+        name: scm-monitor-api-metrics
+        key: METRICS_TOKEN
+{{- else }}
       # No auth: /metrics is deliberately unauthenticated because it
       # exposes process state only -- request/scan counts, goroutines,
       # heap -- and never fleet security posture. That is what
-      # /api/v1/stats is for, and it requires the API key. If a fleet
-      # gauge is ever added to /metrics, this needs a bearerTokenSecret
-      # and that endpoint needs to stop being open.
+      # /api/v1/stats is for, and it requires the API key. Set
+      # monitorApi.metricsToken to close it (report S4).
       # See services/monitor-api/internal/api/metrics.go.
+{{- end }}
+{{- if .Values.monitorApi.tls.enabled }}
+      # The endpoint serves TLS from the private CA now.
+      scheme: https
+      tlsConfig:
+        ca:
+          secret:
+            name: scm-ca-tls
+            key: ca.crt
+        serverName: {{ printf "monitor-api.%s.svc.cluster.local" .Release.Namespace | quote }}
+{{- end }}
 {{- end }}

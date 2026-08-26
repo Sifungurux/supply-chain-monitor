@@ -321,3 +321,85 @@ func scrapeMetrics(t *testing.T, h http.Handler) string {
 	}
 	return rec.Body.String()
 }
+
+// TestMetrics_TokenGate covers the optional /metrics bearer token
+// (report S4).
+//
+// The endpoint is exempt from API-key auth so an in-cluster Prometheus
+// can scrape it, which also means anything that can reach the API can
+// read scan counts, artifact totals and the build version. Not
+// credentials, but reconnaissance -- so a deployment that wants it
+// closed gets its own token, separate from the API keys because the
+// scrape is a different principal: sharing one would make "let
+// Prometheus scrape" mean "give Prometheus an API key".
+func TestMetrics_TokenGate(t *testing.T) {
+	newRouter := func(token string) http.Handler {
+		return api.NewRouter(api.Config{
+			Store:        artifact.NewMemStore(),
+			Tracker:      pipeline.NewTracker([]string{"build", "scan"}),
+			APIKey:       testAPIKey,
+			MetricsToken: token,
+		})
+	}
+	scrape := func(h http.Handler, auth string) int {
+		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// Unset: open, exactly as every existing deployment behaves. An
+	// upgrade must not start refusing its own Prometheus.
+	t.Run("unset leaves it open", func(t *testing.T) {
+		h := newRouter("")
+		if code := scrape(h, ""); code != http.StatusOK {
+			t.Errorf("no token configured, no auth: got %d, want 200", code)
+		}
+	})
+
+	t.Run("set requires the token", func(t *testing.T) {
+		h := newRouter("scrape-secret")
+		if code := scrape(h, ""); code != http.StatusUnauthorized {
+			t.Errorf("no auth: got %d, want 401", code)
+		}
+		if code := scrape(h, "Bearer wrong"); code != http.StatusUnauthorized {
+			t.Errorf("wrong token: got %d, want 401", code)
+		}
+		if code := scrape(h, "Bearer scrape-secret"); code != http.StatusOK {
+			t.Errorf("correct token: got %d, want 200", code)
+		}
+	})
+
+	// The metrics token must NOT be an API key in disguise, in either
+	// direction -- that separation is the whole reason it exists.
+	t.Run("api key does not open metrics and vice versa", func(t *testing.T) {
+		h := newRouter("scrape-secret")
+		if code := scrape(h, "Bearer "+testAPIKey); code != http.StatusUnauthorized {
+			t.Errorf("API key on /metrics: got %d, want 401", code)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts", nil)
+		req.Header.Set("Authorization", "Bearer scrape-secret")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("metrics token on the API: got %d, want 401", rec.Code)
+		}
+	})
+
+	// The probes stay open regardless -- a gated /metrics must not take
+	// liveness with it.
+	t.Run("probes stay open", func(t *testing.T) {
+		h := newRouter("scrape-secret")
+		for _, p := range []string{"/healthz", "/readyz"} {
+			req := httptest.NewRequest(http.MethodGet, p, nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Errorf("%s: got %d, want 200", p, rec.Code)
+			}
+		}
+	})
+}

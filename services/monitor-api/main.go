@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -2826,6 +2827,9 @@ func runAPIServer() {
 		// nil under DISABLE_SCAN_ISOLATION, which makes POST
 		// .../scan?mode=sbom-only answer 501 rather than quietly
 		// running a full scan.
+		// Optional bearer token for GET /metrics (report S4). Empty
+		// leaves the endpoint open, as every deployment has today.
+		MetricsToken:      getenv("METRICS_TOKEN", ""),
 		BuildVersion:      BuildVersion(),
 		SBOMReevalScanner: sbomReevalScanner(cveScanner, isolatedTrivySBOMDoc, isolatedGrypeSBOMDoc),
 		// Empty = same-origin only. The dashboard proxies through its
@@ -2870,7 +2874,39 @@ func runAPIServer() {
 		WriteTimeout: httpWriteTimeout,
 	}
 
-	log.Printf("monitor-api listening on %s", listenAddr)
+	// TLS when a cert and key are BOTH configured, plain HTTP otherwise.
+	//
+	// Why this matters here specifically: Gateway TLS terminates at the
+	// edge, so every in-cluster hop is cleartext -- and those hops carry
+	// bearer credentials. The dashboard proxy sends its API key, the
+	// sweep CronJobs send theirs, and scan-worker Jobs post documents
+	// back with a per-Job scan token. Postgres and the registry already
+	// serve TLS from the same private CA; monitor-api was the one
+	// credential-carrying hop that did not (report S3).
+	//
+	// Requiring BOTH files rather than one flag is deliberate: a
+	// deployment that sets a cert but no key has misconfigured TLS, and
+	// silently serving plaintext there is the failure that leaves an
+	// operator believing traffic is encrypted when it is not. Fail
+	// loudly instead.
+	certFile, keyFile := getenv("API_TLS_CERT_FILE", ""), getenv("API_TLS_KEY_FILE", "")
+	if (certFile == "") != (keyFile == "") {
+		fatal("API_TLS_CERT_FILE and API_TLS_KEY_FILE must be set together -- refusing to start rather than serve plaintext on a deployment that asked for TLS",
+			"cert_file_set", certFile != "", "key_file_set", keyFile != "")
+	}
+	if certFile != "" {
+		// MinVersion pinned rather than left to the Go default, which
+		// has moved over releases: an explicit floor is a property of
+		// this deployment, not of whichever toolchain built it.
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		slog.Info("monitor-api listening with TLS", "addr", listenAddr, "cert", certFile)
+		if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+			fatal("server error", "err", err)
+		}
+		return
+	}
+
+	log.Printf("monitor-api listening on %s (plaintext -- set API_TLS_CERT_FILE/API_TLS_KEY_FILE to serve TLS)", listenAddr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fatal("server error", "err", err)
 	}

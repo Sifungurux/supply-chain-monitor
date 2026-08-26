@@ -125,6 +125,15 @@ spec:
             - name: SCAN_WORKER_REGISTRY_CA_SECRET
               value: scm-ca-tls
 {{- end }}
+{{- if .Values.monitorApi.tls.enabled }}
+            # Both or neither -- main.go refuses to start with one set,
+            # rather than silently serving plaintext on a deployment
+            # that asked for TLS.
+            - name: API_TLS_CERT_FILE
+              value: /tls/tls.crt
+            - name: API_TLS_KEY_FILE
+              value: /tls/tls.key
+{{- end }}
 {{- $authSecrets := splitList "," (include "supply-chain-monitor.registryAuthSecrets" . | default "") }}
 {{- $caSecrets := splitList "," (include "supply-chain-monitor.extraCASecrets" . | default "") }}
 {{- $authSecrets = without $authSecrets "" }}
@@ -244,6 +253,14 @@ spec:
               # It rejoins on its own when the check passes again.
               path: /readyz
               port: 8080
+{{- if .Values.monitorApi.tls.enabled }}
+              # The probe has to speak the same protocol the server
+              # does, or kubelet reports every pod unready the moment
+              # TLS is turned on. HTTPS here is not verified by kubelet
+              # (it accepts the self-signed chain), which is fine: the
+              # probe is a liveness signal, not an authentication.
+              scheme: HTTPS
+{{- end }}
             # main.go blocks startup on connectStoreWithRetry (up to 12
             # attempts, 5s apart -- worst case ~60s) if Postgres isn't
             # accepting connections yet, which is routine on a fresh
@@ -262,6 +279,9 @@ spec:
               # See internal/api/health.go.
               path: /healthz
               port: 8080
+{{- if .Values.monitorApi.tls.enabled }}
+              scheme: HTTPS
+{{- end }}
             # Unlike readinessProbe, a liveness failure kills the pod --
             # this needs enough total slack (initialDelay +
             # periodSeconds * failureThreshold) to outlast the ~60s
@@ -280,6 +300,15 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+{{- if .Values.monitorApi.tls.enabled }}
+            # The serving keypair. Read-only and its own mount rather
+            # than sharing /ca: that directory is on SSL_CERT_DIR, and a
+            # private key sitting in the trust-store path would be read
+            # by every Go process in this pod looking for CAs.
+            - name: api-tls
+              mountPath: /tls
+              readOnly: true
+{{- end }}
 {{- if .Values.monitorApi.cosign.trustedRootSecret }}
             - name: sigstore-trusted-root
               mountPath: /etc/sigstore
@@ -337,6 +366,11 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
       volumes:
+{{- if .Values.monitorApi.tls.enabled }}
+        - name: api-tls
+          secret:
+            secretName: scm-monitor-api-tls
+{{- end }}
 {{- if .Values.registry.tls.enabled }}
         - name: registry-ca
           secret:

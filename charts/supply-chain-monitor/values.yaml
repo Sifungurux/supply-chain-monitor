@@ -878,6 +878,36 @@ monitorApi:
   # scoped -- then a consumer added later fails loudly at startup
   # instead of quietly running with full authority (report S2).
   apiKeyScopesStrict: false
+  # Serve the API over TLS inside the cluster, from the same private CA
+  # that already issues for the Gateway and the registry.
+  #
+  # Gateway TLS terminates at the EDGE, so without this every in-cluster
+  # hop is cleartext -- and those hops carry bearer credentials: the
+  # dashboard proxy's API key, both sweep CronJobs' keys, and the
+  # per-Job scan token workers use to post documents back. Postgres and
+  # the registry already do this; monitor-api was the one
+  # credential-carrying hop that did not (report S3).
+  #
+  # Off by default: enabling rewrites every in-cluster caller's URL
+  # scheme at once, so it should be a deliberate switch rather than
+  # something an upgrade does silently. On a single-node cluster the
+  # risk it addresses is modest; on any multi-node or shared-CNI
+  # cluster it is real.
+  #
+  # Requires gateway.tls.enabled, which is what creates the CA issuer.
+  tls:
+    enabled: false
+    duration: 2160h   # 90d
+    renewBefore: 360h # 15d
+  # Optional bearer token for GET /metrics (report S4). Empty leaves the
+  # endpoint open -- which is what an in-cluster Prometheus scrape
+  # normally wants, and what every existing deployment has.
+  #
+  # Its own token rather than an API key: the scrape is a different
+  # principal with a different lifecycle, and sharing one would make
+  # "let Prometheus scrape" mean "give Prometheus an API key". When
+  # set, the ServiceMonitor is rendered with a matching bearerTokenSecret.
+  metricsToken: ""
   # CIDRs whose X-Forwarded-For header the failed-auth throttle believes
   # (TRUSTED_PROXY_CIDRS).
   #

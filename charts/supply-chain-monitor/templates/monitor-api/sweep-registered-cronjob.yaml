@@ -76,6 +76,15 @@ spec:
             runAsNonRoot: true
             runAsUser: 65534
             runAsGroup: 65534
+{{- if .Values.monitorApi.tls.enabled }}
+          volumes:
+            - name: api-ca
+              secret:
+                secretName: scm-ca-tls
+                items:
+                  - key: ca.crt
+                    path: scm-ca.crt
+{{- end }}
           containers:
             - name: sweep-registered
               image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
@@ -90,8 +99,12 @@ spec:
                   drop: ["ALL"]
               args: ["sweep-registered"]
               env:
+                # Scheme follows monitorApi.tls.enabled -- see the
+                # apiBaseURL helper. A caller left on http:// when the
+                # server moves to TLS fails outright, at whatever hour
+                # its CronJob runs rather than at deploy time.
                 - name: SWEEP_API_BASE_URL
-                  value: "http://monitor-api:8080"
+                  value: {{ include "supply-chain-monitor.apiBaseURL" . | quote }}
                 - name: SWEEP_BATCH_SIZE
                   value: {{ .Values.monitorApi.sweep.batchSize | quote }}
                 # Passed explicitly so the process budget and the Job
@@ -132,11 +145,24 @@ spec:
                 # consumer impossible to limit at all (report S2).
                 # Falls back to the master key when no sweep entry
                 # exists; see the namedKey helper.
+{{- if .Values.monitorApi.tls.enabled }}
+                # Additive, never SSL_CERT_FILE: that REPLACES Go's
+                # system trust store, and this Job would stop trusting
+                # everything public. See values.yaml's note.
+                - name: SSL_CERT_DIR
+                  value: "/etc/ssl/certs:/ca"
+{{- end }}
                 - name: SWEEP_API_KEY
                   valueFrom:
                     secretKeyRef:
                       name: scm-monitor-api-auth
                       key: SWEEP_API_KEY
+{{- if .Values.monitorApi.tls.enabled }}
+              volumeMounts:
+                - name: api-ca
+                  mountPath: /ca
+                  readOnly: true
+{{- end }}
               resources:
                 {{- toYaml .Values.monitorApi.sweep.resources | nindent 16 }}
 {{- end }}
