@@ -117,9 +117,23 @@ API_KEY="${API_KEY:-${existing_api_key:-$(openssl rand -hex 32)}}"
 # silently revoke every named client -- the same carry-over trap that
 # left postgres-password on a placeholder for weeks, in the opposite
 # direction.
-if [ -n "${API_KEY_NAMES:-}" ]; then
+#
+# "dashboard" is ALWAYS in the set, whether or not the caller listed it.
+# The dashboard's nginx proxy attaches a key to every request it
+# forwards, and that proxy is reachable by anyone who can reach the
+# dashboard -- so without its own key it falls back to the master one,
+# and "can load the dashboard" becomes "can delete any artifact"
+# (report S1). The chart always deploys a dashboard, so this client
+# always exists; leaving it to be remembered is how the fallback got
+# hit in the first place.
+DESIRED_KEY_NAMES="${API_KEY_NAMES:-}"
+if [ -n "$DESIRED_KEY_NAMES" ] && ! printf '%s' "$DESIRED_KEY_NAMES" | tr ',' '\n' | grep -qx dashboard; then
+	DESIRED_KEY_NAMES="${DESIRED_KEY_NAMES},dashboard"
+fi
+
+if [ -n "$DESIRED_KEY_NAMES" ]; then
 	API_KEYS=""
-	for name in $(printf '%s' "$API_KEY_NAMES" | tr ',' ' '); do
+	for name in $(printf '%s' "$DESIRED_KEY_NAMES" | tr ',' ' '); do
 		[ -n "$name" ] || continue
 		# Reuse this client's current key if it already has one, so
 		# adding a second consumer does not re-key the first.
