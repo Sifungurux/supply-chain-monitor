@@ -72,6 +72,9 @@ CONTAINER_BUILD  := $(shell 	if docker buildx version >/dev/null 2>&1; then echo
 # be able to identify later.
 GIT_SHA          := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet 2>/dev/null || echo -dirty)
 IMAGE_SHA        := monitor-api:$(GIT_SHA)
+# Scratch tarball the k3d import reads. Written next to the build rather
+# than in /tmp so a failed run leaves it somewhere obvious.
+IMAGE_TAR        := .monitor-api-image.tar
 
 # On the podman runtime, resolve DOCKER_HOST from podman's own current
 # connection list instead of requiring it exported by hand in every
@@ -176,15 +179,74 @@ endif
 	$(CONTAINER_BUILD) --build-arg GIT_SHA=$(GIT_SHA) -t $(IMAGE) -t $(IMAGE_SHA) services/monitor-api
 	@echo "built $(IMAGE) and $(IMAGE_SHA)"
 ifeq ($(SCM_RUNTIME),podman)
-	@echo "SCM_RUNTIME=podman -- importing docker.io/library/$(IMAGE) into k3d cluster '$(SCM_CLUSTER_NAME)' (see comment above)..."
-	k3d image import docker.io/library/$(IMAGE) docker.io/library/$(IMAGE_SHA) -c $(SCM_CLUSTER_NAME)
+	@echo "SCM_RUNTIME=podman -- importing into k3d cluster '$(SCM_CLUSTER_NAME)'..."
+	@# IMPORT VIA A TARBALL, AND UNDER THE FULLY-QUALIFIED NAME.
+	@#
+	@# Two separate things made the obvious `k3d image import <ref>`
+	@# form fail SILENTLY -- it printed "Successfully imported 2
+	@# image(s)" while the cluster kept running the previous binary,
+	@# which is the worst way for a deploy step to be wrong.
+	@#
+	@# 1. podman's docker-compat API lists only ONE tag per image id,
+	@#    and :dev and :<sha> are the same image. So k3d could not find
+	@#    the sha tag in the list it searches -- `docker image inspect`
+	@#    resolves it fine, but `k3d image import` answers "no valid
+	@#    images specified". Saving both refs into one tarball sidesteps
+	@#    the lookup entirely.
+	@#
+	@# 2. podman names local builds `localhost/monitor-api:...`, and a
+	@#    tarball of those imports under that same name -- while
+	@#    Kubernetes resolves the bare `monitor-api:dev` in the chart to
+	@#    `docker.io/library/monitor-api:dev`. The node ended up holding
+	@#    a fresh localhost/ image AND a stale docker.io/library/ one,
+	@#    and kept running the stale one. Tagging explicitly before the
+	@#    save is what makes the imported name the one kubelet looks up.
+	podman tag $(IMAGE) docker.io/library/$(IMAGE)
+	podman tag $(IMAGE) docker.io/library/$(IMAGE_SHA)
+	podman save --format docker-archive -o $(IMAGE_TAR) \
+		docker.io/library/$(IMAGE) docker.io/library/$(IMAGE_SHA)
+	k3d image import $(IMAGE_TAR) -c $(SCM_CLUSTER_NAME)
+	@rm -f $(IMAGE_TAR)
 	@# Pin it against kubelet image GC. The import is the only copy --
 	@# nothing pushes this image to a registry, so a collected image
 	@# cannot be re-pulled and any Job landing on that node fails with
 	@# what looks like a credentials error. See cluster/pin-image.sh.
 	./cluster/pin-image.sh docker.io/library/$(IMAGE) $(SCM_CLUSTER_NAME)
 	./cluster/pin-image.sh docker.io/library/$(IMAGE_SHA) $(SCM_CLUSTER_NAME)
+	@$(MAKE) --no-print-directory verify-image-imported
 endif
+
+# Proves the image actually reached every node, rather than trusting
+# `k3d image import`'s own success message -- which was observed
+# printing "Successfully imported 2 image(s)" while changing nothing.
+#
+# CHECKS THE SHA TAG, NOT :dev, and that is the whole point. :dev exists
+# on the node whether or not this build landed, so its presence proves
+# nothing; the sha tag is unique to this commit, so a stale image cannot
+# fake it. This is the concrete payoff of tagging by commit at all.
+.PHONY: verify-image-imported
+verify-image-imported:
+	@nodes="$$(k3d node list -o json 2>/dev/null | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | grep '^k3d-$(SCM_CLUSTER_NAME)-' | grep -v serverlb)"; \
+	if [ -z "$$nodes" ]; then \
+		echo "" >&2; \
+		echo "CANNOT VERIFY: found no nodes for cluster '$(SCM_CLUSTER_NAME)'." >&2; \
+		echo "Is the cluster up, and is DOCKER_HOST set (SCM_RUNTIME=podman)?" >&2; \
+		exit 1; \
+	fi; \
+	missing=""; \
+	for node in $$nodes; do \
+		if ! podman exec "$$node" ctr -n k8s.io images ls 2>/dev/null | grep -q "docker.io/library/$(IMAGE_SHA) "; then \
+			missing="$$missing $$node"; \
+		fi; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "" >&2; \
+		echo "IMAGE DID NOT REACH:$$missing" >&2; \
+		echo "docker.io/library/$(IMAGE_SHA) is absent there, so those nodes still run whatever they had." >&2; \
+		echo "The import step reports success even when it changes nothing -- see the build target." >&2; \
+		exit 1; \
+	fi; \
+	echo "verified docker.io/library/$(IMAGE_SHA) on every node"
 
 # Builds the image and asserts the properties its Dockerfile is written
 # to guarantee -- separate from `build` above because that one also
