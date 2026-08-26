@@ -972,12 +972,23 @@ a rebuild, so nothing else notices a new image is available.
   **opt-in**: with `apiKeyScopes` empty nothing is enforced, and once
   set, a key with no entry still runs unrestricted (named in a startup
   warning) so that scoping one consumer cannot break the others.
-- **The dashboard hands its API key to any browser that loads it.** An
-  initContainer renders `env.js` from the same Secret
-  (`templates/dashboard/deployment.yaml`), so whoever can reach the
-  dashboard holds a full-privilege key. That is the trade-off for
-  needing no manual key entry; treat dashboard access as equivalent to
-  key access.
+- **Dashboard access is API access at the dashboard key's scope.** The
+  key is no longer served to the browser -- `env.js` deliberately
+  carries no `apiKey`, and an nginx `location /dash-api/` inside the pod
+  attaches `Authorization` server-side
+  (`templates/dashboard/deployment.yaml`). But the proxy adds that
+  header to *every* request it forwards, and it is reachable by anyone
+  who can reach the dashboard, so whatever the proxy holds is
+  effectively public to that audience.
+  Two things bound it. The proxy uses the named **`dashboard`** client
+  from `API_KEYS`, not the master key (which authenticates as `default`
+  with unrestricted scope) -- `cluster/chart-secrets.sh` always
+  generates that client, and `monitorApi.apiKeyScopes` is what actually
+  limits it. And nginx `limit_except GET HEAD POST` refuses DELETE, PUT
+  and PATCH at the proxy regardless of the key's scopes, so a
+  mis-scoped key still cannot destroy an artifact through it.
+  Both are defence in depth around the same fact: treat dashboard reach
+  as equivalent to holding the dashboard key.
 - `charts/supply-chain-monitor/values.yaml`'s `postgres.credentials.password`
   and `monitorApi.apiKey` are empty by default — no plaintext credential
   ships in this repo. A real value comes from one of three places: Flux's

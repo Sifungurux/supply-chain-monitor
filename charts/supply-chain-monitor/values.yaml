@@ -850,7 +850,34 @@ monitorApi:
   #
   # Note scan workers do NOT use a key at all: they get a per-Job token
   # scoped to one artifact and one document kind (report S3).
+  #
+  # THE "dashboard" CLIENT IS THE ONE TO SCOPE FIRST. Its key is
+  # attached by the dashboard's nginx proxy to every request the proxy
+  # forwards, and that proxy is reachable by anyone who can reach the
+  # dashboard -- so an unscoped dashboard key makes "can load the
+  # dashboard" mean "can delete any artifact". Recommended:
+  #
+  #   apiKeyScopes: "dashboard=read|scan"
+  #
+  # read for the views, scan for the Scan button. Deliberately NOT
+  # admin: that refuses delete, maintainer edits, stage changes and risk
+  # acceptance at the API, so the dashboard's admin controls return 403
+  # rather than working for anyone who found the URL. Add `register`
+  # only if dashboard.allowManualRegistration is on.
+  #
+  # Leaving this empty enforces nothing at all -- every key, named or
+  # not, runs unrestricted (see KeyScopes.Enforced in
+  # internal/api/scopes.go).
   apiKeyScopes: ""
+  # Refuse to start when a named key has no entry in apiKeyScopes above,
+  # rather than running it unrestricted and only warning.
+  #
+  # Off by default: on by default would brick an upgrade the moment a
+  # new consumer is added and its scope entry has not caught up, turning
+  # a security control into an outage. Turn it on once every key is
+  # scoped -- then a consumer added later fails loudly at startup
+  # instead of quietly running with full authority (report S2).
+  apiKeyScopesStrict: false
   # CIDRs whose X-Forwarded-For header the failed-auth throttle believes
   # (TRUSTED_PROXY_CIDRS).
   #

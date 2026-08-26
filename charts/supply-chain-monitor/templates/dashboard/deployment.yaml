@@ -75,7 +75,30 @@ spec:
               # scope (a local dev cluster), not a substitute for a
               # real templating engine if this ever needs to be
               # hardened further.
-              ESCAPED_KEY=$(printf '%s' "$API_KEY" | sed 's/\\/\\\\/g; s/"/\\"/g')
+              # THE KEY THIS PROXY ATTACHES IS THE DASHBOARD'S, NOT THE
+              # MASTER KEY. Every request the proxy forwards carries this
+              # credential, and the proxy is reachable by anyone who can
+              # reach the dashboard -- so whatever it holds is effectively
+              # public to that audience. The master key authenticates as
+              # client "default" with unrestricted scope, which made
+              # "can load the dashboard" equal to "can delete any
+              # artifact" (report S1).
+              #
+              # DASHBOARD_API_KEY is resolved by the chart from the named
+              # "dashboard" client (see the namedKey helper), so
+              # monitorApi.apiKeyScopes can limit it -- scopes key off
+              # the client name, and a consumer sharing the master key
+              # cannot be scoped at all.
+              #
+              # The fallback is loud on purpose: it is exactly the
+              # insecure shape this change exists to remove, and a silent
+              # one would look like a working deployment.
+              if [ "$DASHBOARD_API_KEY" = "$API_KEY" ]; then
+                echo "WARNING: dashboard is using the MASTER API key -- no 'dashboard' entry in monitorApi.apiKeys." >&2
+                echo "WARNING: that key is unrestricted, so anyone who can reach this dashboard has admin authority." >&2
+                echo "WARNING: run cluster/chart-secrets.sh to generate one, and scope it in monitorApi.apiKeyScopes." >&2
+              fi
+              ESCAPED_KEY=$(printf '%s' "$DASHBOARD_API_KEY" | sed 's/\\/\\\\/g; s/"/\\"/g')
               ESCAPED_BASE=$(printf '%s' "$DASHBOARD_API_BASE" | sed 's/\\/\\\\/g; s/"/\\"/g')
               ESCAPED_ALLOW_MANUAL_REG=$(printf '%s' "$DASHBOARD_ALLOW_MANUAL_REGISTRATION" | sed 's/\\/\\\\/g; s/"/\\"/g')
               ESCAPED_SHOW_CONN_SETTINGS=$(printf '%s' "$DASHBOARD_SHOW_CONNECTION_SETTINGS" | sed 's/\\/\\\\/g; s/"/\\"/g')
@@ -115,6 +138,18 @@ spec:
                 }
 
                 location /dash-api/ {
+                  # SECOND LOCK, INDEPENDENT OF THE KEY'S SCOPES. The
+                  # dashboard reads (GET) and triggers scans and
+                  # maintainer edits (POST); it has no legitimate use for
+                  # DELETE, PUT or PATCH. Denying them here means a
+                  # mis-scoped or accidentally-rotated-to-master key
+                  # still cannot destroy an artifact through this proxy.
+                  #
+                  # limit_except lists the methods that are ALLOWED --
+                  # everything else falls into the block and is denied.
+                  limit_except GET HEAD POST {
+                    deny all;
+                  }
                   proxy_pass http://${MONITOR_API_ADDR}/;
                   proxy_set_header Authorization "Bearer ${API_KEY}";
                   proxy_set_header Host \$host;
@@ -127,6 +162,11 @@ spec:
               }
               NGINX_EOF
           env:
+            - name: DASHBOARD_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: scm-monitor-api-auth
+                  key: DASHBOARD_API_KEY
             - name: API_KEY
               valueFrom:
                 secretKeyRef:

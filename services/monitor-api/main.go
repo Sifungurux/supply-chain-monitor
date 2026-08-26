@@ -2172,7 +2172,21 @@ func runAPIServer() {
 			// so that enabling scopes cannot lock out a deployment
 			// mid-upgrade -- but that is a hole, and a hole nobody can
 			// see is one nobody closes.
-			slog.Warn("some API keys have no scopes configured and run UNRESTRICTED -- give them an entry in monitorApi.apiKeyScopes to close this",
+			//
+			// API_KEY_SCOPES_STRICT turns the hole into a refusal. Off
+			// by default deliberately: on by default would brick an
+			// upgrade the moment a new consumer is added and its scope
+			// entry has not caught up, which turns a security control
+			// into an outage -- the same reasoning the short-key check
+			// below already applies. A deployment that has finished
+			// scoping its keys turns it on and can no longer regress
+			// silently by adding one.
+			if getenvBool("API_KEY_SCOPES_STRICT", false) {
+				fatal("API_KEY_SCOPES_STRICT is set and some API keys have no scopes -- refusing to start rather than run them unrestricted",
+					"unscoped_clients", strings.Join(unscoped, ", "),
+					"valid_scopes", strings.Join(api.AllScopes, ", "))
+			}
+			slog.Warn("some API keys have no scopes configured and run UNRESTRICTED -- give them an entry in monitorApi.apiKeyScopes to close this (set API_KEY_SCOPES_STRICT=true to refuse instead)",
 				"unscoped_clients", strings.Join(unscoped, ", "))
 		}
 		slog.Info("API key scopes are enforced", "clients", len(clients))
