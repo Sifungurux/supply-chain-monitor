@@ -138,6 +138,32 @@ spec:
       # other deployment silently loses them.
       showConnectionSettings: false
     monitorApi:
+      # SCOPES, ENFORCED. Every in-cluster consumer now has its own
+      # named key (cluster/chart-secrets.sh generates dashboard and
+      # sweep unconditionally), which is what makes scoping possible at
+      # all -- scopes key off the client NAME, and until PR #174 every
+      # consumer shared the master key as client "default".
+      #
+      # read+scan for both, derived from what they actually call:
+      # the sweep does GET /artifacts, GET /artifacts/{id} and
+      # POST /artifacts/{id}/scan; the dashboard does the same plus its
+      # other GET views. Neither needs admin, and that is the point --
+      # delete, maintainer, stage and risk-acceptance are refused by
+      # the API, not merely hidden in the UI.
+      #
+      # "default" (the master key) is deliberately NOT listed, so it
+      # stays unrestricted for operator use. That is the remaining hole
+      # and it is a deliberate one; apiKeyScopesStrict stays false while
+      # it exists, since strict would refuse to start over it.
+      apiKeyScopes: "dashboard=read|scan;sweep=read|scan"
+      # Per-key throttling, sized well above observed need: the
+      # dashboard polls a handful of endpoints every 10s and the
+      # sweeps poll one scan every 5s sequentially, so real sustained
+      # load per key is under 2 rps. 20/50 bounds a runaway retry loop
+      # or a compromised key without ever touching normal operation.
+      rateLimit:
+        requestsPerSecond: 20
+        burst: 50
       # Report grype findings by CVE id rather than by the advisory id
       # that matched (grype --by-cve). Chart default is false, set true
       # here because the cost was measured ON THIS CLUSTER and is
