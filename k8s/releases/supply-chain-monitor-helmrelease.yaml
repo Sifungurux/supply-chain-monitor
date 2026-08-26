@@ -127,6 +127,20 @@ spec:
   # Deployment directly, since Flux/Helm alone can't detect a same-tag
   # image change.
   values:
+    postgres:
+      backup:
+        encryption:
+          # Backups are encrypted to a PUBLIC key. The cluster holds
+          # only the half that encrypts -- it cannot read a single
+          # dump, including the ones it wrote itself. The private half
+          # lives outside the cluster and is lent to a restore for the
+          # seconds it runs (cluster/postgres-restore.sh's
+          # GPG_PRIVATE_KEY_FILE).
+          #
+          # Without this the daily pg_dump PVC holds the entire
+          # findings and artifact estate as plaintext gzip, readable by
+          # anything that can reach the volume (report S5).
+          publicKeySecret: scm-backup-encryption
     dashboard:
       # Chart default is false (fail-closed) -- this local dev cluster
       # is the one deployment that actually wants the manual-registration
@@ -156,6 +170,17 @@ spec:
       # and it is a deliberate one; apiKeyScopesStrict stays false while
       # it exists, since strict would refuse to start over it.
       apiKeyScopes: "dashboard=read|scan;sweep=read|scan"
+      # Serve the API over TLS inside the cluster. Gateway TLS
+      # terminates at the EDGE, so without this every in-cluster hop is
+      # cleartext -- and those hops carry bearer credentials: the
+      # dashboard proxy's key, both sweeps' keys, and the per-Job scan
+      # token workers post documents back with (report S3).
+      #
+      # Every caller moves together via the apiBaseURL helper, so this
+      # single flag rewrites the dashboard proxy, both sweep CronJobs
+      # and SCAN_WORKER_API_BASE_URL at once.
+      tls:
+        enabled: true
       # Per-key throttling, sized well above observed need: the
       # dashboard polls a handful of endpoints every 10s and the
       # sweeps poll one scan every 5s sequentially, so real sustained

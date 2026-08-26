@@ -26,3 +26,10 @@ services/monitor-api/monitor-api
 # build target: importing by reference silently did nothing, importing a
 # tarball works). Removed on success; committed never.
 .monitor-api-image.tar
+
+# Stray scan output. testscan.json (a real scan result for alpine:3.19)
+# sat committed at the repo root for months -- no secrets in it, but it
+# is exactly the class of file that accumulates, and a scan result is
+# the project's own output rather than its source (report S5).
+testscan.json
+*.testscan.json
