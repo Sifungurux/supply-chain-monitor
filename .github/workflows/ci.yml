@@ -335,30 +335,29 @@ jobs:
       # consumer can verify this image came from this workflow and this
       # commit: `gh attestation verify oci://<image>@<digest>
       # --repo <owner>/<repo>`.
+      #
+      # THIS STEP IS WHY THE REPOSITORY IS PUBLIC. GitHub's attestations
+      # API is available to public repositories, and to private ones
+      # only in an org on Team or Enterprise. A user-owned private repo
+      # gets, after a perfectly successful push:
+      #
+      #   Failed to persist attestation: Feature not available for
+      #   user-owned private repositories.
+      #
+      # create-storage-record: false does NOT work around that. It was
+      # tried in 38c8360 and failed identically -- the entitlement is
+      # checked before the storage record, not because of it, and the
+      # registry copy never lands either. The alternatives were unsigned
+      # buildx provenance, or cosign keyless, which publishes the image
+      # digest to the public Rekor log regardless.
+      #
+      # If this repository ever goes private again this step stops
+      # working, and the fix is to delete it, not to reconfigure it.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ steps.ref.outputs.image }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
-          # The attestation lives in ghcr.io next to the image, and
-          # NOWHERE ELSE. The action also files a storage record with
-          # GitHub's attestations API by default, and that API is closed
-          # to user-owned private repositories -- the first real run of
-          # this job died on exactly that, after a successful push:
-          #
-          #   Failed to persist attestation: Feature not available for
-          #   user-owned private repositories.
-          #
-          # So verification reads the bundle out of the registry rather
-          # than the API:
-          #
-          #   gh attestation verify oci://<image>@<digest> \
-          #     --repo Sifungurux/supply-chain-monitor --bundle-from-oci
-          #
-          # Flip this back to true if the repository ever goes public or
-          # moves to an org on Team/Enterprise -- the API record is what
-          # makes the plain `gh attestation verify` form work.
-          create-storage-record: false
 
       - name: Report what was published
         run: |
