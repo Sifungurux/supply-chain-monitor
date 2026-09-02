@@ -340,6 +340,25 @@ jobs:
           subject-name: ${{ steps.ref.outputs.image }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+          # The attestation lives in ghcr.io next to the image, and
+          # NOWHERE ELSE. The action also files a storage record with
+          # GitHub's attestations API by default, and that API is closed
+          # to user-owned private repositories -- the first real run of
+          # this job died on exactly that, after a successful push:
+          #
+          #   Failed to persist attestation: Feature not available for
+          #   user-owned private repositories.
+          #
+          # So verification reads the bundle out of the registry rather
+          # than the API:
+          #
+          #   gh attestation verify oci://<image>@<digest> \
+          #     --repo Sifungurux/supply-chain-monitor --bundle-from-oci
+          #
+          # Flip this back to true if the repository ever goes public or
+          # moves to an org on Team/Enterprise -- the API record is what
+          # makes the plain `gh attestation verify` form work.
+          create-storage-record: false
 
       - name: Report what was published
         run: |
