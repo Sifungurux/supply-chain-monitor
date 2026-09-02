@@ -33,3 +33,8 @@ services/monitor-api/monitor-api
 # the project's own output rather than its source (report S5).
 testscan.json
 *.testscan.json
+
+# Scratch directory `cluster/test-backup-scripts.sh` renders the shipped
+# backup scripts into; removed by its own trap. Inside the repo rather
+# than $TMPDIR because Docker Desktop does not share /var/folders.
+.test-backup-work.*/

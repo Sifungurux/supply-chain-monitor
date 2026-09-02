@@ -32,7 +32,11 @@ ROOT="$(cd "$DIR/.." && pwd)"
 CHART="charts/supply-chain-monitor"
 HELM_IMAGE="alpine/helm:4.2.0"
 
-WORK="$(mktemp -d)"
+# Inside the repo, not $TMPDIR: on macOS mktemp -d lands in
+# /var/folders, which Docker Desktop does not share -- /h then mounts as
+# an empty directory and the run dies with "No such file or directory".
+# $ROOT is already shared, since the helm renders below bind-mount it.
+WORK="$(mktemp -d "$ROOT/.test-backup-work.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 # The image under test is whatever the chart actually deploys, read
@@ -102,7 +106,14 @@ PY
 cp "$DIR/test-backup-scripts-cases.sh" "$WORK/cases.sh"
 
 echo "== running them =="
+# --user 0: the image runs as uid 26 (postgres), $WORK is a mktemp -d
+# owned by whoever ran this, and the cases both write into /h and
+# `chmod +x` a stub there -- chmod needs ownership, not just write. Docker
+# Desktop fakes bind-mount ownership, so this only bites on Linux. Nothing
+# under test cares which uid runs it: pg_dump and psql are stubs and both
+# tmpfs mounts are 1777.
 docker run --rm \
+	--user 0 \
 	-v "$WORK":/h \
 	--tmpfs /backups:rw,mode=1777 \
 	--tmpfs /etc/scm-backup-decryption:rw,mode=1777 \

@@ -292,7 +292,10 @@ test-image:
 	@# pins to drift out of step with the Dockerfile's.
 	@echo "== the tool-gated scanner tests actually run =="
 	@rm -rf .tool-bin && mkdir -p .tool-bin
-	@docker run --rm --entrypoint sh -v "$(CURDIR)/.tool-bin":/dest $(IMAGE)-verify \
+	@# --user 0 because the image runs as 65534 and .tool-bin belongs to
+	@# whoever ran make. Docker Desktop fakes bind-mount ownership so this
+	@# passes on a Mac either way; on a Linux runner the copy is denied.
+	@docker run --rm --user 0 --entrypoint sh -v "$(CURDIR)/.tool-bin":/dest $(IMAGE)-verify \
 		-c 'cp /usr/local/bin/oras /usr/local/bin/trivy /dest/'
 	docker run --rm -v "$(CURDIR)/services/monitor-api":/src \
 		-v "$(CURDIR)/.tool-bin/oras":/usr/local/bin/oras \
