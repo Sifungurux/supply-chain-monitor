@@ -54,7 +54,7 @@ spec:
             runAsGroup: 65534
           containers:
             - name: prune
-              image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
+              image: {{ include "supply-chain-monitor.monitorApiImage" . | quote }}
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities:

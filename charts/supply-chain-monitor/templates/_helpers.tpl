@@ -233,3 +233,35 @@ https://monitor-api.{{ .Release.Namespace }}.svc.cluster.local:8080
 http://monitor-api.{{ .Release.Namespace }}.svc.cluster.local:8080
 {{- end -}}
 {{- end -}}
+
+{{/*
+The monitor-api image reference, as ONE expression used by every place
+that runs this image -- the Deployment, six CronJobs, three primer Jobs,
+and SCAN_WORKER_IMAGE in the ConfigMap. It was previously spelled out as
+`{{ .repository }}:{{ .tag }}` at each of those eleven sites, so adding
+digest support meant either editing all eleven or having two of them
+disagree about what the cluster runs.
+
+DIGEST WINS OVER TAG when set. A digest is the only reference that names
+one specific image: a tag -- even an immutable-by-convention `:<sha>`
+one -- is a mutable pointer the registry lets anyone re-point. This
+project exists to tell people what is actually running in their cluster,
+so it pins the way it would want its own users to.
+
+Both are kept rather than replacing tag with digest. The chart's default
+is still `monitor-api:dev`, the locally-built image `make build` imports
+into k3d, because a fresh clone with no ghcr access still has to be able
+to run this. Deployments that pin set monitorApi.image.digest and the
+tag becomes decoration -- Kubernetes ignores it entirely once a digest
+is present, which is why this emits ONE or the other rather than
+`repo:tag@digest`.
+*/}}
+{{- define "supply-chain-monitor.monitorApiImage" -}}
+{{- with .Values.monitorApi.image -}}
+{{- if .digest -}}
+{{ .repository }}@{{ .digest }}
+{{- else -}}
+{{ .repository }}:{{ .tag }}
+{{- end -}}
+{{- end -}}
+{{- end -}}

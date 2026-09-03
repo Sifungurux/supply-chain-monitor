@@ -122,10 +122,34 @@ spec:
       name: scm-chart-secrets
       valuesKey: registry-admin-password
       targetPath: dockerAuth.accounts.admin.password
-  # image.tag stays "dev" (the chart's default) for local iteration --
-  # `make deploy` rebuilds monitor-api:dev and rollout-restarts the
-  # Deployment directly, since Flux/Helm alone can't detect a same-tag
-  # image change.
+  # PINNED BY DIGEST to what CI published, which is what closes the
+  # version-skew hole: the chart and the binary now move as one commit
+  # instead of on two different clocks. Two rollouts in August deployed
+  # old code, and enabling in-cluster TLS switched probes to HTTPS while
+  # the binary predated the feature -- both because `make build` and
+  # Flux were independent.
+  #
+  # A DIGEST, NOT THE :<sha> TAG. Kubernetes ignores the tag entirely
+  # once a digest is present, and a digest is the only reference that
+  # names one specific image -- a tag, even a per-commit one, is a
+  # mutable pointer the registry lets anyone re-point. For this project
+  # in particular, pinning any other way would be advice it does not
+  # take itself.
+  #
+  # `make deploy` NO LONGER AFFECTS THIS CLUSTER. It still rebuilds
+  # monitor-api:dev, imports it into k3d and restarts the rollout, and
+  # the cluster goes on running the pinned image -- a deploy that
+  # reports success and changes nothing. Local iteration now means
+  # merging to main, letting publish-image run, and bumping the digest
+  # below. To iterate against a local build instead, clear the digest
+  # (`--set monitorApi.image.digest=`), which falls back to the chart's
+  # own monitor-api:dev default.
+  #
+  # BUMPING IT: take the digest publish-image prints in its job summary,
+  # or
+  #   gh run view --job <publish-image job id> --log | grep 'digest: sha256:'
+  # This is still a manual step -- Flux ImageUpdateAutomation would make
+  # it automatic, and is not set up.
   values:
     postgres:
       backup:
@@ -152,6 +176,16 @@ spec:
       # other deployment silently loses them.
       showConnectionSettings: false
     monitorApi:
+      # ghcr.io/<owner>/<repo>/monitor-api, lowercased -- ghcr requires
+      # an all-lowercase path and this repository's owner is not.
+      # Published by ci.yml's publish-image job on every push to main.
+      image:
+        repository: ghcr.io/sifungurux/supply-chain-monitor/monitor-api
+        # a40e5c3 -- "chore(docker): bump golang from 1.26-alpine to
+        # 1.27-alpine". The multi-arch INDEX digest, not a per-platform
+        # one, so the arm64 nodes here and any amd64 node resolve their
+        # own manifest from it.
+        digest: sha256:181178d8e76230bc49fe55090be74b2d70bd34959f6f4446441d9c0507570e1b
       # SCOPES, ENFORCED. Every in-cluster consumer now has its own
       # named key (cluster/chart-secrets.sh generates dashboard and
       # sweep unconditionally), which is what makes scoping possible at

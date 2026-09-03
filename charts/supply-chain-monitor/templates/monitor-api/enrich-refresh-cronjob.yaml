@@ -58,7 +58,7 @@ spec:
             runAsGroup: 65534
           containers:
             - name: enrich-refresh
-              image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
+              image: {{ include "supply-chain-monitor.monitorApiImage" . | quote }}
               imagePullPolicy: {{ .Values.monitorApi.image.pullPolicy }}
               securityContext:
                 allowPrivilegeEscalation: false
