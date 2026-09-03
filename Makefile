@@ -95,7 +95,7 @@ ifeq ($(SCM_RUNTIME),podman)
 export DOCKER_HOST := $(shell (podman system connection ls --format json | jq -r '.[] | select(.Default==true) | .URI') 2>/dev/null)
 endif
 
-.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build test-image vulncheck trivy-config deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap check-alert-rules check-duplicate-keys check-k8s-manifests check-go-image-pin helm-lint helm-template test-backup-scripts db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
+.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets backup-key gateway-api-install build test-image vulncheck trivy-config deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap check-alert-rules check-duplicate-keys check-k8s-manifests check-go-image-pin helm-lint helm-template test-backup-scripts db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -132,6 +132,20 @@ git-auth:
 
 git-test:
 	./cluster/test-git-connection.sh
+
+# Creates the GPG keypair the Postgres backup CronJob encrypts to, and
+# installs the PUBLIC half as the scm-backup-encryption Secret. Nothing
+# else creates it, and the chart mounts it non-optionally -- so a
+# cluster rebuilt without this has a backup job that CrashLoops nightly
+# (which is exactly what happened on 2026-09-03).
+#
+# The private half is written OUTSIDE this repo and is the only thing
+# that can read a backup. Verifies the pair round-trips through the real
+# gpg before the Secret is touched. See cluster/backup-encryption-key.sh
+# for rotation (--rotate) and for checking a key still matches what the
+# cluster encrypts to (--check).
+backup-key:
+	./cluster/backup-encryption-key.sh
 
 # Creates/updates the scm-chart-secrets Secret that
 # k8s/releases/supply-chain-monitor-helmrelease.yaml's spec.valuesFrom

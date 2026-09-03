@@ -38,3 +38,16 @@ testscan.json
 # backup scripts into; removed by its own trap. Inside the repo rather
 # than $TMPDIR because Docker Desktop does not share /var/folders.
 .test-backup-work.*/
+
+# Scratch directory `cluster/backup-encryption-key.sh` generates the GPG
+# keypair in; removed by its own trap. Inside the repo for the same
+# reason as .test-backup-work.* above.
+.backup-key-work.*/
+
+# GPG key material, anywhere in the tree. Nothing here is ever meant to
+# be committed: cluster/backup-encryption-key.sh writes private keys to
+# ~/.scm-backup-keys by default and its own scratch dir is ignored above.
+# This is the backstop for a key copied into the repo to look at -- which
+# happened while that script was being written, and in a public repo a
+# committed private key is every backup ever encrypted to it, lost.
+*.asc
