@@ -224,6 +224,20 @@ jobs:
       - name: make trivy-config
         run: make trivy-config
 
+  # Fails if the Makefile's GO_BUILD_IMAGE and the Dockerfile's FROM
+  # lines name different Go toolchains. Deliberately its OWN job rather
+  # than a step inside govulncheck below: when these drift, govulncheck
+  # still passes -- it just passes about a compiler the shipped binary
+  # is not built with -- so a red `govulncheck` would send someone
+  # hunting for a CVE that does not exist. A red check-go-image-pin says
+  # what actually happened.
+  check-go-image-pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: make check-go-image-pin
+        run: make check-go-image-pin
+
   # govulncheck: Go vulnerabilities this code actually REACHES, by call
   # graph, rather than everything present in the dependency tree. That
   # call-graph filtering is the point -- it is the difference between
