@@ -59,7 +59,7 @@ spec:
             fsGroup: 65534
           containers:
             - name: grype-db-refresh
-              image: "{{ .Values.monitorApi.image.repository }}:{{ .Values.monitorApi.image.tag }}"
+              image: {{ include "supply-chain-monitor.monitorApiImage" . | quote }}
               # Deliberately no readOnlyRootFilesystem: these run trivy/grype/psql,
               # which use TMPDIR and other rootfs paths that have not been verified
               # here. Dropping capabilities and privilege escalation is safe

@@ -467,8 +467,24 @@ postgres:
 
 monitorApi:
   image:
+    # Default is the LOCALLY BUILT image `make build` imports into k3d,
+    # so a fresh clone with no ghcr access can still run this.
     repository: monitor-api
     tag: dev
+    # When set, this WINS over tag -- the reference becomes
+    # repository@digest and Kubernetes ignores the tag entirely.
+    #
+    # A digest is the only reference that names one specific image. A
+    # tag, including an immutable-by-convention :<sha> one, is a mutable
+    # pointer the registry lets anyone re-point; this project exists to
+    # tell people what is actually running in their cluster, so it pins
+    # the way it would want its own users to.
+    #
+    # Set in k8s/releases/supply-chain-monitor-helmrelease.yaml for this
+    # project's own cluster, pointing at what CI published. Note that
+    # `make deploy` cannot affect a cluster that pins one -- see that
+    # file's comment.
+    digest: ""
     pullPolicy: IfNotPresent
   listenAddr: ":8080"
   pipelineStages: "source,build,test,scan,sign,publish,deploy"

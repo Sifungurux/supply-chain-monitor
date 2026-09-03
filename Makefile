@@ -415,6 +415,21 @@ trivy-config:
 # their own. Finite and exits when done -- it doesn't babysit the
 # cluster afterward; Flux does that continuously on its own from here.
 deploy: build
+	@# A DEPLOY THAT REPORTS SUCCESS AND CHANGES NOTHING is this repo's
+	@# most expensive failure mode, and pinning the HelmRelease to a
+	@# published digest creates a fresh one: everything below still runs
+	@# -- build, import, push, reconcile, rollout restart -- while the
+	@# cluster goes on running the pinned image. Warn rather than fail,
+	@# since the rest of this target (the chart, the CronJobs, Traefik)
+	@# is still doing real work.
+	@if grep -qE '^\s+digest: sha256:' k8s/releases/supply-chain-monitor-helmrelease.yaml 2>/dev/null; then \
+		echo ""; \
+		echo "  NOTE: the HelmRelease pins monitorApi.image.digest, so this deploy"; \
+		echo "  will NOT change which monitor-api binary the cluster runs. The image"; \
+		echo "  built above is ignored. To ship a code change: merge to main, let"; \
+		echo "  publish-image run, and bump the digest in that file."; \
+		echo ""; \
+	fi
 	@if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
 		echo "This project isn't a git repository yet -- Flux polls Git, not the filesystem." >&2; \
 		echo "Run: git init && git remote add origin <url matching k8s/flux-system/gotk-sync.yaml's GitRepository.spec.url> && git push -u origin main" >&2; \

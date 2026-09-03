@@ -138,9 +138,15 @@ data:
   UNPACKER_BIN: {{ .Values.monitorApi.unpacker.bin | quote }}
   # Almost always the same image monitor-api itself runs from, since
   # `monitor-api scan-worker` is the same binary in a different mode --
-  # defaults to monitorApi.image.repository:monitorApi.image.tag unless
-  # scanWorkerImage is explicitly overridden.
-  SCAN_WORKER_IMAGE: {{ (.Values.monitorApi.scanWorkerImage | default (printf "%s:%s" .Values.monitorApi.image.repository .Values.monitorApi.image.tag)) | quote }}
+  # defaults to the same reference the Deployment uses (digest when one
+  # is pinned, else repository:tag) unless scanWorkerImage overrides it.
+  #
+  # This one matters more than the ten Helm-rendered call sites: the
+  # scan-worker Job is built in GO, at runtime, from this string. Helm
+  # never sees it, so nothing the chart does to a Job spec reaches it --
+  # a pinned image that the scan Jobs cannot pull leaves the API pod
+  # perfectly healthy and silently breaks every isolated scan.
+  SCAN_WORKER_IMAGE: {{ (.Values.monitorApi.scanWorkerImage | default (include "supply-chain-monitor.monitorApiImage" .)) | quote }}
   # Left false here -- this is the real in-cluster deployment, which
   # does have the ServiceAccount token isolation needs (see
   # serviceaccount.yaml). true is only ever meant for running the
