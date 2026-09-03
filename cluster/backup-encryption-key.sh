@@ -181,8 +181,10 @@ in_pg "
 	gpg --batch --with-colons --fingerprint '${UID_NAME}' \
 		| awk -F: '/^fpr:/{print \$10; exit}' > /w/fpr
 "
-[ -s "$WORK/publickey.asc" ] && [ -s "$WORK/privatekey.asc" ] \
-	|| { echo "ERROR: key generation produced an empty file." >&2; exit 1; }
+if [ ! -s "$WORK/publickey.asc" ] || [ ! -s "$WORK/privatekey.asc" ]; then
+	echo "ERROR: key generation produced an empty file." >&2
+	exit 1
+fi
 FPR="$(cat "$WORK/fpr")"
 echo "  ${UID_NAME}  ${FPR}"
 
