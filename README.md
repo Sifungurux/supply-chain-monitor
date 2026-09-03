@@ -9,6 +9,31 @@ currently at.
 This is a v1 skeleton meant to run locally and grow from. See
 `docs/architecture.md` for the design and known gaps.
 
+> ### Rotate every credential before any real deployment
+>
+> This repository is public, and **its git history is public with it.**
+> Two credentials were checked in until `aebf6fe` (2026-08-09) and are
+> now permanently readable by anyone who clones it:
+>
+> - `POSTGRES_PASSWORD: changeme123`
+> - `monitorApi.apiKey: qwe4r56789009876543223456789`
+>
+> Both were placeholders for a single-user local cluster, and neither is
+> a default any more — the chart ships both values **empty** and fails
+> closed, see [Bringing your own secrets](#bringing-your-own-secrets).
+> But removing a value from `values.yaml` does not remove it from a
+> running system: Postgres reads `POSTGRES_PASSWORD` only on initdb
+> against an empty volume, so **a database initialised before
+> 2026-08-09 is still using `changeme123` no matter what the chart now
+> renders.** Rotating it needs the `ALTER ROLE` step
+> `cluster/chart-secrets.sh` documents, not just a new Secret.
+>
+> The same goes for anything else this repo taught you to paste: API
+> keys, registry credentials, the metrics token, TLS material. Treat
+> every credential that has ever appeared in this repo, its history, or
+> its docs as compromised, and issue fresh ones before pointing any of
+> this at something you care about.
+
 ## What's here
 
 ```
