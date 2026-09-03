@@ -2985,6 +2985,43 @@ is handled since Postgres and `monitor-api` start up concurrently.
 
 ### Backing up and restoring Postgres
 
+**Before the first backup can run, create the encryption key:**
+
+```bash
+make backup-key
+```
+
+Backups are encrypted to a GPG **public** key held in the
+`scm-backup-encryption` Secret. The chart mounts that Secret
+non-optionally, so without it the nightly backup pod fails to start —
+deliberately, since the alternative is a job that quietly writes
+plaintext under a configuration that says it encrypts. Nothing else
+creates it, and it is cluster state rather than anything in git, so a
+rebuilt cluster needs this run again.
+
+The cluster gets only the half that encrypts and cannot read a single
+dump, including the ones it wrote itself. `make backup-key` writes the
+**private** half outside this repo (`~/.scm-backup-keys` by default),
+verifies the pair round-trips through the same gpg the backup and
+restore jobs use *before* touching the Secret, and never overwrites an
+existing key file. **That private key is the only thing that can read a
+backup — back it up somewhere you would still have if this machine
+died.**
+
+```bash
+# does the key I hold still match what the cluster encrypts to?
+GPG_PRIVATE_KEY_FILE=~/.scm-backup-keys/<...>.private.asc   ./cluster/backup-encryption-key.sh --check
+
+# leaked or retired key
+./cluster/backup-encryption-key.sh --rotate
+```
+
+Rotating does **not** re-encrypt anything: every existing backup stays
+encrypted to the key that was current when it was written, and always
+will be. Keep old private keys until you are certain no backup you would
+ever want still needs them — `--rotate` prints how to take a fresh
+backup immediately so that window closes.
+
 A daily `pg_dump` (gzip-compressed, into its own PVC separate from the
 live data) runs automatically once deployed — see
 `charts/supply-chain-monitor/templates/postgres/backup-cronjob.yaml`. Retention keeps the
