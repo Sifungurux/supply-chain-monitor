@@ -95,7 +95,7 @@ ifeq ($(SCM_RUNTIME),podman)
 export DOCKER_HOST := $(shell (podman system connection ls --format json | jq -r '.[] | select(.Default==true) | .URI') 2>/dev/null)
 endif
 
-.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build test-image vulncheck trivy-config deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap check-alert-rules check-duplicate-keys check-k8s-manifests helm-lint helm-template test-backup-scripts db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
+.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets gateway-api-install build test-image vulncheck trivy-config deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap check-alert-rules check-duplicate-keys check-k8s-manifests check-go-image-pin helm-lint helm-template test-backup-scripts db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -316,10 +316,23 @@ test-image:
 # vulnerabilities the shipped binary does not have, or misses ones it
 # does. Keep this image and the Dockerfile's in step.
 #
-# Gating in CI, and clean as of the Go 1.26 / pgx v5.10 bump -- see the
-# govulncheck job in .github/workflows/ci.yml. Run it by hand any time;
-# it needs network for the vulnerability database.
-GOVULNCHECK_VERSION ?= v1.1.4
+# Gating in CI, and clean as of the Go 1.27 bump -- see the govulncheck
+# job in .github/workflows/ci.yml. Run it by hand any time; it needs
+# network for the vulnerability database.
+#
+# THIS VERSION MOVES WITH THE TOOLCHAIN. v1.1.4 does not merely misreport
+# on Go 1.27, it dies:
+#
+#   panic: unexpected expr: *ast.KeyValueExpr
+#     golang.org/x/tools@v0.29.0/go/ssa/builder.go:958
+#
+# govulncheck vendors x/tools to build the call graph, and a pinned
+# x/tools cannot parse a language version released after it. Bumping the
+# Go image without bumping this breaks the job outright -- which is the
+# good case. The bad case is the one check-go-image-pin below exists for:
+# leave GO_BUILD_IMAGE behind and nothing breaks at all, because
+# govulncheck goes on analyzing the old toolchain, green, forever.
+GOVULNCHECK_VERSION ?= v1.7.0
 # PINNED TO THE SAME DIGEST THE BUILD USES. This ran against the
 # floating golang:1.26-alpine tag while services/monitor-api/Dockerfile
 # pinned by digest -- so the gating vulnerability check and the actual
@@ -327,8 +340,36 @@ GOVULNCHECK_VERSION ?= v1.1.4
 # and on 2026-08-16 they did: the tag moved to a Go release with four
 # stdlib CVEs while the build stayed on the pinned one.
 #
-# Keep GO_BUILD_IMAGE in step with the Dockerfile's FROM lines.
-GO_BUILD_IMAGE ?= golang:1.26-alpine@sha256:70b46548e42db77e0966aaf3619fd068734dc6c77584d526b91126504fd95816
+# Keep GO_BUILD_IMAGE in step with the Dockerfile's FROM lines --
+# check-go-image-pin below now enforces that rather than trusting this
+# comment, which it had already stopped doing: on 2026-09-03 the two
+# were pinned to DIFFERENT digests of golang:1.26-alpine and nothing
+# noticed. That pair happened to resolve to the same go1.26.6, so the
+# invariant was broken without a consequence, which is the state a
+# check exists to catch.
+GO_BUILD_IMAGE ?= golang:1.27-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc
+
+# Fails if GO_BUILD_IMAGE and services/monitor-api/Dockerfile disagree
+# about the Go toolchain. A bump that moves one and not the other is
+# green in every job: govulncheck passes, because it analyzed a
+# toolchain the shipped binary is not built with. Dependabot bumps the
+# Dockerfile alone -- see PR #179, where it did exactly that.
+#
+# Both Dockerfile stages are checked, not just the first: `build` and
+# `umoci-build` compile different binaries into the same image, and a
+# bump that moved one would ship two toolchains in one artifact.
+check-go-image-pin:
+	@pins="$$(grep -oE 'golang:[^ ]+' services/monitor-api/Dockerfile | sort -u)"; \
+		if [ "$$(printf '%s\n' "$$pins" | wc -l)" -ne 1 ]; then \
+			echo "Dockerfile pins more than one golang image:" >&2; \
+			printf '  %s\n' $$pins >&2; exit 1; \
+		fi; \
+		[ "$$pins" = "$(GO_BUILD_IMAGE)" ] || { \
+			echo "GO_BUILD_IMAGE and the Dockerfile disagree about the Go toolchain:" >&2; \
+			echo "  Makefile:   $(GO_BUILD_IMAGE)" >&2; \
+			echo "  Dockerfile: $$pins" >&2; \
+			echo "govulncheck analyzes with the Makefile's image; the binary ships with the Dockerfile's." >&2; \
+			exit 1; }
 
 # Executes the backup/restore SHELL LOGIC -- the one thing helm lint,
 # helm template and check-helm-manifests.sh all leave untested. See
@@ -493,7 +534,7 @@ test-artifact:
 		-H 'Content-Type: application/json' \
 		-d '{"ref":"alpine:3.19","type":"image"}' | tee /tmp/scm-artifact.json
 
-test: test-api test-dashboard check-dashboard-configmap check-openapi-spec check-alert-rules check-duplicate-keys check-k8s-manifests
+test: test-api test-dashboard check-dashboard-configmap check-openapi-spec check-alert-rules check-duplicate-keys check-k8s-manifests check-go-image-pin
 
 # Runs services/monitor-api's Go test suite (handlers, store, pipeline)
 # via a containerized golang image -- no local Go install needed, just
