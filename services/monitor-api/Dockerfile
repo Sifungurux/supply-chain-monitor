@@ -144,9 +144,31 @@ ARG ORAS_SHA256_ARM64=8db4a223bd6034deff198e791ea7cb3af0840df25b7e9f370e2f1f3fd2
 # registry and unpacks it to a plain directory (oras-go / crane + umoci),
 # so ClamAV can scan a container image's actual file contents instead of
 # just its compressed layers.
-ARG UNPACKER_VERSION=0.7.1
-ARG UNPACKER_SHA256_AMD64=e4998d996766f94d5b27a4c531d9ae919fed04c868f91fb3760046017a10a13b
-ARG UNPACKER_SHA256_ARM64=1a65aaa83a442e432c5e3649957320d769d75bb74b17c3e54dfb9295c9c0893a
+# BUMPED BECAUSE 0.7.1 STOPPED EXISTING, not because it was time.
+# Sifungurux/unpacker's releases below v0.9.1 were removed on
+# 2026-09-04; the tags remain, the release ASSETS do not, so every build
+# of this repo -- on every branch, and at every historical commit --
+# started failing with `curl (22) 404` about 13 minutes later. The other
+# four tool downloads were verified fine at the same moment, which is
+# what isolated it to this one.
+#
+# Worth stating in this repo in particular: a pinned build is only
+# reproducible while the artifact it pins still exists. Deleting a
+# release does not just break the next build, it breaks every past one.
+#
+# 0.9.1 NEEDS umoci ON PATH and 0.7.1 did not -- it shells out to it for
+# the extract and exits 1 with `umoci: executable file not found` when
+# it is missing. This image already ships umoci (the umoci-build stage
+# above), so nothing here breaks, but that is a coincidence rather than
+# a design: anything running this binary somewhere else needs umoci too.
+#
+# Verified equivalent to 0.7.1 rather than assumed, on the case v0.7.1
+# itself existed to fix -- an OCI image index, where an earlier version
+# unpacked to nothing at all. Both extract 94 files / 11860K from
+# public.ecr.aws/docker/library/alpine:3.20 and exit 0.
+ARG UNPACKER_VERSION=0.9.1
+ARG UNPACKER_SHA256_AMD64=5cb34f20f32ef833361cd9213c3881448ebb755e44283bc726b6db8127b9eea6
+ARG UNPACKER_SHA256_ARM64=118d64bfbda824099a61f05101d81717c9f43e0133ff342f751b8e2bcf9e192a
 
 # github.com/anchore/grype: alternative CVE scanner to trivy, selectable
 # via monitorApi.cveScanner (internal/scanner/grype.go).
