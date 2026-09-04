@@ -181,11 +181,10 @@ spec:
       # Published by ci.yml's publish-image job on every push to main.
       image:
         repository: ghcr.io/sifungurux/supply-chain-monitor/monitor-api
-        # a40e5c3 -- "chore(docker): bump golang from 1.26-alpine to
-        # 1.27-alpine". The multi-arch INDEX digest, not a per-platform
-        # one, so the arm64 nodes here and any amd64 node resolve their
-        # own manifest from it.
-        digest: sha256:181178d8e76230bc49fe55090be74b2d70bd34959f6f4446441d9c0507570e1b
+        # 3db8c03 -- "feat(sweep): scan concurrently". The multi-arch
+        # INDEX digest, not a per-platform one, so the arm64 nodes here
+        # and any amd64 node resolve their own manifest from it.
+        digest: sha256:fa0ff271922e8d556f2ab867f7a20ab9df5ccc2e3cd1e0378f914d8377286a11
       # SWEEP THROUGHPUT, sized from measurement rather than the chart's
       # conservative defaults (*/15, batchSize 5).
       #
@@ -209,6 +208,18 @@ spec:
       sweep:
         schedule: "*/5 * * * *"
         batchSize: 10
+        # SIZED BY DISK, NOT BY THE SCAN CAP. monitorApi.scanConcurrency
+        # is 12, but every in-flight image scan unpacks into node
+        # scratch space -- measured up to ~2.6GB -- and this node has
+        # ~24GB free. 12 at once could want ~31GB and start evicting
+        # pods; 4 wants ~10GB, which fits with room for the registry to
+        # keep growing.
+        #
+        # Deliberately a starting point, not a final answer. The drain
+        # test that produced the 69/hour baseline (40 artifacts, 34.7
+        # minutes, 2026-09-04) is repeatable, so this can be raised
+        # against measurement rather than guessed upward.
+        concurrency: 4
       # SCOPES, ENFORCED. Every in-cluster consumer now has its own
       # named key (cluster/chart-secrets.sh generates dashboard and
       # sweep unconditionally), which is what makes scoping possible at
