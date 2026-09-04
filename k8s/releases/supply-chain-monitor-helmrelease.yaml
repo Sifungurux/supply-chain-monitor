@@ -186,6 +186,29 @@ spec:
         # one, so the arm64 nodes here and any amd64 node resolve their
         # own manifest from it.
         digest: sha256:181178d8e76230bc49fe55090be74b2d70bd34959f6f4446441d9c0507570e1b
+      # SWEEP THROUGHPUT, sized from measurement rather than the chart's
+      # conservative defaults (*/15, batchSize 5).
+      #
+      # Measured draining 90 artifacts after the 2026-09-03 re-mirror:
+      # a scan takes 16-25s, so a batch of 5 finishes in ~2 MINUTES and
+      # the CronJob then sits idle for the other 13. Throughput was
+      # ~20/hour, and none of it was limited by scanning -- the sweep
+      # scans SEQUENTIALLY (one at a time, blocking on each), so it
+      # never came near scanConcurrency: 12 above.
+      #
+      # */5 with batchSize 10 is ~120/hour, 6x. The pairing matters:
+      # concurrencyPolicy is Forbid, so a run longer than its interval
+      # silently skips the next one. 10 scans x ~20s is ~3.5 minutes
+      # against a 5-minute interval, which keeps normal runs clear of
+      # that with room to spare. timeoutMinutes (25) stays the bound for
+      # a pathological image that eats a whole run -- overrunning
+      # mid-batch is expected and safe, see the chart's own comment.
+      #
+      # The real ceiling is the sequential scanning, not either number
+      # here; a parallel sweep would be a Go change.
+      sweep:
+        schedule: "*/5 * * * *"
+        batchSize: 10
       # SCOPES, ENFORCED. Every in-cluster consumer now has its own
       # named key (cluster/chart-secrets.sh generates dashboard and
       # sweep unconditionally), which is what makes scoping possible at
