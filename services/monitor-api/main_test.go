@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1250,4 +1251,110 @@ func TestListWithRetry(t *testing.T) {
 			t.Errorf("called %d times with a cancelled context, want 1", calls)
 		}
 	})
+}
+
+// TestSweepConcurrency is the check on the worker pool that replaced the
+// sweep's fire-one-and-poll loop.
+//
+// WHY IT MEASURES OVERLAP RATHER THAN ELAPSED TIME. A faster wall clock
+// would also be produced by the scans simply being quick, so it proves
+// nothing about concurrency. This holds each scan open until the test
+// releases it and records how many were in flight at once, which is the
+// property the change is actually about: POST /scan answers 202 and the
+// API enforces its own cap, so the sweep's job is to keep that queue
+// full rather than to hold it at one.
+//
+// The default case matters as much as the concurrent one. SWEEP_CONCURRENCY
+// defaults to 1, so an existing deployment must behave exactly as before
+// until it opts in -- a regression there would change every cluster's
+// scan load silently on upgrade.
+func TestSweepConcurrency(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		concurrency string
+		wantMax     int32
+	}{
+		{"default is sequential", "", 1},
+		{"opted in runs scans in parallel", "4", 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ids := []string{"a1", "b2", "c3", "d4", "e5", "f6", "g7", "h8"}
+
+			var inFlight, maxInFlight int32
+			release := make(chan struct{})
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET /api/v1/artifacts", func(w http.ResponseWriter, r *http.Request) {
+				var out []artifact.Artifact
+				if r.URL.Query().Get("status") == string(artifact.StatusRegistered) {
+					for _, id := range ids {
+						out = append(out, artifact.Artifact{ID: id, Ref: "example.com/" + id + ":1", Type: artifact.TypeImage, Status: artifact.StatusRegistered})
+					}
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"total": len(out), "artifacts": out})
+			})
+			mux.HandleFunc("POST /api/v1/artifacts/{id}/scan", func(w http.ResponseWriter, r *http.Request) {
+				n := atomic.AddInt32(&inFlight, 1)
+				for {
+					m := atomic.LoadInt32(&maxInFlight)
+					if n <= m || atomic.CompareAndSwapInt32(&maxInFlight, m, n) {
+						break
+					}
+				}
+				// Hold the scan open. With a pool of 4 the fourth
+				// arrival closes the gate and lets everyone go; with a
+				// pool of 1 nobody else can arrive, so the timeout is
+				// what releases it -- which is the sequential case
+				// proving itself.
+				if n >= int32(4) {
+					select {
+					case <-release:
+					default:
+						close(release)
+					}
+				}
+				select {
+				case <-release:
+				case <-time.After(300 * time.Millisecond):
+				}
+				atomic.AddInt32(&inFlight, -1)
+				w.WriteHeader(http.StatusAccepted)
+				_ = json.NewEncoder(w).Encode(artifact.Artifact{ID: r.PathValue("id"), Status: artifact.StatusScanning})
+			})
+			mux.HandleFunc("GET /api/v1/artifacts/{id}", func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(artifact.Artifact{
+					ID: r.PathValue("id"), Ref: "example.com/" + r.PathValue("id") + ":1",
+					Status: artifact.StatusScanned, Digest: "sha256:" + r.PathValue("id"),
+				})
+			})
+
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			t.Setenv("SWEEP_API_BASE_URL", srv.URL)
+			t.Setenv("SWEEP_API_KEY", "test-key")
+			t.Setenv("SWEEP_BATCH_SIZE", strconv.Itoa(len(ids)))
+			t.Setenv("SWEEP_MODE", "full")
+			t.Setenv("SWEEP_RESCAN_STALE_AFTER_DAYS", "0")
+			t.Setenv("SWEEP_MIRROR_BACKFILL", "false")
+			if tc.concurrency != "" {
+				t.Setenv("SWEEP_CONCURRENCY", tc.concurrency)
+			}
+
+			var buf bytes.Buffer
+			old := log.Writer()
+			log.SetOutput(&buf)
+			defer log.SetOutput(old)
+			runSweepRegistered()
+
+			if got := atomic.LoadInt32(&maxInFlight); got != tc.wantMax {
+				t.Errorf("peak scans in flight = %d, want %d\nlog:\n%s", got, tc.wantMax, buf.String())
+			}
+			// However they were scheduled, every artifact must still be
+			// accounted for exactly once.
+			if want := "done -- 8 scanned, 0 failed, 0 not attempted"; !strings.Contains(buf.String(), want) {
+				t.Errorf("summary wrong.\nwant substring: %q\ngot:\n%s", want, buf.String())
+			}
+		})
+	}
 }

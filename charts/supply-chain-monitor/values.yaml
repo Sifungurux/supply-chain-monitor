@@ -1808,6 +1808,22 @@ monitorApi:
     enabled: true
     schedule: "*/15 * * * *" # every 15 minutes
     batchSize: 5
+    # How many of a batch are scanned AT ONCE.
+    #
+    # POST /scan answers 202 the moment a scan starts, and monitorApi
+    # .scanConcurrency is the real cluster-wide limit (429 + Retry-After
+    # when full). The sweep nevertheless fired one scan and polled it to
+    # completion before starting the next, so the queue it feeds sat
+    # almost always empty -- measured 2026-09-04, 40 artifacts took 34.7
+    # minutes against a cap of 12, and one slow image stalled everything
+    # behind it because nothing else was allowed in flight.
+    #
+    # 1 keeps exactly that behaviour, so an existing deployment does not
+    # change its scan load on upgrade. Raise it toward scanConcurrency
+    # to keep the pipeline full -- but size it against DISK as well as
+    # the cap: every in-flight image scan unpacks into scratch space
+    # (measured up to ~2.6GB), which no setting here can see.
+    concurrency: 1
     # THE WHOLE RUN'S BUDGET, and it must stay above
     # monitorApi.scanTimeoutSeconds -- the template refuses to render
     # otherwise.
