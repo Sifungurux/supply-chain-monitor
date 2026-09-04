@@ -3022,6 +3022,31 @@ will be. Keep old private keys until you are certain no backup you would
 ever want still needs them — `--rotate` prints how to take a fresh
 backup immediately so that window closes.
 
+#### Restoring is two halves, and the dump is only one of them
+
+**A database restore alone leaves the cluster broken.** Once an artifact
+has been mirrored its `ref` points at `scm-registry`, so a dump restored
+into a cluster whose registry PVC is empty gives you a full finding
+history attached to artifacts that every scan then fails with
+`MANIFEST_UNKNOWN`. Nothing repairs it on its own: mirroring happens at
+*registration*, and `mirrorArtifact` returns early once `source_ref` is
+set, so the sweep's backfill skips precisely the artifacts that need it.
+
+Full recovery onto a fresh cluster is therefore:
+
+```bash
+make chart-secrets     # credentials (cluster state, not in git)
+make backup-key        # backup encryption key (ditto)
+make db-restore BACKUP=<name> GPG_PRIVATE_KEY_FILE=<...>
+make remirror          # re-populate the registry from each source_ref
+```
+
+`make remirror` is idempotent and resumable — anything already in the
+registry is skipped — and it stops cleanly when free disk drops below
+`SCM_REMIRROR_MIN_FREE_GB` (default 15) rather than filling the node. A
+full mirror copies every platform of every image, which is a great deal
+more than the images themselves; `--dry-run` lists what it would copy.
+
 A daily `pg_dump` (gzip-compressed, into its own PVC separate from the
 live data) runs automatically once deployed — see
 `charts/supply-chain-monitor/templates/postgres/backup-cronjob.yaml`. Retention keeps the
