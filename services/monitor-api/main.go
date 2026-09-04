@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/api"
@@ -1267,43 +1268,103 @@ func runSweepRegistered() {
 	toScan := pickArtifactsToSweep(all, batchSize)
 	log.Printf("sweep-registered: %d artifact(s) registered-but-unscanned, scanning %d (SWEEP_BATCH_SIZE=%d)", countByStatus(all, artifact.StatusRegistered), len(toScan), batchSize)
 
+	// SWEEP_CONCURRENCY scans in flight at once.
+	//
+	// WHY THIS EXISTS. POST /scan answers 202 the moment a scan starts
+	// and the API enforces its own cluster-wide cap (SCAN_CONCURRENCY,
+	// 429 + Retry-After when full). This sweep nevertheless fired ONE
+	// scan and polled it to completion before starting the next, so the
+	// queue it feeds was almost always empty: measured on 2026-09-04,
+	// draining 40 artifacts took 34.7 minutes -- 69/hour against a cap
+	// of 12, roughly a twelfth of the pipeline. One slow image stalled
+	// everything behind it (node:18 took 3m17s, mysql:8.4 3m05s) purely
+	// because nothing else was allowed to be in flight.
+	//
+	// Scheduling could not fix that. Halving the interval and doubling
+	// the batch bought 3.5x and hit the ceiling of a sequential loop;
+	// the cap is the thing that was never being used.
+	//
+	// DEFAULT 1, so this changes nothing until a deployment opts in.
+	// The ceiling is the API's own cap, not this: setting it higher
+	// than SCAN_CONCURRENCY just means more workers parked in
+	// scanWaitingOutCap's backoff. Size it against the cap AND against
+	// disk -- each in-flight image scan unpacks into scratch space (up
+	// to ~2.6GB measured), which is a per-node limit this process
+	// cannot see.
+	conc := getenvInt("SWEEP_CONCURRENCY", 1)
+	if conc < 1 {
+		conc = 1
+	}
+	if conc > len(toScan) {
+		conc = len(toScan)
+	}
+
 	missingDigest := 0
 	scanned, failed, skipped := 0, 0, 0
-	for i, a := range toScan {
-		updated, err := scanArtifactViaAPI(ctx, apiBase, apiKey, a.ID)
-		// The run's own budget (SWEEP_TIMEOUT_MINUTES) ran out. Every
-		// artifact after this one would fail the same way and
-		// instantly, so stop rather than logging a line per remaining
-		// artifact that reads as a real scan failure.
-		//
-		// Running out mid-batch is NORMAL and safe, not an error: the
-		// scans themselves run in the API pod and scan-worker Jobs, so
-		// they outlive this process, and pickArtifactsToSweep orders by
-		// least-recently-attempted, so the next run resumes with
-		// whatever was missed. See monitorApi.sweep.timeoutMinutes for
-		// why the budget is deliberately not batchSize x a whole scan.
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			skipped += len(toScan) - i
-			log.Printf("sweep-registered: run budget exhausted -- %d artifact(s) not attempted, the next run resumes with them (SWEEP_TIMEOUT_MINUTES)", len(toScan)-i)
-			break
+	// One mutex over the counters AND the logging, so a run's output
+	// stays one line per artifact rather than interleaved fragments.
+	var mu sync.Mutex
+	work := make(chan artifact.Artifact)
+	var wg sync.WaitGroup
+	for w := 0; w < conc; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for a := range work {
+				updated, err := scanWaitingOutCap(ctx, apiBase, apiKey, a.ID, "")
+				// The run's own budget (SWEEP_TIMEOUT_MINUTES) ran out.
+				// Every artifact after this would fail the same way and
+				// instantly, so stop rather than logging a line per
+				// remaining artifact that reads as a real scan failure.
+				//
+				// Running out mid-batch is NORMAL and safe, not an
+				// error: the scans themselves run in the API pod and
+				// scan-worker Jobs, so they outlive this process, and
+				// pickArtifactsToSweep orders by
+				// least-recently-attempted, so the next run resumes
+				// with whatever was missed. See
+				// monitorApi.sweep.timeoutMinutes for why the budget is
+				// deliberately not batchSize x a whole scan.
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					return
+				}
+				mu.Lock()
+				switch {
+				case errors.Is(err, errScanCapSaturated):
+					skipped++
+					log.Printf("sweep-registered: %s (%s) skipped -- scan concurrency limit still saturated after waiting, next run retries it", a.ID, a.Ref)
+				case err != nil:
+					failed++
+					log.Printf("sweep-registered: scan %s (%s) failed: %v", a.ID, a.Ref, err)
+				case updated.Digest == "":
+					scanned++
+					missingDigest++
+					log.Printf("sweep-registered: %s (%s) scanned, digest still not resolved", a.ID, a.Ref)
+				default:
+					scanned++
+					log.Printf("sweep-registered: %s (%s) scanned, digest resolved", a.ID, a.Ref)
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+feed:
+	for _, a := range toScan {
+		select {
+		case <-ctx.Done():
+			// Stop handing out work; the workers drain what they hold.
+			break feed
+		case work <- a:
 		}
-		if errors.Is(err, errScanCapSaturated) {
-			skipped++
-			log.Printf("sweep-registered: %s (%s) skipped -- scan concurrency limit reached, next run retries it", a.ID, a.Ref)
-			continue
-		}
-		if err != nil {
-			failed++
-			log.Printf("sweep-registered: scan %s (%s) failed: %v", a.ID, a.Ref, err)
-			continue
-		}
-		scanned++
-		if updated.Digest == "" {
-			missingDigest++
-			log.Printf("sweep-registered: %s (%s) scanned, digest still not resolved", a.ID, a.Ref)
-		} else {
-			log.Printf("sweep-registered: %s (%s) scanned, digest resolved", a.ID, a.Ref)
-		}
+	}
+	close(work)
+	wg.Wait()
+
+	// Derived rather than counted: with workers running concurrently
+	// there is no "index we stopped at", and anything that fell out on
+	// a deadline was never recorded in a bucket above.
+	if notAttempted := len(toScan) - scanned - failed - skipped; notAttempted > 0 {
+		log.Printf("sweep-registered: run budget exhausted -- %d artifact(s) not attempted, the next run resumes with them (SWEEP_TIMEOUT_MINUTES)", notAttempted)
 	}
 	// Counts what actually happened. This used to report len(toScan) as
 	// the number scanned regardless of outcome, so a run in which every
@@ -1460,11 +1521,30 @@ const sbomReevalCapRetries = 3
 // scan cap rather than skipping it. Bounded by ctx throughout, so the
 // run's own budget is always the outer limit.
 func reevaluateSBOM(ctx context.Context, apiBase, apiKey, id string) error {
-	var err error
+	_, err := scanWaitingOutCap(ctx, apiBase, apiKey, id, sweepModeSBOMOnly)
+	return err
+}
+
+// scanWaitingOutCap scans one artifact, waiting out a saturated scan cap
+// rather than skipping it. Bounded by ctx throughout, so the run's own
+// budget is always the outer limit.
+//
+// Shared by the sbom-only sweep and the concurrent full sweep. Both need
+// exactly this and having two backoff loops would let them drift; the
+// full sweep needs it for a different reason than sbom-only, though.
+// Sequentially, a 429 meant "someone else is busy, try next run". Once
+// the sweep deliberately runs SWEEP_CONCURRENCY scans at once, brushing
+// the cap is the EXPECTED steady state -- skipping there would make a
+// run drop most of its batch precisely when the pipeline is working.
+func scanWaitingOutCap(ctx context.Context, apiBase, apiKey, id, mode string) (*artifact.Artifact, error) {
+	var (
+		a   *artifact.Artifact
+		err error
+	)
 	for attempt := 0; attempt <= sbomReevalCapRetries; attempt++ {
-		_, err = scanArtifactViaAPIMode(ctx, apiBase, apiKey, id, sweepModeSBOMOnly)
+		a, err = scanArtifactViaAPIMode(ctx, apiBase, apiKey, id, mode)
 		if !errors.Is(err, errScanCapSaturated) {
-			return err
+			return a, err
 		}
 		if attempt == sbomReevalCapRetries {
 			break
@@ -1478,11 +1558,11 @@ func reevaluateSBOM(ctx context.Context, apiBase, apiKey, id string) error {
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-time.After(wait):
 		}
 	}
-	return err
+	return a, err
 }
 
 // listWithRetry wraps a sweep's initial artifact listing in a bounded

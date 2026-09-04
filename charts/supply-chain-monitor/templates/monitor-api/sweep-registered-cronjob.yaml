@@ -107,6 +107,13 @@ spec:
                   value: {{ include "supply-chain-monitor.apiBaseURL" . | quote }}
                 - name: SWEEP_BATCH_SIZE
                   value: {{ .Values.monitorApi.sweep.batchSize | quote }}
+                # How many of that batch are in flight AT ONCE. The API
+                # answers POST /scan with 202 and enforces its own
+                # cluster-wide cap, so this is the sweep filling that
+                # queue rather than holding it at one. 1 keeps the old
+                # fire-one-and-poll behaviour.
+                - name: SWEEP_CONCURRENCY
+                  value: {{ .Values.monitorApi.sweep.concurrency | quote }}
                 # Passed explicitly so the process budget and the Job
                 # deadline above come from ONE value and cannot drift
                 # into agreeing by coincidence again.
