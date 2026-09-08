@@ -124,6 +124,10 @@ func (h *handler) indexSBOMComponents(id string, content []byte) {
 	}
 	slog.Info("indexed components from the uploaded SBOM", "artifact_id", id, "count", len(components))
 	h.applyLicenseDenylist(id, components)
+	// After the snapshot exists, never before: the diff this reads
+	// compares the two most recent snapshots, and SaveComponents above
+	// is what wrote the newer one.
+	h.notifyNewComponents(id)
 }
 
 // applyLicenseDenylist records a finding per component carrying a

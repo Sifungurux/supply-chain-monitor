@@ -881,11 +881,22 @@ func (h *handler) notifyNewFindings(a *artifact.Artifact, roundStamp time.Time, 
 		"artifact_id", a.ID, "count", len(newFindings),
 		"threshold", threshold, "destinations", len(h.notifiers))
 
+	h.deliver(event)
+}
+
+// deliver fans one event out to every configured notifier.
+//
+// Fire-and-forget on its own goroutine per notifier: notifications are
+// not part of a scan's result. A slow or broken receiver must not delay
+// the scan's own completion, and a panicking Notifier must not take the
+// process down -- runScan's recover covers its own goroutine, not the
+// ones spawned here.
+func (h *handler) deliver(event notify.ScanEvent) {
 	for _, n := range h.notifiers {
 		go func(n notify.Notifier) {
 			defer func() {
 				if rec := recover(); rec != nil {
-					slog.Error("notifier panicked", "artifact_id", a.ID, "err", rec)
+					slog.Error("notifier panicked", "artifact_id", event.ArtifactID, "err", rec)
 				}
 			}()
 			// Its own context, not the scan's: the scan's is already
@@ -903,6 +914,88 @@ func (h *handler) notifyNewFindings(a *artifact.Artifact, roundStamp time.Time, 
 // internal retry. Comfortably above the per-attempt HTTP timeout in
 // internal/notify so a retry isn't cut off mid-flight.
 const notifyTimeout = 30 * time.Second
+
+// notifyNewComponents fires the configured notifiers when this
+// artifact's newly-indexed SBOM contains packages the previous one did
+// not.
+//
+// This is the one supply-chain signal no scanner can produce. Trivy and
+// grype answer "is this component known-bad"; a package that arrived in
+// the build without anyone adding it carries no advisory, so it has no
+// severity, no CVE and no finding -- and that is precisely what a
+// compromised build or a swapped dependency looks like. The inventory
+// diff is the only place it is visible.
+//
+// ADDED ONLY. A removal is not a risk signal, and a version change is
+// an ordinary dependency bump that would fire on every base-image
+// update -- the noise that makes people turn a notification off. What
+// is reported is what nobody asked for.
+//
+// Called from indexSBOMComponents rather than from runScan, because for
+// an image the components are not indexed during the scan at all: the
+// scan-worker Job uploads the SBOM afterwards and THAT is what indexes
+// them. Hooking runScan would notify for sbom-type artifacts only, and
+// silently never for the images that are most of any fleet.
+//
+// The first inventory never notifies: with one snapshot there is
+// nothing to compare against, and every package in it would be "new"
+// only in the sense that nobody had looked before. Same reasoning as
+// notifyNewFindings' first-scan suppression, but it needs no flag --
+// the comparison simply has no other side.
+//
+// ponytail: no per-deployment toggle. The event is naturally quiet
+// (re-scanning an unchanged digest yields the same SBOM, so nothing is
+// added), but a trivy upgrade that changes package DETECTION would
+// report new components fleet-wide for one round. Add a
+// notifications.notifyNewComponents flag if that ever actually pages
+// someone.
+func (h *handler) notifyNewComponents(id string) {
+	if len(h.notifiers) == 0 {
+		return
+	}
+
+	snapshots, err := h.store.ComponentSnapshots(id, 2)
+	if err != nil {
+		slog.Error("could not read component snapshots for notification", "artifact_id", id, "err", err)
+		return
+	}
+	if len(snapshots) < 2 {
+		return
+	}
+
+	// ComponentSnapshots is newest-first, and a diff reads
+	// oldest -> newest -- the same ordering listComponentDiff uses.
+	newer, err := h.store.ComponentsAt(id, snapshots[0])
+	if err != nil {
+		slog.Error("could not read the current component inventory for notification", "artifact_id", id, "err", err)
+		return
+	}
+	older, err := h.store.ComponentsAt(id, snapshots[1])
+	if err != nil {
+		slog.Error("could not read the previous component inventory for notification", "artifact_id", id, "err", err)
+		return
+	}
+
+	added := artifact.DiffComponents(older, newer).Added
+	if len(added) == 0 {
+		return
+	}
+
+	a, err := h.store.Get(id)
+	if err != nil {
+		slog.Error("could not read the artifact for a component notification", "artifact_id", id, "err", err)
+		return
+	}
+
+	slog.Info("SBOM introduced components the previous one did not contain",
+		"artifact_id", id, "count", len(added), "destinations", len(h.notifiers))
+
+	h.deliver(notify.ScanEvent{
+		ArtifactID:    id,
+		ArtifactRef:   a.Ref,
+		NewComponents: added,
+	})
+}
 
 // captureDocuments derives a CycloneDX SBOM and a SARIF report from an
 // in-process image scan's raw trivy report and stores them, exactly as

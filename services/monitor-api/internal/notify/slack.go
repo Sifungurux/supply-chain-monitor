@@ -70,6 +70,13 @@ func (s *SlackNotifier) Notify(ctx context.Context, event ScanEvent) error {
 // clients that can't render blocks, and omitting it produces a
 // notification that just says "attachment".
 func (s *SlackNotifier) buildMessage(event ScanEvent) map[string]any {
+	// A component event carries no findings and no severity, so the
+	// findings renderer below would head it "0 new  finding(s)". Its
+	// own message rather than conditionals threaded through that one:
+	// the two events say different things and share only the artifact.
+	if len(event.NewFindings) == 0 && len(event.NewComponents) > 0 {
+		return s.buildComponentMessage(event)
+	}
 	summary := fmt.Sprintf("%s: %d new %s finding(s) on %s",
 		strings.ToUpper(event.Severity), len(event.NewFindings), strings.ToLower(event.Severity), event.ArtifactRef)
 	// KEV leads. Exploitation observed in the wild outranks any
@@ -119,6 +126,57 @@ func (s *SlackNotifier) buildMessage(event ScanEvent) map[string]any {
 				"fields": []map[string]any{
 					{"type": "mrkdwn", "text": "*Artifact:*\n" + event.ArtifactRef},
 					{"type": "mrkdwn", "text": "*Worst severity:*\n" + event.Severity},
+				},
+			},
+			{
+				"type": "section",
+				"text": map[string]any{"type": "mrkdwn", "text": strings.Join(lines, "\n")},
+			},
+			{
+				"type": "context",
+				"elements": []map[string]any{
+					{"type": "mrkdwn", "text": "artifact `" + event.ArtifactID + "` • supply-chain-monitor"},
+				},
+			},
+		},
+	}
+}
+
+// buildComponentMessage renders the "new packages appeared in this
+// artifact" event. Deliberately quieter in tone than the findings
+// message -- nothing here is known to be wrong, and most of these are
+// an ordinary base-image bump. What it is for is the case that has no
+// finding at all: a package that arrived without anyone adding it.
+func (s *SlackNotifier) buildComponentMessage(event ScanEvent) map[string]any {
+	summary := fmt.Sprintf("%d new component(s) in %s", len(event.NewComponents), event.ArtifactRef)
+
+	var lines []string
+	for i, c := range event.NewComponents {
+		if i == maxSlackFindings {
+			lines = append(lines, fmt.Sprintf("_…and %d more_", len(event.NewComponents)-maxSlackFindings))
+			break
+		}
+		line := "• *" + c.PURL + "*"
+		if c.Licenses != "" {
+			line += fmt.Sprintf("  _[%s]_", c.Licenses)
+		}
+		lines = append(lines, line)
+	}
+
+	return map[string]any{
+		"text": summary,
+		"blocks": []map[string]any{
+			{
+				"type": "header",
+				"text": map[string]any{
+					"type": "plain_text",
+					"text": fmt.Sprintf("%d new component(s)", len(event.NewComponents)),
+				},
+			},
+			{
+				"type": "section",
+				"fields": []map[string]any{
+					{"type": "mrkdwn", "text": "*Artifact:*\n" + event.ArtifactRef},
 				},
 			},
 			{

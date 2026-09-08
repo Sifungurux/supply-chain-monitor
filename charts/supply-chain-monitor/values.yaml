@@ -1464,8 +1464,15 @@ monitorApi:
   # broken is logged and dropped, and can never fail a scan or delay its
   # result.
   notifications:
-    # Generic receiver. Gets the raw event as JSON:
+    # Generic receiver. Gets the raw event as JSON, in one of two
+    # shapes -- a scan introduced findings:
     #   {artifact_id, artifact_ref, severity, new_findings: [...]}
+    # or an indexed SBOM contained packages the previous one did not:
+    #   {artifact_id, artifact_ref, new_components: [...]}
+    # The second has no severity and no threshold: a dependency that
+    # arrived without anyone adding it carries no advisory, which is
+    # exactly why it is worth sending. Additions only, and the first
+    # SBOM for an artifact has nothing to compare against.
     webhookURL: ""
     # Optional HMAC-SHA256 secret. When set, each request carries
     #   X-Signature-256: sha256=<hex>
