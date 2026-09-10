@@ -1,6 +1,7 @@
 # Scan concurrency ramp, 2026-08-24 — where a mirrored fleet breaks
 
-The 2026-08-23 ramp raised `scanConcurrencyPerKind.unpacker` from 2 to 8 and
+The [2026-08-23 ramp](scan-concurrency-2026-08-23.md) raised
+`scanConcurrencyPerKind.unpacker` from 2 to 8 and
 found **no clean capacity ceiling** on a 100 GB VM: every rung from 2 to 8
 completed with zero failures, and disk — the constraint the cap was invented to
 enforce — had stopped binding. The cap was chosen on blast radius, not because

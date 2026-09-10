@@ -1,0 +1,14 @@
+cap=12 images=36 parallelism=16 rc=0
+disk_baseline_bytes=29632839680
+disk_peak_bytes=36816601088
+disk_delta_bytes=7183761408
+oom_kills_this_rung=1
+evicted_pods=0
+imagepull_bad=0
+  scanned: 34
+  failed: 2
+  failed f85f1040d9f8f17d
+  failed 8debca87eef26cae
+Total wall clock: 1475s for 36 scans (parallelism=16)
+Per-scan latency (ms) -- min: 25000  p50: 318000  p95: 1294000  max: 1475000  avg: 554583
+Queued behind the scan concurrency cap: 16 scan(s) retried after a 429, 1248 retries total.

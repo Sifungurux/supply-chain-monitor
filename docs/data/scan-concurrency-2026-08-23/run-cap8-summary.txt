@@ -1,0 +1,11 @@
+cap=8 images=24 parallelism=24 rc=0
+disk_baseline_bytes=23902150656
+disk_peak_bytes=36439375872
+disk_delta_bytes=12537225216
+oom_kills_this_rung=0
+evicted_pods=0
+imagepull_bad=0
+  scanned: 24
+Total wall clock: 855s for 24 scans (parallelism=24)
+Per-scan latency (ms) -- min: 126000  p50: 489000  p95: 815000  max: 855000  avg: 505875
+Queued behind the scan concurrency cap: 17 scan(s) retried after a 429, 696 retries total.
