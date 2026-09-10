@@ -181,10 +181,11 @@ spec:
       # Published by ci.yml's publish-image job on every push to main.
       image:
         repository: ghcr.io/sifungurux/supply-chain-monitor/monitor-api
-        # 3db8c03 -- "feat(sweep): scan concurrently". The multi-arch
-        # INDEX digest, not a per-platform one, so the arm64 nodes here
-        # and any amd64 node resolve their own manifest from it.
-        digest: sha256:fa0ff271922e8d556f2ab867f7a20ab9df5ccc2e3cd1e0378f914d8377286a11
+        # 755fdae -- "feat(notify): send an event when an SBOM gains a
+        # component nobody added". The multi-arch INDEX digest, not a
+        # per-platform one, so the arm64 nodes here and any amd64 node
+        # resolve their own manifest from it.
+        digest: sha256:d76f02733ebbcba5a5bb1283056ffc0d7585bd8a2f9752c4772e6e8e9d544bfb
       # SWEEP THROUGHPUT, sized from measurement rather than the chart's
       # conservative defaults (*/15, batchSize 5).
       #
