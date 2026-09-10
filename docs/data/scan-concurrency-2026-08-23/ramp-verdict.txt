@@ -1,0 +1,11 @@
+cap=2 broke=0 (baseline rung, 6/6 scanned, +8.4GB)
+cap=3 broke=0 
+cap=4 broke=1  non-scanned outcomes
+BREAK at cap=4:  non-scanned outcomes
+RAMP DONE
+=== TAKE 2 (playwright excluded, OOM instrumented) ===
+cap=4 broke=0 oom=1 
+cap=6 broke=0 oom=2 
+cap=8 broke=0 oom=0 
+cap=12 broke=0 oom=-3 
+cap=16 ABORTED (48 client connections would hit the same host transport ceiling; not a capacity result)

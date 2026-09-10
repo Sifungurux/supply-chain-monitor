@@ -1,0 +1,10 @@
+cap=2 images=6 parallelism=6 rc=0
+disk_baseline_bytes=21415206912
+disk_peak_bytes=29859221504
+disk_delta_bytes=8444014592
+evicted_pods=0
+imagepull_bad=0
+  scanned: 6
+Total wall clock: 909s for 6 scans (parallelism=6)
+Per-scan latency (ms) -- min: 267000  p50: 668000  p95: 909000  max: 909000  avg: 586167
+Queued behind the scan concurrency cap: 4 scan(s) retried after a 429, 180 retries total.
