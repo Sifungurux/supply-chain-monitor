@@ -181,12 +181,11 @@ spec:
       # Published by ci.yml's publish-image job on every push to main.
       image:
         repository: ghcr.io/sifungurux/supply-chain-monitor/monitor-api
-        # cedd32b -- "chore(docker): bump golang 4c9fe60 -> cf6fca6".
-        # Same code as 755fdae, rebuilt on the new Go toolchain. The
-        # multi-arch INDEX digest, not a per-platform one, so the arm64
-        # nodes here and any amd64 node resolve their own manifest from
-        # it.
-        digest: sha256:eecd5ff70d3e4012ec650eb659642dd55857fe7ba98816e173bad41aa4adf10d
+        # 0013978 -- "feat(cosign): scope verification by ref prefix".
+        # The multi-arch INDEX digest, not a per-platform one, so the
+        # arm64 nodes here and any amd64 node resolve their own manifest
+        # from it.
+        digest: sha256:648f594cb030bf97209af036f4114c4479e6daa9a98c3e518fa5f311dd88abfe
       # SWEEP THROUGHPUT, sized from measurement rather than the chart's
       # conservative defaults (*/15, batchSize 5).
       #
@@ -207,6 +206,32 @@ spec:
       #
       # The real ceiling is the sequential scanning, not either number
       # here; a parallel sweep would be a Go change.
+      # Provenance verification, ON here for the first time.
+      #
+      # SCOPED, and that is what makes it usable. Unsigned is a HIGH
+      # finding; this cluster tracks 93 image artifacts and 82 of them
+      # are upstream images (public.ecr.aws, registry.k8s.io, quay.io,
+      # gcr.io) that will never carry a signature from this identity.
+      # Verifying those would mean ~90 true, useless, high findings
+      # burying the ones that matter. So only images this project itself
+      # publishes are checked; everything else stays provenance
+      # "unknown" -- not checked, rather than accused.
+      #
+      # The identity is this repository's own CI. ci.yml's
+      # attest-build-provenance step signs keylessly through GitHub's
+      # OIDC, so the certificate identity is the workflow ref and the
+      # issuer is GitHub's. Verified against the real published image
+      # from inside this cluster before turning it on -- both the
+      # signature and the SLSA v1 attestation.
+      cosign:
+        enabled: true
+        certIdentityRegexp: "^https://github.com/Sifungurux/supply-chain-monitor/.*$"
+        certOIDCIssuer: "https://token.actions.githubusercontent.com"
+        # A signature says somebody signed this; provenance says how it
+        # was built. ci.yml produces both, so demand both.
+        requireAttestation: true
+        refPrefixes:
+          - "ghcr.io/sifungurux/"
       sweep:
         schedule: "*/5 * * * *"
         batchSize: 10
