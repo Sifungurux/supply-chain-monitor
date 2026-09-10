@@ -532,10 +532,53 @@ monitorApi:
     certIdentityRegexp: ""
     certOIDCIssuer: ""
 
+    # WHICH images get verified. A ref is checked only if it literally
+    # starts with one of these; everything else is reported as
+    # provenance "unknown" -- not checked, rather than accused.
+    #
+    # THIS IS THE SETTING THAT MAKES enabled: true SURVIVABLE. Unsigned
+    # is a HIGH-severity finding, which is right for images you build
+    # and useless for the ones you merely run. Measured on this
+    # project's own deployment: 93 image artifacts, of which 47 are
+    # public.ecr.aws, 11 ghcr.io, 10 registry.k8s.io, 9 quay.io. None of
+    # those upstream images carries a signature from your identity and
+    # none ever will, so verifying them all means ~90 true, useless,
+    # high-severity findings burying the handful that mean something.
+    #
+    # Empty verifies EVERYTHING -- the only safe default for a setting
+    # whose entire effect is to check less.
+    #
+    #   refPrefixes:
+    #     - "ghcr.io/acme/"
+    #
+    # A literal prefix, not a glob or regexp. A too-BROAD pattern is
+    # noisy and obvious; a too-NARROW one is silent, and a pattern
+    # language makes that easy to write by accident. Include the
+    # trailing "/" -- "ghcr.io/acme" also matches "ghcr.io/acmecorp/".
+    # The prefixes in force are logged at startup, because a typo that
+    # matches nothing looks exactly like the feature working.
+    #
+    # Matched against the artifact's ORIGINAL ref (source_ref), not its
+    # mirrored copy in scm-registry -- a mirror carries no signature, so
+    # that is the ref cosign is given too.
+    refPrefixes: []
+
     # Additionally demand a SLSA provenance attestation, not just a
     # signature. A signature says somebody signed this; provenance says
     # how it was built.
     requireAttestation: false
+
+    # The in-toto predicate type the attestation must carry. Empty uses
+    # "slsaprovenance1" -- SLSA v1, which is what
+    # actions/attest-build-provenance emits.
+    #
+    # Not cosmetic. cosign's "slsaprovenance" shorthand means SLSA
+    # **v0.2**, and pointing it at a v1 attestation fails with "none of
+    # the attestations matched the predicate type" -- which this service
+    # would report as a MISSING attestation on an image that has a
+    # perfectly valid one. Set this only if your builder emits something
+    # else (e.g. "https://slsa.dev/provenance/v0.2").
+    attestationType: ""
 
     # ---- Public Sigstore, or your own ----
     #

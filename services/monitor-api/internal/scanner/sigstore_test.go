@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 )
 
 func baseCfg() SigstoreConfig {
@@ -82,9 +84,16 @@ func TestSigstoreScanner_Args(t *testing.T) {
 		}
 	})
 
-	t.Run("attestation verification asks for slsaprovenance", func(t *testing.T) {
+	// Was "--type slsaprovenance", which is cosign's shorthand for SLSA
+	// **v0.2**. Every image built by actions/attest-build-provenance
+	// carries v1, so that type matched nothing and this scanner reported
+	// a missing attestation on images that have a valid one -- verified
+	// against the real binary and a real attested image, which is the
+	// only way this was ever going to show up. The old assertion was
+	// defending the bug.
+	t.Run("attestation verification asks for the SLSA v1 predicate", func(t *testing.T) {
 		got := strings.Join(NewSigstoreScanner(baseCfg()).verifyAttestationArgs("alpine:3.19"), " ")
-		if !strings.HasPrefix(got, "verify-attestation --type slsaprovenance ") {
+		if !strings.HasPrefix(got, "verify-attestation --type slsaprovenance1 ") {
 			t.Fatalf("args = %q", got)
 		}
 	})
@@ -301,5 +310,104 @@ func TestSigstoreScanner_AlwaysSetsTUFRoot(t *testing.T) {
 				t.Errorf("%s points outside the writable scratch volume", found)
 			}
 		})
+	}
+}
+
+// Scoping exists so that a fleet of images somebody else built does not
+// each grow a true, useless, high-severity "unsigned" finding. The
+// verdict for an out-of-scope ref must be ProvenanceUnknown -- not
+// checked -- and cosign must not run at all.
+func TestSigstoreScanner_RefPrefixScoping(t *testing.T) {
+	t.Setenv(RefHostAllowlistEnv, "registry.internal.example")
+
+	cfg := baseCfg()
+	cfg.RefPrefixes = []string{"ghcr.io/acme/"}
+
+	t.Run("an out-of-scope ref is unknown, not unsigned", func(t *testing.T) {
+		s := NewSigstoreScanner(cfg)
+		// Fails loudly if it is ever executed: the point of scoping is
+		// that cosign is not run for these at all.
+		s.bin = writeFakeCosign(t, `echo "cosign should not have run"; exit 1`)
+
+		findings, status, _, err := s.ScanProvenance(context.Background(), "public.ecr.aws/docker/library/nginx:1.27")
+		if err != nil {
+			t.Fatalf("ScanProvenance: %v", err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("findings = %+v, want none -- an unverified upstream image is not an accusation", findings)
+		}
+		if status != artifact.ProvenanceUnknown {
+			t.Fatalf("status = %q, want ProvenanceUnknown", status)
+		}
+	})
+
+	t.Run("an in-scope ref is verified normally", func(t *testing.T) {
+		s := NewSigstoreScanner(cfg)
+		s.bin = writeFakeCosign(t, `echo "Verified OK"; exit 0`)
+
+		findings, status, _, err := s.ScanProvenance(context.Background(), "ghcr.io/acme/app@sha256:abc")
+		if err != nil {
+			t.Fatalf("ScanProvenance: %v", err)
+		}
+		if len(findings) != 0 || status != artifact.ProvenanceVerified {
+			t.Fatalf("findings=%+v status=%q, want none/verified", findings, status)
+		}
+	})
+
+	// scan.go passes provenanceRef(a) -- the ORIGINAL ref -- precisely
+	// because a mirrored copy carries no signature. The prefix has to be
+	// matched against that same string, or enabling mirroring would
+	// silently take every one of your own images out of scope.
+	t.Run("the mirrored copy's own path is not what gets matched", func(t *testing.T) {
+		s := NewSigstoreScanner(cfg)
+		s.bin = writeFakeCosign(t, `echo "cosign should not have run"; exit 1`)
+
+		mirrored := "scm-registry.supply-chain-monitor.svc.cluster.local:5000/mirror/ghcr.io/acme/app:1"
+		_, status, _, err := s.ScanProvenance(context.Background(), mirrored)
+		if err != nil {
+			t.Fatalf("ScanProvenance: %v", err)
+		}
+		if status != artifact.ProvenanceUnknown {
+			t.Fatalf("status = %q for a mirrored path, want ProvenanceUnknown -- "+
+				"if this ever passes the prefix check, scan.go is handing over the wrong ref", status)
+		}
+	})
+
+	t.Run("no prefixes configured verifies everything", func(t *testing.T) {
+		s := NewSigstoreScanner(baseCfg())
+		s.bin = writeFakeCosign(t, `echo "Verified OK"; exit 0`)
+
+		_, status, _, err := s.ScanProvenance(context.Background(), "public.ecr.aws/docker/library/nginx:1.27")
+		if err != nil {
+			t.Fatalf("ScanProvenance: %v", err)
+		}
+		if status != artifact.ProvenanceVerified {
+			t.Fatalf("status = %q, want verified -- an empty prefix list must not silently disable the check", status)
+		}
+	})
+}
+
+// cosign's "slsaprovenance" shorthand is SLSA v0.2;
+// actions/attest-build-provenance emits v1. Sending the v0.2 type at a
+// v1 attestation reports a MISSING attestation on an image that has one.
+func TestSigstoreScanner_AttestationTypeDefaultsToV1(t *testing.T) {
+	s := NewSigstoreScanner(baseCfg())
+	args := s.verifyAttestationArgs("ghcr.io/acme/app:1")
+
+	found := ""
+	for i, a := range args {
+		if a == "--type" && i+1 < len(args) {
+			found = args[i+1]
+		}
+	}
+	if found != DefaultAttestationType {
+		t.Fatalf("--type = %q, want %q (what GitHub actually emits)", found, DefaultAttestationType)
+	}
+
+	cfg := baseCfg()
+	cfg.AttestationType = "https://slsa.dev/provenance/v0.2"
+	s = NewSigstoreScanner(cfg)
+	if got := strings.Join(s.verifyAttestationArgs("x"), " "); !strings.Contains(got, "v0.2") {
+		t.Fatalf("args = %q, want the configured type to win", got)
 	}
 }
