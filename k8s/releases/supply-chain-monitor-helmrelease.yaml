@@ -81,7 +81,7 @@ spec:
   # them (plus the three registry account passwords) from the
   # scm-chart-secrets Secret instead (create/update it
   # with `make chart-secrets`, see cluster/chart-secrets.sh and
-  # README's "Bringing your own secrets") -- that Secret is cluster
+  # docs/operations.md's "Bringing your own secrets") -- that Secret is cluster
   # state, never a committed file. spec.values (below) takes precedence
   # over valuesFrom per Flux's own merge order, so as long as
   # dashboard.*/etc. below never sets these two keys, this stays safe.

@@ -282,7 +282,7 @@ clamav:
   autoscaling:
     # HPA scales on CPU utilization (clamd scanning is CPU-bound, see
     # resources.requests.cpu below) between min/max replicas -- see
-    # README's "Scaling ClamAV". Requires a metrics-server (the
+    # docs/operations.md's "Scaling ClamAV". Requires a metrics-server (the
     # metrics.k8s.io API) in the target cluster; if it's missing, the
     # HPA object still creates fine but can't read metrics and won't
     # scale -- set this false to fall back to the static `replicas`
@@ -359,7 +359,7 @@ postgres:
     # insecure default. This project's own Flux deployment
     # (k8s/releases/supply-chain-monitor-helmrelease.yaml) supplies a
     # real value via spec.valuesFrom, sourced from a Secret that never
-    # touches this repo -- see README's "Bringing your own secrets" for
+    # touches this repo -- see docs/operations.md's "Bringing your own secrets" for
     # that flow, or for setting this directly (--set, a gitignored
     # values file, or existingSecret: true below) if you're not going
     # through Flux.
@@ -572,7 +572,7 @@ monitorApi:
     #   kubectl -n supply-chain-monitor create secret generic scm-sigstore-root \
     #     --from-file=trusted_root.json=./trusted_root.json
     trustedRootSecret: ""
-  # KEV/EPSS enrichment of CVE findings -- see README, "Which CVEs are
+  # KEV/EPSS enrichment of CVE findings -- see docs/operations.md, "Which CVEs are
   # actually being exploited".
   #
   # Severity alone is a poor triage signal: it describes how bad
@@ -615,7 +615,7 @@ monitorApi:
   # evaluates, so a pipeline can ask "is this artifact acceptable" in
   # one call instead of fetching every finding and re-deriving the
   # answer for itself (which is how two pipelines reading the same
-  # artifact end up disagreeing). See README, "Gating a pipeline on
+  # artifact end up disagreeing). See docs/operations.md, "Gating a pipeline on
   # policy".
   #
   # EMPTY (the default) means no policy. The endpoint still answers,
@@ -657,7 +657,7 @@ monitorApi:
   # not keep failing builds, or the assessment buys nothing.
   policy:
     # Starter policy, chosen so the gate is real without painting the
-    # dashboard red on day one -- see README, "Gating a pipeline on
+    # dashboard red on day one -- see docs/operations.md, "Gating a pipeline on
     # policy".
     #
     # Deliberately NOT maxSeverity.cve yet: there are ~657 active
@@ -1116,7 +1116,7 @@ monitorApi:
   # false here (the real in-cluster deployment, which has the
   # ServiceAccount token isolation needs). true is only ever meant for
   # running the monitor-api binary standalone outside Kubernetes -- see
-  # README, "Running monitor-api outside a Kubernetes pod". Never set
+  # docs/operations.md, "Running monitor-api outside a Kubernetes pod". Never set
   # this true here without also accepting image malware scanning moving
   # back in-process for real.
   disableScanIsolation: false
@@ -1415,7 +1415,7 @@ monitorApi:
   # scanConcurrency itself.
   #
   # malcontent is the reason this exists: it has OOMKilled at 2Gi-8Gi on
-  # ordinary language-runtime images (see README, "malcontent") where
+  # ordinary language-runtime images (see docs/operations.md, "malcontent") where
   # trivy on the same image is comfortable. Without per-kind caps the
   # one global cap has to be set for malcontent's worst case, throttling
   # every other scanner with it.
@@ -1447,7 +1447,7 @@ monitorApi:
   maxArtifacts: 0
   # Outbound notifications when a scan introduces NEW findings at or
   # above minSeverity. Everything here is optional: with no URL set,
-  # nothing is sent and nothing can fail. See README, "Notifications".
+  # nothing is sent and nothing can fail. See docs/operations.md, "Notifications".
   #
   # "New" means new to THIS artifact in THIS scan round -- a re-scan
   # that reports the same findings again is silent, so a nightly sweep
@@ -1500,7 +1500,7 @@ monitorApi:
     # (trivy HIGH, grype High, clamav critical).
     minSeverity: "high"
   # Uncomment (and set enabled: true) for air-gapped operation -- see
-  # cluster/seed-trivy-db.sh and README's "Air-gapped operation".
+  # cluster/seed-trivy-db.sh and docs/operations.md's "Air-gapped operation".
   trivyDB:
     enabled: false
     repository: ""
@@ -1565,7 +1565,7 @@ monitorApi:
   # than something in a registry. Off by default, and deliberately so:
   # `file` and `sarif` artifacts are the two types with no isolated
   # scan-worker Job, so an ungated path here is read inside the API pod
-  # itself -- see internal/scanner/localpath.go and README's "Local
+  # itself -- see internal/scanner/localpath.go and docs/operations.md's "Local
   # filesystem paths as refs".
   #
   # Both are required together: enabled without a root refuses local
@@ -1663,7 +1663,7 @@ monitorApi:
   # trivy/grype there is no DB cache PVC and no refresh CronJob.
   # Left at "clamav" on evidence, not caution -- trial runs against this
   # project's own test fleet found two blockers, both recorded in
-  # internal/scanner/isolated_malcontent.go and the README:
+  # internal/scanner/isolated_malcontent.go and the docs/operations.md:
   #
   #   - Memory. A rust:1.79 scan peaks at ~6.4GiB and OOMKills at 2, 4
   #     and 6GiB; playwright OOMKills even at 8GiB. One scan is most of a
@@ -1704,7 +1704,7 @@ monitorApi:
   # scanners, with no Go code change here. monitor-api runs this
   # command itself, in-cluster -- for recording results a scan already
   # produced somewhere else entirely (a CI pipeline, a different
-  # system), see POST /api/v1/artifacts/{id}/findings instead (README,
+  # system), see POST /api/v1/artifacts/{id}/findings instead (docs/operations.md,
   # "Submitting findings from an external scanner"). Each entry's
   # `command` must already be present in the monitor-api image (build a
   # derived image FROM this one that adds it -- this project's own
@@ -1716,13 +1716,13 @@ monitorApi:
   # "source" and "category" are both optional per finding -- they fall
   # back to this entry's own `name`/`category` when a finding's own
   # JSON omits them. See docs/architecture.md ("Pluggable scanners")
-  # and README for the full contract plus a worked example (wiring
+  # and docs/operations.md for the full contract plus a worked example (wiring
   # Grype in via a small shim script).
   #
   # pluggableScanners:
   #   - name: grype
   #     artifactTypes: ["image"]
-  #     command: grype-to-findings.sh   # a shim script, not grype itself -- see README
+  #     command: grype-to-findings.sh   # a shim script, not grype itself -- see docs/operations.md
   #     args: ["{{ref}}"]
   #     category: cve
   #     timeoutSeconds: 300

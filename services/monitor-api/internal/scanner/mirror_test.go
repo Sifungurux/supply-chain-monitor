@@ -48,7 +48,7 @@ func TestMirrorRef(t *testing.T) {
 		// Nothing to do: already in the local registry, or not a
 		// registry ref at all.
 		{testRegistry + "/mirror/ghcr.io/org/app:v1", ""},
-		// The SHORT cluster-DNS forms name the same registry -- README
+		// The SHORT cluster-DNS forms name the same registry -- docs/operations.md
 		// documents pushing sbom/sarif artifacts by them, and mirroring
 		// one would store a second copy of something already here and
 		// point the artifact at the duplicate.

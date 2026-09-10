@@ -2,7 +2,7 @@
 # Daily pg_dump of scm-postgres into scm-postgres-backups, gzip-compressed,
 # optionally encrypted to a GPG public key, with filename-based
 # retention (keeps the newest keepBackups files, deletes older ones)
-# -- see docs/architecture.md ("Postgres backups") and README's
+# -- see docs/architecture.md ("Postgres backups") and docs/operations.md's
 # "Backing up and restoring Postgres" for the human-facing how-to,
 # including on-demand backups (`make db-backup`), restoring
 # (`make db-restore BACKUP=...`), and how to turn encryption on.
@@ -271,7 +271,7 @@ spec:
 
                   echo "backup complete: $(du -h "$out" | cut -f1)"
                   if [ -n "${GPG_RECIPIENT_FILE:-}" ]; then
-                    echo "encrypted -- restoring it needs the private key (see README, \"Backing up and restoring Postgres\")"
+                    echo "encrypted -- restoring it needs the private key (see docs/operations.md, \"Backing up and restoring Postgres\")"
                   fi
 
                   cd /backups

@@ -49,7 +49,7 @@ type PluggableScannerConfig struct {
 	ArtifactTypes []string `json:"artifactTypes"`
 	// Command is the binary to exec -- must already exist in the
 	// monitor-api image (or a derived image built FROM it; see
-	// docs/architecture.md and README for why this project's own
+	// docs/architecture.md and docs/operations.md for why this project's own
 	// Dockerfile can't bake in every possible third-party scanner) or
 	// on the $PATH monitor-api's process sees.
 	Command string `json:"command"`

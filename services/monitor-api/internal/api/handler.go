@@ -152,7 +152,7 @@ type ScanLimits struct {
 	// got before per-kind caps existed.
 	//
 	// The point is that the memory cost of a scan belongs to the TOOL:
-	// malcontent has OOMKilled at 2-8Gi on ordinary images (README,
+	// malcontent has OOMKilled at 2-8Gi on ordinary images (docs/operations.md,
 	// "malcontent") where trivy on the same image is fine, so one global
 	// cap has to be set for the worst case and throttles everything
 	// else with it.

@@ -19,7 +19,7 @@ import (
 // the policy" from "the API is down, the id is wrong, or my key is
 // invalid" -- and the first of those must block a release while the
 // others must be investigated, not silently treated as a failed gate.
-// The caller reads .pass out of the body. See README's "Gating a
+// The caller reads .pass out of the body. See docs/operations.md's "Gating a
 // pipeline on policy" for the curl form this is designed around.
 //
 // A missing artifact is still a 404: that is a question about an id

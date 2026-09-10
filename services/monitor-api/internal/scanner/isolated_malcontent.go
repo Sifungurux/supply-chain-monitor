@@ -115,7 +115,7 @@ func (c IsolatedMalcontentConfig) withDefaults() IsolatedMalcontentConfig {
 		//     wants a per-scanner concurrency cap, which does not exist.
 		//
 		// Both are why monitorApi.malwareScanner still defaults to
-		// "clamav". See the README's malcontent section.
+		// "clamav". See docs/operations.md's malcontent section.
 		c.MemoryLimit = "8Gi"
 	}
 	if c.EphemeralStorageLimit == "" {

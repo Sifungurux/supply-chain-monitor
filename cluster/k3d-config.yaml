@@ -3,7 +3,7 @@
 # natively via `colima start --kubernetes`, which is a single VM/single
 # node and can't be grown into a multi-node cluster. If you need a real
 # multi-node cluster (e.g. to test scm-clamav's replicas actually
-# spreading across nodes under load -- see README's "Scaling ClamAV"),
+# spreading across nodes under load -- see docs/operations.md's "Scaling ClamAV"),
 # use this podman/k3d path with SCM_K3D_AGENTS set, e.g.:
 #   SCM_RUNTIME=podman SCM_K3D_AGENTS=3 ./cluster/create-cluster.sh
 apiVersion: k3d.io/v1alpha5

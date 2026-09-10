@@ -150,7 +150,7 @@ data:
   # Left false here -- this is the real in-cluster deployment, which
   # does have the ServiceAccount token isolation needs (see
   # serviceaccount.yaml). true is only ever meant for running the
-  # monitor-api binary standalone outside Kubernetes -- see README,
+  # monitor-api binary standalone outside Kubernetes -- see docs/operations.md,
   # "Running monitor-api outside a Kubernetes pod".
   DISABLE_SCAN_ISOLATION: {{ .Values.monitorApi.disableScanIsolation | quote }}
   # Off by default -- see monitorApi.scanWorker.verboseLogs's own
@@ -277,7 +277,7 @@ data:
   # operator override still works.
   SCAN_WORKER_API_BASE_URL: {{ if .Values.monitorApi.tls.enabled }}{{ include "supply-chain-monitor.apiBaseURL" . | quote }}{{ else }}{{ .Values.monitorApi.scanWorker.apiBaseURL | quote }}{{ end }}
   {{- if .Values.monitorApi.trivyDB.enabled }}
-  # air-gapped operation -- see cluster/seed-trivy-db.sh and README's
+  # air-gapped operation -- see cluster/seed-trivy-db.sh and docs/operations.md's
   # "Air-gapped operation".
   TRIVY_DB_REPOSITORY: {{ .Values.monitorApi.trivyDB.repository | quote }}
   TRIVY_JAVA_DB_REPOSITORY: {{ .Values.monitorApi.trivyDB.javaRepository | quote }}

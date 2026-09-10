@@ -28,7 +28,7 @@ import (
 // under. Off is the default, which is to say the default behaviour is
 // now "every ref is fetched from a registry" -- the flag exists for the
 // documented case of running this binary outside a cluster (see
-// README's "Running monitor-api outside a Kubernetes pod"), or a
+// docs/operations.md's "Running monitor-api outside a Kubernetes pod"), or a
 // deployment that really does mount a volume of artifacts and wants to
 // scan them in place.
 //
@@ -49,7 +49,7 @@ const (
 // something a security boundary should depend on.
 func localArtifactRoot() (string, error) {
 	if strings.ToLower(strings.TrimSpace(os.Getenv(AllowLocalArtifactPathsEnv))) != "true" {
-		return "", fmt.Errorf("a local filesystem path is not an accepted artifact ref -- push the artifact to a registry, or set %s=true with %s (see README)", AllowLocalArtifactPathsEnv, LocalArtifactRootEnv)
+		return "", fmt.Errorf("a local filesystem path is not an accepted artifact ref -- push the artifact to a registry, or set %s=true with %s (see docs/operations.md)", AllowLocalArtifactPathsEnv, LocalArtifactRootEnv)
 	}
 	root := strings.TrimSpace(os.Getenv(LocalArtifactRootEnv))
 	if root == "" {

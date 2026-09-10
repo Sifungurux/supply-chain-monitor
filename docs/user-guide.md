@@ -1,6 +1,6 @@
 # Supply Chain Monitor — user guide
 
-This guide is task-oriented: what each feature is *for*, and how to wire it into a pipeline. For per-feature configuration reference — every chart value, every flag — see [README.md](../README.md) and [docs/architecture.md](architecture.md). This guide links into those rather than restating them.
+This guide is task-oriented: what each feature is *for*, and how to wire it into a pipeline. For per-feature configuration reference — every chart value, every flag — see [operations.md](operations.md) and [docs/architecture.md](architecture.md). This guide links into those rather than restating them.
 
 **Every example below was run.** Against the live development cluster, on 2026-08-21, at commit `fbf4918`. Outputs are pasted from the run, not composed. Where something could not be executed here, it says so inline — and says why.
 
@@ -65,7 +65,7 @@ AUTH=(-H "Authorization: Bearer $KEY")
 curl -s "${AUTH[@]}" localhost:18080/api/v1/stats
 ```
 
-**Scopes.** Keys can be named per client and scoped to `read`, `register`, `scan`, `documents:write` or `admin`. A denial is **403, not 401** — the credential is valid, it just may not do this. See [README § Per-client API keys](../README.md#per-client-api-keys).
+**Scopes.** Keys can be named per client and scoped to `read`, `register`, `scan`, `documents:write` or `admin`. A denial is **403, not 401** — the credential is valid, it just may not do this. See [Operations § Per-client API keys](operations.md#per-client-api-keys).
 
 **Health.** `/healthz` and `/metrics` need no key. `/healthz` reports the process only; `/readyz` actually pings Postgres.
 
@@ -239,7 +239,7 @@ curl -s -X POST localhost:18080/api/v1/artifacts "${AUTH[@]}" \
 ```
 → `HTTP 409`
 
-To make this mandatory fleet-wide, set `REQUIRE_DIGEST` (see [README § Requiring a verified digest](../README.md#requiring-a-verified-digest-at-registration)). Note the different behaviour: with `REQUIRE_DIGEST` on, a mismatch registers the artifact with `unsafe: true` rather than refusing it, so an existing pipeline doesn't start hard-failing the day you flip it — and `disallowUnsafe` in the policy is what then blocks promotion.
+To make this mandatory fleet-wide, set `REQUIRE_DIGEST` (see [Operations § Requiring a verified digest](operations.md#requiring-a-verified-digest-at-registration)). Note the different behaviour: with `REQUIRE_DIGEST` on, a mismatch registers the artifact with `unsafe: true` rather than refusing it, so an existing pipeline doesn't start hard-failing the day you flip it — and `disallowUnsafe` in the policy is what then blocks promotion.
 
 ### A ref cannot point at your own network
 
@@ -363,7 +363,7 @@ Returns full artifact objects — ref, digest, stage, and their findings — so 
 
 ### Feed in another scanner
 
-**Solves:** you already run something the monitor doesn't. SARIF from any tool can be submitted against an artifact and lands in the same buckets, classified per result (misconfiguration / secret / other). See [README § Submitting findings from an external scanner](../README.md#submitting-findings-from-an-external-scanner).
+**Solves:** you already run something the monitor doesn't. SARIF from any tool can be submitted against an artifact and lands in the same buckets, classified per result (misconfiguration / secret / other). See [Operations § Submitting findings from an external scanner](operations.md#submitting-findings-from-an-external-scanner).
 
 ---
 
@@ -394,7 +394,7 @@ curl -s "${AUTH[@]}" "localhost:18080/api/v1/components?q=openssl&limit=3"
 
 Note the versions are separate rows. "How many images have openssl" is rarely the question; "how many have the *vulnerable* one" is, and that is a different number — here 7 versus 3 versus 8.
 
-Licenses come along for free, which is what the license denylist gates on ([README § Component licenses](../README.md#component-licenses-and-the-denylist)).
+Licenses come along for free, which is what the license denylist gates on ([Operations § Component licenses](operations.md#component-licenses-and-the-denylist)).
 
 ### What changed between builds?
 
@@ -816,7 +816,7 @@ Three things to know before you rely on it:
 
 > ⚠️ **Not executed here.** The credential mechanism was verified against a registry with htpasswd auth — all four tools authenticate from a merged config, with anonymous controls that fail. But this development cluster has no second private registry configured, so `registryCredentials` has never authenticated a real second registry end-to-end. Treat the first configuration as something to verify, not assume.
 
-For the in-cluster registry's own auth, see [README § Registry authentication](../README.md#registry-authentication).
+For the in-cluster registry's own auth, see [Operations § Registry authentication](operations.md#registry-authentication).
 
 ---
 
@@ -844,7 +844,7 @@ kubectl logs -n supply-chain-monitor <scm-scan-pod> | grep files_scanned
 
 Signature and SLSA-provenance verification is off unless `COSIGN_ENABLED=true` **and** a certificate identity and OIDC issuer are configured. On this deployment `COSIGN_ENABLED = false`, so no artifact carries provenance and the dashboard shows nothing — which is exactly what a broken verification setup would also look like.
 
-**Check the config, not the UI.** monitor-api refuses to start if `COSIGN_ENABLED` is set without an identity, precisely so that "enabled but unusable" cannot masquerade as "everything is signed". See [README § Provenance](../README.md#provenance-was-this-image-signed-and-by-whom).
+**Check the config, not the UI.** monitor-api refuses to start if `COSIGN_ENABLED` is set without an identity, precisely so that "enabled but unusable" cannot masquerade as "everything is signed". See [Operations § Provenance](operations.md#provenance-was-this-image-signed-and-by-whom).
 
 ### "Policy passed"
 
@@ -852,7 +852,7 @@ Signature and SLSA-provenance verification is off unless `COSIGN_ENABLED=true` *
 
 ### "The scan finished instantly"
 
-Check `last_scan_at` actually moved. A rescan of an artifact that is already fresh may be a no-op depending on your rescan cadence settings ([README § Scan freshness](../README.md#scan-freshness)).
+Check `last_scan_at` actually moved. A rescan of an artifact that is already fresh may be a no-op depending on your rescan cadence settings ([Operations § Scan freshness](operations.md#scan-freshness)).
 
 ---
 

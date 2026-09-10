@@ -16,7 +16,7 @@ set -euo pipefail
 #   ./cluster/seed-trivy-db.sh <vm-address>:30500      # colima runtime -- use the VM address create-cluster.sh printed
 #   ./cluster/seed-trivy-db.sh myregistry.example.com   # any other reachable registry
 #
-# scm-registry now requires push auth (see README's "Registry
+# scm-registry now requires push auth (see docs/operations.md's "Registry
 # authentication"). SCM_WRITER_PASSWORD is REQUIRED: values.yaml ships
 # no password for this account any more, so there is no default left to
 # fall back to -- and a wrong one would fail as an opaque 401 from the

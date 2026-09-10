@@ -34,11 +34,11 @@ Scoring per item follows the brief: **Impact** (1–5, how much this slows the t
   cannot lock out a running deployment. What it does NOT add is scopes:
   every key remains full-privilege, which is now the open half of this
   item and is tracked in `docs/architecture.md`'s Known limitations.
-- **#11 (README's "Known limitations" section was stale)**: fixed.
+- **#11 (docs/operations.md's "Known limitations" section was stale)**: fixed.
   Rewrote it to stop duplicating `docs/architecture.md`'s own
   "Known limitations" (which drifted once already — see the
   2026-08-06 update above) and instead point at it, keeping only
-  README-specific operational notes not covered there. Also fixed the
+  docs/operations.md-specific operational notes not covered there. Also fixed the
   same stale "never run against a real cluster" claim where it
   appeared twice more, outside that section (Quickstart, "GitOps
   (Flux)") — same root cause, found while fixing #11's own section.
@@ -171,7 +171,7 @@ while re-auditing, since both were one-line doc bugs; three new items
 added below.
 
 **Fixed:**
-- `README.md`'s "Isolating Trivy scanning" section had two directly
+- `docs/operations.md.md`'s "Isolating Trivy scanning" section had two directly
   contradictory paragraphs back to back — one stating `sbom` scans run
   in an isolated Job "the same way" `image` does, immediately followed
   by a leftover paragraph from before that shipped, stating the
@@ -183,12 +183,12 @@ added below.
   2,774-line changelog into a ~220-line current-state document (see
   its git history) — its "Roadmap / open gaps" heading became "Known limitations", which
   broke two `docs/architecture.md`'s Roadmap" cross-references in
-  `README.md` (now point at "Known limitations" instead) and silently
+  `docs/operations.md.md` (now point at "Known limitations" instead) and silently
   dropped the plaintext-secrets limitation this audit's own #6 finding
   cross-references (restored).
 
 **New findings**, added to the table below: #10 (`go vet` not run in
-CI), #11 (README's "Known limitations" section is stale on a larger
+CI), #11 (docs/operations.md's "Known limitations" section is stale on a larger
 scale than the two paragraphs just fixed). #9's file-size numbers are
 updated to current line counts.
 
@@ -206,7 +206,7 @@ updated to current line counts.
 | 8 | No shellcheck/lint on `cluster/*.sh` (1,074 lines across 13 scripts) | Test | 3 | 3 | 1 | 30 |
 | 9 | `handlers.go` split into 7 resource-based files (fixed); `postgres_store.go` (961 lines, was 827) still one file, untouched | Code | 2 | 1 | 4 | 6 |
 | 10 | `go vet` only runs inside the manual, rarely-used `make lock-deps` target — not enforced in CI | Test | 2 | 2 | 1 | 20 |
-| 11 | README's "Known limitations" section (~40 lines) is written entirely from a stale "never run against a real cluster, go.sum can't be generated" framing that predates this project's own confirmed real-cluster testing and committed go.sum | Documentation | 3 | 2 | 2 | 20 |
+| 11 | docs/operations.md's "Known limitations" section (~40 lines) is written entirely from a stale "never run against a real cluster, go.sum can't be generated" framing that predates this project's own confirmed real-cluster testing and committed go.sum | Documentation | 3 | 2 | 2 | 20 |
 
 (Sorted by priority below, not by table order.)
 
@@ -265,9 +265,9 @@ Follows directly from #2: now that `go.sum` is committed, `Dockerfile`'s `RUN go
 - **A bare `helm install`/`helm upgrade`**: `--set`/`-f` with a gitignored values file, same as any Helm chart.
 - **Fully externally-managed Secrets**: `existingSecret`/`apiKeyExistingSecret` from the first attempt, unchanged and still correct for this case -- confirmed on review that consumers (`postgres`/`monitor-api` Deployments, the backup CronJob, the dashboard's `render-config` initContainer, the sweep-registered CronJob, the scan-worker Job's `SCM_API_KEY`) do all reference the Secret by fixed name already, so this path genuinely works as designed; the "created secret is never used" concern raised on review turned out to be about the plaintext-default problem above, not a bug in this mechanism itself.
 
-Every place that referenced the old default values as a fallback got fixed too, once removing them turned those fallbacks into landmines: `Makefile`'s `test-artifact` target (`SCM_API_KEY ?= qwe4r...` → now `$(error ...)`s if unset) and `cluster/load-test-clamav.sh` (`${SCM_API_KEY:-qwe4r...}` → now `${SCM_API_KEY:?...}`), plus three README code examples that hardcoded the old key literally.
+Every place that referenced the old default values as a fallback got fixed too, once removing them turned those fallbacks into landmines: `Makefile`'s `test-artifact` target (`SCM_API_KEY ?= qwe4r...` → now `$(error ...)`s if unset) and `cluster/load-test-clamav.sh` (`${SCM_API_KEY:-qwe4r...}` → now `${SCM_API_KEY:?...}`), plus three docs/operations.md code examples that hardcoded the old key literally.
 
-Verified with `helm lint`/`helm template` against default values (confirms `POSTGRES_PASSWORD: ""` renders, i.e. the fail-closed path is real) and against `existingSecret: true` for both, added as a third scenario to `cluster/check-helm-manifests.sh` alongside the two existing ones. `shellcheck` clean on the new script. Documented in README's rewritten "Bringing your own secrets" section covering all three paths.
+Verified with `helm lint`/`helm template` against default values (confirms `POSTGRES_PASSWORD: ""` renders, i.e. the fail-closed path is real) and against `existingSecret: true` for both, added as a third scenario to `cluster/check-helm-manifests.sh` alongside the two existing ones. `shellcheck` clean on the new script. Documented in docs/operations.md's rewritten "Bringing your own secrets" section covering all three paths.
 
 Deliberately **not** covered at the time: `dockerAuth.accounts.*.password` (the registry's own reader/writer/admin accounts). **Since fixed** -- the three passwords are empty in `values.yaml`, sourced from `make chart-secrets` (Flux `valuesFrom`, one generated per account), `--set`/`-f`, or the new `dockerAuth.existingSecret` for externally-managed Secrets.
 
@@ -292,9 +292,9 @@ Was tracked in `docs/architecture.md`'s "Known limitations" (formerly "Roadmap /
 
 **Fix**: add `go vet ./...` as a step in the existing `test-api` CI job (same container, same `go.sum`, no new job needed) rather than only running it inside `lock-deps`.
 
-### 11. README's "Known limitations" section is stale — priority 20
+### 11. docs/operations.md's "Known limitations" section is stale — priority 20
 
-`README.md`'s "Known limitations (v1 stub — see docs/architecture.md for the plan)" section (currently ~40 lines, just past "Tearing down") is written entirely from the framing of a sandboxed assistant session that had never run this project against a real cluster and couldn't generate `go.sum`. Both premises are now false: the Status section of this very audit documents real multi-node podman/k3d cluster runs, and `go.sum` has been committed since `f0b9c95`. Specific stale claims in that section: "hasn't been run against a real cluster yet," "Traefik + Gateway API is unverified against a real cluster too" (contradicted by `docs/architecture.md`'s own now-condensed history of a confirmed real first run), and "`go.sum` isn't committed... couldn't be generated without a real Go toolchain in the sandbox this was built in." One two-line contradiction from this same section (the "Isolating Trivy scanning" SBOM paragraphs) was found and fixed directly during this re-audit; the "Known limitations" section itself needs a full rewrite reflecting what's actually still unverified today, not a spot-fix.
+`docs/operations.md.md`'s "Known limitations (v1 stub — see docs/architecture.md for the plan)" section (currently ~40 lines, just past "Tearing down") is written entirely from the framing of a sandboxed assistant session that had never run this project against a real cluster and couldn't generate `go.sum`. Both premises are now false: the Status section of this very audit documents real multi-node podman/k3d cluster runs, and `go.sum` has been committed since `f0b9c95`. Specific stale claims in that section: "hasn't been run against a real cluster yet," "Traefik + Gateway API is unverified against a real cluster too" (contradicted by `docs/architecture.md`'s own now-condensed history of a confirmed real first run), and "`go.sum` isn't committed... couldn't be generated without a real Go toolchain in the sandbox this was built in." One two-line contradiction from this same section (the "Isolating Trivy scanning" SBOM paragraphs) was found and fixed directly during this re-audit; the "Known limitations" section itself needs a full rewrite reflecting what's actually still unverified today, not a spot-fix.
 
 **Fix**: rewrite the section from scratch against the current, real state of the project — cross-reference `docs/architecture.md`'s "Known limitations" for what's genuinely still open (single shared API key, plaintext default secrets, no TLS on the Gateway, no NetworkPolicy on scan-worker pods) rather than re-deriving a separate list that can drift from it again.
 

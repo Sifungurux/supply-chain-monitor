@@ -8,7 +8,7 @@
 # -- a media type trivy's own image scanner doesn't understand, hence
 # the "unsupported artifact type" failure this was written to address).
 #
-# See README.md's "Scanning AI model artifacts" section and
+# See docs/operations.md's "Scanning AI model artifacts" section and
 # docs/architecture.md for the full reasoning, including an important
 # caveat: modelscan (as of this writing) only understands Pickle/H5/
 # SavedModel/Keras-V3-formatted model files. Many modern LLM weight
@@ -23,7 +23,7 @@
 # Usage: monitor-api invokes this as `modelscan-to-findings.sh <ref>`
 # (see the {{ref}} substitution in PluggableScannerConfig.Args).
 #
-# Requires (see the Dockerfile snippet in README.md for a derived
+# Requires (see the Dockerfile snippet in docs/operations.md for a derived
 # image): oras (already baked into monitor-api's own Dockerfile),
 # python3/pip with modelscan installed, and jq.
 set -eu
