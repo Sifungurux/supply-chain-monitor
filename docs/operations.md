@@ -973,6 +973,36 @@ reporting the same findings is silent, so a nightly sweep doesn't page
 about a CVE that has been known for weeks; a finding that was fixed and
 came back counts as new again.
 
+**New *components* notify too, on the same destinations.** When an
+artifact's SBOM is indexed and contains packages the previous SBOM did
+not, the event carries `new_components` instead of `new_findings`, with
+no severity:
+
+```json
+{
+  "artifact_id": "8f14e45fceea167a",
+  "artifact_ref": "ghcr.io/acme/checkout:2.4.1",
+  "new_components": [
+    { "purl": "pkg:npm/left-pad@1.3.0", "name": "left-pad", "version": "1.3.0" }
+  ]
+}
+```
+
+This is the one signal no scanner produces. Trivy and grype answer "is
+this component known-bad"; a dependency that arrived in the build
+without anyone adding it has no advisory, so it has no severity, no CVE
+and no finding — and that is what a compromised build or a swapped
+dependency looks like. There is no threshold to set, because there is
+no severity to compare.
+
+**Additions only.** A removal is not a risk signal, and a version change
+is an ordinary dependency bump that would fire on every base-image
+update. And there is nothing to compare on the first SBOM, so a newly
+registered artifact is silent without needing `suppressFirstScan` — as
+is a re-scan of an unchanged digest, which produces the same inventory.
+One case is *not* quiet: a trivy upgrade that changes package detection
+reports new components across the fleet for one round.
+
 **An artifact's first ever scan does not notify** —
 `suppressFirstScan: true`, the default. Every finding is "new" there
 only because nobody had looked before; that's not a change in the

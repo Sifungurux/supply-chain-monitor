@@ -43,6 +43,19 @@ type ScanEvent struct {
 	// waking someone for -- exploitation OBSERVED beats any predicted
 	// severity, and it is what a message should lead with.
 	KnownExploitedCount int `json:"known_exploited_count"`
+	// NewComponents is the packages that appeared in this artifact's
+	// SBOM which the previous SBOM did not contain -- the "why is this
+	// dependency here at all" signal, which no finding can carry: a
+	// component nobody has published an advisory for produces no
+	// finding, at any severity, and is exactly what a compromised build
+	// or a swapped dependency looks like.
+	//
+	// An event carries findings OR components, never both. They are
+	// separate events on separate triggers (a scan round vs. an SBOM
+	// being indexed, which for an image happens later, on the
+	// scan-worker's document upload), and merging them would mean
+	// holding one back to wait for the other.
+	NewComponents []artifact.Component `json:"new_components,omitempty"`
 }
 
 // CountKnownExploited returns how many findings are in the KEV

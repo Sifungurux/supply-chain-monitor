@@ -703,6 +703,17 @@ has a working tool.
   goroutine: a destination that errors, hangs, or panics is logged and
   dropped, and cannot fail a scan — the one-way counterpart to the
   inbound webhooks CI/CD already uses to register artifacts.
+
+  The same destinations also receive a **new-component** event
+  (`new_components`, no findings and no severity) when an artifact's
+  SBOM is indexed and contains packages the previous one did not --
+  fired from `indexSBOMComponents`, not from `runScan`, because for an
+  image the inventory is indexed when the scan-worker uploads the SBOM
+  afterwards rather than during the scan itself. Additions only: a
+  removal is not a risk signal and a version change is an ordinary
+  dependency bump. It needs no first-scan suppression and no threshold
+  -- one snapshot has nothing to compare against, and an unchanged
+  digest re-scans to an identical inventory.
 - `POST /api/v1/artifacts/{id}/scan` is **asynchronous**: it answers
   `202` with a `Location` pointing at the artifact, runs every scanner
   for that type concurrently in a background goroutine, and callers poll
