@@ -181,11 +181,12 @@ spec:
       # Published by ci.yml's publish-image job on every push to main.
       image:
         repository: ghcr.io/sifungurux/supply-chain-monitor/monitor-api
-        # 755fdae -- "feat(notify): send an event when an SBOM gains a
-        # component nobody added". The multi-arch INDEX digest, not a
-        # per-platform one, so the arm64 nodes here and any amd64 node
-        # resolve their own manifest from it.
-        digest: sha256:d76f02733ebbcba5a5bb1283056ffc0d7585bd8a2f9752c4772e6e8e9d544bfb
+        # cedd32b -- "chore(docker): bump golang 4c9fe60 -> cf6fca6".
+        # Same code as 755fdae, rebuilt on the new Go toolchain. The
+        # multi-arch INDEX digest, not a per-platform one, so the arm64
+        # nodes here and any amd64 node resolve their own manifest from
+        # it.
+        digest: sha256:eecd5ff70d3e4012ec650eb659642dd55857fe7ba98816e173bad41aa4adf10d
       # SWEEP THROUGHPUT, sized from measurement rather than the chart's
       # conservative defaults (*/15, batchSize 5).
       #
