@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -36,6 +37,41 @@ type SigstoreConfig struct {
 	// signed this"; provenance says "and here is how it was built".
 	RequireAttestation bool
 
+	// AttestationType is the in-toto predicate type the attestation must
+	// carry. Empty means DefaultAttestationType.
+	//
+	// This is a real setting, not a knob for its own sake: cosign's
+	// "slsaprovenance" shorthand means SLSA **v0.2**, while
+	// actions/attest-build-provenance emits
+	// "https://slsa.dev/provenance/v1". Verified against the real
+	// binary and a real attested image -- v0.2 fails with "none of the
+	// attestations matched the predicate type: slsaprovenance, found:
+	// https://slsa.dev/provenance/v1", which this scanner would then
+	// report as a MISSING attestation on an image that has a perfectly
+	// good one.
+	AttestationType string
+
+	// RefPrefixes bounds WHICH artifacts get verified at all: a ref is
+	// checked only if it literally starts with one of these. Empty
+	// verifies everything, which is the only safe default for a setting
+	// whose whole effect is to check less.
+	//
+	// Why this exists. Unsigned is a high-severity finding (see
+	// SigstoreScanner), and that is right for images you build. Most
+	// fleets are mostly images somebody ELSE built -- nginx, postgres,
+	// the 93 upstream images this project's own deployment tracks, none
+	// of which carry a signature from your identity and none of which
+	// ever will. Verifying those produces a true, useless, high-severity
+	// finding per artifact, which buries the one case the check exists
+	// for. So: name your own registry path, and everything else is
+	// reported as ProvenanceUnknown -- not checked, rather than accused.
+	//
+	// A literal prefix, deliberately not a glob or regexp: the failure
+	// mode of a too-NARROW pattern is silence, and a pattern language
+	// makes that easy to write by accident. Include the trailing "/" --
+	// "ghcr.io/acme" also matches "ghcr.io/acmecorp-evil/...".
+	RefPrefixes []string
+
 	// TrustedRootPath points cosign at a Sigstore TrustedRoot JSON
 	// describing a PRIVATE Sigstore deployment's Fulcio/Rekor/CT keys.
 	// Empty uses the public instance.
@@ -61,6 +97,25 @@ type SigstoreConfig struct {
 	// DockerConfigDir authenticates registry reads, the same mechanism
 	// GrypeScanner uses (see main.go's writeDockerConfig).
 	DockerConfigDir string
+}
+
+// DefaultAttestationType is what actions/attest-build-provenance
+// produces, which is what GitHub-built images actually carry. cosign's
+// own "slsaprovenance" shorthand is SLSA v0.2 and matches none of them.
+const DefaultAttestationType = "slsaprovenance1"
+
+// InScope reports whether ref is one this deployment verifies at all.
+// See SigstoreConfig.RefPrefixes.
+func (c SigstoreConfig) InScope(ref string) bool {
+	if len(c.RefPrefixes) == 0 {
+		return true
+	}
+	for _, p := range c.RefPrefixes {
+		if p != "" && strings.HasPrefix(ref, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // Configured reports whether verification can run at all.
@@ -133,6 +188,23 @@ func (s *SigstoreScanner) Scan(ctx context.Context, ref string) ([]artifact.Find
 // ScanProvenance verifies ref and reports both the findings and the
 // verdict. Implements ProvenanceScanner.
 func (s *SigstoreScanner) ScanProvenance(ctx context.Context, ref string) ([]artifact.Finding, string, string, error) {
+	// Out of scope: not verified, and deliberately NOT a finding. The
+	// verdict stays ProvenanceUnknown -- "nobody checked" -- which is
+	// exactly what happened.
+	//
+	// Logged, because that verdict is otherwise indistinguishable from
+	// cosign being switched off entirely, and a mistyped prefix that
+	// matches nothing looks identical to success.
+	//
+	// Ahead of ValidateRef on purpose: a ref this deployment does not
+	// verify needs no DNS lookup to reject, and nothing outbound
+	// happens on this path at all.
+	if !s.cfg.InScope(ref) {
+		slog.Info("provenance verification skipped: ref is outside cosign.refPrefixes",
+			"ref", ref, "prefixes", strings.Join(s.cfg.RefPrefixes, ","))
+		return nil, artifact.ProvenanceUnknown, s.trustDescription(), nil
+	}
+
 	// Same guard every other scanner applies before handing a ref to a
 	// tool that will make an outbound request from it.
 	if err := ValidateRef(ctx, ref); err != nil {
@@ -220,7 +292,11 @@ func (s *SigstoreScanner) verifyArgs(ref string) []string {
 }
 
 func (s *SigstoreScanner) verifyAttestationArgs(ref string) []string {
-	args := []string{"verify-attestation", "--type", "slsaprovenance"}
+	t := s.cfg.AttestationType
+	if t == "" {
+		t = DefaultAttestationType
+	}
+	args := []string{"verify-attestation", "--type", t}
 	args = append(args, s.identityArgs()...)
 	args = append(args, s.trustArgs()...)
 	return append(args, "--", ref)

@@ -38,6 +38,8 @@ data:
   COSIGN_CERT_IDENTITY_REGEXP: {{ .Values.monitorApi.cosign.certIdentityRegexp | quote }}
   COSIGN_CERT_OIDC_ISSUER: {{ .Values.monitorApi.cosign.certOIDCIssuer | quote }}
   COSIGN_REQUIRE_ATTESTATION: {{ .Values.monitorApi.cosign.requireAttestation | quote }}
+  COSIGN_ATTESTATION_TYPE: {{ .Values.monitorApi.cosign.attestationType | quote }}
+  COSIGN_REF_PREFIXES: {{ join "," .Values.monitorApi.cosign.refPrefixes | quote }}
   {{- if .Values.monitorApi.cosign.trustedRootSecret }}
   # Derived from trustedRootSecret rather than taken from
   # cosign.trustedRoot, so the mount path and the path cosign is told

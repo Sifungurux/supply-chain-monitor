@@ -2504,6 +2504,8 @@ func runAPIServer() {
 		CertIdentityRegexp: os.Getenv("COSIGN_CERT_IDENTITY_REGEXP"),
 		CertOIDCIssuer:     os.Getenv("COSIGN_CERT_OIDC_ISSUER"),
 		RequireAttestation: getenvBool("COSIGN_REQUIRE_ATTESTATION", false),
+		AttestationType:    os.Getenv("COSIGN_ATTESTATION_TYPE"),
+		RefPrefixes:        splitAndTrim(os.Getenv("COSIGN_REF_PREFIXES")),
 		TrustedRootPath:    os.Getenv("COSIGN_TRUSTED_ROOT"),
 		TUFMirror:          os.Getenv("COSIGN_TUF_MIRROR"),
 		TUFRootPath:        os.Getenv("COSIGN_TUF_ROOT"),
@@ -2529,7 +2531,17 @@ func runAPIServer() {
 		if err := sigstoreScanner.Initialize(context.Background()); err != nil {
 			fatal("could not initialise cosign against the configured Sigstore TUF mirror", "err", err)
 		}
-		slog.Info("provenance verification enabled", "trust_root", cosignTrustDescription())
+		// The prefixes are logged because a mistyped one verifies
+		// nothing and is indistinguishable from the feature working:
+		// every artifact simply stays ProvenanceUnknown, which is also
+		// what "cosign is off" looks like.
+		if prefixes := splitAndTrim(os.Getenv("COSIGN_REF_PREFIXES")); len(prefixes) > 0 {
+			slog.Info("provenance verification enabled", "trust_root", cosignTrustDescription(),
+				"ref_prefixes", strings.Join(prefixes, ","))
+		} else {
+			slog.Info("provenance verification enabled for EVERY image artifact (no cosign.refPrefixes set)",
+				"trust_root", cosignTrustDescription())
+		}
 	}
 
 	inProcessTrivy := scanner.NewTrivyScanner(registryAddr, trivyDB)
