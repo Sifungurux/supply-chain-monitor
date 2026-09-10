@@ -132,7 +132,7 @@ should show `flux-system` (the Kustomization) and both HelmReleases
 closed, from `git push` to running Deployments, with no `kubectl apply`
 on the deploy side involved at all from here on (`make deploy` triggers
 reconciliation rather than applying manifests directly -- see the
-top-level README's "GitOps (Flux)" section).
+top-level docs/operations.md's "GitOps (Flux)" section).
 
 ## Upgrading the Flux controllers later
 

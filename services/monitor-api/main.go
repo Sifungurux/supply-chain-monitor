@@ -477,7 +477,7 @@ func buildPostgresDSN() string {
 	// pgxpool honors pool_max_conns/pool_min_conns as DSN query params
 	// (see NewPostgresStore, which just hands this string straight to
 	// pgxpool.New) -- left unset by default (0) so anyone running this
-	// binary directly (README, "Running monitor-api outside a
+	// binary directly (docs/operations.md, "Running monitor-api outside a
 	// Kubernetes pod") gets pgxpool's own untouched default (currently
 	// max(4, runtime.NumCPU()*4) max conns, 0 min conns), same as
 	// before this existed. The chart (values.yaml's
@@ -2240,7 +2240,7 @@ func runAPIServer() {
 	// trivy vulnerability DB config. Empty repository strings mean
 	// "trivy's own default" (public ghcr.io/mirror.gcr.io) -- fine with
 	// normal internet access. For an air-gapped cluster, seed a mirror
-	// with cluster/seed-trivy-db.sh and point these at it (see README).
+	// with cluster/seed-trivy-db.sh and point these at it (see docs/operations.md).
 	trivyDB := scanner.TrivyDBConfig{
 		DBRepository:     getenv("TRIVY_DB_REPOSITORY", ""),
 		JavaDBRepository: getenv("TRIVY_JAVA_DB_REPOSITORY", ""),
@@ -2440,7 +2440,7 @@ func runAPIServer() {
 	// whichever way it's set, so "is this on?" is answerable from the
 	// pod's first few log lines rather than by reading its env.
 	if getenvBool("ALLOW_LOCAL_ARTIFACT_PATHS", false) {
-		log.Printf("ALLOW_LOCAL_ARTIFACT_PATHS=true: refs may name files under LOCAL_ARTIFACT_ROOT=%q (empty means local paths stay refused) -- see README, \"Local filesystem paths as refs\"", os.Getenv("LOCAL_ARTIFACT_ROOT"))
+		log.Printf("ALLOW_LOCAL_ARTIFACT_PATHS=true: refs may name files under LOCAL_ARTIFACT_ROOT=%q (empty means local paths stay refused) -- see docs/operations.md, \"Local filesystem paths as refs\"", os.Getenv("LOCAL_ARTIFACT_ROOT"))
 	}
 
 	// Governs how much of trivy's/unpacker's own progress output ends up
@@ -2486,7 +2486,7 @@ func runAPIServer() {
 	// "Isolating the unpack+scan step"/"Isolating Trivy scanning" for
 	// local dev convenience, not something to flip on anywhere the pod
 	// might see untrusted image content beyond a throwaway local
-	// registry. See docs/architecture.md and README's "Running
+	// registry. See docs/architecture.md and docs/operations.md's "Running
 	// monitor-api outside a Kubernetes pod".
 	disableScanIsolation := getenvBool("DISABLE_SCAN_ISOLATION", false)
 	inProcessUnpacker := scanner.NewUnpackerScanner(clamAddr, unpackerBin, unpackerInsecure, unpackerPublic, int64(unpackerMaxFileMB)*1024*1024, dockerConfigPath)
@@ -2621,7 +2621,7 @@ func runAPIServer() {
 	if !disableScanIsolation {
 		k8sClient, err := k8sjob.NewInClusterClient()
 		if err != nil {
-			fatal("could not create the kubernetes client for scan-worker jobs (set DISABLE_SCAN_ISOLATION=true to run without one -- see README)", "err", err)
+			fatal("could not create the kubernetes client for scan-worker jobs (set DISABLE_SCAN_ISOLATION=true to run without one -- see docs/operations.md)", "err", err)
 		}
 		workerImage := getenv("SCAN_WORKER_IMAGE", "monitor-api:dev")
 		// Empty (the pre-registry-auth default) when scm-registry has no
@@ -2806,7 +2806,7 @@ func runAPIServer() {
 			})
 		}
 	} else {
-		log.Printf("DISABLE_SCAN_ISOLATION=true: image malware scanning, trivy CVE scanning, and sbom trivy scanning will all run in-process, not in isolated Jobs -- see README, \"Running monitor-api outside a Kubernetes pod\"")
+		log.Printf("DISABLE_SCAN_ISOLATION=true: image malware scanning, trivy CVE scanning, and sbom trivy scanning will all run in-process, not in isolated Jobs -- see docs/operations.md, \"Running monitor-api outside a Kubernetes pod\"")
 	}
 
 	scanners := scanner.Registry{
@@ -2843,7 +2843,7 @@ func runAPIServer() {
 	// Operator-configured pluggable scanners (a different CVE scanner
 	// than trivy, a different SBOM tool, ...) on top of the built-in
 	// ones above -- see docs/architecture.md ("Pluggable scanners") and
-	// README. Unset/empty by default, so nothing changes for anyone not
+	// docs/operations.md. Unset/empty by default, so nothing changes for anyone not
 	// using this.
 	if pluggableScannersEnv := getenv("PLUGGABLE_SCANNERS", ""); pluggableScannersEnv != "" {
 		var specs []scanner.PluggableScannerConfig

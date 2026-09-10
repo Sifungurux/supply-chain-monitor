@@ -131,7 +131,7 @@ EOF
     # real multi-node cluster, e.g. for testing whether scm-clamav's
     # replicas (charts/supply-chain-monitor/values.yaml's clamav.replicas)
     # actually spread across nodes and keep up under concurrent scan load
-    # (see README's "Scaling ClamAV" and `make load-test-clamav`):
+    # (see docs/operations.md's "Scaling ClamAV" and `make load-test-clamav`):
     #   SCM_RUNTIME=podman SCM_K3D_AGENTS=3 ./cluster/create-cluster.sh
     local create_args=(cluster create --config "${PODMAN_SCRIPT_DIR}/../k3d-config.yaml")
     if [[ -n "${SCM_K3D_AGENTS:-}" ]]; then

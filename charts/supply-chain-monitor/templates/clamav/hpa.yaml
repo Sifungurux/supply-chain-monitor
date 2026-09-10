@@ -1,6 +1,6 @@
 {{- if .Values.clamav.autoscaling.enabled }}
 # Scales scm-clamav on CPU utilization between min/max replicas -- see
-# values.yaml's clamav.autoscaling comments and README's "Scaling
+# values.yaml's clamav.autoscaling comments and docs/operations.md's "Scaling
 # ClamAV". Requires a metrics-server (metrics.k8s.io) in the target
 # cluster to actually act on; without one this object just sits idle,
 # same as any HPA with no metrics source.

@@ -22,7 +22,7 @@ import (
 // air-gapped deployment, mirror those into a registry the cluster can
 // actually reach (e.g. scm-registry, via cluster/seed-trivy-db.sh
 // while still online) and point this config at that mirror instead.
-// See docs/architecture.md and the README's air-gapped section.
+// See docs/architecture.md and docs/operations.md's air-gapped section.
 type TrivyDBConfig struct {
 	DBRepository     string // "" = trivy's own default (public ghcr.io/mirror.gcr.io)
 	JavaDBRepository string // "" = trivy's own default

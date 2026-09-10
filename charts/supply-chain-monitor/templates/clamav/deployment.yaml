@@ -35,7 +35,7 @@ spec:
       # see cluster/k3d-config.yaml) it spreads replicas across nodes
       # instead of letting the scheduler stack them all on one, which
       # would defeat the point of testing clamav.replicas under a
-      # multi-node cluster in the first place -- see README's "Scaling
+      # multi-node cluster in the first place -- see docs/operations.md's "Scaling
       # ClamAV".
       topologySpreadConstraints:
         - maxSkew: 1

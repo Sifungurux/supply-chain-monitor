@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Load-tests the register->scan pipeline against a real, concurrent batch
-# of artifacts, specifically to answer "does scm-clamav (see README's
+# of artifacts, specifically to answer "does scm-clamav (see docs/operations.md's
 # "Scaling ClamAV") become a bottleneck once many scans land at once, and
 # does raising clamav.replicas actually help" -- rather than guessing
 # from clamav.replicas alone. Needs `make port-forward` running in
@@ -20,7 +20,7 @@
 #   public.ecr.aws/docker/library/<name>.
 #
 #   1. Bulk-registers testdata/bulk-test-images.json (95 image refs,
-#      see README's "Registering many artifacts at once") via
+#      see docs/operations.md's "Registering many artifacts at once") via
 #      POST /api/v1/artifacts/bulk.
 #   2. Fires POST /api/v1/artifacts/{id}/scan for every artifact that
 #      registered, PARALLELISM at a time (there's no batch-scan endpoint
@@ -50,7 +50,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 API_BASE="${API_BASE:-http://localhost:8080}"
 # No chart default to fall back to -- values.yaml's monitorApi.apiKey
-# is deliberately empty (see README's "Bringing your own secrets"), so
+# is deliberately empty (see docs/operations.md's "Bringing your own secrets"), so
 # this must match whatever real value your cluster is actually running
 # with. Required, not defaulted: guessing wrong here would just be a
 # confusing wall of 401s partway through a 100-artifact batch.

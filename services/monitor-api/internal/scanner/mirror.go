@@ -220,7 +220,7 @@ func (m *OrasMirror) MirrorRef(ref string) string {
 // this same registry by any of the three forms REF_HOST_ALLOWLIST
 // deliberately lists -- "scm-registry:5000",
 // "scm-registry.<ns>:5000", "scm-registry.<ns>.svc.cluster.local:5000" --
-// and README documents pushing `file`/`sbom`/`sarif` artifacts there by
+// and docs/operations.md documents pushing `file`/`sbom`/`sarif` artifacts there by
 // the short one. A prefix match misses those, and the consequence is not
 // a missed optimisation: the registry would mirror ITSELF, storing a
 // second copy of something it already holds and rewriting the artifact's

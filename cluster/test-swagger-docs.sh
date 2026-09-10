@@ -4,7 +4,7 @@
 # (TestAuth_SwaggerRoutesExempt, TestSwaggerUI_ReferencesOpenAPISpec,
 # TestOpenAPISpec_DescribesEveryRegisteredRoute), which exercise the exact
 # same handler code but never open a real TCP listener or make a real HTTP
-# round trip. Also runs the literal curl examples from README.md's
+# round trip. Also runs the literal curl examples from docs/operations.md's
 # "Authentication" and "API" sections against that live server, so a
 # documented command that's since drifted from what the API actually
 # returns fails here instead of just misleading the next person who
@@ -41,7 +41,7 @@ docker run -d --rm --name "$PG_CONTAINER" \
 	-e POSTGRES_PASSWORD=test -p "${PG_PORT}:5432" \
 	percona/percona-distribution-postgresql:17.10 >/dev/null
 
-echo "==> starting monitor-api on :${API_PORT} (DISABLE_SCAN_ISOLATION=true -- see README, \"Running monitor-api outside a Kubernetes pod\")"
+echo "==> starting monitor-api on :${API_PORT} (DISABLE_SCAN_ISOLATION=true -- see docs/operations.md, \"Running monitor-api outside a Kubernetes pod\")"
 docker rm -f "$API_CONTAINER" >/dev/null 2>&1 || true
 docker run -d --rm --network host --name "$API_CONTAINER" \
 	-v "$(pwd)/services/monitor-api":/src -w /src \
@@ -100,7 +100,7 @@ echo "==> auth is actually enforced on real data endpoints (the thing /swagger d
 noauth_status=$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/api/v1/artifacts")
 check "GET /api/v1/artifacts (no auth)" "$noauth_status" "401"
 
-echo "==> README's documented curl examples, run for real"
+echo "==> docs/operations.md's documented curl examples, run for real"
 AUTH=(-H "Authorization: Bearer ${API_KEY}")
 
 stages_status=$(curl -s -o /tmp/stages.json -w '%{http_code}' "${AUTH[@]}" "${BASE}/api/v1/pipeline/stages")
@@ -111,7 +111,7 @@ create_status=$(curl -s -o /tmp/create.json -w '%{http_code}' -X POST "${AUTH[@]
 	-H 'Content-Type: application/json' \
 	-d '{"ref":"alpine:3.19","type":"image"}' \
 	"${BASE}/api/v1/artifacts")
-check "POST /api/v1/artifacts (README's example)" "$create_status" "201"
+check "POST /api/v1/artifacts (docs/operations.md's example)" "$create_status" "201"
 artifact_id=$(grep -o '"id":"[^"]*"' /tmp/create.json | head -1 | cut -d'"' -f4)
 if [ -z "$artifact_id" ]; then
 	echo "FAIL: could not extract artifact id from create response: $(cat /tmp/create.json)" >&2
@@ -121,7 +121,7 @@ else
 	check "GET /api/v1/artifacts/{id}" "$get_status" "200"
 	grep -q '"ref":"alpine:3.19"' /tmp/get.json || { echo "FAIL: fetched artifact doesn't have the ref it was registered with: $(cat /tmp/get.json)" >&2; fail=1; }
 
-	# README's "Suppressing findings with VEX" example, end to end:
+	# docs/operations.md's "Suppressing findings with VEX" example, end to end:
 	# record a finding, upload the document from that section verbatim,
 	# and check the finding actually comes back suppressed. The Go tests
 	# cover the same path, but only this one proves the documented
@@ -131,7 +131,7 @@ else
 		-H 'Content-Type: application/json' \
 		-d '{"bucket":"cve","findings":[{"id":"CVE-2024-1234","severity":"critical","source":"external"}]}' \
 		"${BASE}/api/v1/artifacts/${artifact_id}/findings")
-	check "POST /api/v1/artifacts/{id}/findings (README's example)" "$findings_status" "200"
+	check "POST /api/v1/artifacts/{id}/findings (docs/operations.md's example)" "$findings_status" "200"
 
 	cat >/tmp/vex.json <<-'VEXDOC'
 		{
@@ -149,13 +149,13 @@ else
 		-H 'Content-Type: application/json' \
 		--data-binary @/tmp/vex.json \
 		"${BASE}/api/v1/artifacts/${artifact_id}/vex")
-	check "POST /api/v1/artifacts/{id}/vex (README's example)" "$vex_status" "200"
+	check "POST /api/v1/artifacts/{id}/vex (docs/operations.md's example)" "$vex_status" "200"
 	grep -q '"statements":1' /tmp/vex-response.json || { echo "FAIL: VEX upload didn't report 1 understood statement: $(cat /tmp/vex-response.json)" >&2; fail=1; }
 
 	curl -s -o /tmp/get-vex.json "${AUTH[@]}" "${BASE}/api/v1/artifacts/${artifact_id}"
 	grep -q '"status":"not_affected"' /tmp/get-vex.json || { echo "FAIL: finding not suppressed after the documented VEX upload: $(cat /tmp/get-vex.json)" >&2; fail=1; }
 
-	# The retraction the README documents, run for real. This is the half
+	# The retraction docs/operations.md documents, run for real. This is the half
 	# that shipped broken: uploading an "affected" statement answered 200
 	# with "1 statement understood" and left the finding suppressed,
 	# because nothing is reported on the upload path. A Go test covers it
@@ -164,14 +164,14 @@ else
 		-H 'Content-Type: application/json' \
 		-d '{"statements":[{"vulnerability":{"name":"CVE-2024-1234"},"status":"affected"}]}' \
 		"${BASE}/api/v1/artifacts/${artifact_id}/vex")
-	check "POST /api/v1/artifacts/{id}/vex retraction (README's example)" "$retract_status" "200"
+	check "POST /api/v1/artifacts/{id}/vex retraction (docs/operations.md's example)" "$retract_status" "200"
 
 	curl -s -o /tmp/get-retracted.json "${AUTH[@]}" "${BASE}/api/v1/artifacts/${artifact_id}"
 	grep -q '"status":"not_affected"' /tmp/get-retracted.json && { echo "FAIL: an \"affected\" statement did not retract the suppression: $(cat /tmp/get-retracted.json)" >&2; fail=1; }
 	grep -q '"justification"' /tmp/get-retracted.json && { echo "FAIL: the justification outlived the suppression it explained: $(cat /tmp/get-retracted.json)" >&2; fail=1; }
 	grep -q '"justification":"vulnerable_code_not_in_execute_path"' /tmp/get-vex.json || { echo "FAIL: VEX justification didn't persist: $(cat /tmp/get-vex.json)" >&2; fail=1; }
 
-	# README's "Searching by component" example, end to end: upload an
+	# docs/operations.md's "Searching by component" example, end to end: upload an
 	# SBOM, then run the documented --get/--data-urlencode curl and check
 	# the artifact comes back. The purl carries "/", "@" and a query
 	# string of its own, which is exactly what a live round trip through
@@ -192,12 +192,12 @@ else
 		"${BASE}/api/v1/artifacts/${artifact_id}/documents/sbom")
 	check "POST /api/v1/artifacts/{id}/documents/sbom" "$sbom_status" "200"
 
-	# README's "Gating a pipeline on policy", run for real.
+	# docs/operations.md's "Gating a pipeline on policy", run for real.
 	#
 	# The endpoint's whole contract is that a FAILING policy is still
 	# HTTP 200 -- a CI step cannot otherwise tell a violation from an
 	# outage, a wrong id, or a bad key. That is exactly the kind of
-	# claim a README makes and nothing checks, so it is checked here
+	# claim a docs/operations.md makes and nothing checks, so it is checked here
 	# against a live server.
 	#
 	# This server runs with no POLICY_JSON, so the pass case is what a
@@ -207,9 +207,9 @@ else
 	# configured" a meaningful assertion rather than a vacuous one.
 	policy_status=$(curl -s -o /tmp/policy.json -w '%{http_code}' "${AUTH[@]}" \
 		"${BASE}/api/v1/artifacts/${artifact_id}/policy")
-	check "GET /api/v1/artifacts/{id}/policy (README's example)" "$policy_status" "200"
+	check "GET /api/v1/artifacts/{id}/policy (docs/operations.md's example)" "$policy_status" "200"
 	grep -q '"pass":true' /tmp/policy.json || { echo "FAIL: no policy is configured, so every artifact must pass: $(cat /tmp/policy.json)" >&2; fail=1; }
-	# violations must be [] and never null -- the README's jq pipeline
+	# violations must be [] and never null -- the docs/operations.md's jq pipeline
 	# does `.violations[]` on it.
 	grep -q '"violations":\[\]' /tmp/policy.json || { echo "FAIL: violations must encode as an empty array, not null: $(cat /tmp/policy.json)" >&2; fail=1; }
 
@@ -221,7 +221,7 @@ else
 	component_status=$(curl -s -o /tmp/components.json -w '%{http_code}' "${AUTH[@]}" \
 		--get --data-urlencode 'purl=pkg:apk/alpine/openssl@3.1.4-r5?arch=x86_64' \
 		"${BASE}/api/v1/components")
-	check "GET /api/v1/components?purl=... (README's example)" "$component_status" "200"
+	check "GET /api/v1/components?purl=... (docs/operations.md's example)" "$component_status" "200"
 	grep -q "\"id\":\"${artifact_id}\"" /tmp/components.json || { echo "FAIL: component search didn't return the artifact whose SBOM lists it: $(cat /tmp/components.json)" >&2; fail=1; }
 
 	# The document's own subject is not a component of it.
@@ -253,7 +253,7 @@ else
 	# parsing as the purl, and the response is a different shape.
 	search_status=$(curl -s -o /tmp/component-search.json -w '%{http_code}' "${AUTH[@]}" \
 		--get --data-urlencode 'q=openssl' "${BASE}/api/v1/components")
-	check "GET /api/v1/components?q=... (README's example)" "$search_status" "200"
+	check "GET /api/v1/components?q=... (docs/operations.md's example)" "$search_status" "200"
 	grep -q '"packages"' /tmp/component-search.json || { echo "FAIL: package search response has no \"packages\" key: $(cat /tmp/component-search.json)" >&2; fail=1; }
 	grep -q '"artifacts":1' /tmp/component-search.json || { echo "FAIL: package search didn't report an artifact count: $(cat /tmp/component-search.json)" >&2; fail=1; }
 	grep -q 'pkg:apk/alpine/openssl@3.1.4-r5' /tmp/component-search.json || { echo "FAIL: package search didn't find the uploaded component by name: $(cat /tmp/component-search.json)" >&2; fail=1; }

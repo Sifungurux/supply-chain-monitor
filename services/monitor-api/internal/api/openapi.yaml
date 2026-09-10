@@ -718,7 +718,7 @@ paths:
         meaning "the API is down, the id is wrong, or my key is
         invalid" — and the first must block a release while the others
         must be investigated, not silently treated as a failed gate.
-        Read `pass` from the body. See README, "Gating a pipeline on
+        Read `pass` from the body. See docs/operations.md, "Gating a pipeline on
         policy".
 
 

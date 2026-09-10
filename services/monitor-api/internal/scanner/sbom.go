@@ -15,7 +15,7 @@ import (
 // TrivyDBConfig with TrivyScanner (trivy.go) since `trivy sbom` pulls
 // the same vulnerability DB as `trivy image` and accepts the same
 // --db-repository/--skip-db-update air-gapped-mirror flags -- see
-// cluster/seed-trivy-db.sh and README's "Air-gapped operation".
+// cluster/seed-trivy-db.sh and docs/operations.md's "Air-gapped operation".
 //
 // v1 stub: ref is assumed to already be a filesystem path reachable
 // inside the monitor-api pod -- the same simplification `file`-type

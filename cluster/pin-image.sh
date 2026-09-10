@@ -35,7 +35,7 @@
 # CA it does not trust. Making node pulls work would mean a
 # registries.yaml on every node plus a node-reachable auth realm, and
 # k3d only writes registries.yaml at cluster CREATION -- i.e. destroy
-# and recreate a cluster holding the live database. See README,
+# and recreate a cluster holding the live database. See docs/operations.md,
 # "Why the image is pinned rather than pushed to scm-registry".
 set -euo pipefail
 

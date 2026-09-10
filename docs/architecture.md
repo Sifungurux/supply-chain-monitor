@@ -38,7 +38,7 @@ All pieces run as Deployments in the `supply-chain-monitor` namespace on
 a local Kubernetes cluster on macOS, created via `cluster/create-cluster.sh`.
 Two runtime backends are supported: Colima's native `--kubernetes` (k3s
 in the Docker VM, default and recommended) or k3d against Podman
-(experimental). See the README's "Choosing a runtime" and
+(experimental). See docs/operations.md's "Choosing a runtime" and
 `cluster/runtimes/{colima,podman}.sh`.
 
 - **scm-registry** (`registry:2`) — an OCI registry to push test
@@ -855,7 +855,7 @@ keeps `curl` and GNU `tar` out of the shipped image entirely. The
 runtime stage ends with `USER 65534` — the same uid every workload in
 this chart already pins — so a bare `docker run` gets the same non-root
 posture the cluster enforces. (Note for derived images: switch to `USER
-root` for install steps and back afterwards, see README's pluggable-
+root` for install steps and back afterwards, see docs/operations.md's pluggable-
 scanner example.)
 
 Alpine rather than distroless is a checked decision, not an omission:
@@ -999,7 +999,7 @@ a rebuild, so nothing else notices a new image is available.
   externally-managed Secrets (sealed-secrets, external-secrets, SOPS,
   plain `kubectl create secret`). Left genuinely unset, Postgres's own
   entrypoint and `monitor-api`'s own startup check both refuse to run
-  rather than come up with an empty password/key — see README's
+  rather than come up with an empty password/key — see docs/operations.md's
   "Bringing your own secrets". The three `dockerAuth.accounts.*.password`
   values (registry auth) now work the same way -- empty by default,
   sourced from `make chart-secrets`/`--set`/`dockerAuth.existingSecret`,

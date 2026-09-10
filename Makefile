@@ -158,7 +158,7 @@ backup-key:
 # Creates/updates the scm-chart-secrets Secret that
 # k8s/releases/supply-chain-monitor-helmrelease.yaml's spec.valuesFrom
 # sources postgres.credentials.password and monitorApi.apiKey from --
-# see cluster/chart-secrets.sh and README's "Bringing your own secrets".
+# see cluster/chart-secrets.sh and docs/operations.md's "Bringing your own secrets".
 # Generates a random value for anything you don't pass in yourself
 # (POSTGRES_PASSWORD=... API_KEY=... make chart-secrets to pin either).
 chart-secrets:
@@ -506,7 +506,7 @@ logs:
 
 # Load-tests the register->scan pipeline with 100 concurrent artifacts
 # (see cluster/load-test-clamav.sh) to check whether scm-clamav
-# (README's "Scaling ClamAV") is keeping up, rather than guessing from
+# (docs/operations.md's "Scaling ClamAV") is keeping up, rather than guessing from
 # clamav.replicas alone. Requires `make port-forward` running in another
 # terminal. Override PARALLELISM=N to change concurrency.
 load-test-clamav:
@@ -548,7 +548,7 @@ db-backups-list:
 #     GPG_PRIVATE_KEY_FILE=~/keys/scm-backup-private.asc
 # Add GPG_PASSPHRASE_FILE=... if that key is passphrase-protected.
 #
-# See cluster/postgres-restore.sh and README's "Backing up and
+# See cluster/postgres-restore.sh and docs/operations.md's "Backing up and
 # restoring Postgres".
 db-restore:
 	GPG_PRIVATE_KEY_FILE="$(GPG_PRIVATE_KEY_FILE)" GPG_PASSPHRASE_FILE="$(GPG_PASSPHRASE_FILE)" ./cluster/postgres-restore.sh $(BACKUP)
@@ -556,8 +556,8 @@ db-restore:
 # quick smoke test against a port-forwarded API (run `make port-forward`
 # first). SCM_API_KEY must match whatever's in scm-monitor-api-auth --
 # no chart default to fall back to since values.yaml's monitorApi.apiKey
-# is deliberately empty (see README's "Bringing your own secrets");
-# every endpoint but /healthz requires it (see README's Authentication
+# is deliberately empty (see docs/operations.md's "Bringing your own secrets");
+# every endpoint but /healthz requires it (see docs/operations.md's Authentication
 # section). No fallback value here on purpose -- guessing wrong would
 # just be a confusing 401, a missing SCM_API_KEY should fail loudly
 # instead.
@@ -610,7 +610,7 @@ test-dashboard:
 
 # Starts a real, throwaway monitor-api (plus its own throwaway Postgres,
 # same as test-postgres above) and curls /swagger, /openapi.yaml, and the
-# README-documented API examples against it for real -- see
+# docs/operations.md-documented API examples against it for real -- see
 # cluster/test-swagger-docs.sh's own header for what this catches that
 # internal/api's httptest-based Go tests can't (no real TCP listener, no
 # real HTTP round trip). Needs --network host (see test-postgres's own

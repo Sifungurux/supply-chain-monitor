@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Restores a backup from the scm-postgres-backups PVC into the live
 # scm-postgres database -- see `make db-restore BACKUP=...` and
-# README's "Backing up and restoring Postgres". DESTRUCTIVE: this
+# docs/operations.md's "Backing up and restoring Postgres". DESTRUCTIVE: this
 # overwrites whatever is currently in the database with the backup's
 # contents (it doesn't drop/recreate anything first -- a restore onto
 # a non-empty database can fail on conflicting rows/constraints rather

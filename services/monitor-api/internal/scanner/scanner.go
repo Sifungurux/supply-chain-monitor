@@ -19,7 +19,7 @@ type Scanner interface {
 //
 // It exists because the memory cost of a scan is a property of the
 // TOOL, not of the artifact: malcontent has OOMKilled repeatedly at
-// 2-8Gi on ordinary language-runtime images (see README, "malcontent"),
+// 2-8Gi on ordinary language-runtime images (see docs/operations.md, "malcontent"),
 // while trivy on the same image is comfortable in a fraction of that.
 // One global cap has to be set for the worst case, which throttles
 // everything else for no reason.
