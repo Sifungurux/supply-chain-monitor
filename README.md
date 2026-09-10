@@ -2,6 +2,13 @@
 
 [![CI](https://github.com/Sifungurux/supply-chain-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/Sifungurux/supply-chain-monitor/actions/workflows/ci.yml)
 
+[![CVE: Trivy + Grype](https://img.shields.io/badge/CVE-Trivy%20%2B%20Grype-2f6feb?style=flat-square)](docs/operations.md#choosing-a-cve-scanner-trivy-grype-or-both)
+[![Malware: ClamAV + malcontent](https://img.shields.io/badge/Malware-ClamAV%20%2B%20malcontent-c2410c?style=flat-square)](docs/operations.md#image-scanning-cves-and-malware-not-just-one-or-the-other)
+[![Triage: KEV + EPSS](https://img.shields.io/badge/Triage-KEV%20%2B%20EPSS-7c3aed?style=flat-square)](docs/operations.md#which-cves-are-actually-being-exploited)
+[![VEX: OpenVEX](https://img.shields.io/badge/VEX-OpenVEX-0f766e?style=flat-square)](docs/operations.md#suppressing-findings-with-vex)
+[![Policy gate: pass / fail](https://img.shields.io/badge/Policy%20gate-pass%20%2F%20fail-15803d?style=flat-square)](docs/operations.md#gating-a-pipeline-on-policy)
+[![Provenance: cosign + SLSA](https://img.shields.io/badge/Provenance-cosign%20%2B%20SLSA-334155?style=flat-square)](docs/operations.md#provenance-was-this-image-signed-and-by-whom)
+
 **Know what is in every image you ship, what is wrong with it, whether it
 came from you — and keep knowing after the day you built it.**
 
