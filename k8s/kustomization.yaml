@@ -9,14 +9,19 @@
 # tree, only the namespaces, the Flux bootstrap self-reference, and the
 # two HelmReleases below.
 #
-# traefik-namespace.yaml, sources/, and releases/traefik-helmrelease.yaml
-# add Traefik as the ingress controller the application chart's
-# Gateway/HTTPRoute/GatewayClass attach to -- see docs/architecture.md,
-# "Ingress: Traefik + Gateway API". Traefik's chart comes from an
-# upstream HelmRepository (sources/traefik-helmrepository.yaml), not
-# charts/ in this repo -- it's third-party infra, not part of this
-# application, which is why it stays its own HelmRelease rather than
-# folding into the single application chart.
+# NO INGRESS CONTROLLER IS INSTALLED FROM HERE ANY MORE. This tree used
+# to add Traefik (traefik-namespace.yaml, sources/traefik-helmrepository.yaml,
+# releases/traefik-helmrelease.yaml) because k3d shipped no Gateway API
+# implementation of its own. The mini-rack already runs Envoy Gateway as
+# cluster infrastructure, so installing a second controller would be
+# redundant -- the application chart's Gateway/GatewayClass/HTTPRoute
+# attach to Envoy Gateway's controller instead, set in
+# releases/supply-chain-monitor-helmrelease.yaml's gateway values.
+#
+# Those three Traefik files are still IN the repo, just not referenced
+# here: they are what a k3d cluster (cluster/create-cluster.sh) would
+# need, and re-adding the three lines below is the whole of putting
+# Traefik back.
 #
 # `make deploy` no longer runs `kubectl apply -k k8s/` directly (see
 # Makefile) -- it builds the local dev image, pushes/commits, and
@@ -28,14 +33,12 @@ resources:
   - namespace.yaml
   - flux-system
   - releases/supply-chain-monitor-helmrelease.yaml
-  - traefik-namespace.yaml
-  - sources/traefik-helmrepository.yaml
-  - releases/traefik-helmrelease.yaml
   # cert-manager issues the Gateway's TLS certificate from a self-signed
   # CA -- see releases/cert-manager-helmrelease.yaml and the application
-  # chart's templates/gateway/certificates.yaml. Third-party infra like
-  # Traefik, so it follows the same namespace + HelmRepository + release
-  # shape rather than folding into the application chart.
+  # chart's templates/gateway/certificates.yaml. Third-party infra, so it
+  # follows the namespace + HelmRepository + release shape rather than
+  # folding into the application chart. Unlike the ingress controller,
+  # this one is NOT provided by the rack, so the chart still installs it.
   - cert-manager-namespace.yaml
   - sources/cert-manager-helmrepository.yaml
   - releases/cert-manager-helmrelease.yaml
