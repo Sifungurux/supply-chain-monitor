@@ -49,13 +49,65 @@ spec:
         - protocol: TCP
           port: 8080
   egress:
-    # Everything except the instance-metadata range. Expressed as one
-    # allow with an `except` rather than a deny, because NetworkPolicy
-    # has no deny primitive -- see the scan-worker policy's own comment.
-    # No `ports:` restriction: this has to cover DNS (53/udp), Postgres
-    # (5432), clamd (3310), the registry (5000), the apiserver (443),
-    # and arbitrary notification webhooks, which is every port worth
-    # naming.
+    # DNS, and then every in-cluster peer, named by SELECTOR rather than
+    # left to the catch-all CIDR below.
+    #
+    # A CIDR alone is not enough, and how it fails depends on the CNI.
+    # Under flannel/kube-router (k3d) an ipBlock of 0.0.0.0/0 genuinely
+    # means everything, pod and Service traffic included, so this policy
+    # looked complete for as long as that was the only cluster it ran
+    # on. Cilium resolves in-cluster destinations to security identities
+    # instead, and a CIDR only ever matches the "world" identity -- so
+    # the very same rule permits the public internet and silently drops
+    # CoreDNS.
+    #
+    # Measured on Cilium, from a pod carrying this policy's own label:
+    #
+    #   1.1.1.1:53      open
+    #   10.96.0.10:53   connection timed out    <- CoreDNS, ClusterIP
+    #
+    # None of which surfaces as a network error anywhere useful:
+    # monitor-api blocks in connectStoreWithRetry unable to resolve
+    # Postgres, never binds its listener, and the liveness probe kills
+    # it -- so it presents as a CrashLoopBackOff with nothing in its own
+    # logs, while Postgres logs no connection attempt at all, because
+    # none ever arrives.
+    #
+    # scan-worker-egress.yaml has always named its peers this way. This
+    # policy was the one that did not.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.dnsNamespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dnsSelector | nindent 14 }}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # Postgres, the registry, clamav and docker-auth all live in this
+    # namespace, and each is already constrained from the other side --
+    # postgres.yaml admits only named clients. Enumerating them again
+    # here would be a second list to keep in step with the first.
+    - to:
+        - podSelector: {}
+    # The Kubernetes API, which monitor-api needs in order to create
+    # scan-worker Jobs. Same identity problem as DNS -- the API server
+    # is not part of the "world" a CIDR rule covers -- and there is no
+    # portable selector for it in a NetworkPolicy, so it is named by
+    # CIDR: the Service range it is reachable through, and the node
+    # network it actually runs on.
+    {{- range .Values.networkPolicy.apiServerCIDRs }}
+    - to:
+        - ipBlock:
+            cidr: {{ . | quote }}
+    {{- end }}
+    # Everything genuinely external -- ghcr.io, upstream registries, the
+    # vulnerability-database feeds, notification webhooks -- except the
+    # instance-metadata range. Expressed as one allow with an `except`
+    # rather than a deny, because NetworkPolicy has no deny primitive;
+    # see the scan-worker policy's own comment. No `ports:` restriction,
+    # since it has to cover every port those reach.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
