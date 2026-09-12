@@ -18,11 +18,9 @@
 # belt-and-suspenders layer for Postgres specifically not yet accepting
 # connections when monitor-api's own pod starts.
 #
-# The ingress controller is NOT part of this HelmRelease/chart. On the
-# mini-rack it is Envoy Gateway, installed as cluster infrastructure
-# outside this repo entirely; the chart only owns the routing objects
-# that attach to it (see the gateway values below, and
-# k8s/kustomization.yaml for why Traefik is no longer installed here).
+# Traefik itself is NOT part of this HelmRelease/chart -- see
+# k8s/releases/traefik-helmrelease.yaml -- it's third-party
+# infrastructure, not this application.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -153,55 +151,6 @@ spec:
   # This is still a manual step -- Flux ImageUpdateAutomation would make
   # it automatic, and is not set up.
   values:
-    # ENVOY GATEWAY, not Traefik. This cluster is the mini-rack, which
-    # already runs Envoy Gateway as its Gateway API implementation --
-    # so the chart attaches to that rather than the project installing
-    # a second controller alongside it. Traefik's HelmRelease is gone
-    # from k8s/kustomization.yaml for the same reason.
-    #
-    # Only the three values below change: the Gateway/HTTPRoute objects
-    # themselves are implementation-agnostic Gateway API.
-    gateway:
-      # A GatewayClass of the chart's OWN, pointing at Envoy Gateway's
-      # controller -- NOT the `envoy` class the Envoy Gateway install
-      # already created. Two classes may share one controller, and
-      # taking over a cluster-scoped object this chart did not create
-      # would be a Helm ownership conflict on the first reconcile.
-      gatewayClassName: scm-envoy
-      controllerName: gateway.envoyproxy.io/gatewayclass-controller
-      # 80/443, not Traefik's 8000/8443. Those were Traefik's internal
-      # EntryPoint container ports -- a k3d-specific detail. Envoy
-      # Gateway provisions a Service per Gateway instead, so the
-      # listener port IS the port that Service exposes, and MetalLB
-      # gives it an address off rack-pool (192.168.150.32-62).
-      listenerPort: 80
-      tls:
-        listenerPort: 443
-        # The port a BROWSER dials, and on this cluster it is the same
-        # 443 as the listener -- which it never was on k3d, where the
-        # chart default (30443) named a NodePort. MetalLB gives the
-        # Gateway's own Service a routable address off rack-pool, so the
-        # port a client reaches and the port the listener is programmed
-        # on are finally the same number. Leaving 30443 here would
-        # redirect every plain-HTTP visitor to a port nothing listens
-        # on -- silently, exactly as templates/gateway/httproute.yaml
-        # warns.
-        redirectPort: 443
-        # Replaces the chart's k3d-era list. scm.rack.local is the name
-        # this cluster is actually browsed at, and it must resolve to
-        # the Gateway's MetalLB address off rack-pool -- a cert is valid
-        # for a name, but nothing here creates the DNS record for it.
-        #
-        # localhost stays for `kubectl port-forward`, which is the
-        # debugging path that works before any DNS does. The
-        # svc.cluster.local name stays because in-cluster callers reach
-        # the Gateway by Service name and would otherwise get a
-        # name-mismatch on an otherwise-valid certificate.
-        # scm.localhost is dropped: it was the k3d host-port mapping.
-        dnsNames:
-          - scm.rack.local
-          - localhost
-          - scm-gateway.supply-chain-monitor.svc.cluster.local
     postgres:
       backup:
         encryption:
