@@ -92,6 +92,7 @@ Four things shape every integration:
   scanner can never quietly mark everything resolved.
 
 Full design and rationale: [docs/architecture.md](docs/architecture.md).
+Cutting a chart release: [docs/releasing.md](docs/releasing.md).
 
 ## Deploy it
 

@@ -1,0 +1,201 @@
+name: Release chart
+
+# Publishes charts/supply-chain-monitor as a versioned, installable
+# artifact. Until this existed the chart was only ever consumed as a
+# DIRECTORY IN THIS REPOSITORY -- Flux reads it straight from the
+# GitRepository with reconcileStrategy: Revision (see
+# k8s/releases/supply-chain-monitor-helmrelease.yaml), which
+# deliberately ignores Chart.yaml's version entirely. That is a fine
+# way to run one cluster off main and a non-answer for anybody else:
+# there was no `helm install` anyone could type, and no way to say
+# which chart they were running.
+#
+# WHAT THIS DOES NOT CHANGE: this project's own cluster. It keeps
+# deploying from the GitRepository, so every push to main still reaches
+# it immediately. A release is an artifact for consumers (and for a
+# future pinned production install), not a new step in the dev loop.
+#
+# Triggered by a tag, never by a push to a branch: a release has to be
+# a deliberate act with a name, and a tag is the only thing in git that
+# is both.
+on:
+  push:
+    tags:
+      - 'chart-v*'
+
+# See ci.yml's permissions comment for the reasoning. This workflow is
+# the exception that genuinely needs to write: a release creates a git
+# release object (contents), pushes an OCI artifact (packages), and
+# mints a provenance statement bound to it (id-token/attestations).
+permissions:
+  contents: read
+
+jobs:
+  release-chart:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The tag and Chart.yaml must agree before anything is built. An
+      # OCI tag is MUTABLE, so nothing downstream catches a mismatch and
+      # nothing repairs it either: the only "fix" is overwriting a
+      # version somebody may already have pulled. Refuse first.
+      - name: Tag matches Chart.yaml
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: make check-chart-version
+
+      # The same chart checks CI runs on every PR, re-run here because a
+      # tag can point at any commit -- including one that never went
+      # through a pull request.
+      - name: Chart checks
+        run: make check-dashboard-configmap helm-lint helm-template check-alert-rules
+
+      # ghcr.io requires an all-lowercase path and this repository's
+      # owner is not (Sifungurux) -- computed, not assumed, exactly as
+      # ci.yml's publish-image does.
+      - name: Compute references
+        id: ref
+        run: |
+          repo=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
+          {
+            echo "charts=ghcr.io/$repo/charts"
+            echo "chart_ref=ghcr.io/$repo/charts/supply-chain-monitor"
+            echo "image=ghcr.io/$repo/monitor-api"
+            # From the checked-out HEAD rather than ${GITHUB_SHA},
+            # which is the tag OBJECT for an annotated tag. This has to
+            # be the commit: it is what publish-image tagged the image
+            # with, and the image-exists check below resolves it.
+            echo "sha=$(git rev-parse --short=7 HEAD)"
+            # chart-v0.1.0-rc.1 -> 0.1.0-rc.1
+            echo "version=${GITHUB_REF_NAME#chart-v}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The chart's appVersion is stamped with this commit's short SHA,
+      # which is what publish-image tagged the image with -- but ONLY
+      # for a commit on main, since that job is main-only. A tag on any
+      # other commit would otherwise produce a chart naming an app build
+      # that does not exist, which is discovered at `helm install` time
+      # by somebody who is not you.
+      - name: The tagged commit's image must exist
+        run: |
+          ref="${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.sha }}"
+          if ! docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
+            echo "::error::$ref does not exist in ghcr."
+            echo "::error::publish-image runs only on pushes to main, so this tag is probably on a commit that never landed there."
+            exit 1
+          fi
+          echo "ok: $ref exists"
+
+      - name: Package
+        run: make chart-package APP_VERSION=${{ steps.ref.outputs.sha }}
+
+      # helm push prints the pushed digest; captured because the
+      # attestation below has to be bound to it. A chart attested by
+      # TAG rather than digest would attest whatever that tag points at
+      # later, which is the whole failure mode attestations exist to
+      # close.
+      #
+      # Every value reaches the container through the environment, and
+      # the inner script is single-quoted: the token is never
+      # interpolated into a command line where `ps` or a shell trace
+      # could see it.
+      - name: Push to ghcr
+        id: push
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHARTS_REPO: ${{ steps.ref.outputs.charts }}
+          CHART: dist/supply-chain-monitor-${{ steps.ref.outputs.version }}.tgz
+        run: |
+          set -o pipefail
+          docker run --rm \
+            -e GHCR_USER -e GHCR_TOKEN -e CHART -e CHARTS_REPO \
+            -e HELM_REGISTRY_CONFIG=/tmp/registry.json \
+            -v "$PWD":/src -w /src --entrypoint sh alpine/helm:4.2.0 -c \
+            'echo "$GHCR_TOKEN" | helm registry login ghcr.io -u "$GHCR_USER" --password-stdin && helm push "$CHART" "oci://$CHARTS_REPO"' \
+            2>&1 | tee push.log
+          digest=$(grep -oE 'sha256:[0-9a-f]{64}' push.log | head -1)
+          if [ -z "$digest" ]; then
+            echo "::error::helm push printed no digest -- refusing to attest or release something unidentified."
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # Same provenance story as the image, for the same reason and with
+      # the same constraint: GitHub's attestations API works here because
+      # this repository is PUBLIC (see ci.yml's publish-image for the
+      # exact error a private one gets). If the repo ever goes private,
+      # delete this step rather than trying to reconfigure it.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.ref.outputs.chart_ref }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      # Prerelease is derived from the VERSION itself, not from a
+      # workflow input: anything carrying a SemVer prerelease part is by
+      # definition not a stable release, and deriving it means the two
+      # can never disagree. It is also what keeps GitHub's "Latest"
+      # badge off a release candidate.
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ref.outputs.version }}
+          CHART_REF: ${{ steps.ref.outputs.chart_ref }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          APP_SHA: ${{ steps.ref.outputs.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "Helm chart **supply-chain-monitor** version **$VERSION**, built against monitor-api **$APP_SHA**."
+            echo
+            echo "Install:"
+            echo '```'
+            echo "helm install scm oci://$CHART_REF --version $VERSION"
+            echo '```'
+            echo
+            echo "Digest: \`$DIGEST\`"
+            echo
+            echo "Verify provenance:"
+            echo '```'
+            echo "gh attestation verify oci://$CHART_REF@$DIGEST --repo $REPO"
+            echo '```'
+            echo
+            echo "The chart is published to ghcr; the .tgz attached here is the same artifact for anyone who would rather not pull from a registry."
+          } > release-notes.md
+
+          prerelease=""
+          case "$VERSION" in *-*) prerelease="--prerelease" ;; esac
+
+          # Unquoted on purpose: an empty $prerelease must expand to no
+          # argument at all, not to an empty one gh would reject.
+          # shellcheck disable=SC2086
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Chart $VERSION" \
+            --notes-file release-notes.md \
+            $prerelease \
+            "dist/supply-chain-monitor-$VERSION.tgz"
+
+      - name: Report what was published
+        run: |
+          {
+            echo "### Published chart"
+            echo ""
+            echo '```'
+            echo "${{ steps.ref.outputs.chart_ref }}:${{ steps.ref.outputs.version }}"
+            echo "digest:     ${{ steps.push.outputs.digest }}"
+            echo "appVersion: ${{ steps.ref.outputs.sha }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

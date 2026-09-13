@@ -158,6 +158,16 @@ jobs:
           shopt -s globstar
           shellcheck cluster/**/*.sh
 
+  # Chart.yaml's version must be valid SemVer 2 -- helm enforces this
+  # too, but only at `helm package` time, which is on a release tag.
+  # See cluster/check-chart-release.sh.
+  check-chart-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: make check-chart-version
+        run: make check-chart-version
+
   # Structural lint only -- see helm-template below for the check that
   # actually caught this chart's one real regression (a document
   # rendering without apiVersion, which lint doesn't validate).

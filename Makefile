@@ -707,6 +707,28 @@ check-alert-rules:
 		| docker run --rm -i --entrypoint sh prom/prometheus:v3.7.3 \
 			-c 'cat > /tmp/r.yaml && promtool check rules /tmp/r.yaml' 
 
+# Chart.yaml's version must be valid SemVer 2, checked on every PR
+# rather than at release time -- see cluster/check-chart-release.sh for
+# why finding this out on a tag is the worst moment. The same script
+# also enforces tag/Chart.yaml agreement when RELEASE_TAG is set, which
+# is how .github/workflows/release-chart.yml calls it.
+check-chart-version:
+	sh cluster/check-chart-release.sh
+
+# Packages the chart into dist/ exactly as the release workflow does,
+# so "it packages in CI" and "it packages on my machine" mean the same
+# thing -- the same reason every other check here is a make target.
+#
+# APP_VERSION overrides Chart.yaml's appVersion placeholder; the
+# release workflow passes the tagged commit's short SHA. Left unset
+# locally, helm keeps whatever Chart.yaml says, which is what you want
+# when you are only checking that the thing packages.
+chart-package:
+	mkdir -p dist
+	docker run --rm -v "$(CURDIR)":/src -w /src alpine/helm:4.2.0 package charts/supply-chain-monitor \
+		--destination dist $(if $(APP_VERSION),--app-version $(APP_VERSION),)
+	@ls -1 dist/*.tgz
+
 # Structural lint against the chart's own conventions (required fields,
 # indentation, etc.). Does NOT validate that a rendered document is a
 # well-formed Kubernetes object -- see helm-template below for the

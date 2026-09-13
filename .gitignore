@@ -51,3 +51,8 @@ testscan.json
 # happened while that script was being written, and in a public repo a
 # committed private key is every backup ever encrypted to it, lost.
 *.asc
+
+# Packaged charts, built by `make chart-package` and by the release
+# workflow. The published artifact is the one in ghcr, never a tarball
+# that happened to be left in a working tree.
+dist/
