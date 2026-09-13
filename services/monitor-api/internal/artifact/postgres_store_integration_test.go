@@ -2502,3 +2502,62 @@ func TestPostgresStore_MirrorRewriteRoundTrips(t *testing.T) {
 		t.Fatalf("FindByRef(%q) = %v, %v -- want artifact %s", local, found, err, a.ID)
 	}
 }
+
+// The scan-duration window has to survive the database, and the empty
+// case is the one that would actually break production: pgx encodes a
+// nil Go slice as SQL NULL, so a NOT NULL column here would reject the
+// Update of every artifact that has not been scanned yet -- which is
+// every artifact, once, immediately after this ships. A never-scanned
+// artifact must be updatable, and must read back as an empty window
+// rather than as an error or a zero-length-but-non-nil surprise.
+func TestPostgresStore_ScanDurationsRoundTrip(t *testing.T) {
+	s := newTestPostgresStore(t)
+
+	a, err := s.Create("alpine:3.19", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(a.ScanDurationsMs) != 0 {
+		t.Fatalf("a freshly created artifact already has durations: %v", a.ScanDurationsMs)
+	}
+
+	// An Update that touches something else entirely, while the window
+	// is still nil -- the NULL-vs-NOT-NULL case above.
+	if _, err := s.Update(a.ID, func(art *artifact.Artifact) {
+		art.CurrentStage = "build"
+	}); err != nil {
+		t.Fatalf("Update with no durations recorded yet: %v", err)
+	}
+
+	if _, err := s.Update(a.ID, func(art *artifact.Artifact) {
+		art.ScanDurationsMs = artifact.AppendScanDuration(art.ScanDurationsMs, 1200)
+		art.ScanDurationsMs = artifact.AppendScanDuration(art.ScanDurationsMs, 3400)
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Read back through Get -- a fresh query, not the value Update
+	// returned, which would pass even if the column were never written.
+	got, err := s.Get(a.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.ScanDurationsMs) != 2 || got.ScanDurationsMs[0] != 1200 || got.ScanDurationsMs[1] != 3400 {
+		t.Fatalf("scan durations = %v, want [1200 3400] -- order carries which scan was most recent", got.ScanDurationsMs)
+	}
+
+	// And through List, which shares selectArtifactColumns but a
+	// different scan path.
+	list, err := s.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, l := range list {
+		if l.ID != a.ID {
+			continue
+		}
+		if len(l.ScanDurationsMs) != 2 || l.ScanDurationsMs[1] != 3400 {
+			t.Fatalf("List returned scan durations %v, want [1200 3400]", l.ScanDurationsMs)
+		}
+	}
+}

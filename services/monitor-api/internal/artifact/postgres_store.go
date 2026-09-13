@@ -145,6 +145,18 @@ var schemaStatements = []string{
 	// reason digest is: FindByRef matches on it, and a NULL would need
 	// its own IS NULL branch in every comparison.
 	`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS source_ref TEXT NOT NULL DEFAULT ''`,
+	// The last ten full scans' wall-clock milliseconds, oldest first --
+	// see Artifact.ScanDurationsMs, which explains why this is ten
+	// integers in a column rather than a scan_runs table. Same
+	// idempotent ADD COLUMN IF NOT EXISTS pattern as everything above,
+	// NULLABLE, unlike the TEXT columns above, and deliberately: pgx
+	// encodes a nil Go slice as SQL NULL, so a NOT NULL column would
+	// reject the Update of every artifact that has not been scanned
+	// yet -- which is every artifact, once, right after this ships.
+	// NULL and '{}' both read back as a nil slice and mean the same
+	// thing here ("no scan has been timed"), so nothing downstream has
+	// to tell them apart.
+	`ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS scan_durations_ms BIGINT[]`,
 	`CREATE TABLE IF NOT EXISTS stage_history (
 		id          BIGSERIAL PRIMARY KEY,
 		artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
@@ -421,7 +433,7 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS scan_tokens_expires_idx ON scan_tokens (expires_at)`,
 }
 
-const selectArtifactColumns = `SELECT id, ref, source_ref, digest, type, status, current_stage, created_at, updated_at, last_scan_at, last_scan_error_at, maintainer_team, maintainer_email, last_scan_failure_reason, unsafe, provenance, provenance_checked_at, provenance_trust_root FROM artifacts`
+const selectArtifactColumns = `SELECT id, ref, source_ref, digest, type, status, current_stage, created_at, updated_at, last_scan_at, last_scan_error_at, maintainer_team, maintainer_email, last_scan_failure_reason, unsafe, provenance, provenance_checked_at, provenance_trust_root, scan_durations_ms FROM artifacts`
 
 // pgxIface is satisfied by both *pgxpool.Pool and pgx.Tx, so the
 // read/write helpers below can run either directly against the pool
@@ -721,7 +733,7 @@ func scanArtifactRow(row rowScanner) (*Artifact, error) {
 	var a Artifact
 	var typ, status string
 
-	err := row.Scan(&a.ID, &a.Ref, &a.SourceRef, &a.Digest, &typ, &status, &a.CurrentStage, &a.CreatedAt, &a.UpdatedAt, &a.LastScanAt, &a.LastScanErrorAt, &a.MaintainerTeam, &a.MaintainerEmail, &a.LastScanFailureReason, &a.Unsafe, &a.Provenance, &a.ProvenanceCheckedAt, &a.ProvenanceTrustRoot)
+	err := row.Scan(&a.ID, &a.Ref, &a.SourceRef, &a.Digest, &typ, &status, &a.CurrentStage, &a.CreatedAt, &a.UpdatedAt, &a.LastScanAt, &a.LastScanErrorAt, &a.MaintainerTeam, &a.MaintainerEmail, &a.LastScanFailureReason, &a.Unsafe, &a.Provenance, &a.ProvenanceCheckedAt, &a.ProvenanceTrustRoot, &a.ScanDurationsMs)
 	if err != nil {
 		return nil, err
 	}
@@ -1176,8 +1188,8 @@ func (s *PostgresStore) Update(id string, mutate func(*Artifact)) (*Artifact, er
 	// mirror with no source_ref has lost where it came from, with no way
 	// back. One statement, one transaction, so there is no window in
 	// which only half of that rewrite is on disk.
-	if _, err := tx.Exec(ctx, `UPDATE artifacts SET status = $1, current_stage = $2, digest = $3, updated_at = $4, last_scan_at = $5, last_scan_error_at = $6, maintainer_team = $7, maintainer_email = $8, last_scan_failure_reason = $9, unsafe = $10, provenance = $11, provenance_checked_at = $12, provenance_trust_root = $13, ref = $14, source_ref = $15 WHERE id = $16`,
-		string(a.Status), a.CurrentStage, a.Digest, a.UpdatedAt, a.LastScanAt, a.LastScanErrorAt, a.MaintainerTeam, a.MaintainerEmail, a.LastScanFailureReason, a.Unsafe, a.Provenance, a.ProvenanceCheckedAt, a.ProvenanceTrustRoot, a.Ref, a.SourceRef, a.ID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE artifacts SET status = $1, current_stage = $2, digest = $3, updated_at = $4, last_scan_at = $5, last_scan_error_at = $6, maintainer_team = $7, maintainer_email = $8, last_scan_failure_reason = $9, unsafe = $10, provenance = $11, provenance_checked_at = $12, provenance_trust_root = $13, ref = $14, source_ref = $15, scan_durations_ms = $16 WHERE id = $17`,
+		string(a.Status), a.CurrentStage, a.Digest, a.UpdatedAt, a.LastScanAt, a.LastScanErrorAt, a.MaintainerTeam, a.MaintainerEmail, a.LastScanFailureReason, a.Unsafe, a.Provenance, a.ProvenanceCheckedAt, a.ProvenanceTrustRoot, a.Ref, a.SourceRef, a.ScanDurationsMs, a.ID); err != nil {
 		return nil, fmt.Errorf("update artifact: %w", err)
 	}
 

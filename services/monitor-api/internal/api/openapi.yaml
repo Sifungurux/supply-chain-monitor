@@ -1565,6 +1565,17 @@ components:
             artifact has never failed a scan. Earlier than last_scan_at means
             the artifact has since recovered.
         last_scan_at: { type: string, format: date-time }
+        scan_durations_ms:
+          type: array
+          maxItems: 10
+          description: >-
+            Wall-clock milliseconds taken by each of the last ten FULL scans,
+            oldest first -- the last element is the most recent scan. Absent
+            until the first scan finishes. Written only by a full scan: an
+            sbom-only re-evaluation and an external findings submission both
+            update last_scan_at without adding to this window, because neither
+            one timed a scan of this artifact.
+          items: { type: integer, format: int64 }
         has_sbom: { type: boolean }
         has_sarif: { type: boolean }
         created_at: { type: string, format: date-time }

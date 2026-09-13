@@ -347,6 +347,13 @@ func TestScanArtifact_AllScannersFail(t *testing.T) {
 	if len(got.LastScanErrors) != 2 {
 		t.Fatalf("expected both scanner errors recorded, got %v", got.LastScanErrors)
 	}
+	// A scan that failed outright still consumed this pod's time, and
+	// hiding that would make the duration window look healthiest
+	// exactly when scans are grinding to a halt -- a timeout is five
+	// minutes of work, not an absence of work.
+	if len(got.ScanDurationsMs) != 1 {
+		t.Errorf("scan_durations_ms = %v after a total failure, want the one duration recorded", got.ScanDurationsMs)
+	}
 	// Neither raw scanner error string should ever reach the API
 	// response -- only the classified, friendly message. Both fixtures
 	// here don't match any known pattern, so both should land on the
@@ -1831,5 +1838,70 @@ func TestScanArtifact_SBOMOnlyKeepsOtherScannersAttribution(t *testing.T) {
 	// both its source and its open status.
 	if f := got["CVE-GRYPE-ONLY"]; f.Source != "grype" || f.Status != artifact.FindingStatusOpen {
 		t.Errorf("CVE-GRYPE-ONLY = %+v, want source %q and status %q", f, "grype", artifact.FindingStatusOpen)
+	}
+}
+
+// The scan clock: every FULL scan appends its wall-clock milliseconds to
+// the artifact's rolling window, and the window never grows past
+// ScanDurationWindow no matter how often the artifact is scanned.
+//
+// The sleeping scanner is what makes this a real measurement rather
+// than an assertion about zero: Milliseconds() truncates, so an
+// instant fake scanner would record 0 and a stopwatch that had been
+// wired up backwards (or not at all) would look exactly the same as
+// one that worked.
+func TestScanArtifact_RecordsScanDurationWindow(t *testing.T) {
+	const delay = 12 * time.Millisecond
+	h, store := newTestRouter(scanner.Registry{
+		artifact.TypeImage: {&sleepingScanner{delay: delay, findings: []artifact.Finding{{ID: "CVE-2024-1", Source: "trivy"}}}},
+	})
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	if _, scanned := scanAndWait(t, h, store, created.ID); len(scanned.ScanDurationsMs) != 1 {
+		t.Fatalf("after one scan, scan_durations_ms = %v, want exactly one entry", scanned.ScanDurationsMs)
+	}
+
+	var last *artifact.Artifact
+	for i := 0; i < artifact.ScanDurationWindow+1; i++ {
+		_, last = scanAndWait(t, h, store, created.ID)
+	}
+
+	if len(last.ScanDurationsMs) != artifact.ScanDurationWindow {
+		t.Fatalf("after %d scans, scan_durations_ms = %v, want the window capped at %d",
+			artifact.ScanDurationWindow+2, last.ScanDurationsMs, artifact.ScanDurationWindow)
+	}
+	for i, ms := range last.ScanDurationsMs {
+		if ms < delay.Milliseconds() {
+			t.Errorf("scan_durations_ms[%d] = %dms, want at least the %v the scanner slept -- the clock is not measuring the scan",
+				i, ms, delay)
+		}
+	}
+}
+
+// An sbom-only re-evaluation stamps no duration, the same rule and the
+// same reason as TestScanArtifact_SBOMOnlyDoesNotRefreshTheScanClock
+// above: it is a fraction of the work a full scan does, so letting its
+// wall-clock time into the window would drag every mean down the night
+// after a sweep and make a scan that is getting slower look like it is
+// getting faster.
+func TestScanArtifact_SBOMOnlyRecordsNoDuration(t *testing.T) {
+	reeval := &grypeSBOMLike{findings: []artifact.Finding{{ID: "CVE-2024-9", Source: "grype"}}}
+	h, store := newSBOMReevalRouter(scanner.Registry{
+		artifact.TypeImage: {&fakeScanner{}},
+	}, reeval)
+	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	_, full := scanAndWait(t, h, store, created.ID)
+	if len(full.ScanDurationsMs) != 1 {
+		t.Fatalf("precondition: a full scan must record one duration, got %v", full.ScanDurationsMs)
+	}
+	if err := store.SaveDocument(created.ID, artifact.DocumentKindSBOM, "application/json", []byte(`{}`)); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+
+	_, after := scanModeAndWait(t, h, store, created.ID, "sbom-only")
+	if len(after.ScanDurationsMs) != 1 {
+		t.Errorf("scan_durations_ms = %v after an sbom-only round, want the full scan's single entry untouched",
+			after.ScanDurationsMs)
 	}
 }

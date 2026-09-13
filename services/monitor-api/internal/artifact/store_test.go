@@ -933,3 +933,47 @@ func TestMemStore_ComponentPURLs(t *testing.T) {
 		t.Errorf("got %v for an unknown artifact, want empty", none)
 	}
 }
+
+// AppendScanDuration is what decides the ORDER of Artifact.ScanDurationsMs
+// and what falls out of it, which is the half the dashboard and the
+// detail page both depend on: the mean is over whatever is in the
+// window, and "the last scan" is the tail. Getting the trim backwards
+// would keep the ten OLDEST scans forever and freeze both numbers at
+// whatever the artifact did the week it was registered -- a bug that
+// renders as plausible data, never as an error.
+func TestAppendScanDuration(t *testing.T) {
+	var window []int64
+	for i := 1; i <= artifact.ScanDurationWindow+5; i++ {
+		window = artifact.AppendScanDuration(window, int64(i))
+	}
+
+	if len(window) != artifact.ScanDurationWindow {
+		t.Fatalf("window length = %d, want %d", len(window), artifact.ScanDurationWindow)
+	}
+	// 1..15 appended, so the ten kept must be 6..15 -- newest at the
+	// tail, oldest dropped from the front.
+	if got, want := window[len(window)-1], int64(artifact.ScanDurationWindow+5); got != want {
+		t.Errorf("newest = %d, want %d -- the most recent scan must be the TAIL", got, want)
+	}
+	if got, want := window[0], int64(6); got != want {
+		t.Errorf("oldest kept = %d, want %d -- the trim must drop the front, not the back", got, want)
+	}
+	for i := 1; i < len(window); i++ {
+		if window[i] <= window[i-1] {
+			t.Fatalf("window is not in append order: %v", window)
+		}
+	}
+}
+
+// A window shorter than ScanDurationWindow is the normal state for a
+// newly registered artifact and must survive untouched -- the trim only
+// applies once it is full.
+func TestAppendScanDurationBelowWindowKeepsEverything(t *testing.T) {
+	var window []int64
+	window = artifact.AppendScanDuration(window, 100)
+	window = artifact.AppendScanDuration(window, 200)
+
+	if len(window) != 2 || window[0] != 100 || window[1] != 200 {
+		t.Fatalf("window = %v, want [100 200]", window)
+	}
+}

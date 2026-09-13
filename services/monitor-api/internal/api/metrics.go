@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 )
 
 // The Prometheus text exposition format, written by hand rather than
@@ -58,6 +61,24 @@ type metrics struct {
 	// visible outside the pod logs.
 	authFailures  atomic.Int64
 	authThrottled atomic.Int64
+	// scanDurations is the wall-clock time of the last few completed
+	// full scans, oldest first -- the one thing in here that is not an
+	// atomic, because it is the one thing that is not an independent
+	// increment. A mean needs every sample in the window read as one
+	// consistent set, which is exactly what the note above says no
+	// reader needs and what atomics therefore cannot give; the lock is
+	// taken once per completed scan and once per scrape, so it is
+	// never contended.
+	//
+	// PROCESS state, not fleet state, like everything else here: these
+	// are the last N scans THIS pod ran, not this artifact's history
+	// and not the fleet's. A per-artifact duration series would put an
+	// unbounded label set on an unauthenticated endpoint and disclose
+	// the fleet's contents -- see the note at the top of this file.
+	// The per-artifact numbers live on the artifact instead
+	// (artifact.ScanDurationsMs) behind the authenticated API.
+	durationsMu   sync.Mutex
+	scanDurations []time.Duration
 	startedAt     time.Time
 }
 
@@ -74,6 +95,43 @@ func (m *metrics) recordScanResult(failed bool) {
 		return
 	}
 	m.scansSucceeded.Add(1)
+}
+
+// recordScanDuration records one completed full scan's wall-clock time,
+// dropping the oldest once the window is full. Called from runScan for
+// successful AND failed scans alike, matching what LastScanAt records:
+// a scan that timed out still took five minutes of this pod's life, and
+// hiding that would make the mean look healthiest exactly when scans
+// are grinding to a halt.
+//
+// An sbom-only re-evaluation never reaches here -- see the caller.
+func (m *metrics) recordScanDuration(d time.Duration) {
+	m.durationsMu.Lock()
+	defer m.durationsMu.Unlock()
+	m.scanDurations = append(m.scanDurations, d)
+	if len(m.scanDurations) > artifact.ScanDurationWindow {
+		m.scanDurations = m.scanDurations[len(m.scanDurations)-artifact.ScanDurationWindow:]
+	}
+}
+
+// scanDurationStats returns the most recent scan's duration, the mean
+// over the window, and how many samples that mean covers. n == 0 means
+// no full scan has completed in this process yet, and the caller
+// publishes nothing at all in that case rather than a zero -- "no scan
+// has run" and "a scan took no time" must not look the same to an
+// alert.
+func (m *metrics) scanDurationStats() (last, mean time.Duration, n int) {
+	m.durationsMu.Lock()
+	defer m.durationsMu.Unlock()
+	if len(m.scanDurations) == 0 {
+		return 0, 0, 0
+	}
+	var total time.Duration
+	for _, d := range m.scanDurations {
+		total += d
+	}
+	n = len(m.scanDurations)
+	return m.scanDurations[n-1], total / time.Duration(n), n
 }
 
 // recordAuth* are called from withAuth's rejection path only -- a
@@ -186,6 +244,26 @@ func (h *handler) metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 	counter("scm_auth_failures_total", "Requests rejected with 401 because the API key was missing or wrong.", h.metrics.authFailures.Load())
 	counter("scm_auth_throttled_total", "Requests refused with 429 because that client address had already failed authentication too often.", h.metrics.authThrottled.Load())
+
+	// Published only once a scan has actually finished in this process:
+	// a pod that has never scanned would otherwise report a flat 0 and
+	// read as "scans are instant" rather than "there is nothing to
+	// report". The window resets on restart, like every other value
+	// here -- for history across restarts, graph these over time.
+	if last, mean, n := h.metrics.scanDurationStats(); n > 0 {
+		gauge("scm_scan_duration_seconds", "Wall-clock seconds the most recently completed full scan took in this process, successful or failed.", last.Seconds())
+		// The NAME is a literal, not built from ScanDurationWindow: a
+		// metric name is a contract with every dashboard and alert
+		// that already references it, and generating it from the
+		// constant means raising the window to 20 silently renames the
+		// series and breaks them all with no error anywhere. Only the
+		// HELP text tracks the constant.
+		gauge(
+			"scm_scan_duration_mean10_seconds",
+			fmt.Sprintf("Mean wall-clock seconds over the last %d full scans completed in this process (fewer until %d have run).", artifact.ScanDurationWindow, artifact.ScanDurationWindow),
+			mean.Seconds(),
+		)
+	}
 
 	gauge("scm_process_uptime_seconds", "Seconds since this process started.", time.Since(h.metrics.startedAt).Seconds())
 	gauge("go_goroutines", "Goroutines currently running.", float64(runtime.NumGoroutine()))

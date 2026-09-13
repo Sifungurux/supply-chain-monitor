@@ -2937,3 +2937,60 @@ test('an undated scan error is treated as current rather than resolved', async (
   assert.doesNotMatch(body, /Resolved/, 'absent data must never be reported as recovered');
   dom.window.close();
 });
+
+// Scan time on the detail page. Three cases, because they are three
+// different sentences and only one of them is the common one:
+//
+//   - several scans on record -> the last one, plus an average that
+//     names how many scans it is actually over. "Avg over last 10"
+//     printed above two samples would be a claim the page cannot
+//     support, and an artifact registered yesterday has two samples.
+//   - exactly one scan -> the duration alone. An average of one value
+//     is that value, and printing it twice implies a baseline that does
+//     not exist yet.
+//   - never scanned -> a dash, not "0ms", which would read as a scan
+//     that took no time.
+test('the detail page shows the last scan duration and an average over however many scans it actually has', async () => {
+  const artifacts = [
+    // 2.0s, 4.0s, 6.0s -> last 6.0s, mean 4.0s over 3.
+    Object.assign({}, SAMPLE_ARTIFACTS[0], { id: 'd1', scan_durations_ms: [2000, 4000, 6000] }),
+    Object.assign({}, SAMPLE_ARTIFACTS[0], { id: 'd2', ref: 'once:1', scan_durations_ms: [1500] }),
+    Object.assign({}, SAMPLE_ARTIFACTS[0], { id: 'd3', ref: 'never:1', last_scan_at: null }),
+    // 2m 59.6s -- the case where rounding the seconds half renders the
+    // impossible "2m 60s".
+    Object.assign({}, SAMPLE_ARTIFACTS[0], { id: 'd4', ref: 'slow:1', scan_durations_ms: [179600] })
+  ];
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (isArtifactsList(url)) return artifactsPage(artifacts);
+      return errorResponse(404, {});
+    }
+  });
+
+  await tick(20);
+  const doc = dom.window.document;
+
+  doc.querySelector('button[data-action="toggle"][data-id="d1"]').click();
+  const many = doc.getElementById('detail-body').innerHTML;
+  assert.match(many, /Scan time:<\/strong> 6\.0s \(avg 4\.0s over last 3\)/);
+
+  doc.querySelector('button[data-action="toggle"][data-id="d2"]').click();
+  const one = doc.getElementById('detail-body').innerHTML;
+  assert.match(one, /Scan time:<\/strong> 1\.5s/);
+  assert.doesNotMatch(one, /avg/, 'a single scan gets no average');
+
+  doc.querySelector('button[data-action="toggle"][data-id="d3"]').click();
+  const none = doc.getElementById('detail-body').innerHTML;
+  assert.match(none, /Scan time:<\/strong> —/);
+  assert.doesNotMatch(none, /0ms/, 'a never-scanned artifact must not read as an instant scan');
+
+  doc.querySelector('button[data-action="toggle"][data-id="d4"]').click();
+  const slow = doc.getElementById('detail-body').innerHTML;
+  assert.match(slow, /Scan time:<\/strong> 2m 59s/);
+  assert.doesNotMatch(slow, /60s/, 'the seconds half of a m/s duration can never reach 60');
+
+  dom.window.close();
+});

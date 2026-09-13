@@ -458,10 +458,22 @@ curl -s "${AUTH[@]}" "localhost:18080/api/v1/artifacts/$ID/documents/sbom"
 scm_scans_started_total 5
 scm_scans_succeeded_total 5
 scm_scans_failed_total 0
+scm_scan_duration_seconds 41.2
+scm_scan_duration_mean10_seconds 38.7
 scm_http_responses_total{class="2xx"} 147
 scm_http_responses_total{class="4xx"} 4
 scm_http_responses_total{class="5xx"} 0
 ```
+
+The two duration gauges are **absent until a scan has finished in that
+pod**, rather than reporting 0 -- "nothing has been measured yet" and "a
+scan took no time" must not look the same to an alert. They cover this
+process only and reset on restart; the mean is over the last ten
+completed scans (fewer until ten have run). Per-artifact durations are
+not exposed here -- `/metrics` is unauthenticated and a series per
+artifact would both disclose the fleet and put an unbounded label set on
+it. Those live on the artifact itself, as `scan_durations_ms`, behind
+the authenticated API and on the dashboard's detail page.
 
 ---
 
