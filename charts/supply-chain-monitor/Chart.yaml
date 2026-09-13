@@ -16,5 +16,26 @@ description: >-
   this application. See docs/architecture.md, "A single chart for the
   whole application", for the full picture.
 type: application
-version: 0.1.0
+# SemVer 2, and the SINGLE SOURCE OF TRUTH for what a chart release is
+# called: the release workflow refuses a `chart-v*` tag that disagrees
+# with this line (cluster/check-chart-release.sh), rather than silently
+# publishing a chart whose version and tag say different things.
+#
+# Bumped by hand in the PR that prepares a release, so the version lands
+# in a reviewable diff next to whatever changed to justify it.
+#
+# A -rc.N prerelease is not just a label: `helm install`, `helm upgrade`
+# and Flux all SKIP prereleases unless a constraint asks for them
+# explicitly, so a release candidate cannot be picked up by accident.
+#
+# INDEPENDENT of appVersion below -- a values-only fix to this chart
+# does not imply a new monitor-api build, and pretending otherwise means
+# one of the two numbers is always lying.
+version: 0.1.0-rc.1
+# The monitor-api build this chart release was cut against. "dev" is
+# the working-tree placeholder and is never what ships: the release
+# workflow stamps the tagged commit's own short SHA here, which is
+# exactly what ci.yml's publish-image tagged the image with for that
+# commit, and refuses to release if that image was never published.
+# Nothing has to remember to update this by hand, so it cannot drift.
 appVersion: "dev"
