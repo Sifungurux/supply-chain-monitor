@@ -210,6 +210,15 @@ func (h *handler) runScan(a *artifact.Artifact, scanners []scanner.Scanner, rele
 // entirely.
 func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scanner, release func(), mode string) {
 	defer release()
+	// Wall-clock start of the scan, read from time.Now() WITHOUT .UTC()
+	// on purpose: .UTC() strips the monotonic reading, which would
+	// leave this measuring the wall clock and reporting nonsense across
+	// an NTP step or a suspend. Everything derived from it goes through
+	// time.Since below. Covers the whole round -- every scanner, the
+	// isolated Job wait, and the pre-scan digest resolve -- because
+	// that is the number "how long did scanning this take" means to
+	// somebody looking at the detail page.
+	start := time.Now()
 	// See scanModeSBOMOnly. Read once into a local so every branch below
 	// asks the same question the same way.
 	sbomOnly := mode == scanModeSBOMOnly
@@ -553,6 +562,20 @@ func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scann
 	}
 
 	now := time.Now().UTC()
+	// Measured ONCE, here, so the artifact's own record and the
+	// process-wide Prometheus gauges can never disagree about the same
+	// scan. Every scanner has returned by this point; what remains is
+	// the merge and one database write, which is milliseconds and not
+	// what anybody means by scan duration.
+	elapsed := time.Since(start)
+	// Recorded here rather than after the Update below, matching
+	// recordScanResult above: the scan is what was timed, and whether
+	// the database write that follows succeeds does not change how long
+	// it took. Gated on !sbomOnly for the same reason every other scan
+	// metric is -- see scm_scan_duration_seconds in metrics.go.
+	if !sbomOnly {
+		h.metrics.recordScanDuration(elapsed)
+	}
 	// Two CVE scanners (trivy, grype) can both report the same CVE ID in
 	// one round -- coalesce their Source values into one finding before
 	// merging, so the second scanner's result doesn't just overwrite the
@@ -744,6 +767,12 @@ func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scann
 		// green. The cheap path must not be able to satisfy the
 		// expensive path's clock.
 		art.LastScanAt = &now
+		// Same full-scans-only rule as LastScanAt directly above, for
+		// the same reason: an sbom-only round is a fraction of the
+		// work, so letting its wall-clock time into this window would
+		// drag every mean down the night after a sweep and make a scan
+		// that is getting slower look like it is getting faster.
+		art.ScanDurationsMs = artifact.AppendScanDuration(art.ScanDurationsMs, elapsed.Milliseconds())
 	})
 
 	if updErr != nil {
@@ -755,7 +784,8 @@ func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scann
 	}
 	slog.Info("scan finished",
 		"artifact_id", id, "ref", updated.Ref,
-		"status", updated.Status, "scan_errors", len(updated.LastScanErrors))
+		"status", updated.Status, "scan_errors", len(updated.LastScanErrors),
+		"duration_ms", elapsed.Milliseconds())
 
 	// Revoke this artifact's upload tokens now the scan is over. They
 	// expire on their own, but a token that outlives the Job it was

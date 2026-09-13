@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/api"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -402,4 +403,54 @@ func TestMetrics_TokenGate(t *testing.T) {
 			}
 		}
 	})
+}
+
+// The two scan-duration gauges, and the thing that is easy to get
+// wrong about them: they are ABSENT until a scan has actually
+// completed in this process. A pod that has never scanned publishing a
+// flat 0 would read as "scans are instant" on every dashboard and
+// would satisfy any alert written against the value, which is the
+// opposite of what "nothing has been measured" should do.
+func TestMetrics_ScanDurationGaugesAppearOnlyAfterAScan(t *testing.T) {
+	const delay = 12 * time.Millisecond
+	store := artifact.NewMemStore()
+	h := api.NewRouter(api.Config{
+		Store:    store,
+		Tracker:  pipeline.NewTracker([]string{"build", "scan"}),
+		APIKey:   testAPIKey,
+		Scanners: scanner.Registry{artifact.TypeImage: {&sleepingScanner{delay: delay}}},
+	})
+
+	before := scrape(t, h)
+	if strings.Contains(before, "scm_scan_duration_seconds") {
+		t.Errorf("scm_scan_duration_seconds is published before any scan has run:\n%s", before)
+	}
+	if strings.Contains(before, "scm_scan_duration_mean") {
+		t.Errorf("the mean gauge is published before any scan has run:\n%s", before)
+	}
+
+	a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+a.ID+"/scan", nil)
+	if got := waitForScan(t, store, a.ID); got.Status != artifact.StatusScanned {
+		t.Fatalf("status = %q, want %q", got.Status, artifact.StatusScanned)
+	}
+
+	body := scrape(t, h)
+	last := metricValue(t, body, "scm_scan_duration_seconds")
+	// Spelled out, not built from ScanDurationWindow: this name is the
+	// contract dashboards reference, so changing it must fail here.
+	mean := metricValue(t, body, "scm_scan_duration_mean10_seconds")
+	// Seconds, not milliseconds: a gauge named _seconds that actually
+	// carries milliseconds renders every panel 1000x wrong and looks
+	// entirely plausible until somebody compares it to a stopwatch.
+	if want := delay.Seconds(); last < want {
+		t.Errorf("scm_scan_duration_seconds = %v, want at least %v (the scanner slept that long)", last, want)
+	}
+	if last > 10 {
+		t.Errorf("scm_scan_duration_seconds = %v -- far too large for a %v scan, the unit is probably not seconds", last, delay)
+	}
+	// One sample in the window, so the mean IS the last value.
+	if mean != last {
+		t.Errorf("mean = %v, last = %v -- with a single scan recorded they must be equal", mean, last)
+	}
 }

@@ -179,6 +179,26 @@ type Finding struct {
 	Category string `json:"-"`
 }
 
+// ScanDurationWindow is how many recent scan durations an artifact
+// keeps (see Artifact.ScanDurationsMs). Ten is what the detail page
+// shows a mean over; the row grows by 80 bytes and nothing else in the
+// system reads further back.
+const ScanDurationWindow = 10
+
+// AppendScanDuration adds one scan's wall-clock milliseconds to the
+// rolling window, dropping the oldest once it is full. Returns the new
+// slice rather than mutating in place: the caller is a Store.Update
+// mutate callback working on a snapshot, and the backing array may be
+// shared with a copy another goroutine is still reading (see
+// copyArtifact).
+func AppendScanDuration(window []int64, ms int64) []int64 {
+	window = append(window, ms)
+	if len(window) > ScanDurationWindow {
+		window = window[len(window)-ScanDurationWindow:]
+	}
+	return window
+}
+
 // StageEvent records that an artifact was observed at a given pipeline
 // step (source, build, test, scan, sign, publish, deploy, ...).
 type StageEvent struct {
@@ -308,6 +328,31 @@ type Artifact struct {
 	// can't tell a caller "was this actually scanned recently" without
 	// false positives from those other paths.
 	LastScanAt *time.Time `json:"last_scan_at,omitempty"`
+	// ScanDurationsMs is how long each of the last ScanDurationWindow
+	// full scans took, in milliseconds, OLDEST FIRST -- the tail is the
+	// most recent scan, the same ordering as StageHistory so there is
+	// no second convention to remember. Empty until the first scan
+	// finishes.
+	//
+	// The window is kept here rather than in a scan_runs table because
+	// ten integers per artifact is the entire requirement: the detail
+	// page wants "how long did the last scan take, and is that normal
+	// for this artifact", which is the last value and the mean of the
+	// window, both answerable from the row itself with no join and no
+	// retention policy to own.
+	// ponytail: a table would be the right shape only if something
+	// wanted per-run timestamps or a window longer than a glance --
+	// nothing does yet.
+	//
+	// Written ONLY by a full scan (internal/api/scan.go), alongside
+	// LastScanAt and under the same rule: an sbom-only re-evaluation
+	// records nothing here, because a partial round's wall-clock time
+	// is not this artifact's scan time and averaging the two together
+	// would make every artifact look faster the night after a sweep.
+	// Externally submitted findings (POST .../findings) also stamp
+	// LastScanAt but never touch this -- that scan happened somewhere
+	// else and this process never timed it.
+	ScanDurationsMs []int64 `json:"scan_durations_ms,omitempty"`
 	// HasSBOM/HasSARIF report whether a generated document of that kind
 	// exists for this artifact (see Document, Store.SaveDocument/
 	// GetDocument) -- booleans, not the document bytes themselves, so

@@ -1569,6 +1569,40 @@
     return timeAgo(a.last_scan_at);
   }
 
+  // formatDuration renders a scan's wall-clock milliseconds at one
+  // significant decimal, which is all anybody reads off a page: scans
+  // run from a couple of seconds (a small file) to several minutes (a
+  // multi-GB image pulled and unpacked), and a bare millisecond count
+  // is unreadable at the top of that range.
+  function formatDuration(ms) {
+    if (ms < 1000) return Math.round(ms) + 'ms';
+    if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+    // floor, not round, on the seconds half: rounding 59.6s up renders
+    // "2m 60s".
+    return Math.floor(ms / 60000) + 'm ' + Math.floor((ms % 60000) / 1000) + 's';
+  }
+
+  // scanDurationText answers "how long did the last scan take, and is
+  // that normal for this artifact" from Artifact.scan_durations_ms --
+  // the server keeps the last ten, oldest first, so the tail is the
+  // most recent one.
+  //
+  // The average names the REAL sample count, not a flat "last 10": an
+  // artifact scanned twice has an average over two scans, and calling
+  // that "the average of the last 10" would be a number the page does
+  // not have. A single sample gets no average at all -- an average of
+  // one value is the value, and printing it twice just implies a
+  // baseline that has not been established yet.
+  function scanDurationText(a) {
+    var durations = a.scan_durations_ms || [];
+    if (!durations.length) return '—';
+    var last = durations[durations.length - 1];
+    if (durations.length === 1) return formatDuration(last);
+    var total = durations.reduce(function (sum, ms) { return sum + ms; }, 0);
+    return formatDuration(last) + ' (avg ' + formatDuration(total / durations.length) +
+      ' over last ' + durations.length + ')';
+  }
+
   // maintainerText is the modal's read-only view of who owns an
   // artifact -- "Not set" (not an empty string) so a never-configured
   // artifact reads as a deliberate state, not a rendering glitch.
@@ -1914,6 +1948,7 @@
         '<span>' + esc(a.type) + '</span>' +
         '<span>' + statusBadge(a) + unsafeBadge(a) + staleBadge(a) + provenanceBadge(a) + '<span id="policy-badge"></span></span>' +
         '<span><strong>Last scan:</strong> ' + esc(lastScanText(a)) + '</span>' +
+        '<span><strong>Scan time:</strong> ' + esc(scanDurationText(a)) + '</span>' +
         '<span><strong>Maintainer:</strong> ' + maintainerText(a) +
           ' <button type="button" class="link-btn" data-action="edit-maintainer">Edit</button></span>' +
         '<span><strong>Documents:</strong> ' + documentLinks(a) + '</span>' +

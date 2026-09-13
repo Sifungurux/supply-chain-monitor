@@ -450,6 +450,7 @@ func copyArtifact(a *Artifact) *Artifact {
 	out.SecretFindings = append([]Finding(nil), a.SecretFindings...)
 	out.OtherFindings = append([]Finding(nil), a.OtherFindings...)
 	out.LastScanErrors = append([]string(nil), a.LastScanErrors...)
+	out.ScanDurationsMs = append([]int64(nil), a.ScanDurationsMs...)
 	return &out
 }
 
