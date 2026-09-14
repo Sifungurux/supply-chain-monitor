@@ -1345,10 +1345,50 @@ fifty scans' worth of Jobs at once, which an unbounded
 `monitorApi.scanConcurrency` (`SCAN_CONCURRENCY`, **8** in the chart —
 so up to ~24 concurrent Jobs at the default `cveScanner`; multiply
 before changing it) caps how many scans run at once across the process.
-It is bounded by node scratch disk, nothing else — `values.yaml`
-documents the measurements and what would let you raise it (bigger
-nodes, or moving per-Job `/tmp` onto a networked StorageClass such as
-Ceph RBD).
+It is bounded by node scratch disk **and by the access mode of the
+scanner DB cache PVCs** — see the warning immediately below, which on a
+multi-node cluster binds long before disk does. `values.yaml` documents
+the disk measurements and what would let you raise it (bigger nodes, or
+moving per-Job `/tmp` onto a networked StorageClass such as Ceph RBD).
+
+> **The cap cannot buy concurrency the storage layer will not grant.**
+> Every isolated scan-worker Job mounts a shared vulnerability-DB PVC
+> (`scm-grype-db-cache`, or `scm-trivy-db-cache` for isolated trivy).
+> Those default to `ReadWriteOnce`, which means one **node**, not one
+> pod: Jobs scheduled onto the node holding the volume run fine, and
+> every Job scheduled anywhere else sits `Pending` with
+> `Multi-Attach error for volume "pvc-..."` until
+> `activeDeadlineSeconds` (1200s) kills it — at which point it is
+> recorded as a **scan failure against an artifact that was never the
+> problem**.
+>
+> Measured on a 3-worker cluster at cap 12: 3 Jobs running on the node
+> with the volume, 14 `Pending` on the other two, 84
+> `FailedAttachVolume` events, scan p95 **674s** against a median of
+> **204s** — the tail is pure queueing. The same corpus and cap on a
+> single-node k3d cluster was more than twice as fast.
+>
+> On any cluster with real CSI storage, set
+> `monitorApi.grypeCache.persistence.accessMode` (and
+> `monitorApi.trivyCache.persistence.accessMode`) to `ReadWriteMany`.
+> The DB is read-only to every scan Job — only the primer Job and the
+> refresh CronJob write it — so concurrent mounts across nodes are
+> safe.
+>
+> The default stays `ReadWriteOnce` because `local-path`, the k3d/dev
+> default, does not support `ReadWriteMany` at all. It is also why this
+> went unnoticed: `local-path` is `hostPath` underneath, with no
+> attach/detach controller, so RWO never bites there. The consequence
+> was even written down elsewhere in this document — see "Where this
+> lives, and why not the trivy cache", which notes that attaching the
+> RWO cache to a Deployment would pin every scan-worker Job to one node
+> — it just was not carried across to the Jobs themselves.
+>
+> **Changing it on a running deployment is not a values edit alone.**
+> `accessModes` is immutable on a bound PVC, so Helm's pre-upgrade hook
+> fails applying the change and Flux rolls back every other change in
+> the same commit. Delete the PVC while no scan is running, then let
+> the hook recreate it; the primer Job repopulates the DB.
 Scanning is asynchronous, so nobody is blocked on the response: a
 request arriving with every slot busy is rejected immediately with a
 `429` and `Retry-After`, rather than queueing:
