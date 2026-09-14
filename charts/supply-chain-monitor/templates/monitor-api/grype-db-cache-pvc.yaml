@@ -9,6 +9,15 @@
 # is opened read-only internally, so many scan-worker Jobs can safely
 # share one copy concurrently.
 #
+# "Concurrently" is bounded by the ACCESS MODE, which is the part that
+# sentence used to leave out. Read-only file access makes sharing safe;
+# it does not make it possible. ReadWriteOnce means one NODE, so Jobs
+# landing anywhere else block on Multi-Attach until their deadline kills
+# them and they are reported as scan failures. That was invisible for as
+# long as this only ran on local-path, which is hostPath underneath and
+# has no attach/detach controller at all. See
+# monitorApi.grypeCache.persistence.accessMode in values.yaml.
+#
 # Unlike the primer Job/refresh CronJob below, this PVC is NOT gated on
 # monitorApi.cveScanner: even when cveScanner stays "trivy" (the
 # default), the PVC must still exist so Helm/Flux's readiness wait
@@ -26,7 +35,7 @@ metadata:
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": hook-failed
 spec:
-  accessModes: ["ReadWriteOnce"]
+  accessModes: [{{ .Values.monitorApi.grypeCache.persistence.accessMode | quote }}]
   resources:
     requests:
       storage: {{ .Values.monitorApi.grypeCache.persistence.size }}

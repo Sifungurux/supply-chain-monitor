@@ -1827,6 +1827,44 @@ monitorApi:
       # hundred MB -- 2Gi is generous headroom on top of that, cheap on
       # a local-path StorageClass.
       size: 2Gi
+      # ACCESS MODE, and the single most important storage decision in
+      # this chart on a multi-node cluster.
+      #
+      # Every isolated scan-worker Job mounts this PVC. ReadWriteOnce
+      # does NOT mean "one pod" -- it means one NODE: pods on the node
+      # the volume is attached to share it happily, and pods scheduled
+      # anywhere else sit Pending with
+      #
+      #   Multi-Attach error for volume "pvc-..."
+      #
+      # until they hit activeDeadlineSeconds and are reported as scan
+      # FAILURES against artifacts that were never the problem.
+      #
+      # Measured on a 3-worker cluster at scan cap 12: 3 Jobs running on
+      # the node holding the volume, 14 Pending on the other two, 84
+      # FailedAttachVolume events, and a scan p95 of 674s against a
+      # median of 204s -- the tail is entirely queueing. The cap cannot
+      # buy concurrency the storage layer will not grant.
+      #
+      # This defaults to ReadWriteOnce because it has to: local-path
+      # (the k3d/dev default, and what `helm install` hits on a fresh
+      # clone) does not support ReadWriteMany at all, and a hostPath
+      # volume has no attach/detach controller, so RWO never bites
+      # there. That is exactly why this went unnoticed for so long.
+      #
+      # SET THIS TO ReadWriteMany on any cluster with real CSI storage
+      # (Longhorn, Ceph, EBS with a multi-attach-capable driver, ...)
+      # where scan Jobs can land on more than one node. The DB is
+      # read-only to every scan Job -- only the primer Job and the
+      # refresh CronJob write it -- so concurrent mounts are safe.
+      #
+      # CHANGING IT ON AN EXISTING DEPLOYMENT IS NOT A VALUES EDIT
+      # ALONE: accessModes is immutable on a bound PVC, so Helm's
+      # pre-upgrade hook will fail applying the change and Flux will
+      # roll back every other change in the same commit. Delete the PVC
+      # first (with no scan running), then let the hook recreate it; the
+      # primer Job repopulates the DB. See docs/operations.md.
+      accessMode: ReadWriteOnce
     # Offset from postgres.backup.schedule's 02:00 so the two don't
     # contend for disk/CPU on a single-node dev cluster at the same
     # moment.
@@ -1852,6 +1890,44 @@ monitorApi:
       # trivy has) is typically a few hundred MB -- same 2Gi headroom
       # as trivyCache for consistency.
       size: 2Gi
+      # ACCESS MODE, and the single most important storage decision in
+      # this chart on a multi-node cluster.
+      #
+      # Every isolated grype scan-worker Job mounts this PVC. ReadWriteOnce
+      # does NOT mean "one pod" -- it means one NODE: pods on the node
+      # the volume is attached to share it happily, and pods scheduled
+      # anywhere else sit Pending with
+      #
+      #   Multi-Attach error for volume "pvc-..."
+      #
+      # until they hit activeDeadlineSeconds and are reported as scan
+      # FAILURES against artifacts that were never the problem.
+      #
+      # Measured on a 3-worker cluster at scan cap 12: 3 Jobs running on
+      # the node holding the volume, 14 Pending on the other two, 84
+      # FailedAttachVolume events, and a scan p95 of 674s against a
+      # median of 204s -- the tail is entirely queueing. The cap cannot
+      # buy concurrency the storage layer will not grant.
+      #
+      # This defaults to ReadWriteOnce because it has to: local-path
+      # (the k3d/dev default, and what `helm install` hits on a fresh
+      # clone) does not support ReadWriteMany at all, and a hostPath
+      # volume has no attach/detach controller, so RWO never bites
+      # there. That is exactly why this went unnoticed for so long.
+      #
+      # SET THIS TO ReadWriteMany on any cluster with real CSI storage
+      # (Longhorn, Ceph, EBS with a multi-attach-capable driver, ...)
+      # where scan Jobs can land on more than one node. The DB is
+      # read-only to every scan Job -- only the primer Job and the
+      # refresh CronJob write it -- so concurrent mounts are safe.
+      #
+      # CHANGING IT ON AN EXISTING DEPLOYMENT IS NOT A VALUES EDIT
+      # ALONE: accessModes is immutable on a bound PVC, so Helm's
+      # pre-upgrade hook will fail applying the change and Flux will
+      # roll back every other change in the same commit. Delete the PVC
+      # first (with no scan running), then let the hook recreate it; the
+      # primer Job repopulates the DB. See docs/operations.md.
+      accessMode: ReadWriteOnce
     # Offset from both postgres.backup.schedule (02:00) and
     # trivyCache.refreshSchedule (03:00) so none of the three contend
     # for disk/CPU on a single-node dev cluster at the same moment.

@@ -53,7 +53,7 @@ metadata:
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": hook-failed
 spec:
-  accessModes: ["ReadWriteOnce"]
+  accessModes: [{{ .Values.monitorApi.trivyCache.persistence.accessMode | quote }}]
   resources:
     requests:
       storage: {{ .Values.monitorApi.trivyCache.persistence.size }}

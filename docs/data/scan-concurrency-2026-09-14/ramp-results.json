@@ -1,0 +1,50 @@
+[
+ {
+  "cap": 8,
+  "artifacts": 40,
+  "wall_s": 1355.7,
+  "accepted": 40,
+  "retries_429": 883,
+  "not_scanned": 0,
+  "evicted_new": 0,
+  "oomkilled_new": 0,
+  "registry_restarts_new": 0,
+  "disk_pressure": false,
+  "memory_pressure": false,
+  "peak_pending_pods": 18,
+  "scan_jobs_by_node": {},
+  "peak_disk_used_gb": 101.4,
+  "scan_ms_n": 40,
+  "scan_ms_median": 204185,
+  "scan_ms_p95": 674437,
+  "scan_ms_max": 674493,
+  "BROKE": false
+ },
+ {
+  "cap": 12,
+  "artifacts": 40,
+  "wall_s": 1077.9,
+  "accepted": 40,
+  "retries_429": 555,
+  "not_scanned": 0,
+  "evicted_new": 0,
+  "oomkilled_new": 0,
+  "registry_restarts_new": 0,
+  "disk_pressure": false,
+  "memory_pressure": false,
+  "peak_pending_pods": 24,
+  "scan_jobs_by_node": {
+   "w3": 9,
+   "cp3": 7,
+   "w2": 9,
+   "w1": 10,
+   "cp2": 1
+  },
+  "peak_disk_used_gb": 101.4,
+  "scan_ms_n": 40,
+  "scan_ms_median": 174171,
+  "scan_ms_p95": 1014708,
+  "scan_ms_max": 1034749,
+  "BROKE": false
+ }
+]
