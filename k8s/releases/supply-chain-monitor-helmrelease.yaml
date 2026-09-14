@@ -181,11 +181,18 @@ spec:
       # Published by ci.yml's publish-image job on every push to main.
       image:
         repository: ghcr.io/sifungurux/supply-chain-monitor/monitor-api
-        # 0013978 -- "feat(cosign): scope verification by ref prefix".
+        # 1b844b3 -- "feat(release): version the chart with semver and
+        # publish it to ghcr", which is also the commit chart-v0.1.0-rc.1
+        # was cut from. Carries the scan-duration work from #205: without
+        # this bump the chart's new "Scan time" row renders on every
+        # detail page while the API pod still runs an image that never
+        # writes scan_durations_ms, so every artifact reads "—" forever
+        # and an un-deployed feature is indistinguishable from a broken
+        # one.
         # The multi-arch INDEX digest, not a per-platform one, so the
         # arm64 nodes here and any amd64 node resolve their own manifest
         # from it.
-        digest: sha256:648f594cb030bf97209af036f4114c4479e6daa9a98c3e518fa5f311dd88abfe
+        digest: sha256:a76df884695d3e16bbf2181a8e53fda33d41127dd444cc529015ed475dd6a47a
       # SWEEP THROUGHPUT, sized from measurement rather than the chart's
       # conservative defaults (*/15, batchSize 5).
       #
