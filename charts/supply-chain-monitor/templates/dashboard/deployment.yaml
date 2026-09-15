@@ -90,13 +90,30 @@ spec:
               # the client name, and a consumer sharing the master key
               # cannot be scoped at all.
               #
-              # The fallback is loud on purpose: it is exactly the
-              # insecure shape this change exists to remove, and a silent
-              # one would look like a working deployment.
+              # FAIL CLOSED, rather than proxying with the master key.
+              #
+              # This used to warn and carry on. A warning on stderr in a
+              # pod nobody is tailing is not a control: the deployment
+              # came up looking healthy while every anonymous visitor to
+              # the dashboard held unrestricted API authority through the
+              # proxy -- register, scan, submit findings, upload fleet
+              # VEX. Report 2026-09-09, S-1.
+              #
+              # Refusing to attach ANY credential degrades the dashboard
+              # to read-nothing (the API answers 401) instead of
+              # silently over-granting. That is loud in the way a
+              # warning was not: the page visibly does not work, which
+              # is the correct signal for "no dashboard key exists".
+              #
+              # The fix is one command -- cluster/chart-secrets.sh
+              # generates a named "dashboard" client -- and the error
+              # below says so.
               if [ "$DASHBOARD_API_KEY" = "$API_KEY" ]; then
-                echo "WARNING: dashboard is using the MASTER API key -- no 'dashboard' entry in monitorApi.apiKeys." >&2
-                echo "WARNING: that key is unrestricted, so anyone who can reach this dashboard has admin authority." >&2
-                echo "WARNING: run cluster/chart-secrets.sh to generate one, and scope it in monitorApi.apiKeyScopes." >&2
+                echo "ERROR: no 'dashboard' entry in monitorApi.apiKeys." >&2
+                echo "ERROR: refusing to proxy with the MASTER key -- that is unrestricted, and anyone" >&2
+                echo "ERROR: who can reach this dashboard would inherit it (register/scan/findings/VEX)." >&2
+                echo "ERROR: run cluster/chart-secrets.sh to generate a scoped dashboard key." >&2
+                DASHBOARD_API_KEY=""
               fi
               ESCAPED_KEY=$(printf '%s' "$DASHBOARD_API_KEY" | sed 's/\\/\\\\/g; s/"/\\"/g')
               ESCAPED_BASE=$(printf '%s' "$DASHBOARD_API_BASE" | sed 's/\\/\\\\/g; s/"/\\"/g')
@@ -166,7 +183,22 @@ spec:
 {{- else }}
                   proxy_pass http://${MONITOR_API_ADDR}/;
 {{- end }}
-                  proxy_set_header Authorization "Bearer ${API_KEY}";
+                  # ESCAPED_KEY, not API_KEY. This heredoc is unquoted,
+                  # so \${API_KEY} expanded to the MASTER key env var --
+                  # on every request, not merely as a fallback when no
+                  # dashboard key existed. ESCAPED_KEY (the named
+                  # "dashboard" client, escaped for this quoted context)
+                  # was computed above and then referenced nowhere, so
+                  # the whole named-key-plus-scopes design for the
+                  # dashboard was inert: monitorApi.apiKeyScopes could
+                  # scope the dashboard client all it liked and the
+                  # proxy still presented an unrestricted credential.
+                  #
+                  # Verified on a live cluster before the fix: the
+                  # generated config carried the master key's prefix
+                  # while DASHBOARD_API_KEY, correctly populated in the
+                  # pod env, went unused.
+                  proxy_set_header Authorization "Bearer ${ESCAPED_KEY}";
                   proxy_set_header Host \$host;
                   proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
                   proxy_http_version 1.1;

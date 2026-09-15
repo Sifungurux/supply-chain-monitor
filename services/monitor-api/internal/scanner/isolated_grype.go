@@ -245,7 +245,10 @@ func (s *IsolatedGrypeScanner) scan(ctx context.Context, ref, artifactID string)
 		env["SCM_ARTIFACT_ID"] = artifactID
 		env["SCM_API_BASE_URL"] = s.cfg.APIBaseURL
 		if s.cfg.MintScanToken != nil {
-			token, err := s.cfg.MintScanToken(artifactID)
+			// Same retry as the trivy path: refusing the scan is right
+			// for a broken minter, but a one-off connection blip should
+			// not cost a re-evaluation round.
+			token, err := mintWithRetry(s.cfg.MintScanToken, artifactID)
 			if err != nil {
 				return nil, fmt.Errorf("mint scan token for sbom re-evaluation of %q: %w", artifactID, err)
 			}

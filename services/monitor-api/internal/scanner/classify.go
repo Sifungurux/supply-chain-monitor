@@ -86,6 +86,11 @@ var classifiers = []struct {
 		message: "Could not fetch the artifact to scan",
 	},
 	{
+		match:   func(s string) bool { return strings.Contains(s, "mint scan token") },
+		reason:  "token_mint_failed",
+		message: "Could not issue the scan's upload credential",
+	},
+	{
 		match:   func(s string) bool { return strings.Contains(s, "scanner panicked:") },
 		reason:  "scanner_error",
 		message: "Scanner encountered an internal error",
