@@ -58,7 +58,22 @@ spec:
   # and enrich-refresh already retries the only transient thing it
   # depends on (the Postgres connection) internally.
   backoffLimit: 0
-  activeDeadlineSeconds: 300
+  # BACKSTOP ONLY -- the real bound is `timeout 240` inside the
+  # container below, and it must stay comfortably lower than this.
+  #
+  # This used to be 300 with no internal timeout, which quietly defeated
+  # the whole `|| exit 0` design above: that guard catches the command
+  # FAILING, but activeDeadlineSeconds kills the Job from outside, so
+  # the shell never runs the guard and the Job goes to status Failed.
+  # Helm then fails the release and Flux rolls back every unrelated
+  # change in the commit -- exactly the outcome the comment at the top
+  # of this file says must not happen.
+  #
+  # Observed 2026-09-15: a slow EPSS fetch tripped the 300s deadline and
+  # rolled back a scan-concurrency change that had nothing to do with
+  # enrichment. A feed that is SLOW must be tolerated the same way a
+  # feed that is BROKEN already is.
+  activeDeadlineSeconds: 600
   template:
     metadata:
       labels:
@@ -86,8 +101,16 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              /usr/local/bin/monitor-api enrich-refresh || {
-                echo "enrich-primer: feed refresh failed -- continuing so the release is not rolled back."
+              # `timeout` so that a SLOW feed lands in the same `|| exit 0`
+              # branch as a BROKEN one. Without it the only bound was the
+              # Job's activeDeadlineSeconds, which kills this shell from
+              # outside and so can never reach the guard below -- turning a
+              # slow CDN into a rolled-back release.
+              #
+              # 240s against activeDeadlineSeconds: 600, so this always
+              # fires first and the guard always gets to run.
+              timeout 240 /usr/local/bin/monitor-api enrich-refresh || {
+                echo "enrich-primer: feed refresh failed or timed out -- continuing so the release is not rolled back."
                 echo "enrich-primer: the scm-enrich-refresh CronJob retries at the configured schedule; findings keep epss_score 0 until it succeeds."
                 exit 0
               }
