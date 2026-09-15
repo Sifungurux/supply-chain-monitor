@@ -6,8 +6,12 @@ k3d-on-podman VM and broke at cap 16, when `scm-registry` was OOMKilled at its
 (3 control planes, 3 workers at 8 CPU / 32GiB each) on Longhorn storage.
 
 The expectation going in was a higher ceiling. What the ramp found instead is
-that **this cluster is slower than the laptop VM was**, and that the scan
-concurrency cap has not been the binding constraint at any rung measured.
+that **this cluster was slower than the laptop VM**, and that the scan
+concurrency cap had not been the binding constraint at any rung measured.
+
+The cause was a `ReadWriteOnce` PersistentVolumeClaim. Switching the scanner DB
+caches to `ReadWriteMany` cut wall-clock 30–42% and per-scan median 46–63% at
+every rung — see [After](#after-the-same-ramp-against-readwritemany) below.
 
 ## The headline
 
@@ -151,14 +155,71 @@ rolls back every other change in the same commit. The order that works is
 4. resume Flux — the pre-upgrade hook recreates it as RWX, and the primer Job
    repopulates the DB
 
-## Status: the after-measurement has not been taken
+## After: the same ramp against ReadWriteMany
 
-The chart change is merged. The cluster-side change is open as homelab PR #2 and
-**was not applied**, so every number above is a *before*. Re-running the same
-rungs against RWX is what would show whether removing the serialization changes
-the shape — the prediction being that median and wall-clock converge, `peak
-Pending` collapses, and the cap starts measuring scanners instead of scheduling
-luck.
+Applied 2026-09-15 and re-ran every rung. Same cluster, same 40-artifact corpus,
+same order, same break criteria. The only intended difference is the access mode.
+
+| cap | wall RWO | wall RWX | | median RWO | median RWX | | p95 RWO | p95 RWX | |
+|-----|---------|---------|------|-----------|-----------|------|--------|--------|------|
+| 8  | 1356s | **889s** | −34% | 204s | **84s** | −59% | 674s | **314s** | −53% |
+| 12 | 1078s | **692s** | −36% | 174s | **94s** | −46% | 1015s | **314s** | −69% |
+| 16 | 1014s | **590s** | −42% | 274s | **114s** | −58% | 675s | **314s** | −53% |
+| 24 | 693s | **486s** | −30% | 254s | **124s** | −51% | 575s | **314s** | −45% |
+| 32 | 672s | **466s** | −31% | 359s | **134s** | −63% | 654s | **314s** | −52% |
+
+Wall-clock fell 30–42% at every rung and per-scan median fell 46–63%. No break
+at any rung in either run, and **zero failed scans across all ten**.
+
+### The p95 is the proof
+
+```
+p95 across the five RWX rungs, in milliseconds:
+  314296  314264  314302  314309  314280
+```
+
+**Flat to within 45ms across a 4× range of concurrency caps.** That is the real
+scan time of the heaviest artifact in the corpus, and it is the number the
+before-run could never see: under RWO the same metric wandered 674 → 1015 → 675
+→ 575 → 654s, because it was measuring how long a Job waited for a volume rather
+than how long a scan took.
+
+A metric that does not move when you change the cap is measuring work. A metric
+that jumps around is measuring queueing. That is the whole difference.
+
+### The deadline is no longer in reach
+
+The worst single scan went from **1035s** — 86% of the 1200s
+`activeDeadlineSeconds`, close enough that one slower artifact would have
+produced a false `scan_timeout` failure — to **314s**, 26% of it. The failure
+mode this fix exists to remove is now nowhere near triggering.
+
+### Queueing stopped growing with the cap
+
+`peak Pending` under RWO climbed with every rung: 18 → 24 → 27 → 40 → 50. Under
+RWX it is 18 → 25 → 28 → 24 → 29 — flat, and it *falls* at cap 24 where the old
+run was climbing fastest. 429 retries roughly halved at every rung too (883 →
+440 at cap 8), because slots free up instead of being held by Jobs that are not
+doing anything.
+
+### What the cap means now
+
+It is still not a throughput ceiling — nothing broke at 32, and no node reported
+pressure of either kind at any point. But it is now bounded by real work rather
+than by scheduling luck, and per-scan latency degrades gently with concurrency
+(84 → 134s median across a 4× cap increase) instead of erratically.
+
+Raising the production cap above 12 is now a defensible change rather than a
+gamble. It has deliberately been left at 12 pending a decision.
+
+### One new thing to watch
+
+The grype DB primer **OOMKilled twice before succeeding** on the first upgrade
+after the switch. The Job completed (Helm saw 1/1) and nothing downstream
+noticed, but it had not done that before. RWX on Longhorn is NFS-backed through
+a share-manager, which is a different IO path than a local block device, and the
+primer downloads and migrates a multi-hundred-MB database. Worth watching on the
+next few refreshes; `monitorApi.grypeCache.resources` is the knob if it recurs.
 
 ## Harness notes for next time
 
@@ -174,3 +235,15 @@ both of which produce plausible wrong numbers rather than errors:
    about to be undone by something else.
 2. **Select Job pods by label, not name prefix.** An empty result reads exactly
    like "no Jobs ran".
+3. **Resume in the same order you suspend: Kustomization first.** The
+   Kustomization is what carries new values onto the HelmRelease, so resuming
+   the HelmRelease first makes it reconcile against whatever values were in the
+   cluster *before* the change. Doing exactly that during the RWX switch
+   recreated both PVCs as ReadWriteOnce from a correct RWX commit, and left the
+   HelmRelease holding RWX values against RWO volumes — one reconcile away from
+   the immutable-field failure the whole procedure exists to avoid. Verify the
+   values are present on the HelmRelease *before* resuming it.
+
+Also: deleting these PVCs blocks on the `pvc-protection` finalizer held by
+**completed** DB-refresh CronJob pods from previous days. A finished pod still
+counts as a consumer; delete those pods and the PVCs release immediately.
