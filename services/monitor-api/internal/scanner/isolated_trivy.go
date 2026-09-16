@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -253,6 +254,35 @@ func (s *IsolatedTrivyScanner) Scan(ctx context.Context, ref string) ([]artifact
 // ScanForArtifact implements ArtifactAwareScanner: identical to Scan,
 // except that when SubCommand is "image" and both artifactID and
 // s.cfg.APIBaseURL are set, the Job also gets SCM_ARTIFACT_ID/
+// mintWithRetry wraps a MintScanToken call in a short backoff.
+//
+// Minting writes a row to Postgres, so the realistic failure is
+// transient: a connection blip, a failover, the NetworkPolicy-programming
+// race a fresh pod hits. Retrying a few times converts almost all of
+// those into a successful scan, which matters more now that a permanent
+// failure refuses the scan outright rather than quietly downgrading to
+// the master key.
+//
+// Deliberately short and bounded: the caller is building a Job spec
+// while holding a scan slot, so this must not become a long stall.
+func mintWithRetry(mint func(string) (string, error), artifactID string) (string, error) {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+		}
+		var token string
+		token, err = mint(artifactID)
+		if err == nil && token != "" {
+			return token, nil
+		}
+		if err == nil {
+			err = errors.New("empty token")
+		}
+	}
+	return "", err
+}
+
 // SCM_API_BASE_URL/SCM_API_KEY env vars -- runScanWorker's image branch
 // (main.go) uses those to best-effort upload a generated SBOM/SARIF
 // document back to monitor-api once the scan itself is done. Findings
@@ -321,23 +351,37 @@ func (s *IsolatedTrivyScanner) ScanForArtifact(ctx context.Context, ref, artifac
 		// tradeoff is that it appears in the Pod spec, readable by
 		// anyone who can already read Pods in this namespace -- who can
 		// also read the Secret.
-		minted := false
+		// A CONFIGURED minter that fails refuses the scan. It does NOT
+		// fall through to the master key, which is what this used to do
+		// for "image" mode on the argument that "losing the SBOM is a
+		// worse outcome than the older credential".
+		//
+		// That trade is inverted. Losing one scan is recoverable and
+		// recovers itself: the artifact keeps its previous status, and
+		// the sweep re-queues it (main.go runSweepRegistered). Putting
+		// the fleet-wide key inside a pod built specifically to process
+		// UNTRUSTED CONTENT -- the one place in this system where a
+		// credential is most exposed -- is not recoverable by anything.
+		//
+		// isolated_grype.go already reasoned it out the right way
+		// ("Losing one re-evaluation round is cheap; handing
+		// untrusted-content pods the fleet-wide key to avoid it is
+		// not"); this is the same rule, applied to the path that
+		// actually runs on every image.
+		//
+		// Transient failures are absorbed by mintWithRetry rather than
+		// by a weaker credential.
 		if s.cfg.MintScanToken != nil {
-			token, err := s.cfg.MintScanToken(artifactID)
-			if err == nil && token != "" {
-				env["SCM_SCAN_TOKEN"] = token
-				minted = true
-			} else if s.cfg.SubCommand == "sbom-doc" {
-				// See needsAPICallback above: no silent downgrade to the
-				// master key on the read path.
-				return nil, fmt.Errorf("mint scan token for sbom re-evaluation of %q: %w", artifactID, err)
+			token, err := mintWithRetry(s.cfg.MintScanToken, artifactID)
+			if err != nil {
+				return nil, fmt.Errorf("mint scan token for %q: %w", artifactID, err)
 			}
-			// For "image" mode a minting failure falls through to the
-			// API key below rather than producing a Job that cannot
-			// upload: losing the SBOM is a worse outcome than the older
-			// credential.
-		}
-		if !minted && s.cfg.SubCommand != "sbom-doc" {
+			env["SCM_SCAN_TOKEN"] = token
+		} else if s.cfg.SubCommand != "sbom-doc" {
+			// No minter configured AT ALL -- a deployment that predates
+			// scan tokens. That is a different thing from one whose
+			// minter is broken, and it still needs a credential to
+			// upload with.
 			secretEnv = append(secretEnv, k8sjob.SecretEnvVar{Name: "SCM_API_KEY", SecretName: s.cfg.APIKeySecretName, SecretKey: s.cfg.APIKeySecretKey})
 		}
 	}

@@ -519,9 +519,15 @@ func TestIsolatedTrivyScanner_SBOMDocMintFailureIsAnError(t *testing.T) {
 	}
 }
 
-// TestIsolatedTrivyScanner_ImageModeStillFallsBackToAPIKey guards the
-// other half of that asymmetry: the upload path's fallback must stay.
-func TestIsolatedTrivyScanner_ImageModeStillFallsBackToAPIKey(t *testing.T) {
+// A CONFIGURED minter that fails refuses the scan rather than handing
+// the pod the fleet-wide key.
+//
+// This test used to assert the opposite -- that image mode "should fall
+// back to SCM_API_KEY so a generated SBOM is not lost". That trade is
+// inverted: a lost scan is re-queued by the sweep, while the master key
+// inside a pod built to process untrusted content is not recoverable by
+// anything. Report 2026-09-09, S-4.
+func TestIsolatedTrivyScanner_ImageModeRefusesWhenMintingFails(t *testing.T) {
 	client := &recordingJobClient{
 		fakeJobClient: fakeJobClient{
 			namespace:      "test-ns",
@@ -540,10 +546,51 @@ func TestIsolatedTrivyScanner_ImageModeStillFallsBackToAPIKey(t *testing.T) {
 		MintScanToken:    func(string) (string, error) { return "", errors.New("store unavailable") },
 	})
 
-	if _, err := s.ScanForArtifact(context.Background(), "alpine:3.19", "artifact-7"); err != nil {
-		t.Fatalf("image mode must not fail on a minting error: %v", err)
+	_, err := s.ScanForArtifact(context.Background(), "alpine:3.19", "artifact-7")
+	if err == nil {
+		t.Fatal("a failing minter must refuse the scan, not downgrade to the master key")
 	}
-	// SCM_API_KEY arrives as a secretKeyRef, never a plain value.
+	// The message has to reach ClassifyScanError's "mint scan token"
+	// pattern, or the artifact records reason "unknown" and an operator
+	// cannot tell this apart from a scanner crash.
+	if reason, _ := ClassifyScanError(err.Error()); reason != "token_mint_failed" {
+		t.Errorf("reason = %q, want token_mint_failed (error was %v)", reason, err)
+	}
+	// And no Job may have been created carrying the master key.
+	for _, j := range client.createdJobs {
+		for _, ev := range j.Spec.Template.Spec.Containers[0].Env {
+			if ev.Name == "SCM_API_KEY" {
+				t.Error("SCM_API_KEY was put in a scan Job after minting failed")
+			}
+		}
+	}
+}
+
+// A deployment with NO minter configured at all is a different case from
+// one whose minter is broken: it predates scan tokens and still needs a
+// credential to upload with. That path must keep working.
+func TestIsolatedTrivyScanner_NoMinterConfiguredStillUsesAPIKey(t *testing.T) {
+	client := &recordingJobClient{
+		fakeJobClient: fakeJobClient{
+			namespace:      "test-ns",
+			statusSequence: []jobStatusResult{{succeeded: true}},
+			podName:        "scm-scan-abc-xyz",
+			logs:           `{"findings":[]}`,
+		},
+	}
+	s := NewIsolatedTrivyScanner(client, IsolatedTrivyConfig{
+		SubCommand:       "image",
+		CacheClaimName:   "scm-trivy-db-cache",
+		PollInterval:     time.Millisecond,
+		APIBaseURL:       "http://monitor-api:8080",
+		APIKeySecretName: "scm-monitor-api-auth",
+		APIKeySecretKey:  "API_KEY",
+		// MintScanToken deliberately nil.
+	})
+
+	if _, err := s.ScanForArtifact(context.Background(), "alpine:3.19", "artifact-7"); err != nil {
+		t.Fatalf("no minter configured must still scan: %v", err)
+	}
 	var sawAPIKey bool
 	for _, ev := range client.createdJobs[0].Spec.Template.Spec.Containers[0].Env {
 		if ev.Name == "SCM_API_KEY" && ev.ValueFrom != nil && ev.ValueFrom.SecretKeyRef != nil {
@@ -551,6 +598,6 @@ func TestIsolatedTrivyScanner_ImageModeStillFallsBackToAPIKey(t *testing.T) {
 		}
 	}
 	if !sawAPIKey {
-		t.Error("image mode should fall back to SCM_API_KEY so a generated SBOM is not lost")
+		t.Error("with no minter configured the Job still needs SCM_API_KEY to upload")
 	}
 }
