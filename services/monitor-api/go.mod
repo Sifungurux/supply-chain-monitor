@@ -9,7 +9,7 @@ go 1.26.0
 // it with `go mod download && go mod verify` rather than re-resolving
 // with `go mod tidy` -- tech-debt-audit.md item #5, since fixed. This
 // comment used to say otherwise.
-require github.com/jackc/pgx/v5 v5.10.0
+require github.com/jackc/pgx/v5 v5.11.0
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
