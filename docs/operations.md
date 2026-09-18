@@ -629,6 +629,46 @@ Only mutations are audited. The dashboard issues several GETs every ten
 seconds per open tab, and an audit trail nobody can grep is not an audit
 trail — read volume belongs in `/metrics`, where it already is.
 
+#### Scopes
+
+`monitorApi.apiKeyScopes` limits what each named client may do, as
+`name=scope|scope;name2=scope` (semicolons and pipes, for the same
+`strvals` reason as above):
+
+| Scope | Covers |
+|---|---|
+| `read` | every GET |
+| `register` | `POST /artifacts`, `/artifacts/bulk` |
+| `scan` | `POST /artifacts/{id}/scan` — asking for a scan, nothing else |
+| `results:write` | submitting results: findings, per-artifact VEX, fleet VEX |
+| `stage:write` | `POST /artifacts/{id}/stage` |
+| `documents:write` | uploading SBOM/SARIF documents |
+| `admin` | implies every scope; required alone for delete, maintainer and risk acceptance |
+
+A denial is **403, not 401** — the credential is valid and identified,
+it simply may not do this.
+
+`scan` and `results:write` are separate deliberately. While they were
+one scope, "may ask for a rescan" and "may declare a finding suppressed"
+were the same permission, so the dashboard key — attached by the
+dashboard's nginx proxy to every request it forwards, and reachable by
+anyone who can reach the dashboard — could suppress findings across the
+whole fleet. `stage:write` is the same reasoning applied to `admin`: a
+build pipeline reports which stage an artifact reached without also
+being able to delete it or accept its risk.
+
+**Enforcement is default-closed.** A client that authenticates but has
+no entry can do nothing — every request answers 403, and it is named in
+a startup warning. Adding a consumer means adding its entry. Leaving
+`apiKeyScopes` empty disables enforcement altogether, which the binary
+refuses to start into when more than one client is configured; set
+`monitorApi.apiKeyScopesStrict: false` to accept that deliberately
+(a single-consumer install, or a laptop).
+
+Scan workers are not scope-checked. They present a per-Job token rather
+than a key — scoped to one artifact and one document kind, single use,
+expiring with the Job — so the gate above never applies to them.
+
 ### Bringing your own secrets
 
 `postgres.credentials.password` and `monitorApi.apiKey` are **empty**

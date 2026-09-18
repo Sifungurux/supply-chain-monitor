@@ -65,7 +65,7 @@ AUTH=(-H "Authorization: Bearer $KEY")
 curl -s "${AUTH[@]}" localhost:18080/api/v1/stats
 ```
 
-**Scopes.** Keys can be named per client and scoped to `read`, `register`, `scan`, `documents:write` or `admin`. A denial is **403, not 401** — the credential is valid, it just may not do this. See [Operations § Per-client API keys](operations.md#per-client-api-keys).
+**Scopes.** Keys can be named per client and scoped to `read`, `register`, `scan`, `results:write`, `stage:write`, `documents:write` or `admin`. `scan` asks for a scan; submitting findings or VEX is `results:write`; moving an artifact between pipeline stages is `stage:write`. A denial is **403, not 401** — the credential is valid, it just may not do this. Enforcement is default-closed: a key with no entry in `monitorApi.apiKeyScopes` can do nothing. See [Operations § Per-client API keys](operations.md#per-client-api-keys).
 
 **Health.** `/healthz` and `/metrics` need no key. `/healthz` reports the process only; `/readyz` actually pings Postgres.
 

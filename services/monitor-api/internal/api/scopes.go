@@ -14,7 +14,7 @@ import (
 // tokens) every scan worker all held the same key, so compromising the
 // least of them was compromising all of them.
 //
-// Five scopes, deliberately coarse. A permission model nobody can hold
+// Seven scopes, deliberately coarse. A permission model nobody can hold
 // in their head gets set to "everything" by the first person in a
 // hurry, and then it is worse than none because it looks like there is
 // one.
@@ -25,10 +25,34 @@ const (
 	ScopeRead = "read"
 	// ScopeRegister creates artifacts (POST /artifacts, /artifacts/bulk).
 	ScopeRegister = "register"
-	// ScopeScan triggers scans, and covers submitting scan RESULTS
-	// (findings, VEX) -- see routeScopes for why those are here rather
-	// than under admin.
+	// ScopeScan ASKS FOR A SCAN and nothing else (POST
+	// /artifacts/{id}/scan).
+	//
+	// It used to also cover submitting scan RESULTS. That made "may
+	// request a rescan" and "may declare a finding suppressed" the same
+	// permission, so the dashboard key -- held by anyone who can reach
+	// the dashboard -- could silence findings across the whole fleet.
+	// Triggering work is a request; asserting its outcome is an
+	// assertion about risk. See ScopeResultsWrite.
 	ScopeScan = "scan"
+	// ScopeResultsWrite submits scan RESULTS: findings, per-artifact VEX
+	// and fleet-wide VEX.
+	//
+	// Separate from ScopeAdmin rather than folded into it because an
+	// external scanner genuinely needs to post what it found, and
+	// requiring admin for that would hand every CI scanner full
+	// authority -- worse than no scopes at all. Separate from ScopeScan
+	// because suppressing a finding is not the same act as asking for
+	// one to be looked for.
+	ScopeResultsWrite = "results:write"
+	// ScopeStageWrite moves an artifact through pipeline stages
+	// (POST /artifacts/{id}/stage).
+	//
+	// Carved out of ScopeAdmin so a CI pipeline can report "this
+	// reached staging" without also being able to delete artifacts,
+	// reassign maintainers or accept risk. That is the whole set a
+	// build pipeline needs beyond register/scan/read.
+	ScopeStageWrite = "stage:write"
 	// ScopeDocumentsWrite uploads generated SBOM/SARIF documents. This
 	// is what a scan worker would need if it used a key at all; it uses
 	// a per-Job token instead (see scantoken.go), which is narrower
@@ -40,7 +64,7 @@ const (
 )
 
 // AllScopes is every scope, in a stable order for logging.
-var AllScopes = []string{ScopeAdmin, ScopeDocumentsWrite, ScopeRead, ScopeRegister, ScopeScan}
+var AllScopes = []string{ScopeAdmin, ScopeDocumentsWrite, ScopeRead, ScopeRegister, ScopeResultsWrite, ScopeScan, ScopeStageWrite}
 
 func validScope(s string) bool {
 	for _, known := range AllScopes {
@@ -90,11 +114,15 @@ func (s Scopes) List() []string {
 // KeyScopes maps client names to their scopes (API_KEY_SCOPES /
 // monitorApi.apiKeyScopes).
 //
-// THE ZERO VALUE DISABLES ENFORCEMENT ENTIRELY, and that is the state
-// every existing deployment upgrades into: no scopes configured means
-// every key does what it did before this existed. Enforcement turning
-// itself on during an upgrade would lock out the dashboard, the sweep
-// CronJob and every CI consumer at once.
+// THE ZERO VALUE DISABLES ENFORCEMENT ENTIRELY: no scopes configured
+// means every key does what it did before this existed.
+//
+// That used to be where every upgrading deployment landed. It is not
+// any more -- the chart ships scopes for every client it generates, and
+// main.go refuses to start into this state when several clients
+// authenticate, since all of them would be unrestricted and differ only
+// in the audit log. The zero value survives for the single-key case,
+// where scoping one consumer against itself is ceremony.
 type KeyScopes struct {
 	byClient map[string]Scopes
 }
@@ -154,24 +182,39 @@ func ParseKeyScopes(raw string) (KeyScopes, []string) {
 
 // For returns a client's scopes.
 //
-// A client with no entry while enforcement is ON is UNRESTRICTED, not
-// denied. That is the compatibility path the report asks for -- the
-// legacy API_KEY authenticates as "default" and is what the dashboard,
-// the sweep CronJob and every existing consumer present -- but it is
-// also a hole, so NewRouter warns about each one by name at startup
-// rather than letting it pass quietly.
+// A client with no entry while enforcement is ON gets NOTHING. This is
+// DEFAULT-CLOSED, and it is the opposite of what this used to do.
+//
+// The old behaviour -- unlisted means unrestricted -- was a deliberate
+// compatibility path: it meant switching scopes on could not lock out a
+// consumer whose entry had not caught up. The cost is that the failure
+// mode ran the wrong way. A consumer added and forgotten did not break
+// loudly; it quietly held full authority, which is precisely the state
+// scopes exist to prevent, and nothing in a working deployment ever
+// revealed it.
+//
+// Default-closed inverts that: a missing entry now costs the consumer
+// its access instead of costing everyone else their isolation. The
+// migration is carried by configuration rather than by code -- the
+// chart ships scopes for every client it generates, and main.go refuses
+// to start a multi-client deployment with no scopes at all rather than
+// letting one drift into this path unnoticed.
 func (k KeyScopes) For(client string) Scopes {
 	if !k.Enforced() {
 		return Scopes{unrestricted: true}
 	}
-	if s, ok := k.byClient[client]; ok {
-		return s
-	}
-	return Scopes{unrestricted: true}
+	// Zero value: no scopes, and NOT unrestricted. Allows() then denies
+	// everything, and requireScope answers 403.
+	return k.byClient[client]
 }
 
 // Unscoped returns the configured client names that have no entry --
-// i.e. the ones running unrestricted while enforcement is on.
+// i.e. the ones that can now do NOTHING while enforcement is on.
+//
+// Still worth naming at startup, but the warning it feeds says the
+// opposite of what it used to: these keys authenticate and then fail
+// every route with 403, which is a configuration mistake that looks
+// like a broken consumer.
 func (k KeyScopes) Unscoped(clients []string) []string {
 	if !k.Enforced() {
 		return nil
