@@ -95,7 +95,7 @@ ifeq ($(SCM_RUNTIME),podman)
 export DOCKER_HOST := $(shell (podman system connection ls --format json | jq -r '.[] | select(.Default==true) | .URI') 2>/dev/null)
 endif
 
-.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets backup-key remirror gateway-api-install build test-image vulncheck trivy-config deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap check-alert-rules check-duplicate-keys check-k8s-manifests check-go-image-pin helm-lint helm-template test-backup-scripts db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
+.PHONY: cluster-up cluster-down cluster-destroy flux-install git-auth git-test chart-secrets check-live-secrets backup-key remirror gateway-api-install build test-image vulncheck trivy-config deploy undeploy port-forward logs scan-jobs test-artifact test test-api test-postgres test-dashboard test-swagger-docs check-dashboard-configmap check-alert-rules check-duplicate-keys check-k8s-manifests check-go-image-pin helm-lint helm-template test-backup-scripts db-shell lock-deps db-backup db-restore db-backups-list load-test-clamav
 
 cluster-up:
 	SCM_RUNTIME=$(SCM_RUNTIME) ./cluster/create-cluster.sh
@@ -536,6 +536,17 @@ db-backup:
 # Lists what's in the scm-postgres-backups PVC (see cluster/postgres-list-backups.sh).
 db-backups-list:
 	./cluster/postgres-list-backups.sh
+
+# Proves the credentials that leaked in git history are refused by a LIVE
+# cluster -- run it against every cluster that has ever had this chart
+# installed. Optional: make check-live-secrets CONTEXT=other-cluster
+#
+# Deliberately NOT part of `make test`: it needs a running cluster, and
+# `test` is what CI runs, where there isn't one. A check that skips
+# itself when it cannot connect is the failure mode this is guarding
+# against in the first place.
+check-live-secrets:
+	./cluster/check-live-secrets.sh $(if $(CONTEXT),--context $(CONTEXT),)
 
 # Restores a backup into the live database -- destructive, asks for
 # confirmation. BACKUP is a filename from `make db-backups-list`, e.g.:

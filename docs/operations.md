@@ -665,6 +665,35 @@ pod restart against the existing PVC won't pick up a new one).
 Secret's *content* changing doesn't trigger a rollout on its own, the
 same as any other running pod's env vars.
 
+#### Confirming a rotation actually took
+
+```bash
+make check-live-secrets                          # current kube context
+make check-live-secrets CONTEXT=other-cluster    # any other
+```
+
+Run it against **every cluster that has ever had this chart installed** —
+a credential is only rotated where it was actually rotated.
+
+This exists because rotating is not the same as having rotated, and
+Postgres has a failure mode that makes the difference invisible. It reads
+`POSTGRES_PASSWORD` only on initdb against an empty volume, so updating
+the Secret without the `ALTER ROLE` step above leaves the **old password
+valid indefinitely** while the Secret, the dashboard, the logs and every
+Flux reconcile look completely healthy. Nothing reports a problem,
+because from Kubernetes' point of view there isn't one.
+
+The check presents the credentials that were removed from this repo's
+`values.yaml` in `aebf6fe` — public in git history since 2026-09-02 — and
+requires each to be actively *refused*: a `password authentication
+failed` from Postgres, a literal `401` from the API.
+
+It reports three outcomes, not two. **Unreachable is `INCONCLUSIVE`, not a
+pass**, and exits non-zero. A check that reads "could not connect" as
+"safe" is the same shape as the backup that exited 0 on empty files.
+
+It needs a live cluster, so it is deliberately not part of `make test`.
+
 **Without Flux** (a bare `helm install`/`helm upgrade`, or testing
 locally): pass real values directly —
 `--set postgres.credentials.password=... --set monitorApi.apiKey=...`,
