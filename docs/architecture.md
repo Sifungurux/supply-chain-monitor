@@ -963,6 +963,10 @@ a rebuild, so nothing else notices a new image is available.
 
 ## Known limitations
 
+Each limitation below is either scheduled, deferred or deliberately accepted;
+[docs/roadmap.md](roadmap.md) records which, and carries the trigger that
+would reopen anything declined.
+
 - Auth keys are **named per client** (`monitorApi.apiKeys`), so a
   request is attributed in the audit log and one consumer can be revoked
   without re-keying the others. A legacy shared `monitorApi.apiKey`

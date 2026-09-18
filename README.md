@@ -294,4 +294,5 @@ services/monitor-api/          the Go service and its tests
 | [docs/operations.md](docs/operations.md) | The full manual — every feature, flag and failure mode, with the reasoning |
 | [docs/architecture.md](docs/architecture.md) | Design, data model, and known limitations |
 | [docs/tech-debt-audit.md](docs/tech-debt-audit.md) | What is knowingly unfinished, scored |
+| [docs/roadmap.md](docs/roadmap.md) | What is planned, what is deferred, and what was declined — with the trigger that would reopen each |
 | [docs/load-test-2026-08-13.md](docs/load-test-2026-08-13.md), `docs/scan-concurrency-*.md` | The measurements behind the capacity numbers above |
