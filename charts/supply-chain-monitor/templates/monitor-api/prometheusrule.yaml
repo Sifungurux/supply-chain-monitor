@@ -114,4 +114,28 @@ spec:
           annotations:
             summary: "More scans are failing than succeeding"
             description: "Every scanner failed for the majority of recent scans. Check scanner Jobs and the grype/trivy DB caches."
+        # A scan Job needs a per-Job token to upload its documents back.
+        # Minting one is a local database write that should never fail,
+        # and mintWithRetry already absorbs the transient case -- so any
+        # sustained rate here is a real, persistent failure.
+        #
+        # This is deliberately alertable rather than self-healing. The
+        # scan used to fall back to the MASTER API key when minting
+        # failed, so it kept working; that put the fleet-wide credential
+        # inside a pod built to process untrusted content, and the trade
+        # was inverted. Now the scan fails closed instead, which is
+        # correct and completely silent -- the artifact keeps its old
+        # status and the sweep re-queues it, so a minter broken for
+        # everything reads as "scans are a bit slow".
+        #
+        # WHOEVER IS PAGED BY THIS: the fix is the database or the
+        # token store, never reinstating the fallback.
+        - alert: ScmScanTokenMintFailing
+          expr: rate(scm_scan_token_mint_failures_total[15m]) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Scans are being refused because their upload credential cannot be minted"
+            description: "monitor-api cannot mint per-Job scan tokens, so image scans fail closed rather than falling back to the master API key. Findings are going stale without any artifact reporting a problem. Check Postgres and the scan_tokens table."
 {{- end }}
