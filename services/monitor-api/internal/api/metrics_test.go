@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -61,6 +62,7 @@ func TestMetrics_ExposesTypeAndHelpForEverySample(t *testing.T) {
 		"scm_scans_started_total",
 		"scm_scans_succeeded_total",
 		"scm_scans_failed_total",
+		"scm_scan_token_mint_failures_total",
 		"scm_http_responses_total",
 		"scm_process_uptime_seconds",
 		"go_goroutines",
@@ -165,6 +167,57 @@ func TestMetrics_CountsScanOutcomes(t *testing.T) {
 	}
 	if got := metricValue(t, body, "scm_scans_failed_total"); got != 0 {
 		t.Errorf("scm_scans_failed_total = %v, want 0", got)
+	}
+}
+
+// A scan refused because its upload credential could not be minted
+// must move scm_scan_token_mint_failures_total.
+//
+// Driven through a real scan rather than by calling the recorder,
+// because the wiring is the whole point: the counter lives in this
+// package, the failure happens in internal/scanner, and they are joined
+// only by runScan's classification loop matching the reason string. A
+// test that called recordScanTokenMintFailure directly would pass with
+// that branch deleted.
+//
+// The other half of the chain -- that the real isolated scanner's error
+// text classifies to token_mint_failed -- is pinned by
+// internal/scanner/isolated_trivy_test.go. Together they cover mint
+// failure through to scrape.
+func TestMetrics_CountsScanTokenMintFailures(t *testing.T) {
+	store := artifact.NewMemStore()
+	h := api.NewRouter(api.Config{
+		Store:   store,
+		Tracker: pipeline.NewTracker([]string{"build", "scan"}),
+		APIKey:  testAPIKey,
+		// The error text the isolated scanners actually produce when
+		// mintWithRetry gives up -- see isolated_trivy.go's
+		// "mint scan token for %q: %w".
+		Scanners: scanner.Registry{artifact.TypeImage: {&fakeScanner{
+			err: errors.New(`mint scan token for "abc123": store unavailable`),
+		}}},
+	})
+	a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	if got := scrapeCounter(t, h, "scm_scan_token_mint_failures_total"); got != 0 {
+		t.Fatalf("counter started at %d, want 0", got)
+	}
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/artifacts/"+a.ID+"/scan", nil)
+	if rec.Code != http.StatusAccepted && rec.Code != http.StatusOK {
+		t.Fatalf("scan status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := waitForScan(t, store, a.ID); got.Status != artifact.StatusFailed {
+		t.Fatalf("status = %q, want %q", got.Status, artifact.StatusFailed)
+	}
+
+	if got := scrapeCounter(t, h, "scm_scan_token_mint_failures_total"); got != 1 {
+		t.Errorf("scm_scan_token_mint_failures_total = %d, want 1", got)
+	}
+	// The refusal must not be miscounted as a generic scan failure
+	// going missing: it is BOTH a failed scan and a mint failure.
+	if got := scrapeCounter(t, h, "scm_scans_failed_total"); got != 1 {
+		t.Errorf("scm_scans_failed_total = %d, want 1", got)
 	}
 }
 

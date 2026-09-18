@@ -61,6 +61,24 @@ type metrics struct {
 	// visible outside the pod logs.
 	authFailures  atomic.Int64
 	authThrottled atomic.Int64
+	// scanTokenMintFailures counts scans REFUSED because the per-Job
+	// upload credential could not be minted.
+	//
+	// It exists because that refusal is otherwise silent. An image scan
+	// used to fall back to the master API key here, on the argument
+	// that losing the SBOM was worse than using the older credential;
+	// that trade was inverted and the fallback removed, so the scan now
+	// fails closed instead of putting the fleet-wide key inside a pod
+	// built to process untrusted content.
+	//
+	// Failing closed is the right outcome and an invisible one: the
+	// artifact keeps its previous status and the sweep re-queues it, so
+	// a minter that is broken for everything looks like scans being
+	// slightly slow. This counter is what makes it look like a problem.
+	//
+	// mintWithRetry has already absorbed the transient case before this
+	// moves, so any sustained rate is a real failure, not a blip.
+	scanTokenMintFailures atomic.Int64
 	// scanDurations is the wall-clock time of the last few completed
 	// full scans, oldest first -- the one thing in here that is not an
 	// atomic, because it is the one thing that is not an independent
@@ -138,6 +156,16 @@ func (m *metrics) scanDurationStats() (last, mean time.Duration, n int) {
 // successful authentication touches neither.
 func (m *metrics) recordAuthFailure()   { m.authFailures.Add(1) }
 func (m *metrics) recordAuthThrottled() { m.authThrottled.Add(1) }
+
+// recordScanTokenMintFailure is called from runScan's error
+// classification loop (scan.go), where every scan error from every
+// layer already converges -- so counting there costs no new plumbing
+// and cannot miss a path that reports the failure differently.
+//
+// Counted per FAILING SCANNER rather than per scan: two scanners
+// failing to mint in one round is two failures, which is what a _total
+// on a failure counter should mean and what rate() reads correctly.
+func (m *metrics) recordScanTokenMintFailure() { m.scanTokenMintFailures.Add(1) }
 
 func (m *metrics) recordResponse(status int) {
 	class := status / 100
@@ -241,6 +269,8 @@ func (h *handler) metricsHandler(w http.ResponseWriter, r *http.Request) {
 	for class := 1; class < len(h.metrics.httpResponses); class++ {
 		fmt.Fprintf(w, "scm_http_responses_total{class=\"%dxx\"} %d\n", class, h.metrics.httpResponses[class].Load())
 	}
+
+	counter("scm_scan_token_mint_failures_total", "Scans refused because the per-Job upload credential could not be minted. The scan fails closed rather than falling back to the master API key.", h.metrics.scanTokenMintFailures.Load())
 
 	counter("scm_auth_failures_total", "Requests rejected with 401 because the API key was missing or wrong.", h.metrics.authFailures.Load())
 	counter("scm_auth_throttled_total", "Requests refused with 429 because that client address had already failed authentication too often.", h.metrics.authThrottled.Load())
