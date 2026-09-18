@@ -20,11 +20,15 @@ data:
   # rather than the auth Secret because scopes are not credentials, and
   # that Secret rolls the pod on change via checksum/api-key.
   API_KEY_SCOPES: {{ include "supply-chain-monitor.apiKeyScopes" . | quote }}
-  # Refuse to start when a named key has no scope entry, instead of
-  # running it unrestricted and warning. Off by default so adding a
-  # consumer cannot brick an upgrade before its scopes catch up; on
-  # once a deployment has finished scoping, so it cannot regress
-  # silently (report S2).
+  # Refuse to start when API_KEY_SCOPES above is EMPTY while several
+  # clients authenticate -- i.e. when all of them are unrestricted and
+  # differ only in the audit log. On by default, which is safe because
+  # the shipped API_KEY_SCOPES is not empty.
+  #
+  # It does NOT fire for a key merely missing an entry: enforcement is
+  # default-closed, so that key can already do nothing, and taking the
+  # API down to report one broken consumer is worse than the consumer
+  # being broken. That case warns and names the client (report S2).
   API_KEY_SCOPES_STRICT: {{ .Values.monitorApi.apiKeyScopesStrict | quote }}
   # Optional bearer token for GET /metrics (report S4). Empty leaves the
   # endpoint open, which is what every existing deployment has. Not a

@@ -946,19 +946,41 @@ monitorApi:
   # rather than working for anyone who found the URL. Add `register`
   # only if dashboard.allowManualRegistration is on.
   #
-  # Leaving this empty enforces nothing at all -- every key, named or
-  # not, runs unrestricted (see KeyScopes.Enforced in
-  # internal/api/scopes.go).
-  apiKeyScopes: ""
-  # Refuse to start when a named key has no entry in apiKeyScopes above,
-  # rather than running it unrestricted and only warning.
+  # ENFORCEMENT IS DEFAULT-CLOSED. A client that authenticates but has
+  # no entry here can do NOTHING -- every request it makes answers 403.
+  # It used to be the opposite (an unlisted client ran unrestricted), so
+  # ADDING A CONSUMER NOW MEANS ADDING ITS ENTRY HERE. That is the point:
+  # the old default failed silently in the insecure direction, and a
+  # forgotten consumer held full authority with nothing to reveal it.
   #
-  # Off by default: on by default would brick an upgrade the moment a
-  # new consumer is added and its scope entry has not caught up, turning
-  # a security control into an outage. Turn it on once every key is
-  # scoped -- then a consumer added later fails loudly at startup
-  # instead of quietly running with full authority (report S2).
-  apiKeyScopesStrict: false
+  # The default below matches exactly what cluster/chart-secrets.sh
+  # generates -- it always creates "dashboard" and "sweep", and the
+  # legacy shared monitorApi.apiKey authenticates as "default". Change
+  # the key set (API_KEY_NAMES) and this must change with it.
+  #
+  # "default=admin" keeps the shared operator key working. Retire it by
+  # setting monitorApi.apiKey to "" once every consumer has its own key,
+  # then drop the entry.
+  #
+  # Setting this to "" disables enforcement entirely and every key runs
+  # unrestricted (see KeyScopes.Enforced in internal/api/scopes.go) --
+  # which apiKeyScopesStrict below refuses to start over when more than
+  # one client is configured.
+  apiKeyScopes: "default=admin;dashboard=read|scan;sweep=read|scan"
+  # Refuse to start when apiKeyScopes above is EMPTY while several
+  # clients authenticate -- i.e. when every one of them is unrestricted
+  # and they differ only in the audit log.
+  #
+  # On by default, which is safe because the shipped apiKeyScopes is no
+  # longer empty. It does NOT fire for a client that is merely missing
+  # an entry: enforcement is default-closed, so that client can already
+  # do nothing, and taking the whole API down to report one broken
+  # consumer is a worse outcome than the consumer being broken. That
+  # case is a startup warning naming the client.
+  #
+  # Set to false to run several unrestricted keys deliberately -- a
+  # single-consumer install or a laptop, where scoping is ceremony.
+  apiKeyScopesStrict: true
   # Serve the API over TLS inside the cluster, from the same private CA
   # that already issues for the Gateway and the registry.
   #

@@ -2339,33 +2339,58 @@ func runAPIServer() {
 			"invalid", strings.Join(invalidScopes, ", "),
 			"valid_scopes", strings.Join(api.AllScopes, ", "))
 	}
+	// Every client that authenticates, including the legacy shared key's
+	// "default" identity.
+	//
+	// legacyClientNameForLog returns "" once the shared key has been
+	// retired (monitorApi.apiKey: ""), which is a documented end state,
+	// not an error. Appending that empty name unfiltered would invent a
+	// nameless client -- harmless while unscoped clients only warned,
+	// but a refusal to start once they do not.
+	clients := apiKeys.Names()
+	if legacy := legacyClientNameForLog(apiKey); legacy != "" {
+		clients = append(clients, legacy)
+	}
 	if keyScopes.Enforced() {
-		// Every client that authenticates, including the legacy shared
-		// key's "default" identity.
-		clients := append(apiKeys.Names(), legacyClientNameForLog(apiKey))
 		if unscoped := keyScopes.Unscoped(clients); len(unscoped) > 0 {
-			// NAMED, not counted. An unlisted client runs unrestricted
-			// so that enabling scopes cannot lock out a deployment
-			// mid-upgrade -- but that is a hole, and a hole nobody can
-			// see is one nobody closes.
+			// NAMED, not counted. Enforcement is default-closed (see
+			// KeyScopes.For), so an unlisted client no longer runs
+			// unrestricted -- it can do nothing at all, and every
+			// request it makes answers 403.
 			//
-			// API_KEY_SCOPES_STRICT turns the hole into a refusal. Off
-			// by default deliberately: on by default would brick an
-			// upgrade the moment a new consumer is added and its scope
-			// entry has not caught up, which turns a security control
-			// into an outage -- the same reasoning the short-key check
-			// below already applies. A deployment that has finished
-			// scoping its keys turns it on and can no longer regress
-			// silently by adding one.
-			if getenvBool("API_KEY_SCOPES_STRICT", false) {
-				fatal("API_KEY_SCOPES_STRICT is set and some API keys have no scopes -- refusing to start rather than run them unrestricted",
-					"unscoped_clients", strings.Join(unscoped, ", "),
-					"valid_scopes", strings.Join(api.AllScopes, ", "))
-			}
-			slog.Warn("some API keys have no scopes configured and run UNRESTRICTED -- give them an entry in monitorApi.apiKeyScopes to close this (set API_KEY_SCOPES_STRICT=true to refuse instead)",
-				"unscoped_clients", strings.Join(unscoped, ", "))
+			// That is the safe direction, so it is a warning rather
+			// than a refusal: the deployment is not insecure, one
+			// consumer is misconfigured. Fataling would take the whole
+			// API down to report a broken client, which is a worse
+			// outcome than the client being broken. The failure is
+			// self-announcing either way -- a consumer that can do
+			// nothing is noticed immediately.
+			slog.Warn("some API keys have no scopes configured and can do NOTHING -- every request they make will answer 403; give them an entry in monitorApi.apiKeyScopes",
+				"unscoped_clients", strings.Join(unscoped, ", "),
+				"valid_scopes", strings.Join(api.AllScopes, ", "))
 		}
 		slog.Info("API key scopes are enforced", "clients", len(clients))
+	} else if len(clients) > 1 {
+		// Scopes off entirely while SEVERAL clients authenticate. Every
+		// one of them holds full authority, which is the exact state
+		// named keys exist to avoid -- the dashboard, the sweep and any
+		// CI consumer differ only in the audit log.
+		//
+		// Refusing to start is deliberate here, where it was not for
+		// the unscoped-client case above: this deployment IS insecure,
+		// not merely misconfigured, and it cannot announce itself
+		// because everything works perfectly.
+		//
+		// Read directly rather than through getenvBool: the escape
+		// hatch has to distinguish "explicitly set to false" from
+		// "unset", and getenvBool folds both into its fallback.
+		if os.Getenv("API_KEY_SCOPES_STRICT") != "false" {
+			fatal("several API keys are configured with no scopes at all, so every one of them is unrestricted -- refusing to start; set monitorApi.apiKeyScopes, or apiKeyScopesStrict: false to accept this deliberately",
+				"clients", strings.Join(clients, ", "),
+				"valid_scopes", strings.Join(api.AllScopes, ", "))
+		}
+		slog.Warn("several API keys are configured with no scopes and all run UNRESTRICTED -- apiKeyScopesStrict is explicitly false, so this was accepted deliberately",
+			"clients", strings.Join(clients, ", "))
 	}
 	// A SHORT KEY IS A WARNING, NOT A REFUSAL. Fataling here would brick
 	// a running deployment on upgrade over a key that is weak but
