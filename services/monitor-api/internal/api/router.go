@@ -217,24 +217,33 @@ func NewRouter(cfg Config) http.Handler {
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/components/diff", requireScope(ScopeRead, h.listComponentDiff))
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/policy", requireScope(ScopeRead, h.getPolicy))
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/scan", requireScope(ScopeScan, h.scanArtifact))
-	// Stage and maintainer describe OWNERSHIP and pipeline position, not
-	// scan results -- changing them is an administrative act.
-	mux.HandleFunc("POST /api/v1/artifacts/{id}/stage", requireScope(ScopeAdmin, h.updateStage))
+	// Stage is where a build pipeline reports progress, so it gets its
+	// own narrow scope rather than admin: a CI runner that can say "this
+	// reached staging" should not thereby be able to delete artifacts or
+	// accept risk. Maintainer stays admin -- it reassigns OWNERSHIP,
+	// which is not something a build step does.
+	mux.HandleFunc("POST /api/v1/artifacts/{id}/stage", requireScope(ScopeStageWrite, h.updateStage))
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/maintainer", requireScope(ScopeAdmin, h.updateMaintainer))
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/documents/{kind}", requireScope(ScopeDocumentsWrite, h.uploadDocument))
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/documents/{kind}", requireScope(ScopeRead, h.downloadDocument))
-	// Findings and VEX are scan RESULTS arriving by another route, so
-	// they sit under "scan" rather than "admin". An external scanner
-	// needs to submit them; making that require admin would hand every
-	// CI scanner full authority, which is worse than no scopes at all.
-	mux.HandleFunc("POST /api/v1/artifacts/{id}/findings", requireScope(ScopeScan, h.submitFindings))
-	mux.HandleFunc("POST /api/v1/artifacts/{id}/vex", requireScope(ScopeScan, h.uploadVEX))
+	// Findings and VEX are scan RESULTS arriving by another route. They
+	// are NOT admin -- an external scanner needs to submit them, and
+	// requiring admin would hand every CI scanner full authority, which
+	// is worse than no scopes at all.
+	//
+	// They are no longer "scan" either. Sharing that scope made
+	// requesting a rescan and declaring a finding suppressed the same
+	// permission, which handed fleet-wide suppression to the dashboard
+	// key -- i.e. to anyone who can reach the dashboard. results:write
+	// is the narrower thing an external scanner actually needs.
+	mux.HandleFunc("POST /api/v1/artifacts/{id}/findings", requireScope(ScopeResultsWrite, h.submitFindings))
+	mux.HandleFunc("POST /api/v1/artifacts/{id}/vex", requireScope(ScopeResultsWrite, h.uploadVEX))
 	// Fleet-wide VEX: one OpenVEX document applied to every artifact
 	// its `products` match. Same scope as the per-artifact upload --
 	// both are "assert something about findings", and a caller trusted
 	// to suppress a finding on one artifact is trusted to do it on the
 	// artifacts a document names.
-	mux.HandleFunc("POST /api/v1/vex", requireScope(ScopeScan, h.uploadFleetVEX))
+	mux.HandleFunc("POST /api/v1/vex", requireScope(ScopeResultsWrite, h.uploadFleetVEX))
 	// Risk acceptance is NOT a scan result, which is why it sits under
 	// admin while its two neighbours above do not: it is a decision to
 	// ship a known vulnerability, and a CI scanner able to make that

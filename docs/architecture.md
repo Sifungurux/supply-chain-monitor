@@ -973,9 +973,19 @@ would reopen anything declined.
   still authenticates, as the client `default`, so upgrading cannot lock
   a deployment out. Keys also carry **scopes**
   (`monitorApi.apiKeyScopes`): `read`, `register`, `scan`,
-  `documents:write` and `admin`, enforced per route in `NewRouter` so
-  the whole permission model is one readable block. A denial is 403,
-  not 401 — the credential is valid, it simply may not do this.
+  `results:write`, `stage:write`, `documents:write` and `admin`,
+  enforced per route in `NewRouter` so the whole permission model is one
+  readable block. A denial is 403, not 401 — the credential is valid, it
+  simply may not do this.
+
+  `scan` asks for a scan and nothing else. Submitting results — findings,
+  per-artifact VEX, fleet VEX — is `results:write`. The two were one
+  scope until the split, which made "may request a rescan" and "may
+  declare a finding suppressed" the same permission and so handed
+  fleet-wide suppression to the dashboard key, i.e. to anyone who could
+  reach the dashboard. `stage:write` is the same carve-out applied to
+  `admin`: a build pipeline reports which stage an artifact reached
+  without also being able to delete it or accept its risk.
 
 
   What remains, deliberately: scopes are configured in the chart rather
@@ -983,10 +993,18 @@ would reopen anything declined.
   report's H1 sketched a database-backed `api_keys` table with
   CRUD endpoints; the Secret-based form was chosen instead because it
   keeps credentials in the same place as every other secret this chart
-  manages, with no new admin surface to protect. And enforcement is
-  **opt-in**: with `apiKeyScopes` empty nothing is enforced, and once
-  set, a key with no entry still runs unrestricted (named in a startup
-  warning) so that scoping one consumer cannot break the others.
+  manages, with no new admin surface to protect.
+
+  Enforcement is **default-closed**. With `apiKeyScopes` set, a key with
+  no entry can do nothing — every request it makes answers 403, and it
+  is named in a startup warning. It used to run *unrestricted* instead,
+  so that scoping one consumer could not break the others; the cost was
+  that the failure ran the wrong way, and a consumer added and forgotten
+  quietly held full authority with nothing in a working deployment to
+  reveal it. Adding a consumer now means adding its entry. Leaving
+  `apiKeyScopes` empty still disables enforcement altogether, which the
+  server refuses to start into when more than one key is configured
+  unless `monitorApi.apiKeyScopesStrict` is explicitly `false`.
 - **Dashboard access is API access at the dashboard key's scope.** The
   key is no longer served to the browser -- `env.js` deliberately
   carries no `apiKey`, and an nginx `location /dash-api/` inside the pod
