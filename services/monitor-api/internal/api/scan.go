@@ -434,6 +434,16 @@ func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scann
 		slog.Warn("scan error", "artifact_id", a.ID, "err", raw)
 		reason, message := scanner.ClassifyScanError(raw)
 		cleanErrors[i] = message
+		// Counted here rather than where the mint fails, because
+		// internal/scanner cannot import this package and this loop is
+		// already the one place every scan error converges. It is also
+		// counted regardless of whether the scan ends up StatusFailed:
+		// a mint failure on one scanner while another succeeds is still
+		// a broken minter, and the partial-success case is exactly the
+		// one nobody would notice.
+		if reason == "token_mint_failed" {
+			h.metrics.recordScanTokenMintFailure()
+		}
 		if failureReason == "" || scanner.ReasonRank(reason) < scanner.ReasonRank(failureReason) {
 			failureReason = reason
 		}
