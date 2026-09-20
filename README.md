@@ -29,7 +29,10 @@ and answers one question your CI job cannot: *is this still true today?*
 > has the old password, because Postgres only reads `POSTGRES_PASSWORD` on
 > first init. Rotating it needs the `ALTER ROLE` step in
 > [`cluster/chart-secrets.sh`](cluster/chart-secrets.sh), not just a new
-> Secret. Details: [docs/operations.md § Bringing your own
+> Secret. Confirm it took with `make check-live-secrets`, which presents
+> the leaked credentials to a live cluster and requires both to be
+> refused — run it against every cluster that has ever had this chart
+> installed. Details: [docs/operations.md § Bringing your own
 > secrets](docs/operations.md#bringing-your-own-secrets).
 
 ---

@@ -230,6 +230,7 @@ echo
 echo "Rotating API_KEY: re-run this script with API_KEY=... -- monitor-api and"
 echo "scm-dashboard roll themselves on the next reconcile (both carry a"
 echo "checksum/api-key annotation), so no manual restart is needed."
+echo "Confirm it took with 'make check-live-secrets' -- the old key must 401."
 echo
 echo "Rotating POSTGRES_PASSWORD: re-run this script with POSTGRES_PASSWORD=...,"
 echo "then also run this against scm-postgres before restarting anything --"
@@ -239,6 +240,8 @@ echo "  kubectl exec -n supply-chain-monitor deploy/scm-postgres -- \\"
 echo "    psql -U ${POSTGRES_USER:-monitor_api} -d ${POSTGRES_DB:-monitor_api} -c \\"
 echo "    \"ALTER ROLE ${POSTGRES_USER:-monitor_api} WITH PASSWORD '<new password>';\""
 echo "Then restart monitor-api so it picks up the new value from the Secret."
+echo "Then run 'make check-live-secrets': it proves the OLD password is refused."
+echo "Skipping the ALTER ROLE step leaves it working with nothing to say so."
 echo
 echo "Rotating a registry account: re-run with REGISTRY_READER_PASSWORD=... (or"
 echo "WRITER/ADMIN). monitor-api and scm-docker-auth both roll themselves on the"
