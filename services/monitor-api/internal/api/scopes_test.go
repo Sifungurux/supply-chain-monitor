@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/api"
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
@@ -50,9 +51,10 @@ func callWithKey(t *testing.T, h http.Handler, method, path, key string, body st
 }
 
 const (
-	readerKey = "readerkey1234567890"
-	scanKey   = "scannerkey1234567890"
-	adminKey  = "adminkey1234567890"
+	readerKey   = "readerkey1234567890"
+	scanKey     = "scannerkey1234567890"
+	adminKey    = "adminkey1234567890"
+	reporterKey = "reporterkey1234567890"
 )
 
 const scopedKeys = "reader:" + readerKey + ";scanner:" + scanKey + ";boss:" + adminKey
@@ -111,10 +113,15 @@ func TestScopes_DenialIsForbiddenNotUnauthorized(t *testing.T) {
 	}
 }
 
-// THE UPGRADE PATH. With no scopes configured, every key does what it
-// did before this feature existed. Enforcement switching itself on
-// during an upgrade would lock out the dashboard, the sweep CronJob and
-// every CI consumer at once.
+// With no scopes configured, every key does what it did before this
+// feature existed -- the zero value still disables enforcement, which
+// is what keeps a single-key deployment working.
+//
+// This is no longer the path a CHART upgrade takes: values.yaml now
+// ships scopes, and main.go refuses to start with none while several
+// clients authenticate. It remains reachable for a single-key install
+// and for anything driving the binary directly, so the router must
+// still behave.
 func TestScopes_UnconfiguredEnforcesNothing(t *testing.T) {
 	h, store := newScopedRouter(t, scopedKeys, "")
 	a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
@@ -135,19 +142,164 @@ func TestScopes_UnconfiguredEnforcesNothing(t *testing.T) {
 	}
 }
 
-// A client with no entry while enforcement IS on runs unrestricted --
-// the compatibility hole main.go warns about by name at startup.
-func TestScopes_UnlistedClientIsUnrestricted(t *testing.T) {
+// DEFAULT-CLOSED. A client with no entry while enforcement is on gets
+// NOTHING -- not the unrestricted access it used to get.
+//
+// The old behaviour existed so that scoping one consumer could not
+// break the others, but it meant a consumer added and forgotten held
+// full authority, and a working deployment never revealed it. The
+// failure now costs that one consumer its access instead of costing
+// everyone else their isolation.
+func TestScopes_UnlistedClientGetsNothing(t *testing.T) {
 	h, store := newScopedRouter(t, scopedKeys, "reader=read")
 	a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
 
-	if got := callWithKey(t, h, http.MethodDelete, "/api/v1/artifacts/"+a.ID, adminKey, ""); got != http.StatusOK {
-		t.Fatalf("unlisted client was denied (%d) -- enabling scopes must not lock out consumers that have no entry yet", got)
+	// Every route, not just the destructive one: "nothing" has to mean
+	// nothing, or this is just a differently-shaped hole.
+	for _, tc := range []struct {
+		method, path, body string
+	}{
+		{http.MethodGet, "/api/v1/artifacts", ""},
+		{http.MethodPost, "/api/v1/artifacts", `{"ref":"x:1","type":"image"}`},
+		{http.MethodPost, "/api/v1/artifacts/" + a.ID + "/scan", ""},
+		{http.MethodPost, "/api/v1/artifacts/" + a.ID + "/findings", `{"findings":[]}`},
+		{http.MethodPost, "/api/v1/artifacts/" + a.ID + "/stage", `{"stage":"build"}`},
+		{http.MethodDelete, "/api/v1/artifacts/" + a.ID, ""},
+	} {
+		// adminKey authenticates as "boss", which has no entry.
+		if got := callWithKey(t, h, tc.method, tc.path, adminKey, tc.body); got != http.StatusForbidden {
+			t.Fatalf("unlisted client %s %s = %d, want 403 -- an unlisted client must be able to do nothing", tc.method, tc.path, got)
+		}
 	}
+
 	names, _ := api.ParseKeyScopes("reader=read")
 	unscoped := names.Unscoped([]string{"reader", "scanner", "boss"})
 	if len(unscoped) != 2 || unscoped[0] != "boss" || unscoped[1] != "scanner" {
 		t.Fatalf("Unscoped = %v, want boss and scanner named so the warning can list them", unscoped)
+	}
+}
+
+// THE SPLIT. "scan" asks for a scan; "results:write" asserts what was
+// found. Sharing one scope made those the same permission, which handed
+// fleet-wide finding suppression to the dashboard key.
+//
+// Tested in BOTH directions deliberately. A one-way test here would
+// pass against the very bug the split exists to fix: a scan-only key
+// that could still post findings.
+func TestScopes_ScanDoesNotImplyResultsWrite(t *testing.T) {
+	const spec = "scanner=read|scan;reporter=read|results:write"
+	h, store := newScopedRouter(t, scopedKeys+";reporter:"+reporterKey, spec)
+	a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	resultRoutes := []struct {
+		name, path, body string
+	}{
+		{"findings", "/api/v1/artifacts/" + a.ID + "/findings", `{"findings":[]}`},
+		{"artifact vex", "/api/v1/artifacts/" + a.ID + "/vex", `{"@context":"https://openvex.dev/ns/v0.2.0","statements":[]}`},
+		{"fleet vex", "/api/v1/vex", `{"@context":"https://openvex.dev/ns/v0.2.0","statements":[]}`},
+	}
+
+	for _, r := range resultRoutes {
+		t.Run(r.name+" refused to a scan-only key", func(t *testing.T) {
+			if got := callWithKey(t, h, http.MethodPost, r.path, scanKey, r.body); got != http.StatusForbidden {
+				t.Fatalf("POST %s as scan-only = %d, want 403 -- triggering a scan must not imply asserting its results", r.path, got)
+			}
+		})
+		t.Run(r.name+" allowed to a results:write key", func(t *testing.T) {
+			if got := callWithKey(t, h, http.MethodPost, r.path, reporterKey, r.body); got == http.StatusForbidden {
+				t.Fatalf("POST %s as results:write = 403, want it permitted", r.path)
+			}
+		})
+	}
+
+	// The reverse direction: results:write must not confer the trigger.
+	if got := callWithKey(t, h, http.MethodPost, "/api/v1/artifacts/"+a.ID+"/scan", reporterKey, ""); got != http.StatusForbidden {
+		t.Fatalf("POST scan as results:write-only = %d, want 403", got)
+	}
+	// ...and the trigger still works for the key that owns it.
+	if got := callWithKey(t, h, http.MethodPost, "/api/v1/artifacts/"+a.ID+"/scan", scanKey, ""); got != http.StatusAccepted {
+		t.Fatalf("POST scan as scan = %d, want 202", got)
+	}
+}
+
+// A scan worker authenticates with a per-Job token, not a key, and so
+// has no client name and no scopes entry. Enforcement being
+// default-closed must NOT reach it.
+//
+// This combination had no coverage: the scope tests configure no scan
+// tokens, and the scan-token tests configure no scopes, so nothing
+// exercised a token while enforcement was on. The failure it guards
+// against is quiet in the worst way -- uploads start failing AFTER a
+// scan succeeds, and an artifact with no documents still reports
+// "scanned".
+func TestScopes_ScanTokenIsNotScopeChecked(t *testing.T) {
+	store := artifact.NewMemStore()
+	a, err := store.Create("example.com/app:1", artifact.TypeImage)
+	if err != nil {
+		t.Fatalf("seed artifact: %v", err)
+	}
+	token, hash, err := api.NewScanToken()
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if err := store.CreateScanToken(a.ID, hash, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("store token: %v", err)
+	}
+
+	// Scopes enforced, and deliberately naming nobody the worker could
+	// be mistaken for.
+	scopes, invalid := api.ParseKeyScopes("reader=read")
+	if len(invalid) > 0 {
+		t.Fatalf("ParseKeyScopes rejected %v", invalid)
+	}
+	h := api.NewRouter(api.Config{
+		Store:      store,
+		Tracker:    pipeline.NewTracker([]string{"build", "scan"}),
+		APIKeys:    api.ParseAPIKeys(scopedKeys),
+		KeyScopes:  scopes,
+		ScanTokens: store.ConsumeScanToken,
+	})
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/artifacts/"+a.ID+"/documents/sbom",
+		strings.NewReader(`{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scan-token upload with scopes enforced = %d, want 200 -- the token path must not be scope-checked, or every isolated scan loses its documents", rec.Code)
+	}
+}
+
+// stage:write is carved out of admin so a build pipeline can report
+// progress without also being able to delete artifacts or accept risk.
+func TestScopes_StageWrite(t *testing.T) {
+	const spec = "scanner=read|scan;reporter=read|stage:write;boss=admin"
+	h, store := newScopedRouter(t, scopedKeys+";reporter:"+reporterKey, spec)
+	a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+	stage := "/api/v1/artifacts/" + a.ID + "/stage"
+
+	if got := callWithKey(t, h, http.MethodPost, stage, reporterKey, `{"stage":"build"}`); got != http.StatusOK {
+		t.Fatalf("stage as stage:write = %d, want 200", got)
+	}
+	// admin implies it explicitly, as it does every other scope.
+	if got := callWithKey(t, h, http.MethodPost, stage, adminKey, `{"stage":"test"}`); got != http.StatusOK {
+		t.Fatalf("stage as admin = %d, want 200", got)
+	}
+	if got := callWithKey(t, h, http.MethodPost, stage, scanKey, `{"stage":"test"}`); got != http.StatusForbidden {
+		t.Fatalf("stage as scan = %d, want 403", got)
+	}
+	// The carve-out is only worth having if it stops short of the rest
+	// of admin -- otherwise it is admin with a longer name.
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodDelete, "/api/v1/artifacts/" + a.ID, ""},
+		{http.MethodPost, "/api/v1/artifacts/" + a.ID + "/maintainer", `{"team":"platform"}`},
+	} {
+		if got := callWithKey(t, h, tc.method, tc.path, reporterKey, tc.body); got != http.StatusForbidden {
+			t.Fatalf("%s %s as stage:write = %d, want 403", tc.method, tc.path, got)
+		}
 	}
 }
 
@@ -235,6 +387,7 @@ func TestScopes_RecommendedGrantsMatchConsumerNeeds(t *testing.T) {
 		{"sweep", api.ScopeScan, true, "posts .../scan for each artifact it picks"},
 		{"sweep", api.ScopeAdmin, false, "never deletes, stages or accepts risk"},
 		{"sweep", api.ScopeRegister, false, "the sweep scans what exists, it does not register"},
+		{"sweep", api.ScopeResultsWrite, false, "it asks for scans; the workers report what they find"},
 
 		// The dashboard reads every view and has a Scan button.
 		{"dashboard", api.ScopeRead, true, "every view is a GET"},
@@ -243,6 +396,11 @@ func TestScopes_RecommendedGrantsMatchConsumerNeeds(t *testing.T) {
 		// who can reach the dashboard can drive (report S1).
 		{"dashboard", api.ScopeAdmin, false, "delete/maintainer/stage/acceptance must be refused"},
 		{"dashboard", api.ScopeDocumentsWrite, false, "scan workers upload documents, not the dashboard"},
+		// THE POINT OF THE SPLIT. Before it, "scan" carried this, so
+		// anyone who could reach the dashboard could suppress a finding
+		// on every artifact in the fleet.
+		{"dashboard", api.ScopeResultsWrite, false, "must not be able to post findings or VEX"},
+		{"dashboard", api.ScopeStageWrite, false, "the dashboard does not move artifacts through the pipeline"},
 	} {
 		if got := scopes.For(tc.client).Allows(tc.scope); got != tc.want {
 			t.Errorf("%s allowed %q = %v, want %v -- %s", tc.client, tc.scope, got, tc.want, tc.why)
@@ -250,11 +408,12 @@ func TestScopes_RecommendedGrantsMatchConsumerNeeds(t *testing.T) {
 	}
 }
 
-// TestScopes_UnscopedNamesEveryHole covers the input to the
-// API_KEY_SCOPES_STRICT refusal: strict mode is only as good as
-// Unscoped's answer, and a client it fails to name is a client that
-// keeps running unrestricted while the deployment believes it is
-// locked down.
+// TestScopes_UnscopedNamesEveryHole covers the input to the startup
+// warning. Under default-closed enforcement an unnamed client is not a
+// client running unrestricted -- it is one that can do nothing, and
+// whose every request answers 403. Either way the warning is only as
+// good as Unscoped's answer, and a client it fails to name is a
+// consumer that looks broken for no discoverable reason.
 func TestScopes_UnscopedNamesEveryHole(t *testing.T) {
 	scopes, _ := api.ParseKeyScopes("dashboard=read|scan")
 	got := scopes.Unscoped([]string{"dashboard", "sweep", "ci", "default"})

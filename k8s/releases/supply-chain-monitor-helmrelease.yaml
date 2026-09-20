@@ -267,11 +267,23 @@ spec:
       # delete, maintainer, stage and risk-acceptance are refused by
       # the API, not merely hidden in the UI.
       #
-      # "default" (the master key) is deliberately NOT listed, so it
-      # stays unrestricted for operator use. That is the remaining hole
-      # and it is a deliberate one; apiKeyScopesStrict stays false while
-      # it exists, since strict would refuse to start over it.
-      apiKeyScopes: "dashboard=read|scan;sweep=read|scan"
+      # "default" (the master key) is listed EXPLICITLY as admin. It
+      # used to be omitted so it stayed unrestricted for operator use,
+      # which worked only because an unlisted client meant "everything".
+      # Enforcement is now default-closed, so omitting it would strip
+      # the operator key of all authority instead of granting it.
+      #
+      # Same power as before, now visible: reading this line says what
+      # the master key can do, rather than saying nothing and meaning
+      # everything.
+      #
+      # Deliberately NO results:write or stage:write here yet. The chart
+      # reconciles from git in minutes while the image only moves when
+      # the digest pin below is edited, so this file is read by the
+      # RUNNING binary first -- and a binary that predates those scope
+      # names treats them as invalid and refuses to start. Add them once
+      # the pin has moved.
+      apiKeyScopes: "default=admin;dashboard=read|scan;sweep=read|scan"
       # Serve the API over TLS inside the cluster. Gateway TLS
       # terminates at the EDGE, so without this every in-cluster hop is
       # cleartext -- and those hops carry bearer credentials: the

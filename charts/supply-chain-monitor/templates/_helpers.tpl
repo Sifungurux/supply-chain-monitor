@@ -186,8 +186,10 @@ never be scoped apart.
 The master-key fallback keeps an upgrade working before its keys have
 been regenerated. It is the insecure shape this exists to replace, so
 callers that can warn about it should (the dashboard initContainer
-does), and API_KEY_SCOPES_STRICT refuses to start when a named key is
-left unscoped.
+does). Scope enforcement is default-closed, so a named client left out
+of monitorApi.apiKeyScopes can do nothing rather than everything, and
+API_KEY_SCOPES_STRICT refuses to start when scopes are absent entirely
+while several clients are configured.
 
 Accepts apiKeys as either a map or the flat "name:key;name:key" string,
 matching supply-chain-monitor.apiKeys above -- valuesFrom injects the

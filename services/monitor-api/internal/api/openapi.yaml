@@ -426,6 +426,10 @@ paths:
     post:
       tags: [pipeline]
       summary: Record this artifact at a pipeline stage
+      description: >-
+        Requires the **stage:write** scope. Carved out of `admin` so a
+        build pipeline can report progress without also being able to
+        delete artifacts, reassign maintainers or accept risk.
       requestBody:
         required: true
         content:
@@ -1026,16 +1030,25 @@ components:
 
 
         Keys can carry SCOPES (`monitorApi.apiKeyScopes`): `read`,
-        `register`, `scan`, `documents:write`, `admin`. A key without
-        the scope a route requires gets **403**, not 401 — the
-        credential is valid and identified, it simply may not do this.
+        `register`, `scan`, `results:write`, `stage:write`,
+        `documents:write`, `admin`. A key without the scope a route
+        requires gets **403**, not 401 — the credential is valid and
+        identified, it simply may not do this.
 
 
-        Scope enforcement is opt-in. With none configured every key is
-        full-privilege, which is how this API behaved before scopes
-        existed; a key with no entry stays unrestricted even once
-        others have scopes, so scoping one consumer cannot break the
-        rest.
+        `scan` asks for a scan and nothing else. Submitting scan
+        RESULTS — findings, per-artifact VEX and fleet VEX — needs
+        `results:write`, because requesting a rescan and declaring a
+        finding suppressed are different acts. `stage:write` moves an
+        artifact between pipeline stages without the rest of `admin`.
+
+
+        Scope enforcement is DEFAULT-CLOSED. With `apiKeyScopes`
+        configured, a key with no entry can do nothing and every
+        request it makes answers 403. Leaving `apiKeyScopes` empty
+        disables enforcement entirely and every key is full-privilege —
+        which the server refuses to start into when more than one key
+        is configured, unless `apiKeyScopesStrict` is explicitly false.
 
   parameters:
     ArtifactID:
