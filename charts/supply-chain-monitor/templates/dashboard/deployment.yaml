@@ -119,6 +119,7 @@ spec:
               ESCAPED_BASE=$(printf '%s' "$DASHBOARD_API_BASE" | sed 's/\\/\\\\/g; s/"/\\"/g')
               ESCAPED_ALLOW_MANUAL_REG=$(printf '%s' "$DASHBOARD_ALLOW_MANUAL_REGISTRATION" | sed 's/\\/\\\\/g; s/"/\\"/g')
               ESCAPED_SHOW_CONN_SETTINGS=$(printf '%s' "$DASHBOARD_SHOW_CONNECTION_SETTINGS" | sed 's/\\/\\\\/g; s/"/\\"/g')
+              ESCAPED_ALLOW_WRITES=$(printf '%s' "$DASHBOARD_ALLOW_WRITES" | sed 's/\\/\\\\/g; s/"/\\"/g')
               # NO apiKey IN env.js. That file is served by nginx to any
               # browser that can reach the dashboard, so writing the key
               # into it published the only credential this API has --
@@ -127,7 +128,7 @@ spec:
               #
               # The key now lives only in the nginx config below, inside
               # the pod, and is attached server-side to proxied requests.
-              printf 'window.SCM_CONFIG = { apiBase: "%s", allowManualRegistration: "%s", showConnectionSettings: "%s" };\n' "$ESCAPED_BASE" "$ESCAPED_ALLOW_MANUAL_REG" "$ESCAPED_SHOW_CONN_SETTINGS" > /html/env.js
+              printf 'window.SCM_CONFIG = { apiBase: "%s", allowManualRegistration: "%s", showConnectionSettings: "%s", allowWrites: "%s" };\n' "$ESCAPED_BASE" "$ESCAPED_ALLOW_MANUAL_REG" "$ESCAPED_SHOW_CONN_SETTINGS" "$ESCAPED_ALLOW_WRITES" > /html/env.js
 
               # The dashboard calls /dash-api/... on its own origin; this
               # proxy strips that prefix and adds the Authorization the
@@ -155,16 +156,34 @@ spec:
                 }
 
                 location /dash-api/ {
-                  # SECOND LOCK, INDEPENDENT OF THE KEY'S SCOPES. The
-                  # dashboard reads (GET) and triggers scans and
-                  # maintainer edits (POST); it has no legitimate use for
-                  # DELETE, PUT or PATCH. Denying them here means a
-                  # mis-scoped or accidentally-rotated-to-master key
-                  # still cannot destroy an artifact through this proxy.
+                  # SECOND LOCK, INDEPENDENT OF THE KEY'S SCOPES.
+                  # Denying a method here means a mis-scoped or
+                  # accidentally-rotated-to-master key still cannot use
+                  # it through this proxy -- two independent things have
+                  # to be wrong, not one.
+                  #
+                  # READ-ONLY BY DEFAULT. This proxy attaches a
+                  # credential server-side to everything it forwards,
+                  # and it is reachable by anyone who can reach the
+                  # dashboard -- so every method allowed here is a
+                  # method the anonymous visitor has. GET and HEAD are
+                  # what a dashboard needs to be a dashboard.
+                  #
+                  # dashboard.allowWrites re-admits POST for the Scan
+                  # and Register buttons. It is a deliberate choice to
+                  # make "can load the dashboard" mean "can trigger
+                  # work", which is reasonable on a private cluster and
+                  # is why the flag exists -- but it should be a
+                  # decision, not the default nobody noticed.
+                  #
+                  # DELETE, PUT and PATCH are never admitted here,
+                  # whatever the flag says. Destructive routes are
+                  # admin-scoped at the API too (see NewRouter), so this
+                  # is the second of two locks on them.
                   #
                   # limit_except lists the methods that are ALLOWED --
                   # everything else falls into the block and is denied.
-                  limit_except GET HEAD POST {
+                  limit_except GET HEAD{{ if .Values.dashboard.allowWrites }} POST{{ end }} {
                     deny all;
                   }
 {{- if .Values.monitorApi.tls.enabled }}
@@ -246,6 +265,11 @@ spec:
                 configMapKeyRef:
                   name: scm-dashboard-config
                   key: DASHBOARD_SHOW_CONNECTION_SETTINGS
+            - name: DASHBOARD_ALLOW_WRITES
+              valueFrom:
+                configMapKeyRef:
+                  name: scm-dashboard-config
+                  key: DASHBOARD_ALLOW_WRITES
           volumeMounts:
             - name: dashboard-html
               mountPath: /config-src

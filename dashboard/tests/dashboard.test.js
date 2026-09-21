@@ -659,7 +659,7 @@ test('the empty-state row points at "Register one above" only when the register 
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
-      window.SCM_CONFIG = { apiBase: '', apiKey: '', allowManualRegistration: 'true' };
+      window.SCM_CONFIG = { apiBase: '', apiKey: '', allowManualRegistration: 'true', allowWrites: 'true' };
     }
   });
 
@@ -1665,6 +1665,81 @@ test('falls back to the old manual-entry behavior when window.SCM_CONFIG is abse
   dom.window.close();
 });
 
+// dashboard.allowWrites gates the controls that POST or DELETE. The
+// real control is the nginx proxy's limit_except, which refuses those
+// methods outright -- this only stops the page offering buttons whose
+// requests would come back 403.
+//
+// Both directions are asserted deliberately. Only checking that the
+// buttons appear when writes are allowed would pass against a page that
+// always shows them, which is the bug this exists to prevent.
+test('Scan and Delete are hidden unless allowWrites is exactly "true"', async () => {
+  function build(config) {
+    return buildDom({
+      url: 'http://localhost:30301/',
+      fetchImpl(url) {
+        if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+        if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+        if (isArtifactsList(url)) return artifactsPage(SAMPLE_ARTIFACTS);
+        return errorResponse(404, {});
+      },
+      beforeParseExtra: config === undefined
+        ? undefined
+        : function (window) { window.SCM_CONFIG = config; }
+    });
+  }
+
+  // No SCM_CONFIG at all (env.js absent, or opened as a file) -- must
+  // fail closed, the same way allowManualRegistration does.
+  const domNoConfig = build(undefined);
+  await tick(20);
+  let doc = domNoConfig.window.document;
+  assert.equal(doc.querySelectorAll('#artifact-rows button[data-action="scan"]').length, 0);
+  assert.equal(doc.querySelectorAll('#artifact-rows button[data-action="delete"]').length, 0);
+  // Details is a read control and must survive: a read-only dashboard
+  // is still a dashboard.
+  assert.ok(doc.querySelectorAll('#artifact-rows button[data-action="toggle"]').length > 0);
+  domNoConfig.window.close();
+
+  // Explicitly "false" -- also hidden.
+  const domFalse = build({ apiBase: '', apiKey: '', allowWrites: 'false' });
+  await tick(20);
+  doc = domFalse.window.document;
+  assert.equal(doc.querySelectorAll('#artifact-rows button[data-action="scan"]').length, 0);
+  assert.equal(doc.querySelectorAll('#artifact-rows button[data-action="delete"]').length, 0);
+  domFalse.window.close();
+
+  // Exactly "true" -- both shown, one per artifact row.
+  const domTrue = build({ apiBase: '', apiKey: '', allowWrites: 'true' });
+  await tick(20);
+  doc = domTrue.window.document;
+  const rows = doc.querySelectorAll('#artifact-rows tr[data-id]').length;
+  assert.ok(rows > 0);
+  assert.equal(doc.querySelectorAll('#artifact-rows button[data-action="scan"]').length, rows);
+  assert.equal(doc.querySelectorAll('#artifact-rows button[data-action="delete"]').length, rows);
+  domTrue.window.close();
+});
+
+// Registration is a POST, so allowManualRegistration alone is not
+// enough -- the proxy would refuse it. Both gates have to be open.
+test('the register link needs allowWrites as well as allowManualRegistration', async () => {
+  const dom = buildDom({
+    url: 'http://localhost:30301/',
+    fetchImpl(url) {
+      if (url.endsWith('/api/v1/pipeline/stages')) return jsonResponse(SAMPLE_STAGES);
+      if (url.endsWith('/api/v1/stats')) return jsonResponse(SAMPLE_STATS);
+      if (isArtifactsList(url)) return artifactsPage([]);
+      return errorResponse(404, {});
+    },
+    beforeParseExtra(window) {
+      window.SCM_CONFIG = { apiBase: '', apiKey: '', allowManualRegistration: 'true', allowWrites: 'false' };
+    }
+  });
+  await tick(20);
+  assert.equal(dom.window.document.getElementById('register-link-section').hidden, true);
+  dom.window.close();
+});
+
 test('the "+ Register an artifact" link stays hidden unless allowManualRegistration is exactly "true"', async () => {
   // No SCM_CONFIG at all (env.js absent) -- must fail closed, not show
   // the link by default.
@@ -1708,7 +1783,7 @@ test('the "+ Register an artifact" link stays hidden unless allowManualRegistrat
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
-      window.SCM_CONFIG = { apiBase: '', apiKey: '', allowManualRegistration: 'true' };
+      window.SCM_CONFIG = { apiBase: '', apiKey: '', allowManualRegistration: 'true', allowWrites: 'true' };
     }
   });
   await tick(20);
@@ -1816,7 +1891,7 @@ test('clicking "+ Register an artifact" opens the register modal, closing on out
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
-      window.SCM_CONFIG = { apiBase: '', apiKey: '', allowManualRegistration: 'true' };
+      window.SCM_CONFIG = { apiBase: '', apiKey: '', allowManualRegistration: 'true', allowWrites: 'true' };
     }
   });
 
@@ -2050,6 +2125,9 @@ test('clicking Delete and confirming sends a DELETE request and reloads the list
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
+      // Delete is a write control, so it only renders where the
+      // deployment allows writes -- see dashboard.allowWrites.
+      window.SCM_CONFIG = { apiBase: '', apiKey: '', allowWrites: 'true' };
       // confirm() is a real, blocking browser dialog -- stub it to
       // drive the "user clicked OK" path deterministically.
       window.confirm = () => true;
@@ -2131,6 +2209,9 @@ test('clicking Delete and cancelling the confirm dialog makes no request', async
       return errorResponse(404, {});
     },
     beforeParseExtra(window) {
+      // Delete is a write control, so it only renders where the
+      // deployment allows writes -- see dashboard.allowWrites.
+      window.SCM_CONFIG = { apiBase: '', apiKey: '', allowWrites: 'true' };
       window.confirm = () => false;
     }
   });

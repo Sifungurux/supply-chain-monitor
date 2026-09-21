@@ -122,8 +122,16 @@ make port-forward      # one terminal
 make test-artifact     # another — registers alpine:3.19 and scans it
 ```
 
-The dashboard is on NodePort `30301`, the API on `30300`. On Colima
-`create-cluster.sh` prints the VM address; on podman/k3d it is `localhost`.
+Both Services are **ClusterIP**, so `make port-forward` is how you reach them —
+the API on `30300` is a NodePort only if you ask for one. The dashboard's proxy
+attaches an API credential server-side to everything it forwards, so publishing
+it on every node publishes that credential to everyone who can reach a node.
+
+The dashboard is also **read-only by default**: its nginx proxy forwards `GET`
+and `HEAD` only, and the key it presents is scoped `read`. Set
+`dashboard.allowWrites: true` (and give the dashboard client `scan`) to get the
+Scan button back — both gates have to be open, because nginx refuses the method
+before the scope is ever consulted.
 
 ### On a cluster you already have
 

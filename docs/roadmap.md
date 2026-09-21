@@ -17,7 +17,7 @@ Work in the current phase, tracked to completion. Items graduate here from
 | ID | Item | Phase | Status | PR |
 |---|---|---|---|---|
 | H-1 | Scope split (`scan` vs `results:write`) + default-closed enforcement | 0 | done — also added `stage:write`, so a CI key never needs `admin` | #216 |
-| S-1 | Dashboard proxy: no master-key fallback, GET-only, ClusterIP, read-only scope | 0 | partial — fallback already fails closed (#212); `limit_except`, ClusterIP and the read-only scope remain | |
+| S-1 | Dashboard proxy: no master-key fallback, GET-only, ClusterIP, read-only scope | 0 | done | #221 |
 | S-4 | No master-key fallback in image scan Jobs; `token_mint_failed` + alert | 0 | partial — refusal, retry and classification already shipped; only the counter and PrometheusRule alert remain | |
 | S-2 | `make check-live-secrets` against every cluster that ever ran the chart | 0 | open | |
 | S-7 | Tekton examples use a scoped `ci` key | 0 | done — `register\|scan\|read\|stage:write`, no `admin` | #222 |

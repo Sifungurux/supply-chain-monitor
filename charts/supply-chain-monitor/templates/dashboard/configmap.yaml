@@ -26,4 +26,9 @@ metadata:
 data:
   DASHBOARD_API_BASE: {{ .Values.dashboard.apiBase | quote }}
   DASHBOARD_ALLOW_MANUAL_REGISTRATION: {{ .Values.dashboard.allowManualRegistration | quote }}
+  # Whether the proxy admits POST at all (see the nginx limit_except in
+  # the Deployment). Published to the page as well as enforced in nginx
+  # so the UI can hide controls it is no longer allowed to use -- a
+  # button that always 403s is worse than no button.
+  DASHBOARD_ALLOW_WRITES: {{ .Values.dashboard.allowWrites | quote }}
   DASHBOARD_SHOW_CONNECTION_SETTINGS: {{ .Values.dashboard.showConnectionSettings | quote }}

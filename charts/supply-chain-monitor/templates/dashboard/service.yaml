@@ -13,5 +13,17 @@ spec:
       # port 80. The Service's own port stays 80, so nothing referring to
       # this Service by port needs to change.
       targetPort: 8080
+      {{- if eq .Values.dashboard.service.type "NodePort" }}
       nodePort: {{ .Values.dashboard.service.nodePort }}
-  type: NodePort
+      {{- end }}
+  # ClusterIP by DEFAULT. A NodePort publishes the dashboard on every
+  # node of the cluster, and this dashboard's proxy attaches an API
+  # credential server-side to everything it forwards -- so the Service
+  # type is what decides how large the audience holding that credential
+  # is. README's stated posture is that port-forward is the front door;
+  # this makes the chart agree with it.
+  #
+  # nodePort is rendered only for the NodePort type, so setting the type
+  # back is a single-value override and the port keeps its meaning
+  # rather than sitting inert in the manifest.
+  type: {{ .Values.dashboard.service.type }}

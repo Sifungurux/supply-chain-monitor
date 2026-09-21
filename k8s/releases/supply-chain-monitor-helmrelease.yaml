@@ -175,6 +175,16 @@ spec:
       # from this cluster's dashboard -- chart default stays true so no
       # other deployment silently loses them.
       showConnectionSettings: false
+      # Chart default is false: the proxy attaches a credential to
+      # everything it forwards, so admitting POST makes "can reach the
+      # dashboard" mean "can trigger scans". Opted back in HERE because
+      # this cluster's dashboard is a working tool for one operator on a
+      # private network, and the Scan button is the point of it.
+      #
+      # The dashboard client keeps read|scan in apiKeyScopes below to
+      # match. Both have to be open for the button to work: nginx
+      # refuses the method before the scope is ever consulted.
+      allowWrites: true
     monitorApi:
       # ghcr.io/<owner>/<repo>/monitor-api, lowercased -- ghcr requires
       # an all-lowercase path and this repository's owner is not.
