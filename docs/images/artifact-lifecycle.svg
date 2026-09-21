@@ -1,0 +1,168 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 450" width="880" height="450" role="img" aria-labelledby="t d">
+<title id="t">The life of an artifact in Supply Chain Monitor</title>
+<desc id="d">A looping six-step walkthrough. An artifact is registered, picked up by the sweep, scanned by trivy, grype, the unpacker and cosign in isolated Jobs, merged into the findings record, sent back through scanning by three different clocks, and finally judged by the policy gate.</desc>
+
+<style>
+  /* One 24s cycle, 4s per step. Every per-step element carries k1..k6,
+     which is only an animation-delay: the same keyframes shifted in time. */
+  .f { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+
+  .step, .nd { opacity: 0; animation: show 24s infinite; }
+  .k1 { opacity: 1; }
+  .nl { opacity: .42; animation: lift 24s infinite; }
+  .chip { animation: travel 24s infinite; }
+  .fill { animation: fill 24s infinite; }
+  .loop { opacity: .22; animation: loop 24s infinite; }
+
+  .k1 { animation-delay: 0s; }
+  .k2 { animation-delay: -20s; }
+  .k3 { animation-delay: -16s; }
+  .k4 { animation-delay: -12s; }
+  .k5 { animation-delay: -8s; }
+  .k6 { animation-delay: -4s; }
+
+  @keyframes show { 0%, 14.8% { opacity: 1 } 16.6%, 98.4% { opacity: 0 } 100% { opacity: 1 } }
+  @keyframes lift { 0%, 14.8% { opacity: 1 } 16.6%, 98.4% { opacity: .42 } 100% { opacity: 1 } }
+
+  @keyframes travel {
+    0%, 13%      { transform: translateX(110px) }
+    16.6%, 29.6% { transform: translateX(242px) }
+    33.3%, 46.3% { transform: translateX(374px) }
+    50%, 63%     { transform: translateX(506px) }
+    66.6%, 79.6% { transform: translateX(638px) }
+    83.3%, 96.3% { transform: translateX(770px) }
+    100%         { transform: translateX(110px) }
+  }
+  @keyframes fill {
+    0%, 13%      { stroke-dashoffset: 660 }
+    16.6%, 29.6% { stroke-dashoffset: 528 }
+    33.3%, 46.3% { stroke-dashoffset: 396 }
+    50%, 63%     { stroke-dashoffset: 264 }
+    66.6%, 79.6% { stroke-dashoffset: 132 }
+    83.3%, 96.3% { stroke-dashoffset: 0 }
+    100%         { stroke-dashoffset: 660 }
+  }
+  @keyframes loop { 0%, 65% { opacity: .22 } 68%, 79% { opacity: 1 } 82%, 100% { opacity: .22 } }
+
+  @media (prefers-reduced-motion: reduce) {
+    .step, .nd, .nl, .chip, .fill, .loop { animation: none; }
+    .step, .nd { opacity: 0 }
+    .nl { opacity: .42 }
+    .chip { transform: translateX(110px) }
+    .fill { stroke-dashoffset: 660 }
+    .loop { opacity: .22 }
+    .k1 { opacity: 1 }
+  }
+</style>
+
+<defs>
+  <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="110" y1="0" x2="770" y2="0">
+    <stop offset="0" stop-color="#00c2ff" />
+    <stop offset="1" stop-color="#cb3cff" />
+  </linearGradient>
+  <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+    <path d="M0 0 L10 5 L0 10 z" fill="#00c2ff" />
+  </marker>
+</defs>
+
+<rect x="1" y="1" width="878" height="448" rx="16" fill="#0b1739" stroke="#343b4f" stroke-width="1.5" />
+
+<text class="f" x="40" y="40" font-size="11.5" font-weight="700" letter-spacing="2.4" fill="#7e89ac">SUPPLY CHAIN MONITOR &#183; THE LIFE OF AN ARTIFACT</text>
+
+<!-- the artifact itself, travelling along the track -->
+<g class="chip">
+  <rect x="-90" y="63" width="180" height="30" rx="15" fill="#2a1246" stroke="#cb3cff" stroke-width="1.2" />
+  <circle cx="-72" cy="78" r="4" fill="#cb3cff" />
+  <text class="f" x="6" y="82" text-anchor="middle" font-size="11.5" font-weight="600" fill="#f0e4ff">ghcr.io/acme/checkout:2.4.1</text>
+</g>
+
+<!-- track -->
+<line x1="110" y1="162" x2="770" y2="162" stroke="#343b4f" stroke-width="2" stroke-linecap="round" />
+<line class="fill" x1="110" y1="162" x2="770" y2="162" stroke="url(#g)" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="660 660" stroke-dashoffset="660" />
+
+<!-- nodes: resting ring, active mark, label, status -->
+<circle cx="110" cy="162" r="6.5" fill="#0b1739" stroke="#343b4f" stroke-width="2" />
+<circle cx="242" cy="162" r="6.5" fill="#0b1739" stroke="#343b4f" stroke-width="2" />
+<circle cx="374" cy="162" r="6.5" fill="#0b1739" stroke="#343b4f" stroke-width="2" />
+<circle cx="506" cy="162" r="6.5" fill="#0b1739" stroke="#343b4f" stroke-width="2" />
+<circle cx="638" cy="162" r="6.5" fill="#0b1739" stroke="#343b4f" stroke-width="2" />
+<circle cx="770" cy="162" r="6.5" fill="#0b1739" stroke="#343b4f" stroke-width="2" />
+
+<g class="nd k1"><circle cx="110" cy="162" r="13" fill="#cb3cff" opacity=".2" /><circle cx="110" cy="162" r="6.5" fill="#cb3cff" /></g>
+<g class="nd k2"><circle cx="242" cy="162" r="13" fill="#cb3cff" opacity=".2" /><circle cx="242" cy="162" r="6.5" fill="#cb3cff" /></g>
+<g class="nd k3"><circle cx="374" cy="162" r="13" fill="#cb3cff" opacity=".2" /><circle cx="374" cy="162" r="6.5" fill="#cb3cff" /></g>
+<g class="nd k4"><circle cx="506" cy="162" r="13" fill="#cb3cff" opacity=".2" /><circle cx="506" cy="162" r="6.5" fill="#cb3cff" /></g>
+<g class="nd k5"><circle cx="638" cy="162" r="13" fill="#cb3cff" opacity=".2" /><circle cx="638" cy="162" r="6.5" fill="#cb3cff" /></g>
+<g class="nd k6"><circle cx="770" cy="162" r="13" fill="#cb3cff" opacity=".2" /><circle cx="770" cy="162" r="6.5" fill="#cb3cff" /></g>
+
+<g class="nl k1"><text class="f" x="110" y="120" text-anchor="middle" font-size="12.5" font-weight="600" fill="#d1dbf9">register</text><text class="f" x="110" y="137" text-anchor="middle" font-size="10.5" fill="#7e89ac">registered</text></g>
+<g class="nl k2"><text class="f" x="242" y="120" text-anchor="middle" font-size="12.5" font-weight="600" fill="#d1dbf9">sweep picks it up</text><text class="f" x="242" y="137" text-anchor="middle" font-size="10.5" fill="#7e89ac">scanning</text></g>
+<g class="nl k3"><text class="f" x="374" y="120" text-anchor="middle" font-size="12.5" font-weight="600" fill="#d1dbf9">scanners fan out</text><text class="f" x="374" y="137" text-anchor="middle" font-size="10.5" fill="#7e89ac">scanning</text></g>
+<g class="nl k4"><text class="f" x="506" y="120" text-anchor="middle" font-size="12.5" font-weight="600" fill="#d1dbf9">findings merge</text><text class="f" x="506" y="137" text-anchor="middle" font-size="10.5" fill="#7e89ac">scanned</text></g>
+<g class="nl k5"><text class="f" x="638" y="120" text-anchor="middle" font-size="12.5" font-weight="600" fill="#d1dbf9">rescan clocks</text><text class="f" x="638" y="137" text-anchor="middle" font-size="10.5" fill="#7e89ac">scanning again</text></g>
+<g class="nl k6"><text class="f" x="770" y="120" text-anchor="middle" font-size="12.5" font-weight="600" fill="#d1dbf9">policy gate</text><text class="f" x="770" y="137" text-anchor="middle" font-size="10.5" fill="#7e89ac">pass / fail</text></g>
+
+<!-- the return path: it never really leaves the loop -->
+<g class="loop">
+  <path d="M638 172 V 220 H 374 V 174" fill="none" stroke="#00c2ff" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#a)" />
+  <text class="f" x="506" y="204" text-anchor="middle" font-size="10.5" fill="#00c2ff">failed 15m &#183; stale 1d &#183; nightly sbom-only</text>
+</g>
+
+<line x1="40" y1="248" x2="840" y2="248" stroke="#1c2745" stroke-width="1" />
+
+<!-- step captions -->
+<g class="step k1">
+  <text class="f" x="40" y="284" font-size="15.5" font-weight="700" fill="#ffffff">1 &#183; Register &#8212; POST /api/v1/artifacts</text>
+  <text class="f" x="40" y="314" font-size="13" fill="#d1dbf9">The ref is validated before anything dials out: no URL scheme, no cluster-local host,</text>
+  <text class="f" x="40" y="338" font-size="13" fill="#d1dbf9">nothing resolving to loopback, link-local or RFC1918. It is caller input we make requests with.</text>
+  <text class="f" x="40" y="362" font-size="13" fill="#d1dbf9">The digest is resolved best-effort and becomes the identity &#8212; two tags over the same bytes</text>
+  <text class="f" x="40" y="386" font-size="13" fill="#d1dbf9">are one artifact. Under requireDigest, a ref that will not confirm sets unsafe: true rather</text>
+  <text class="f" x="40" y="410" font-size="13" fill="#d1dbf9">than blocking the registration.</text>
+</g>
+
+<g class="step k2">
+  <text class="f" x="40" y="284" font-size="15.5" font-weight="700" fill="#ffffff">2 &#183; The sweep picks it up &#8212; nothing scans on registration</text>
+  <text class="f" x="40" y="314" font-size="13" fill="#d1dbf9">A CronJob runs every 15 minutes, takes the oldest registered artifacts up to batchSize,</text>
+  <text class="f" x="40" y="338" font-size="13" fill="#d1dbf9">and POSTs each one to its own /scan. Status flips to scanning and a per-scanner slot is taken.</text>
+  <text class="f" x="40" y="362" font-size="13" fill="#d1dbf9">The same pass retries every failed artifact and backfills any digest that would not resolve</text>
+  <text class="f" x="40" y="386" font-size="13" fill="#d1dbf9">at registration time, so nothing has to be re-submitted by hand.</text>
+</g>
+
+<g class="step k3">
+  <text class="f" x="40" y="284" font-size="15.5" font-weight="700" fill="#ffffff">3 &#183; Scanners fan out, each in its own Job</text>
+  <text class="f" x="40" y="314" font-size="13" fill="#d1dbf9">trivy and grype read the image for CVEs; the unpacker unpacks it with umoci and streams</text>
+  <text class="f" x="40" y="338" font-size="13" fill="#d1dbf9">every file to clamd; cosign verifies the signature against source_ref, not the mirrored copy.</text>
+  <text class="f" x="40" y="362" font-size="13" fill="#d1dbf9">Read-only root filesystem, every capability dropped, non-root, no ServiceAccount token &#8212;</text>
+  <text class="f" x="40" y="386" font-size="13" fill="#d1dbf9">this is the code that parses untrusted third-party content, and it never runs in the API pod.</text>
+</g>
+
+<g class="step k4">
+  <text class="f" x="40" y="284" font-size="15.5" font-weight="700" fill="#ffffff">4 &#183; Findings merge into the record</text>
+  <text class="f" x="40" y="314" font-size="13" fill="#d1dbf9">Matched by id, per bucket: still reported stays open and keeps its original first_seen_at,</text>
+  <text class="f" x="40" y="338" font-size="13" fill="#d1dbf9">gone flips to fixed but stays in the bucket, returning flips back to open. Nothing is overwritten.</text>
+  <text class="f" x="40" y="362" font-size="13" fill="#d1dbf9">VEX suppressions and time-boxed risk acceptances survive every merge. The Job generates an</text>
+  <text class="f" x="40" y="386" font-size="13" fill="#d1dbf9">SBOM and a SARIF report and posts them back; last_scan_at is stamped.</text>
+</g>
+
+<g class="step k5">
+  <text class="f" x="40" y="284" font-size="15.5" font-weight="700" fill="#ffffff">5 &#183; Three clocks send it back, and they are not interchangeable</text>
+  <text class="f" x="40" y="314" font-size="13" fill="#d1dbf9">failed &#8594; retried on the next sweep, 15 minutes later.</text>
+  <text class="f" x="40" y="338" font-size="13" fill="#d1dbf9">stale past rescanAfterDays &#8594; a full rescan. The only path trusted to mark a finding fixed.</text>
+  <text class="f" x="40" y="362" font-size="13" fill="#d1dbf9">nightly &#8594; SBOM re-evaluation: the cve bucket only, no image pull. It adds and updates, never</text>
+  <text class="f" x="40" y="386" font-size="13" fill="#d1dbf9">resolves, and deliberately never stamps last_scan_at &#8212; the cheap path must not satisfy</text>
+  <text class="f" x="40" y="410" font-size="13" fill="#d1dbf9">the expensive path&#8217;s clock.</text>
+</g>
+
+<g class="step k6">
+  <text class="f" x="40" y="284" font-size="15.5" font-weight="700" fill="#ffffff">6 &#183; What approves it &#8212; GET /api/v1/artifacts/{id}/policy</text>
+  <text class="f" x="40" y="314" font-size="13" fill="#05c168">&#10003;</text>
+  <text class="f" x="62" y="314" font-size="13" fill="#d1dbf9">maxSeverity malware: none &#8212; any match fails, whatever a scanner graded it</text>
+  <text class="f" x="40" y="338" font-size="13" fill="#05c168">&#10003;</text>
+  <text class="f" x="62" y="338" font-size="13" fill="#d1dbf9">disallowUnsafe &#8212; the digest was confirmed at registration</text>
+  <text class="f" x="40" y="362" font-size="13" fill="#05c168">&#10003;</text>
+  <text class="f" x="62" y="362" font-size="13" fill="#d1dbf9">requireScanWithinDays: 2 &#8212; against a sweep that rescans after one</text>
+  <text class="f" x="40" y="386" font-size="13" fill="#7e89ac">&#183;</text>
+  <text class="f" x="62" y="386" font-size="13" fill="#7e89ac">provenance: verified &#8212; cosign&#8217;s verdict is reported beside the result, not one of the rules</text>
+  <text class="f" x="40" y="412" font-size="12" fill="#7e89ac">Only active findings count: fixed, VEX-suppressed and accepted are excluded by one predicate.</text>
+</g>
+</svg>

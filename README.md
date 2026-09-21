@@ -54,45 +54,52 @@ This service is the thing that keeps looking after CI has moved on.
 
 ## What it does
 
-| | |
-|---|---|
-| **Finds what's wrong** | Trivy **and** Grype for CVEs (findings merged, not duplicated), ClamAV for malware, [malcontent](https://github.com/chainguard-dev/malcontent) for suspicious binary behaviour, Trivy's secret scanner, license policy |
-| **Tells you what matters** | CISA **KEV** (exploitation observed) and **EPSS** (predicted, daily) on every CVE, so a medium under active attack outranks a critical nobody has touched |
-| **Lets you say "not affected"** | **VEX** documents suppress findings with a reason, fleet-wide or per artifact, plus time-boxed risk acceptance that expires instead of being forgotten |
-| **Proves where it came from** | **cosign** signature and **SLSA** provenance verification against your own identity — the one question a CVE scanner cannot ask |
-| **Watches the inventory** | SBOM per artifact, component search across the fleet, and a diff that alerts when a package appears that nobody added |
-| **Keeps it true over time** | A sweep rescans continuously, vulnerability DBs refresh nightly, and SBOMs are re-evaluated against fresh data without re-pulling every image |
-| **Gates your pipeline** | One `GET .../policy` call returns pass/fail with the violated rules named — call it from CI, or from Kyverno/Gatekeeper at admission |
-| **Answers fleet questions** | "Which images still ship this CVE?" · "Which contain this package?" · "What changed between these two builds?" |
+Six beats, in the order the animation below walks through them.
 
-Everything is behind a plain JSON API with an OpenAPI spec and a Swagger UI,
-plus a small dashboard. Scans run in isolated, unprivileged Kubernetes Jobs —
-the code that parses untrusted image content never runs in the API pod.
+| Beat | What you get |
+|---|---|
+| **1 · Register** | The digest is the identity, not the tag — two registrations of the same bytes are one artifact, which is what makes "which images still ship this CVE" answerable at all. A ref whose digest will not confirm is flagged, not quietly trusted. |
+| **2 · The sweep picks it up** | Nothing scans on registration — a CronJob does it, or your pipeline calls `POST /scan` itself and doesn't wait. The sweep also retries what failed and backfills what wouldn't resolve, so there is no pipeline step to babysit. |
+| **3 · Scanners fan out** | Trivy **and** Grype for CVEs (findings merged, not duplicated), ClamAV plus [malcontent](https://github.com/chainguard-dev/malcontent) for malware and suspicious binary behaviour, Trivy's secret scanner, license policy, and **cosign** + **SLSA** provenance — the one question a CVE scanner cannot ask. Each runs in its own isolated, unprivileged Job. |
+| **4 · Findings merge** | open → fixed → open again, each with a `first_seen_at`. CISA **KEV** and **EPSS** rank them, so a medium under active attack outranks a critical nobody has touched. **VEX** and time-boxed risk acceptance suppress *with a reason* instead of deleting. An SBOM and a SARIF report are generated and kept, and a component diff alerts when a package appears that nobody added. |
+| **5 · Three clocks send it back** | A sweep rescans continuously, the vulnerability DBs refresh nightly, and stored SBOMs are re-evaluated against fresh data without re-pulling every image. This is the part CI does not do. |
+| **6 · Policy gate** | One `GET .../policy` returns pass/fail with the violated rules named — call it from CI, or from Kyverno/Gatekeeper at admission. |
+
+Across all six: a plain JSON API with an OpenAPI spec and a Swagger UI, a small
+dashboard, and fleet-wide questions — *which images still ship this CVE?* ·
+*which contain this package?* · *what changed between these two builds?*
 
 ## How it works
 
-```
-  register ──▶ stage ──▶ scan ──▶ findings ──▶ policy verdict
-     │                     │                        │
-   digest is           trivy/grype + unpacker    pass / fail, with
-   resolved and        + clamav, each in its      the violated rules
-   pinned here         own isolated Job           named
-```
+<img src="docs/images/artifact-lifecycle.svg" alt="A looping walkthrough of an artifact's life: registered, picked up by the sweep, scanned by trivy, grype, the unpacker and cosign in isolated Jobs, merged into the findings record, sent back through scanning by three different clocks, and judged by the policy gate." width="100%">
 
-Four things shape every integration:
+Five things shape every integration, one per beat:
 
-- **Identity is the digest, not the tag.** Two registrations of the same bytes
-  under different tags are one artifact — which is what makes "which images
-  still ship this CVE" answerable at all.
-- **Scanning is asynchronous.** `POST /scan` returns `202`. A pipeline that
-  reads findings immediately reads an empty set, which looks exactly like a
-  clean image.
-- **Findings have a lifecycle.** open → fixed → open again, each with a
-  `first_seen_at`. A rescan reporting the same CVE is not news and does not
-  notify.
-- **A scan that fails is not a scan that passed.** Failures are recorded per
-  artifact and block fix-detection for the buckets they cover, so a broken
-  scanner can never quietly mark everything resolved.
+- **Identity is the digest, not the tag** *(1)*. The digest is resolved at
+  registration and pins what was assessed. Under `requireDigest`, a ref that
+  won't confirm sets `unsafe: true` rather than blocking — the artifact is
+  recorded *and* visibly untrustworthy, which a rejection would not achieve.
+- **Scanning is asynchronous** *(2–3)*. `POST /scan` returns `202`. A pipeline
+  that reads findings immediately reads an empty set, which looks exactly like
+  a clean image. Wait for `status: scanned`, or read the gate.
+- **A scan that fails is not a scan that passed** *(4)*. Failures are recorded
+  per artifact and block fix-detection for the buckets they cover, so a broken
+  scanner can never quietly mark everything resolved. Nothing is ever
+  overwritten: `fixed` findings stay in their bucket, and so do suppressed ones.
+  A rescan re-reporting the same CVE is not news, and does not notify.
+- **The cheap path cannot satisfy the expensive path's clock** *(5)*. The
+  nightly SBOM re-evaluation may add and update findings but never resolve
+  them, and it deliberately leaves `last_scan_at` alone. Stamping it would make
+  every artifact look freshly scanned while malware coverage decayed behind a
+  green dashboard.
+- **The gate tells you whether there is a gate** *(6)*. The response carries
+  `configured` alongside `pass`, because "cleared every rule" and "there are no
+  rules" are otherwise the same empty answer — and only one of them is a green
+  light anyone earned.
+
+Scan status is not pipeline stage. Your CI reports the stage (`source` →
+`deploy`) and nothing derives it from a scan, so an artifact can legitimately be
+`scanned`, sitting at `deploy`, and failing the gate — three independent facts.
 
 Full design and rationale: [docs/architecture.md](docs/architecture.md).
 Cutting a chart release: [docs/releasing.md](docs/releasing.md).
