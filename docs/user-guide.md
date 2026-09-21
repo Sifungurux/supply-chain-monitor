@@ -492,18 +492,54 @@ Four Tasks that mirror what a build pipeline already does:
 | `scm-scan` | triggers a scan **and polls** until it finishes | timeout |
 | `scm-gate` | asks `/policy` | policy fails, or no policy is configured |
 
-They authenticate from the Secret the chart already creates — no key of their own:
+### Give the pipeline its own key
+
+These Tasks read `API_KEY` from a Secret called `scm-tekton-auth` — **not** the
+chart's `scm-monitor-api-auth`, which holds the master key. A pipeline that only
+registers and scans should not also be able to delete artifacts, accept risk on
+a finding, or upload a fleet-wide VEX document that suppresses findings
+everywhere.
+
+The four Tasks make exactly these calls, which is where the scope set comes
+from:
+
+| Call | Scope |
+| --- | --- |
+| `POST /api/v1/artifacts` | `register` |
+| `POST /api/v1/artifacts/{id}/scan` | `scan` |
+| `GET /api/v1/artifacts/{id}`, `GET .../policy` | `read` |
+| `POST /api/v1/artifacts/{id}/stage` | `stage:write` |
+
+So: `register|scan|read|stage:write`, and nothing else. Note there is no
+`results:write` — these Tasks *ask for* scans, they don't submit findings.
+Asking and asserting are separate scopes, and a pipeline that only asks should
+not be able to assert.
+
+`stage:write` exists because of this pipeline. Recording a stage used to require
+`admin`, which made the smallest honest scope for a build pipeline "can do
+everything" — so the scope was carved out rather than the example being written
+to overreach.
+
+Add the client:
 
 ```yaml
-env:
-  - name: API_KEY
-    valueFrom:
-      secretKeyRef:
-        name: scm-monitor-api-auth
-        key: API_KEY
+monitorApi:
+  apiKeys:
+    ci: <a long random string>
+  apiKeyScopes: "ci=register|scan|read|stage:write"
 ```
 
-Run the PipelineRun in a namespace the monitor-api ingress NetworkPolicy admits. In-namespace pods are admitted, which is why these run in `supply-chain-monitor` itself.
+Enforcement is default-closed, so the `apiKeyScopes` entry is not optional — a
+client with no entry can do nothing at all.
+
+Then put the same value where the Tasks read it:
+
+```bash
+kubectl -n supply-chain-monitor create secret generic scm-tekton-auth \
+  --from-literal=API_KEY='<the same random string>'
+```
+
+Run the PipelineRun in a namespace the monitor-api ingress NetworkPolicy admits. In-namespace pods are admitted, which is why these run in `supply-chain-monitor` itself — and why the Secret is created there.
 
 ### Install and run
 

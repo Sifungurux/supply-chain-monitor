@@ -9,8 +9,53 @@
 # NetworkPolicy admits -- in-namespace pods are admitted, which is why
 # the examples run in supply-chain-monitor itself.
 #
-# The API key comes from the Secret the chart already creates. Nothing
-# here needs a key of its own.
+# THE PIPELINE NEEDS ITS OWN KEY, scm-tekton-auth.
+#
+# These Tasks used to read the master key from scm-monitor-api-auth,
+# which is unrestricted: a pipeline that only registers and scans could
+# also delete any artifact in the fleet, accept risk on a finding, or
+# upload a fleet-wide VEX document suppressing findings everywhere. An
+# example is a recommendation, and that was the wrong one.
+#
+# The four Tasks below make exactly these calls:
+#
+#   POST /api/v1/artifacts                   register
+#   POST /api/v1/artifacts/{id}/scan         scan
+#   GET  /api/v1/artifacts/{id}              read
+#   GET  /api/v1/artifacts/{id}/policy       read
+#   POST /api/v1/artifacts/{id}/stage        stage:write
+#
+# so the key needs register|scan|read|stage:write and nothing more.
+#
+# stage:write exists BECAUSE of this pipeline. Recording a pipeline
+# stage used to require `admin`, which meant the smallest honest scope
+# for a build pipeline was "can do everything" -- so the scope was
+# carved out rather than the example being written to overreach.
+#
+# Note there is no results:write here: these Tasks ask for scans, they
+# do not submit findings. Asking and asserting are separate scopes, and
+# a pipeline that only asks should not be able to assert.
+#
+# 1. Add the client to the chart's values (or cluster/chart-secrets.sh,
+#    which generates named keys):
+#
+#      monitorApi:
+#        apiKeys:
+#          ci: <a long random string>
+#        apiKeyScopes: "ci=register|scan|read|stage:write"
+#
+#    Enforcement is default-closed: a client with no apiKeyScopes entry
+#    can do nothing at all, so the entry is not optional.
+#
+# 2. Put the same value where these Tasks read it:
+#
+#      kubectl -n supply-chain-monitor create secret generic scm-tekton-auth \
+#        --from-literal=API_KEY='<the same random string>'
+#
+# They talk to monitor-api over the in-cluster Service, so the
+# PipelineRun must run in a namespace the monitor-api ingress
+# NetworkPolicy admits -- which is why the examples run in
+# supply-chain-monitor itself, and why the Secret is created there.
 ---
 apiVersion: tekton.dev/v1
 kind: Task
@@ -46,7 +91,10 @@ spec:
         - name: API_KEY
           valueFrom:
             secretKeyRef:
-              name: scm-monitor-api-auth
+              # The pipeline's OWN key, not scm-monitor-api-auth -- that
+              # Secret holds the master key, which is unrestricted. See
+              # the header of this file for how to mint this one.
+              name: scm-tekton-auth
               key: API_KEY
       script: |
         #!/bin/sh
@@ -125,7 +173,10 @@ spec:
         - name: API_KEY
           valueFrom:
             secretKeyRef:
-              name: scm-monitor-api-auth
+              # The pipeline's OWN key, not scm-monitor-api-auth -- that
+              # Secret holds the master key, which is unrestricted. See
+              # the header of this file for how to mint this one.
+              name: scm-tekton-auth
               key: API_KEY
       script: |
         #!/bin/sh
@@ -165,7 +216,10 @@ spec:
         - name: API_KEY
           valueFrom:
             secretKeyRef:
-              name: scm-monitor-api-auth
+              # The pipeline's OWN key, not scm-monitor-api-auth -- that
+              # Secret holds the master key, which is unrestricted. See
+              # the header of this file for how to mint this one.
+              name: scm-tekton-auth
               key: API_KEY
       script: |
         #!/bin/sh
@@ -247,7 +301,10 @@ spec:
         - name: API_KEY
           valueFrom:
             secretKeyRef:
-              name: scm-monitor-api-auth
+              # The pipeline's OWN key, not scm-monitor-api-auth -- that
+              # Secret holds the master key, which is unrestricted. See
+              # the header of this file for how to mint this one.
+              name: scm-tekton-auth
               key: API_KEY
       script: |
         #!/bin/sh

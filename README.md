@@ -237,6 +237,12 @@ Swagger UI is at `/swagger`, the spec at `/openapi.yaml`.
 task-oriented ("turn this into a gate", "living with findings", Tekton
 integration) and every example in it was run against a live cluster.
 
+CI pipelines get their own scoped key, never the master one. The Tekton example
+([`examples/tekton/`](examples/tekton/)) shows the shape:
+`ci=register|scan|read|stage:write` — enough to register, scan, read a verdict
+and record a stage, and nothing else. See [§ 7 Tekton
+integration](docs/user-guide.md#7-tekton-integration).
+
 ## Contributing
 
 ```bash
