@@ -1845,10 +1845,15 @@ monitorApi:
     pvcName: scm-trivy-db-cache
     mountPath: /trivy-cache
     persistence:
-      # trivy's vulnerability DB + Java DB together are typically a few
-      # hundred MB -- 2Gi is generous headroom on top of that, cheap on
-      # a local-path StorageClass.
-      size: 2Gi
+      # 5Gi, for the same reason grypeCache is 10Gi: 2Gi was sized on
+      # k3d's local-path, which enforces no quota at all, so the number
+      # was never tested. trivy pulls two DBs (vulnerability + Java) and
+      # extracts them, so peak usage is well above the resting size.
+      #
+      # Smaller than grype's because trivy's downloads are smaller, and
+      # it has not been observed failing -- this is the same latent bug,
+      # fixed before it bites rather than after.
+      size: 5Gi
       # ACCESS MODE, and the single most important storage decision in
       # this chart on a multi-node cluster.
       #
@@ -1908,10 +1913,19 @@ monitorApi:
     pvcName: scm-grype-db-cache
     mountPath: /grype-cache
     persistence:
-      # grype's vulnerability DB alone (no separate Java DB the way
-      # trivy has) is typically a few hundred MB -- same 2Gi headroom
-      # as trivyCache for consistency.
-      size: 2Gi
+      # 10Gi. grype's DB is a few hundred MB at rest, so 2Gi looked like
+      # generous headroom -- but the download is not the resting size:
+      # grype writes a temp download dir and extracts alongside it, so
+      # peak usage is a multiple of the final DB.
+      #
+      # 2Gi was sized when this ran on k3d's local-path, which is a host
+      # directory enforcing NO QUOTA -- so the declared size meant
+      # nothing and node disk was the real ceiling. On Longhorn the
+      # quota is real, and the primer died at 1.3G of 1.9G while still
+      # downloading. The failure surfaces as
+      # "unable to create db client temp dir: no space left on device",
+      # which reads like a node problem and is not.
+      size: 10Gi
       # ACCESS MODE, and the single most important storage decision in
       # this chart on a multi-node cluster.
       #
