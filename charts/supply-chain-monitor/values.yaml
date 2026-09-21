@@ -1203,14 +1203,34 @@ monitorApi:
   scanJobResources:
     cpuRequest: 200m
     memoryRequest: 512Mi
-    # Empty = each scanner's own built-in limit (1Gi). grype gets an
-    # override below: its RSS was measured at ~1.043GiB on heavy images
-    # against a 1Gi limit, so it is OOM-killed and the artifact still
-    # reports "scanned" with half its CVE coverage.
-    memoryLimit: ""
-    perKind:
-      grype:
-        memoryLimit: 1536Mi
+    # 1.5Gi for every scan Job, overriding each scanner's own built-in
+    # 1Gi default.
+    #
+    # 1Gi is simply too small for a CVE scanner on a heavy image, and
+    # this has now been measured twice. grype's RSS hit ~1.043GiB on
+    # dotnet/sdk, mssql/server and playwright -- four separate kills
+    # within 600KB of each other -- and trivy was OOM-killed on the same
+    # built-in limit once grype had its own override and trivy did not.
+    #
+    # Raised HERE rather than as a second perKind exception. Two of the
+    # scanners needing more than the default means the default is wrong,
+    # and adding them one at a time only discovers the next one the same
+    # way: in production, on a heavy image.
+    #
+    # WHY THIS IS WORTH MORE THAN THE OOM ITSELF: an artifact is marked
+    # failed only when EVERY scanner failed (scan.go), so with
+    # cveScanner "both", one scanner being OOM-killed leaves the
+    # artifact "scanned" with no failure reason and half its CVE
+    # coverage. Nothing in the dashboard or the API can see it -- only
+    # pod status and dmesg can.
+    #
+    # A limit is a ceiling, not a reservation: memoryRequest above is
+    # what the scheduler packs against, so raising this does not reduce
+    # how many Jobs fit on a node.
+    #
+    # perKind stays available for a scanner that genuinely needs more.
+    memoryLimit: 1536Mi
+    perKind: {}
   # false here (the real in-cluster deployment, which has the
   # ServiceAccount token isolation needs). true is only ever meant for
   # running the monitor-api binary standalone outside Kubernetes -- see
