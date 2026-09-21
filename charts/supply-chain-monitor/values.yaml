@@ -1885,6 +1885,19 @@ monitorApi:
       # it has not been observed failing -- this is the same latent bug,
       # fixed before it bites rather than after.
       size: 5Gi
+      #
+      # APPLIES ONLY WHEN THE PVC IS FIRST CREATED. This claim is a Helm
+      # hook (hook-delete-policy: hook-failed), so it is kept on success
+      # and never re-created -- and hook resources are not part of the
+      # release's managed manifest, so nothing patches them either.
+      # Changing this on a cluster that already has the claim renders a
+      # manifest that is never applied, and nothing reports it.
+      #
+      # To resize a live one, change it here AND patch the claim:
+      #   kubectl -n <ns> patch pvc scm-trivy-db-cache \
+      #     -p '{"spec":{"resources":{"requests":{"storage":"5Gi"}}}}'
+      # then confirm status.capacity grew, not just the request. See
+      # docs/operations.md, "Resizing a scanner DB cache".
       # ACCESS MODE, and the single most important storage decision in
       # this chart on a multi-node cluster.
       #
@@ -1957,6 +1970,19 @@ monitorApi:
       # "unable to create db client temp dir: no space left on device",
       # which reads like a node problem and is not.
       size: 10Gi
+      #
+      # APPLIES ONLY WHEN THE PVC IS FIRST CREATED. This claim is a Helm
+      # hook (hook-delete-policy: hook-failed), so it is kept on success
+      # and never re-created -- and hook resources are not part of the
+      # release's managed manifest, so nothing patches them either.
+      # Changing this on a cluster that already has the claim renders a
+      # manifest that is never applied, and nothing reports it.
+      #
+      # To resize a live one, change it here AND patch the claim:
+      #   kubectl -n <ns> patch pvc scm-grype-db-cache \
+      #     -p '{"spec":{"resources":{"requests":{"storage":"10Gi"}}}}'
+      # then confirm status.capacity grew, not just the request. See
+      # docs/operations.md, "Resizing a scanner DB cache".
       # ACCESS MODE, and the single most important storage decision in
       # this chart on a multi-node cluster.
       #

@@ -2527,6 +2527,74 @@ fetches its own copy first (the same `oras pull`-backed fetch
 `FetchingScanner` already does in-process). See architecture.md's
 "Scanning pipeline" section for the full reasoning.
 
+### Resizing a scanner DB cache (the `size` value does nothing on an existing install)
+
+`monitorApi.grypeCache.persistence.size` and `monitorApi.trivyCache.persistence.size`
+apply **only when the PVC is first created.** Changing either on a cluster that
+already has the claim renders a new manifest that is never applied, and nothing
+reports a problem.
+
+That is not Helm being unhelpful — it follows from how these PVCs are declared.
+Both are Helm **hooks**:
+
+```yaml
+"helm.sh/hook": pre-install,pre-upgrade
+"helm.sh/hook-weight": "-5"
+"helm.sh/hook-delete-policy": hook-failed
+```
+
+The weight is what makes the claim exist before the primer Job (weight `-4`)
+mounts it. The delete policy keeps it on success — which is right, since
+deleting it every upgrade would throw away the cache — but it also means an
+existing claim is never re-created, and hook resources are not part of the
+release's managed manifest, so nothing patches it either. The primer Job uses
+`before-hook-creation`, so *it* is recreated and re-run on every upgrade; the
+PVC beside it is not.
+
+**The symptom when a cache is too small** is a primer or refresh Job failing
+with something that reads like a node problem and is not:
+
+```
+unable to update vulnerability database: unable to create db client temp dir:
+mkdir /grype-cache/grype-db-download...: no space left on device
+```
+
+The resting DB is a few hundred MB; the *download* is a multiple of that,
+because the Job writes a temp download directory and extracts alongside it.
+
+This was invisible for as long as the project ran on k3d's `local-path`
+provisioner, which hands out a host directory and enforces **no quota at all** —
+the declared size meant nothing there and node disk was the real ceiling. On any
+real CSI driver the quota is enforced and an undersized value finally says so.
+
+**To actually resize**, change the value in the chart (so fresh installs are
+right) *and* patch the live claim:
+
+```bash
+kubectl -n supply-chain-monitor patch pvc scm-grype-db-cache \
+  -p '{"spec":{"resources":{"requests":{"storage":"10Gi"}}}}'
+```
+
+Then check that the volume, not just the request, actually grew — `spec` is what
+was asked for, `status.capacity` is what you have:
+
+```bash
+kubectl -n supply-chain-monitor get pvc scm-grype-db-cache \
+  -o jsonpath='{.spec.resources.requests.storage} / {.status.capacity.storage}{"\n"}'
+```
+
+If `spec` grew but `status.capacity` did not, the filesystem has not been
+expanded yet and the consumer has to remount — delete the failed primer pod and
+let it run again. A `flux reconcile helmrelease supply-chain-monitor -n
+flux-system --with-source` re-runs the primer, since that Job is recreated on
+every upgrade.
+
+If the StorageClass refuses expansion (`allowVolumeExpansion: false`), delete the
+PVC and let the next reconcile's `pre-upgrade` hook recreate it at the new size.
+**These hold nothing but a re-downloadable cache**, so that costs a download, not
+data — unlike every other PVC in this chart. Expect the delete to block on
+finalizers until nothing has it mounted.
+
 ### Scan scratch space: node disk or a StorageClass
 
 Every scan Job extracts the image it is scanning to `/tmp`, and that
