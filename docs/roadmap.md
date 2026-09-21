@@ -16,12 +16,22 @@ Work in the current phase, tracked to completion. Items graduate here from
 
 | ID | Item | Phase | Status | PR |
 |---|---|---|---|---|
-| H-1 | Scope split (`scan` vs `results:write`) + default-closed enforcement | 0 | done — also added `stage:write`, so a CI key never needs `admin` | #216 |
+| H-1 | Scope split (`scan` vs `results:write`) + default-closed enforcement | 0 | done — also added `stage:write`, so a CI key never needs `admin` | #220 |
 | S-1 | Dashboard proxy: no master-key fallback, GET-only, ClusterIP, read-only scope | 0 | done | #221 |
-| S-4 | No master-key fallback in image scan Jobs; `token_mint_failed` + alert | 0 | partial — refusal, retry and classification already shipped; only the counter and PrometheusRule alert remain | |
-| S-2 | `make check-live-secrets` against every cluster that ever ran the chart | 0 | open | |
+| S-4 | No master-key fallback in image scan Jobs; `token_mint_failed` + alert | 0 | done — refusal shipped earlier (#212/#213); the counter and alert followed | #217 |
+| S-2 | `make check-live-secrets` against every cluster that ever ran the chart | 0 | done — **not yet exercised against a live cluster** | #218 |
 | S-7 | Tekton examples use a scoped `ci` key | 0 | done — `register\|scan\|read\|stage:write`, no `admin` | #222 |
-| L-1 | Split `postgres_store.go` by concern, before H-2 | 0 | open | |
+| L-1 | Split `postgres_store.go` by concern, before H-2 | 0 | done — 2,350 lines into six files, no behaviour change | #219 |
+
+**Phase 0 is complete.** Two things it did not finish, carried deliberately
+rather than silently:
+
+- `make check-live-secrets` (S-2) has **never been run against a live cluster**.
+  It is only a check once someone has watched it fail — set a throwaway role's
+  password to the leaked value, confirm it reports the failure, revert.
+- Any artifact scanned while trivy was being OOM-killed is recorded `scanned`
+  with **half its CVE coverage** and no failure reason (see #223). Those need a
+  rescan; the status cannot tell you which they are.
 
 ## Deferred
 
