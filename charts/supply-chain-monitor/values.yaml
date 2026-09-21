@@ -938,13 +938,24 @@ monitorApi:
   # dashboard -- so an unscoped dashboard key makes "can load the
   # dashboard" mean "can delete any artifact". Recommended:
   #
-  #   apiKeyScopes: "dashboard=read|scan"
+  #   apiKeyScopes: "dashboard=read"
   #
-  # read for the views, scan for the Scan button. Deliberately NOT
-  # admin: that refuses delete, maintainer edits, stage changes and risk
-  # acceptance at the API, so the dashboard's admin controls return 403
-  # rather than working for anyone who found the URL. Add `register`
-  # only if dashboard.allowManualRegistration is on.
+  # READ ONLY, matching dashboard.allowWrites defaulting to false. The
+  # dashboard is a viewer; its key is held by everyone who can reach the
+  # page, so it gets the scope a viewer needs and nothing else.
+  #
+  # `read` alone is only expressible because scan and results:write are
+  # now separate scopes. While they were one, taking the Scan button
+  # away from the dashboard key would ALSO have taken away submitting
+  # findings and VEX -- so the fleet-wide suppression power came along
+  # with the button, and nobody could decline just the button.
+  #
+  # Add `scan` for the Scan button (and set dashboard.allowWrites, or
+  # nginx refuses the POST before the scope is ever consulted), and
+  # `register` only if dashboard.allowManualRegistration is on.
+  # Deliberately never admin: delete, maintainer edits, stage changes
+  # and risk acceptance are refused at the API, not merely hidden in the
+  # UI.
   #
   # ENFORCEMENT IS DEFAULT-CLOSED. A client that authenticates but has
   # no entry here can do NOTHING -- every request it makes answers 403.
@@ -966,7 +977,7 @@ monitorApi:
   # unrestricted (see KeyScopes.Enforced in internal/api/scopes.go) --
   # which apiKeyScopesStrict below refuses to start over when more than
   # one client is configured.
-  apiKeyScopes: "default=admin;dashboard=read|scan;sweep=read|scan"
+  apiKeyScopes: "default=admin;dashboard=read;sweep=read|scan"
   # Refuse to start when apiKeyScopes above is EMPTY while several
   # clients authenticate -- i.e. when every one of them is unrestricted
   # and they differ only in the audit log.
@@ -2179,7 +2190,27 @@ dashboard:
   # dashboard via ConfigMap/Secret instead of by hand") from the UI for
   # deployments that never want a person changing it from the browser.
   showConnectionSettings: true
+  # Allow the proxy to forward POST -- the Scan and Register buttons.
+  #
+  # OFF by default. The proxy attaches a credential server-side to
+  # everything it forwards and is reachable by anyone who can reach the
+  # dashboard, so turning this on makes "can load the dashboard" mean
+  # "can trigger scans". That is a reasonable thing to want on a private
+  # cluster; it should just be a decision rather than the default.
+  #
+  # Enforced in nginx (limit_except) AND published to the page, so the
+  # UI hides the controls it may no longer use instead of offering
+  # buttons that answer 403.
+  #
+  # DELETE/PUT/PATCH are never forwarded regardless of this flag.
+  allowWrites: false
   service:
+    # ClusterIP by default -- reach the dashboard with
+    # `kubectl -n supply-chain-monitor port-forward svc/scm-dashboard 8081:80`
+    # or through the Gateway. Set to NodePort to publish it on every
+    # node, which also publishes the credential its proxy attaches.
+    type: ClusterIP
+    # Only rendered when type is NodePort.
     nodePort: 30301
   resources:
     # ephemeral-storage declared for the same reason as the other

@@ -1,0 +1,88 @@
+supply-chain-monitor {{ .Chart.Version }} installed into namespace {{ .Release.Namespace }}.
+
+Reach the dashboard:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/scm-dashboard 8081:80
+  # then open http://localhost:8081
+{{- if eq .Values.dashboard.service.type "NodePort" }}
+
+  This install publishes it on NodePort {{ .Values.dashboard.service.nodePort }} as well, so it is
+  reachable on every node of the cluster -- and so is the API credential
+  its proxy attaches server-side to each request it forwards.
+{{- end }}
+
+Reach the API:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/monitor-api 8080:8080
+
+{{- /*
+  Everything below is a WARNING BLOCK. These conditions are all ones the
+  chart cannot refuse outright -- each is legitimate somewhere -- but
+  each also has no symptom until it matters, which is exactly when
+  nobody is reading. Helm prints NOTES.txt once, at the moment someone
+  is looking.
+*/}}
+
+{{- $dashboardKey := "" }}
+{{- if .Values.monitorApi.apiKeys }}
+  {{- if kindIs "map" .Values.monitorApi.apiKeys }}
+    {{- $dashboardKey = index .Values.monitorApi.apiKeys "dashboard" | default "" }}
+  {{- else if contains "dashboard:" (toString .Values.monitorApi.apiKeys) }}
+    {{- $dashboardKey = "set" }}
+  {{- end }}
+{{- end }}
+{{- if not $dashboardKey }}
+
+  !! NO "dashboard" KEY -- THE DASHBOARD WILL SHOW 401s
+  !!
+  !! monitorApi.apiKeys has no "dashboard" entry, so the dashboard's
+  !! proxy attaches NO credential at all. That is deliberate: it used to
+  !! fall back to the master key, which made "can load the dashboard"
+  !! mean "can delete any artifact" for every anonymous visitor.
+  !!
+  !! The page will load and every API call will answer 401 until you
+  !! generate one:
+  !!
+  !!   ./cluster/chart-secrets.sh
+{{- end }}
+
+{{- if .Values.dashboard.allowWrites }}
+
+  !! THE DASHBOARD PROXY ACCEPTS WRITES
+  !!
+  !! dashboard.allowWrites is true, so the proxy forwards POST using the
+  !! dashboard's key. Anyone who can reach the dashboard can trigger
+  !! scans -- and register artifacts, if allowManualRegistration is on
+  !! too. Reasonable on a private network; make sure that is what this
+  !! network is.
+{{- end }}
+
+{{- if not .Values.monitorApi.apiKeyScopes }}
+
+  !! SCOPES ARE NOT ENFORCED
+  !!
+  !! monitorApi.apiKeyScopes is empty, so every key -- named or not --
+  !! is unrestricted and they differ only in the audit log. With more
+  !! than one client configured, monitor-api refuses to start rather
+  !! than run this way; set apiKeyScopesStrict: false to accept it
+  !! deliberately.
+{{- end }}
+
+{{- if and .Values.postgres.backup.enabled (not .Values.postgres.backup.publicKeySecret) }}
+
+  !! BACKUPS ARE WRITTEN UNENCRYPTED
+  !!
+  !! The backup CronJob is enabled with no postgres.backup.publicKeySecret,
+  !! so every dump lands on the PVC in the clear -- including every
+  !! artifact ref, finding and maintainer contact in the fleet.
+  !!
+  !!   ./cluster/backup-encryption-key.sh   (make backup-key)
+{{- end }}
+
+Verify the credentials that leaked in this repo's git history are refused
+by this cluster -- run it against every cluster that has ever had this
+chart installed:
+
+  make check-live-secrets
+
+Docs: docs/user-guide.md (start here), docs/operations.md (the full manual).

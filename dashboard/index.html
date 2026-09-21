@@ -612,13 +612,33 @@
   els.apiBase.value = state.apiBase;
   els.apiKey.value = state.apiKey;
 
+  // Whether this deployment allows the dashboard to change anything.
+  //
+  // Mirrors the chart's dashboard.allowWrites, which ALSO gates the
+  // nginx proxy (limit_except). nginx is the control; this is only so
+  // the page stops offering buttons whose requests would be refused --
+  // a Scan button that always answers 403 teaches people to distrust
+  // the dashboard rather than to read the setting.
+  //
+  // Fail-closed on anything but the exact string "true", matching
+  // allowManualRegistration: a page opened without env.js is a page
+  // with no deployment behind it, and should not offer to act on one.
+  function writesAllowed() {
+    return injected.allowWrites === 'true';
+  }
+
   // The "+ Register an artifact" link is hidden unless the chart's
   // dashboard.allowManualRegistration is explicitly "true" (see
   // values.yaml) -- fail-closed like the injected apiBase/apiKey
   // pattern's own convention, so a dashboard opened without env.js
   // (or with the value unset/false) never exposes ad-hoc registration
   // a deployment didn't opt into.
-  els.registerLinkSection.hidden = injected.allowManualRegistration !== 'true';
+  //
+  // Registration is a POST, so it also needs writes to be allowed at
+  // all -- see allowWrites below. Both gates, not either: the proxy
+  // refuses the POST regardless of what this page thinks.
+  els.registerLinkSection.hidden =
+    injected.allowManualRegistration !== 'true' || !writesAllowed();
 
   // Opposite default from allowManualRegistration above: this is a
   // display preference, not a security gate, so it stays visible unless
@@ -1515,13 +1535,20 @@
             '<td>' + countCell(openFindings(a.other_findings).length) + '</td>' +
             '<td class="muted">' + timeAgo(a.updated_at) + '</td>' +
             '<td class="actions">' +
-              '<button data-action="scan" data-id="' + esc(a.id) + '" ' + (busy ? 'disabled' : '') + '>' +
-                (busy ? 'Scanning…' : '<i class="ti ti-player-play" aria-hidden="true"></i> Scan') +
-              '</button>' +
+              // Scan and Delete are omitted entirely, not disabled,
+              // when this deployment is read-only: a greyed-out button
+              // says "not right now", and the truth is "not here".
+              (writesAllowed()
+                ? '<button data-action="scan" data-id="' + esc(a.id) + '" ' + (busy ? 'disabled' : '') + '>' +
+                    (busy ? 'Scanning…' : '<i class="ti ti-player-play" aria-hidden="true"></i> Scan') +
+                  '</button>'
+                : '') +
               '<button data-action="toggle" data-id="' + esc(a.id) + '">Details</button>' +
-              '<button data-action="delete" data-id="' + esc(a.id) + '" data-ref="' + esc(a.ref) + '" ' + (busy ? 'disabled' : '') + '>' +
-                '<i class="ti ti-trash" aria-hidden="true"></i> Delete' +
-              '</button>' +
+              (writesAllowed()
+                ? '<button data-action="delete" data-id="' + esc(a.id) + '" data-ref="' + esc(a.ref) + '" ' + (busy ? 'disabled' : '') + '>' +
+                    '<i class="ti ti-trash" aria-hidden="true"></i> Delete' +
+                  '</button>'
+                : '') +
             '</td>' +
           '</tr>'
         );
