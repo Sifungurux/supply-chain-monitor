@@ -191,18 +191,35 @@ spec:
       # Published by ci.yml's publish-image job on every push to main.
       image:
         repository: ghcr.io/sifungurux/supply-chain-monitor/monitor-api
-        # 1b844b3 -- "feat(release): version the chart with semver and
-        # publish it to ghcr", which is also the commit chart-v0.1.0-rc.1
-        # was cut from. Carries the scan-duration work from #205: without
-        # this bump the chart's new "Scan time" row renders on every
-        # detail page while the API pod still runs an image that never
-        # writes scan_durations_ms, so every artifact reads "—" forever
-        # and an un-deployed feature is indistinguishable from a broken
-        # one.
+        # 4bec052 -- the head of main. Closes a 21-commit gap behind the
+        # chart, which has been deploying from git this whole time while
+        # the pod stayed on 1b844b3 (#207).
+        #
+        # THE ONE THING THAT CAN BREAK ON THIS BUMP is #220's scope
+        # split, because it flips a DEFAULT. Old binary: a client with no
+        # entry in apiKeyScopes gets Scopes{unrestricted: true} --
+        # everything. New binary: it gets the zero value, and
+        # requireScope answers 403 to all of it. Default-closed is the
+        # point of #220, and is also why this is not a no-op deploy.
+        #
+        # apiKeyScopes below names default, dashboard and sweep. Those
+        # three are safe: default=admin implies every scope, and the
+        # other two hold read|scan, which is all they use. Any OTHER
+        # client in monitorApi.apiKeys is not -- that list comes from a
+        # Secret via valuesFrom, so it cannot be checked from this repo.
+        # Enumerate it against the live cluster before merging: a key
+        # absent from the map goes from unrestricted to locked out in
+        # one reconcile.
+        #
+        # #220 also moved four routes -- findings, vex and fleet-vex from
+        # scan to results:write, stage from admin to stage:write. Neither
+        # new scope is granted below, so an external CI key posting to
+        # those paths needs its entry extended in the same change.
+        #
         # The multi-arch INDEX digest, not a per-platform one, so the
         # arm64 nodes here and any amd64 node resolve their own manifest
         # from it.
-        digest: sha256:a76df884695d3e16bbf2181a8e53fda33d41127dd444cc529015ed475dd6a47a
+        digest: sha256:855a85f0f59e6d313d4bf1dafe01056159ed34932c901ce5c8260fb00bcaa9dc
       # SWEEP THROUGHPUT, sized from measurement rather than the chart's
       # conservative defaults (*/15, batchSize 5).
       #
