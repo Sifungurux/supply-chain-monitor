@@ -82,6 +82,32 @@ type Policy struct {
 	// component inventory, and re-deriving would let the gate and the
 	// findings disagree.
 	LicenseDenylist bool `json:"licenseDenylist,omitempty"`
+
+	// RequireProvenance fails an artifact whose signature verification
+	// did not conclude VERIFIED. Until this existed, cosign's verdict
+	// was recorded and displayed but gated nothing -- an unsigned image
+	// passed every policy a signed one did.
+	//
+	// Only artifact.ProvenanceVerified passes. The other three states
+	// each fail, and they are NOT interchangeable, so each carries its
+	// own Detail:
+	//
+	//   unsigned    checked, and there is no such signature
+	//   unverified  the check could not be COMPLETED (registry down,
+	//               cosign error) -- "I could not find out" is not
+	//               "it is fine", the same reading that makes
+	//               RequireScanWithinDays fail a never-scanned artifact
+	//   ""          nothing checked it at all: no ProvenanceScanner is
+	//               configured, or this ref is outside
+	//               cosign.refPrefixes
+	//
+	// The empty case is the one that bites. Turning this rule on while
+	// cosign is disabled fails the ENTIRE fleet, and scoping cosign to
+	// a ref prefix fails every artifact outside it. That is deliberate
+	// -- a gate that passes what it never inspected is worth nothing --
+	// but it is a configuration error rather than a supply-chain one,
+	// so the Detail says which, in those words.
+	RequireProvenance bool `json:"requireProvenance,omitempty"`
 }
 
 // Violation is one failed rule. FindingID is set only when a specific
@@ -117,7 +143,7 @@ type Result struct {
 // green light nobody earned. See the dashboard's policyBadge.
 func (p Policy) Configured() bool {
 	return len(p.MaxSeverity) > 0 || p.DisallowUnsafe || p.RequireSBOM ||
-		p.RequireScanWithinDays > 0 || p.LicenseDenylist
+		p.RequireScanWithinDays > 0 || p.LicenseDenylist || p.RequireProvenance
 }
 
 // Load parses POLICY_JSON. An empty string is the legitimate "no
@@ -187,6 +213,64 @@ func validMaxSeverity(s string) bool {
 // having assessed a finding: a critical CVE a human has already
 // justified as not_affected must not keep failing a build, or the VEX
 // document does nothing and people route around the gate.
+// provenanceDetail explains a non-verified provenance state in the
+// terms the operator has to act on. The three failures need three
+// different responses -- re-sign the image, retry the check, or fix the
+// deployment's own cosign configuration -- and a shared "provenance not
+// verified" string would send every one of them to the wrong place.
+func provenanceDetail(p string) string {
+	switch p {
+	case artifact.ProvenanceUnsigned:
+		return "signature verification ran and found no signature from the required identity"
+	case artifact.ProvenanceUnverified:
+		return "signature verification could not be completed, so this artifact is unproven rather than unsigned -- retry before treating it as a supply-chain failure"
+	case artifact.ProvenanceUnknown:
+		return "nothing has verified this artifact: no provenance scanner is configured, or its ref falls outside cosign.refPrefixes. This is a configuration gap in the deployment, not a finding about the artifact"
+	default:
+		// Not reachable through ValidProvenance, but a row written by
+		// an older or future version must not read as verified.
+		return fmt.Sprintf("provenance is %q, which is not a verified state", p)
+	}
+}
+
+// provenanceIsStale reports whether a VERIFIED verdict was reached
+// before the artifact's most recent scan.
+//
+// internal/api's runScan deliberately does not overwrite a provenance
+// verdict when no check ran, so that disabling cosign does not erase
+// every answer it ever gave. That is right for a field that is
+// displayed. It is fail-open for a field that gates: switch cosign off,
+// or narrow cosign.refPrefixes past an artifact, and its old "verified"
+// stands forever with nothing left to re-examine it.
+//
+// It is also the content half of the same hole. The verdict records WHEN
+// a check ran but not WHICH BYTES it ran against, so a scan that updates
+// Digest without re-verifying leaves a verdict certifying the artifact's
+// previous content. There is no digest to compare against -- binding one
+// needs a column -- but both cases share a signal: the verifying scan is
+// no longer the latest scan.
+//
+// So the comparison is against LastScanAt, not against a wall-clock
+// window, and it needs no configuration. With cosign enabled and in
+// scope the two timestamps are written in the same Update and move
+// together; they diverge only when a scan ran and verified nothing,
+// which is exactly the case where the verdict stopped being evidence
+// about the artifact as it now stands.
+func provenanceIsStale(a artifact.Artifact) bool {
+	if a.LastScanAt == nil {
+		// Never scanned, yet carrying a verdict: nothing establishes
+		// that the verdict describes this artifact's current state.
+		return a.ProvenanceCheckedAt != nil
+	}
+	// A verdict with no timestamp cannot be shown to be current. The two
+	// are written together, so this means a row from before
+	// ProvenanceCheckedAt existed.
+	if a.ProvenanceCheckedAt == nil {
+		return true
+	}
+	return a.ProvenanceCheckedAt.Before(*a.LastScanAt)
+}
+
 func Evaluate(p Policy, a artifact.Artifact, now time.Time) Result {
 	violations := []Violation{}
 
@@ -221,6 +305,24 @@ func Evaluate(p Policy, a artifact.Artifact, now time.Time) Result {
 						a.LastScanAt.UTC().Format(time.RFC3339), p.RequireScanWithinDays),
 				})
 			}
+		}
+	}
+
+	if p.RequireProvenance {
+		switch {
+		case a.Provenance != artifact.ProvenanceVerified:
+			violations = append(violations, Violation{
+				Rule:   "requireProvenance",
+				Detail: provenanceDetail(a.Provenance),
+			})
+		case provenanceIsStale(a):
+			// A verdict that outlived the scan it was reached in
+			// certifies bytes this artifact may no longer be. See
+			// provenanceIsStale.
+			violations = append(violations, Violation{
+				Rule:   "requireProvenance",
+				Detail: "the last scan did not verify provenance, so this \"verified\" predates it: the signature scanner is disabled or this ref no longer matches cosign.refPrefixes, and the verdict certifies an earlier state of the artifact rather than its current digest",
+			})
 		}
 	}
 

@@ -744,6 +744,22 @@ monitorApi:
     # -- so this fails only artifacts the rescan cycle is genuinely not
     # keeping up with, not every artifact between nightly runs.
     requireScanWithinDays: 2
+    # Fail anything cosign did not conclude VERIFIED. Off by default,
+    # and the reason is scope rather than strictness: only artifacts
+    # matching monitorApi.cosign.refPrefixes are ever checked, and
+    # everything else is left at provenance "" -- never inspected.
+    #
+    # This rule fails "" as hard as it fails "unsigned", because a gate
+    # that passes what it never looked at certifies nothing. So turning
+    # it on in a deployment whose refPrefixes do not cover the fleet
+    # fails EVERY artifact outside them, immediately. The violation
+    # detail says when that is what happened, in those words, rather
+    # than reporting a configuration gap as a supply-chain failure.
+    #
+    # Turn it on once cosign.refPrefixes covers everything you register,
+    # or once you are ready to treat an unsigned third-party image as a
+    # policy failure -- which, on purpose, is what it is.
+    # requireProvenance: true
   # Prometheus scraping of monitor-api's /metrics (process and scan
   # counters -- see services/monitor-api/internal/api/metrics.go).
   #

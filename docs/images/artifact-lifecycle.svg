@@ -162,7 +162,7 @@
   <text class="f" x="40" y="362" font-size="13" fill="#05c168">&#10003;</text>
   <text class="f" x="62" y="362" font-size="13" fill="#d1dbf9">requireScanWithinDays: 2 &#8212; against a sweep that rescans after one</text>
   <text class="f" x="40" y="386" font-size="13" fill="#7e89ac">&#183;</text>
-  <text class="f" x="62" y="386" font-size="13" fill="#7e89ac">provenance: verified &#8212; cosign&#8217;s verdict is reported beside the result, not one of the rules</text>
+  <text class="f" x="62" y="386" font-size="13" fill="#7e89ac">requireProvenance &#8212; available, not in force here; cosign&#8217;s verdict is recorded either way</text>
   <text class="f" x="40" y="412" font-size="12" fill="#7e89ac">Only active findings count: fixed, VEX-suppressed and accepted are excluded by one predicate.</text>
 </g>
 </svg>

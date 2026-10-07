@@ -1902,6 +1902,39 @@ Sigstore judged it (`public Sigstore` / `private Sigstore, trusted root …`)
 so "unsigned" is never ambiguous between *not signed by us* and *not
 signed by anyone the public instance knows*.
 
+#### Verifying one ref by hand
+
+`monitor-api verify-provenance <ref>` runs the configured cosign settings
+against a single ref, prints the verdict, the trust root and any finding,
+and exits non-zero unless the result is `verified`. It is how you answer
+"why does the dashboard say unsigned" without reading Job logs:
+
+```bash
+kubectl -n supply-chain-monitor exec deploy/monitor-api -- \
+  monitor-api verify-provenance ghcr.io/acme/checkout:2.4.1
+```
+
+Run inside the pod it inherits that deployment's real configuration, which
+is usually the point — a ref outside `refPrefixes` reports `(not checked)`
+rather than a verdict, and that is almost always the explanation.
+
+**CI runs this against its own published image on every push to main.**
+Not as a formality: every bug this verification path has had was invisible
+to `go test`, because the unit tests drive a stub cosign binary. The real
+one needs a writable TUF cache under a read-only root filesystem, and
+cosign's `slsaprovenance` shorthand means SLSA **v0.2** while
+`actions/attest-build-provenance` emits **v1** — an image with a perfectly
+good attestation was reported as having none. Both reached production and
+were found by hand there. So `ci.yml` verifies the image it just pushed,
+with the binary it just built, under the same read-only rootfs plus
+`tmpfs /tmp` the Deployment gives it, and it does **not** pin
+`COSIGN_ATTESTATION_TYPE` — the default is what every deployment gets, so
+the default is what has to be proven right.
+
+GitHub's own verifier runs first in that job, on purpose: if it fails the
+attestation is wrong and this project's code is not implicated, which is
+worth knowing before reading a stack trace.
+
 ### Which CVEs are actually being exploited
 
 Severity describes how bad exploitation *would* be. It says nothing
@@ -1985,7 +2018,49 @@ monitorApi:
     requireSBOM: true
     requireScanWithinDays: 7
     licenseDenylist: true
+    requireProvenance: true   # see the warning below before enabling
 ```
+
+**`requireProvenance` fails three different things, and one of them is
+your own configuration.** It passes only `provenance: verified`. It fails
+`unsigned` (checked, no signature) and `unverified` (the check could not
+complete) — and it fails the empty state, meaning *nothing ever looked*,
+just as hard.
+
+That last case is the one to plan for. Only refs matching
+`monitorApi.cosign.refPrefixes` are checked at all, so enabling this rule
+on a deployment whose prefixes do not cover the fleet fails **every
+artifact outside them** on the next evaluation. That is deliberate — a
+gate that passes what it never inspected certifies nothing — but it is a
+deployment gap rather than a supply-chain one, and the violation detail
+says so in those words, so a build log tells you which you are looking at.
+
+Check what you are about to gate before turning it on:
+
+```bash
+curl -s -H "Authorization: Bearer $SCM_API_KEY" \
+  "http://localhost:30300/api/v1/artifacts?limit=500" \
+  | jq -r '.artifacts[] | select(.type=="image") | .provenance // "(never checked)"' \
+  | sort | uniq -c | sort -rn
+```
+
+Anything but `verified` in that tally is an artifact this rule will fail.
+
+**A `verified` that predates the artifact's last scan also fails.** When no
+provenance check runs, a scan deliberately leaves the previous verdict in
+place, so that disabling cosign does not erase every answer it ever gave —
+right for a field that is displayed, fail-open for one that gates. Without
+this, switching cosign off would leave every previously-verified artifact
+passing the gate forever, and a scan that updated the digest without
+re-verifying would leave a verdict certifying the artifact's *earlier*
+content.
+
+So the rule compares `provenance_checked_at` against `last_scan_at`. With
+cosign enabled and the ref in scope the two are written in the same update
+and move together; they diverge only when a scan ran and verified nothing.
+No configuration, and nothing to keep in step. If this violation appears
+across the fleet at once, the cause is almost always cosign being disabled
+or `refPrefixes` having been narrowed — not anything about the artifacts.
 
 ```bash
 curl -s -H "Authorization: Bearer $SCM_API_KEY" \

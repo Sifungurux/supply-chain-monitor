@@ -661,6 +661,15 @@ func main() {
 		runEnrichRefresh()
 		return
 	}
+	// `monitor-api verify-provenance <ref>` is a sixth mode: verify one
+	// ref with the configured cosign settings, print the verdict, exit
+	// non-zero unless it is VERIFIED. Used by ci.yml to check this
+	// project's own published image, and by hand to explain a verdict.
+	// See runVerifyProvenance.
+	if len(os.Args) > 1 && os.Args[1] == "verify-provenance" {
+		runVerifyProvenance()
+		return
+	}
 	runAPIServer()
 }
 
@@ -2525,20 +2534,8 @@ func runAPIServer() {
 	// nil unless an identity AND issuer are configured; see
 	// NewSigstoreScanner for why verifying without them is worse than
 	// not verifying at all.
-	sigstoreScanner := scanner.NewSigstoreScanner(scanner.SigstoreConfig{
-		CertIdentityRegexp: os.Getenv("COSIGN_CERT_IDENTITY_REGEXP"),
-		CertOIDCIssuer:     os.Getenv("COSIGN_CERT_OIDC_ISSUER"),
-		RequireAttestation: getenvBool("COSIGN_REQUIRE_ATTESTATION", false),
-		AttestationType:    os.Getenv("COSIGN_ATTESTATION_TYPE"),
-		RefPrefixes:        splitAndTrim(os.Getenv("COSIGN_REF_PREFIXES")),
-		TrustedRootPath:    os.Getenv("COSIGN_TRUSTED_ROOT"),
-		TUFMirror:          os.Getenv("COSIGN_TUF_MIRROR"),
-		TUFRootPath:        os.Getenv("COSIGN_TUF_ROOT"),
-		// Same directory grype is pointed at -- both use
-		// go-containerregistry's keychain, which reads config.json from
-		// DOCKER_CONFIG.
-		DockerConfigDir: cosignDockerConfigDir(dockerConfigPath),
-	})
+	sigstoreScanner := scanner.NewSigstoreScanner(
+		sigstoreConfigFromEnv(cosignDockerConfigDir(dockerConfigPath)))
 	if getenvBool("COSIGN_ENABLED", false) && sigstoreScanner == nil {
 		// Enabled but unusable. Refusing to start beats running with
 		// provenance checking silently absent -- an artifact list with
@@ -3218,6 +3215,98 @@ func cosignTrustDescription() string {
 // cosignDockerConfigDir mirrors the grypeDockerConfigDir derivation:
 // DOCKER_CONFIG names a DIRECTORY containing config.json, while
 // writeDockerConfig returns the path to the file itself.
+// sigstoreConfigFromEnv reads the cosign settings the chart renders.
+//
+// Extracted so `monitor-api verify-provenance` builds its scanner from
+// exactly the same environment the API server does. A second copy of
+// these nine lookups is the kind of thing that drifts by one variable
+// and leaves CI proving a configuration nothing runs.
+func sigstoreConfigFromEnv(dockerConfigDir string) scanner.SigstoreConfig {
+	return scanner.SigstoreConfig{
+		CertIdentityRegexp: os.Getenv("COSIGN_CERT_IDENTITY_REGEXP"),
+		CertOIDCIssuer:     os.Getenv("COSIGN_CERT_OIDC_ISSUER"),
+		RequireAttestation: getenvBool("COSIGN_REQUIRE_ATTESTATION", false),
+		AttestationType:    os.Getenv("COSIGN_ATTESTATION_TYPE"),
+		RefPrefixes:        splitAndTrim(os.Getenv("COSIGN_REF_PREFIXES")),
+		TrustedRootPath:    os.Getenv("COSIGN_TRUSTED_ROOT"),
+		TUFMirror:          os.Getenv("COSIGN_TUF_MIRROR"),
+		TUFRootPath:        os.Getenv("COSIGN_TUF_ROOT"),
+		// Same directory grype is pointed at -- both use
+		// go-containerregistry's keychain, which reads config.json from
+		// DOCKER_CONFIG.
+		DockerConfigDir: dockerConfigDir,
+	}
+}
+
+// runVerifyProvenance verifies one ref and exits non-zero unless the
+// verdict is VERIFIED. A sixth CLI mode, and the one CI uses to check
+// this project's own published image against this project's own
+// verification code.
+//
+// Why a mode rather than a test. Every bug this has actually had was
+// invisible to `go test`: the unit tests drive a STUB cosign binary, so
+// they cannot see that the real one needs a writable HOME under a
+// read-only root filesystem, or that cosign's "slsaprovenance"
+// shorthand means SLSA v0.2 while GitHub emits v1 -- both of which
+// reached production and were found there. Reproducing those needs the
+// real binary, in the real image, under the real filesystem
+// constraints, against a real signed artifact. A mode can be run that
+// way: `docker run --read-only ... monitor-api verify-provenance <ref>`.
+//
+// It doubles as the answer to "why does the dashboard say unsigned",
+// which previously required reading scan logs out of a Job.
+func runVerifyProvenance() {
+	if len(os.Args) < 3 {
+		fatal("usage: monitor-api verify-provenance <ref>")
+	}
+	ref := os.Args[2]
+
+	// DOCKER_CONFIG rather than the server's rendered path: this mode
+	// has no chart-mounted secret, and a public image needs no auth at
+	// all.
+	s := scanner.NewSigstoreScanner(sigstoreConfigFromEnv(os.Getenv("DOCKER_CONFIG")))
+	if s == nil {
+		fatal("COSIGN_CERT_IDENTITY_REGEXP and COSIGN_CERT_OIDC_ISSUER are both required -- " +
+			"verifying without them only proves somebody signed the image, which anybody can arrange")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	if err := s.Initialize(ctx); err != nil {
+		fatal("could not initialise cosign", "err", err)
+	}
+
+	findings, provenance, trustRoot, err := s.ScanProvenance(ctx, ref)
+	// An error and a verdict are not alternatives: ScanProvenance
+	// reports "unverified" WITH the error that stopped it, and printing
+	// only one of the two is how a transient registry failure gets
+	// filed as an unsigned image.
+	fmt.Printf("ref:        %s\nprovenance: %s\ntrust root: %s\n", ref, orNone(provenance), orNone(trustRoot))
+	for _, f := range findings {
+		fmt.Printf("finding:    [%s] %s %s\n", f.Severity, f.ID, f.Title)
+	}
+	if err != nil {
+		fmt.Printf("error:      %v\n", err)
+	}
+
+	if provenance != artifact.ProvenanceVerified {
+		// Exit 1 for every non-verified state, including "not checked".
+		// A dogfood step that passed because the ref fell outside
+		// COSIGN_REF_PREFIXES would be a green check proving nothing,
+		// which is the exact failure this whole mode exists to prevent.
+		fatal("provenance is not verified", "ref", ref, "provenance", orNone(provenance))
+	}
+	fmt.Println("OK: verified")
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "(not checked)"
+	}
+	return s
+}
+
 func cosignDockerConfigDir(dockerConfigPath string) string {
 	if dockerConfigPath == "" {
 		return ""

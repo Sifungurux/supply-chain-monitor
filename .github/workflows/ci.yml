@@ -383,6 +383,60 @@ jobs:
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
+      # Dogfooding, in two steps that fail for different reasons on
+      # purpose. H-3.
+      #
+      # Everything this verification path has got wrong was invisible to
+      # `go test`, because the unit tests drive a STUB cosign binary.
+      # The real one needed a writable HOME under a read-only root
+      # filesystem, and cosign's "slsaprovenance" shorthand means SLSA
+      # v0.2 while the step above emits v1 -- an image with a perfectly
+      # good attestation was reported as having none. Both reached
+      # production and were found there, by hand.
+      #
+      # So this runs the real binary, from the image just pushed, under
+      # the same read-only rootfs + tmpfs /tmp the Deployment gives it,
+      # against the attestation minted seconds earlier.
+
+      # First, GitHub's own verifier. If THIS fails the attestation is
+      # wrong and our code is not implicated -- which is worth knowing
+      # before reading a Go stack trace.
+      #
+      # Every value below goes through env: rather than being
+      # interpolated into the shell. None of them is attacker-reachable
+      # (this job is main-push only, and they come from
+      # github.repository and the push digest), but a ${{ }} inside a
+      # run: block is the shape that gets copied into a job where the
+      # input IS attacker-reachable.
+      - name: Verify the attestation (GitHub's verifier)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_DIGEST: ${{ steps.ref.outputs.image }}@${{ steps.push.outputs.digest }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh attestation verify "oci://${IMAGE_DIGEST}" --repo "$REPO"
+
+      # Then ours. A failure here with the step above green means the
+      # attestation is fine and this project's verification code is not
+      # -- the exact signal that was missing when those two bugs shipped.
+      #
+      # Deliberately does NOT set COSIGN_ATTESTATION_TYPE: the default
+      # is what every deployment gets, so the default is what has to be
+      # proven right.
+      - name: Verify the attestation (our own scanner, read-only rootfs)
+        env:
+          IMAGE_DIGEST: ${{ steps.ref.outputs.image }}@${{ steps.push.outputs.digest }}
+          IMAGE: ${{ steps.ref.outputs.image }}
+          REPO: ${{ github.repository }}
+        run: |
+          docker run --rm --read-only --tmpfs /tmp \
+            -e "COSIGN_CERT_IDENTITY_REGEXP=^https://github.com/${REPO}/.*\$" \
+            -e "COSIGN_CERT_OIDC_ISSUER=https://token.actions.githubusercontent.com" \
+            -e "COSIGN_REQUIRE_ATTESTATION=true" \
+            -e "COSIGN_REF_PREFIXES=${IMAGE}" \
+            "${IMAGE_DIGEST}" \
+            verify-provenance "${IMAGE_DIGEST}"
+
       - name: Report what was published
         run: |
           {
