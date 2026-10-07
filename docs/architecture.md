@@ -397,12 +397,47 @@ unmirrored). `pickArtifactsToSweep` deduplicates by id: a duplicate would
 otherwise eat two of the batch's slots and issue a second `POST /scan`
 racing the first.
 
-**Signature verification still runs against `source_ref`.** cosign's
-classic signatures live at a sibling `sha256-<digest>.sig` *tag*, which
-is not an OCI referrer and so is not something `oras copy --recursive`
-brings along; verifying the copy would report every signed image in the
-fleet as unsigned. It is also the more correct answer on its own terms —
-the signer signed that identity, not a path in this cluster's registry.
+**Signature verification tries the mirrored copy first, then
+`source_ref`.** The two kinds of signature behave differently under a
+copy, and the fleet contains both:
+
+- A **modern Sigstore bundle** — what `actions/attest-build-provenance`
+  pushes, media type
+  `application/vnd.dev.sigstore.bundle.v0.3+json` — is attached as an OCI
+  **referrer**, and `oras copy --recursive` carries referrers. Measured
+  against this project's own image (CI run 37614709186): copied into a
+  local `registry:2` with `copyArgs`' exact flags, the referrer arrived
+  and `cosign verify-attestation` against the *copy* exited 0. It works
+  because an attestation binds to the **digest**, not to a repository
+  path — the decoded subject still named the ghcr repository while
+  verification ran against `localhost:5000`.
+- A **classic cosign signature** lives at a sibling
+  `sha256-<digest>.sig` *tag*, which is not a referrer and does not
+  travel. Verifying only the copy would report such an image as
+  unsigned.
+
+So `provenanceRefs` returns `[mirrored, source]` and
+`scanProvenanceRefs` keeps the first `verified` answer, falling back to
+the last. **The order is the safety property**: the final attempt is
+always the original ref, so an unreachable local registry, a referrer
+that did not travel, or a cosign error all land on exactly the verdict
+this code produced before the mirror was consulted. It cannot turn a
+signed artifact into an unsigned one — the fleet-wide false alarm that
+`Artifact.Provenance`'s comment warns about — and it cannot upgrade one
+either, since a `verified` from the mirror is a real verification of the
+same digest against the same identity and trust root.
+
+What it buys: for the artifacts whose signature travelled, provenance
+stops making an upstream round-trip on every scan. Upstream is the least
+reliable participant in a scan — anonymous pull limits are the single
+most common cause of one failing here. What it costs: a genuinely
+unsigned artifact is verified twice, and those are overwhelmingly
+third-party images that `cosign.refPrefixes` already excludes from being
+checked at all.
+
+Verifying the source remains the more correct answer where the signature
+did not travel: the signer signed that identity, not a path in this
+cluster's registry.
 
 **Cost:** registry disk. Every distinct artifact is stored in full —
 `registry.persistence.size` is 50Gi for that reason, up from the 5Gi that
