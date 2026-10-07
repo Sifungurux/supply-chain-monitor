@@ -22,6 +22,7 @@ Work in the current phase, tracked to completion. Items graduate here from
 | S-2 | `make check-live-secrets` against every cluster that ever ran the chart | 0 | done — **not yet exercised against a live cluster** | #218 |
 | S-7 | Tekton examples use a scoped `ci` key | 0 | done — `register\|scan\|read\|stage:write`, no `admin` | #222 |
 | L-1 | Split `postgres_store.go` by concern, before H-2 | 0 | done — 2,350 lines into six files, no behaviour change | #219 |
+| H-3 | Provenance verification on; bundle support; dogfooded in CI; `require_provenance` | 1 | done — see below; "bundle support" landed as a scanner change, not the upload endpoint it was scoped as | #232, #233 |
 
 **Phase 0 is complete.** Two things it did not finish, carried deliberately
 rather than silently:
@@ -33,6 +34,19 @@ rather than silently:
   with **half its CVE coverage** and no failure reason (see #223). Those need a
   rescan; the status cannot tell you which they are.
 
+**H-3's scope changed on contact with the pinned binary**, and the
+roadmap line is kept as written so the change is visible rather than
+tidied away. "Bundle support" was scoped as a stored bundle per artifact
+— upload endpoint, new document kind, verification from the file. Four
+probe rounds against cosign 3.1.3 established that it has **no
+`--bundle` flag** on `verify` or `verify-attestation`, so that design was
+never implementable with this binary; and that our SLSA attestation is
+already an OCI **referrer** that `oras copy --recursive` carries, so a
+mirrored copy verifies on its own. What shipped is the useful half:
+provenance tries the mirrored ref first and falls back to the original,
+removing an upstream round-trip per scan. A classic `sha256-<digest>.sig`
+tag still does not travel, which is why the fallback stays.
+
 ## Deferred
 
 Accepted in principle, not yet in play. No status is tracked until the item
@@ -40,7 +54,6 @@ reaches **Accepted** — a Deferred item is never a review finding.
 
 | ID | Item | Lands in |
 |---|---|---|
-| H-3 | Provenance verification on; bundle support; dogfooded in CI; `require_provenance` | Phase 1 |
 | H-5 | Per-source finding ownership in the SBOM sweep; trivy + grype re-evaluate | Phase 1 |
 | M-2 | CycloneDX SBOM+VEX export; fleet findings CSV; validated by a Dependency-Track import | Phase 1 |
 | S-8 | Registry credentials never on argv | Phase 1 |
