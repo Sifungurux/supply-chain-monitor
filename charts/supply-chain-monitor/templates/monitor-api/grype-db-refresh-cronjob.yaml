@@ -74,6 +74,20 @@ spec:
                 - |
                   set -eu
                   echo "refreshing grype vulnerability DB in ${GRYPE_DB_CACHE_DIR}"
+                  # Same sweep as the primer, and needed here for the
+                  # same reason: this CronJob runs `grype db update`
+                  # daily, so it produces the abandoned staging
+                  # directories just as readily. Fixing only the primer
+                  # would leave the other producer filling the volume
+                  # between installs -- and this one runs far more
+                  # often. See grype-db-cache-primer-job.yaml for the
+                  # outage this comes from.
+                  stale=$(find "${GRYPE_DB_CACHE_DIR}" -maxdepth 1 -name 'grype-db-download*' 2>/dev/null | wc -l | tr -d ' ')
+                  if [ "${stale}" -gt 0 ]; then
+                    echo "sweeping ${stale} abandoned grype download staging director(ies)"
+                    find "${GRYPE_DB_CACHE_DIR}" -maxdepth 1 -name 'grype-db-download*' \
+                      -exec rm -rf {} + 2>/dev/null || true
+                  fi
                   grype db update
                   # The 0700-directory problem this used to solve is
                   # mostly gone now that this Job runs as 65534 -- the
