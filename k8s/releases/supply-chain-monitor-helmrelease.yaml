@@ -191,35 +191,39 @@ spec:
       # Published by ci.yml's publish-image job on every push to main.
       image:
         repository: ghcr.io/sifungurux/supply-chain-monitor/monitor-api
-        # 4bec052 -- the head of main. Closes a 21-commit gap behind the
-        # chart, which has been deploying from git this whole time while
-        # the pod stayed on 1b844b3 (#207).
+        # c869ee0 -- the head of main. Carries H-3 (#232, #234) plus the
+        # alpine base bump (#228); the previous pin stopped at 4bec052.
         #
-        # THE ONE THING THAT CAN BREAK ON THIS BUMP is #220's scope
-        # split, because it flips a DEFAULT. Old binary: a client with no
-        # entry in apiKeyScopes gets Scopes{unrestricted: true} --
-        # everything. New binary: it gets the zero value, and
-        # requireScope answers 403 to all of it. Default-closed is the
-        # point of #220, and is also why this is not a no-op deploy.
+        # Unlike the 4bec052 bump, which flipped #220's default-closed
+        # scope enforcement and needed the live key list enumerated
+        # first, this one changes no behaviour the cluster can observe:
         #
-        # apiKeyScopes below names default, dashboard and sweep. Those
-        # three are safe: default=admin implies every scope, and the
-        # other two hold read|scan, which is all they use. Any OTHER
-        # client in monitorApi.apiKeys is not -- that list comes from a
-        # Secret via valuesFrom, so it cannot be checked from this repo.
-        # Enumerate it against the live cluster before merging: a key
-        # absent from the map goes from unrestricted to locked out in
-        # one reconcile.
+        # - monitorApi.policy below does not set requireProvenance, and
+        #   the rule's zero value enforces nothing. The gate is available
+        #   here, not switched on. See values.yaml before enabling it --
+        #   it fails every artifact nothing has verified, which with the
+        #   refPrefixes below is most of the fleet.
+        # - `monitor-api verify-provenance` is a new CLI mode nothing
+        #   in-cluster invokes. It is for `kubectl exec` and for ci.yml.
+        # - #234's mirrored-copy verification is INERT under the
+        #   refPrefixes set below, and deliberately so rather than by
+        #   luck: SigstoreScanner checks scope BEFORE any I/O, a mirrored
+        #   ref reads scm-registry:5000/mirror/ghcr.io/sifungurux/...,
+        #   and that does not match the ghcr.io/sifungurux/ prefix. So
+        #   the first attempt returns "unknown" after one log line and
+        #   the original ref is verified exactly as before.
         #
-        # #220 also moved four routes -- findings, vex and fleet-vex from
-        # scan to results:write, stage from admin to stage:write. Neither
-        # new scope is granted below, so an external CI key posting to
-        # those paths needs its entry extended in the same change.
+        #   To actually buy what #234 is for -- provenance that stops
+        #   making an upstream round-trip every scan -- refPrefixes needs
+        #   scm-registry:5000/mirror/ghcr.io/sifungurux/ added alongside.
+        #   That is a separate change on purpose: it activates a path
+        #   whose production behaviour has only ever been exercised by
+        #   stub-backed unit tests.
         #
         # The multi-arch INDEX digest, not a per-platform one, so the
         # arm64 nodes here and any amd64 node resolve their own manifest
         # from it.
-        digest: sha256:855a85f0f59e6d313d4bf1dafe01056159ed34932c901ce5c8260fb00bcaa9dc
+        digest: sha256:e27138a1c554b1dcd1773d9971649678c531a1d0a5ed0311effd363913d79a1c
       # SWEEP THROUGHPUT, sized from measurement rather than the chart's
       # conservative defaults (*/15, batchSize 5).
       #
