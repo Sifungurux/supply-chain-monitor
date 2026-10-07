@@ -22,7 +22,7 @@ Work in the current phase, tracked to completion. Items graduate here from
 | S-2 | `make check-live-secrets` against every cluster that ever ran the chart | 0 | done — **not yet exercised against a live cluster** | #218 |
 | S-7 | Tekton examples use a scoped `ci` key | 0 | done — `register\|scan\|read\|stage:write`, no `admin` | #222 |
 | L-1 | Split `postgres_store.go` by concern, before H-2 | 0 | done — 2,350 lines into six files, no behaviour change | #219 |
-| H-3 | Provenance verification on; bundle support; dogfooded in CI; `require_provenance` | 1 | done — see below; "bundle support" landed as a scanner change, not the upload endpoint it was scoped as | #232, #233 |
+| H-3 | Provenance verification on; bundle support; dogfooded in CI; `require_provenance` | 1 | done — see below; "bundle support" landed as a scanner change, not the upload endpoint it was scoped as | #232, #234 |
 
 **Phase 0 is complete.** Two things it did not finish, carried deliberately
 rather than silently:
