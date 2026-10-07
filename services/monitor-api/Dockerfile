@@ -115,7 +115,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-$(go env GOARCH)}
 #   curl -sSL https://github.com/<org>/<repo>/releases/download/v<ver>/<..>checksums.txt
 # so bumping a version means replacing the version AND its two digests
 # together.
-FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS tools
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS tools
 # TARGETARCH is set automatically by BuildKit (amd64/arm64) -- used below
 # to pick the right release tarball and the checksum that goes with it.
 ARG TARGETARCH
@@ -271,7 +271,7 @@ RUN set -eux; \
 # above and now live in the `tools` stage instead, so the shipped image
 # carries no downloader. busybox still provides sh, tar and wget --
 # that is alpine, and the shell is load-bearing per the paragraph above.
-FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 # ca-certificates is the one genuine runtime dependency: trivy, grype
 # and oras all make TLS calls to registries and DB mirrors.
 RUN apk add --no-cache ca-certificates
