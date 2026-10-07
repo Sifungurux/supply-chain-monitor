@@ -1962,7 +1962,26 @@ monitorApi:
         memory: 256Mi
       limits:
         cpu: 500m
-        memory: 768Mi
+        # 1536Mi, matching scanConcurrencyPerKind's scan-Job limit from
+        # #223 rather than carrying a second number for the same tool.
+        #
+        # 768Mi OOM-KILLED both DB jobs: exitCode 137 on the grype
+        # primer and on 3 of the last 6 trivy refresh runs, measured on
+        # the live cluster 2026-10-07. The download is not the resting
+        # size -- these tools fetch an archive and extract alongside it,
+        # so peak RSS is a multiple of the final DB, the same reason the
+        # PVC is 10Gi for a few hundred MB of database.
+        #
+        # This is also what produced the disk exhaustion that looked
+        # like the whole problem: an OOM kill leaves grype's staging
+        # directory behind, each one ~700MB-1.3GB, which fills the cache
+        # until no size is enough. The sweep in the primer handles the
+        # leftovers; this stops making them.
+        #
+        # Raised for BOTH caches on the evidence that both were dying,
+        # which is #223's lesson restated: a per-kind exception only
+        # finds the next one in production.
+        memory: 1536Mi
   # The shared PersistentVolumeClaim IsolatedGrypeScanner mounts
   # read-only into every grype scan-worker Job -- grype's own
   # counterpart to trivyCache above, kept warm by
@@ -2047,7 +2066,26 @@ monitorApi:
         memory: 256Mi
       limits:
         cpu: 500m
-        memory: 768Mi
+        # 1536Mi, matching scanConcurrencyPerKind's scan-Job limit from
+        # #223 rather than carrying a second number for the same tool.
+        #
+        # 768Mi OOM-KILLED both DB jobs: exitCode 137 on the grype
+        # primer and on 3 of the last 6 trivy refresh runs, measured on
+        # the live cluster 2026-10-07. The download is not the resting
+        # size -- these tools fetch an archive and extract alongside it,
+        # so peak RSS is a multiple of the final DB, the same reason the
+        # PVC is 10Gi for a few hundred MB of database.
+        #
+        # This is also what produced the disk exhaustion that looked
+        # like the whole problem: an OOM kill leaves grype's staging
+        # directory behind, each one ~700MB-1.3GB, which fills the cache
+        # until no size is enough. The sweep in the primer handles the
+        # leftovers; this stops making them.
+        #
+        # Raised for BOTH caches on the evidence that both were dying,
+        # which is #223's lesson restated: a per-kind exception only
+        # finds the next one in production.
+        memory: 1536Mi
   # Periodically scans artifacts still sitting at status "registered"
   # (registered but never scanned) -- see templates/monitor-api/
   # sweep-registered-cronjob.yaml and main.go's runSweepRegistered.
