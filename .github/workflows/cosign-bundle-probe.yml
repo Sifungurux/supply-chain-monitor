@@ -99,17 +99,38 @@ jobs:
           echo
 
           echo "=== 2. bundle-related flags this binary advertises"
+          # Round 1 anchored this grep to ^\s+ and found nothing, which
+          # is the load-bearing result of the whole probe -- so round 2
+          # greps the full help for the WORD, unanchored, and prints the
+          # flag count as a sanity check that help was captured at all.
           for sub in verify verify-attestation; do
             echo "--- cosign $sub --help"
-            docker run --rm --entrypoint cosign "$REF" "$sub" --help 2>&1 \
-              | grep -iE '^\s+--(new-)?bundle|--trusted-root|--rfc3161|--tsa' \
-              || echo "(nothing matched -- this binary may not take a bundle at all)"
+            docker run --rm --entrypoint cosign "$REF" "$sub" --help > /tmp/help.txt 2>&1
+            echo "(help captured: $(wc -l < /tmp/help.txt) lines, $(grep -c -- '--' /tmp/help.txt) containing --)"
+            echo "lines mentioning 'bundle', anywhere:"
+            grep -in "bundle" /tmp/help.txt || echo "  (none -- this binary takes no bundle)"
+            echo "trust/timestamp flags, for contrast:"
+            grep -inE -- "--trusted-root|--rfc3161|--tsa|--certificate-chain" /tmp/help.txt | head -6 || echo "  (none)"
           done
+          echo
+          echo "--- every cosign subcommand, in case bundles live elsewhere"
+          docker run --rm --entrypoint cosign "$REF" --help 2>&1 | sed -n '/Available Commands/,/^Flags/p'
           echo
 
           echo "=== 3. obtaining a real bundle for this image"
-          gh attestation download "oci://${REF}" --repo "$REPO" --output-file /tmp/gh-bundle.jsonl
+          # Round 1 passed --output-file, which this gh does not have;
+          # it writes <digest>.jsonl into the working directory instead.
+          echo "gh version: $(gh --version | head -1)"
+          echo "gh attestation download --help:"
+          gh attestation download --help 2>&1 | sed -n '/FLAGS/,/INHERITED/p' | head -20
+          mkdir -p /tmp/dl && cd /tmp/dl || echo "(could not enter /tmp/dl)"
+          gh attestation download "oci://${REF}" --repo "$REPO"
           echo "gh attestation download exit=$?"
+          echo "files written: $(ls -la /tmp/dl 2>/dev/null | tail -n +2 | wc -l)"
+          ls -la /tmp/dl
+          found="$(find /tmp/dl -name '*.jsonl' -o -name '*.json' | head -1)"
+          echo "using: ${found:-<none>}"
+          [ -n "$found" ] && cp "$found" /tmp/gh-bundle.jsonl
           echo "bytes: $(wc -c < /tmp/gh-bundle.jsonl 2>/dev/null || echo 0)"
           # The file is JSON Lines: one bundle per line. cosign wants a
           # single bundle document, so the first line is what gets fed in.
