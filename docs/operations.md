@@ -2013,6 +2013,22 @@ curl -s -H "Authorization: Bearer $SCM_API_KEY" \
 
 Anything but `verified` in that tally is an artifact this rule will fail.
 
+**A `verified` that predates the artifact's last scan also fails.** When no
+provenance check runs, a scan deliberately leaves the previous verdict in
+place, so that disabling cosign does not erase every answer it ever gave —
+right for a field that is displayed, fail-open for one that gates. Without
+this, switching cosign off would leave every previously-verified artifact
+passing the gate forever, and a scan that updated the digest without
+re-verifying would leave a verdict certifying the artifact's *earlier*
+content.
+
+So the rule compares `provenance_checked_at` against `last_scan_at`. With
+cosign enabled and the ref in scope the two are written in the same update
+and move together; they diverge only when a scan ran and verified nothing.
+No configuration, and nothing to keep in step. If this violation appears
+across the fleet at once, the cause is almost always cosign being disabled
+or `refPrefixes` having been narrowed — not anything about the artifacts.
+
 ```bash
 curl -s -H "Authorization: Bearer $SCM_API_KEY" \
   http://localhost:30300/api/v1/artifacts/$ARTIFACT_ID/policy

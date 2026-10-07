@@ -458,3 +458,55 @@ func TestEvaluate_RequireProvenance(t *testing.T) {
 		}
 	})
 }
+
+// Regression: a VERIFIED verdict that predates the latest scan must not
+// pass. runScan leaves an old verdict in place when no check ran, so
+// without this, disabling cosign (or narrowing refPrefixes past an
+// artifact) leaves every previously-verified artifact passing forever.
+func TestEvaluate_RequireProvenance_StaleVerdict(t *testing.T) {
+	p := mustLoad(t, `{"requireProvenance": true}`)
+	scanned := now.Add(-1 * time.Hour)
+
+	t.Run("verified in the latest scan passes", func(t *testing.T) {
+		checked := scanned
+		a := artifact.Artifact{
+			Provenance:          artifact.ProvenanceVerified,
+			LastScanAt:          &scanned,
+			ProvenanceCheckedAt: &checked,
+		}
+		if !policy.Evaluate(p, a, now).Pass {
+			t.Fatal("a verdict reached in the latest scan failed")
+		}
+	})
+
+	t.Run("verdict older than the latest scan fails", func(t *testing.T) {
+		checked := scanned.Add(-72 * time.Hour)
+		a := artifact.Artifact{
+			Provenance:          artifact.ProvenanceVerified,
+			LastScanAt:          &scanned,
+			ProvenanceCheckedAt: &checked,
+		}
+		got := policy.Evaluate(p, a, now)
+		if got.Pass {
+			t.Fatal("a verified artifact whose last scan verified nothing passed")
+		}
+		if !strings.Contains(got.Violations[0].Detail, "did not verify provenance") {
+			t.Errorf("detail = %q, want it to say the last scan verified nothing", got.Violations[0].Detail)
+		}
+	})
+
+	t.Run("verified with no timestamp fails", func(t *testing.T) {
+		a := artifact.Artifact{Provenance: artifact.ProvenanceVerified, LastScanAt: &scanned}
+		if policy.Evaluate(p, a, now).Pass {
+			t.Fatal("a verdict with no ProvenanceCheckedAt passed")
+		}
+	})
+
+	t.Run("verified but never scanned fails", func(t *testing.T) {
+		checked := scanned
+		a := artifact.Artifact{Provenance: artifact.ProvenanceVerified, ProvenanceCheckedAt: &checked}
+		if policy.Evaluate(p, a, now).Pass {
+			t.Fatal("a verdict on a never-scanned artifact passed")
+		}
+	})
+}

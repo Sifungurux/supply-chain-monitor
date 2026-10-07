@@ -233,6 +233,44 @@ func provenanceDetail(p string) string {
 	}
 }
 
+// provenanceIsStale reports whether a VERIFIED verdict was reached
+// before the artifact's most recent scan.
+//
+// internal/api's runScan deliberately does not overwrite a provenance
+// verdict when no check ran, so that disabling cosign does not erase
+// every answer it ever gave. That is right for a field that is
+// displayed. It is fail-open for a field that gates: switch cosign off,
+// or narrow cosign.refPrefixes past an artifact, and its old "verified"
+// stands forever with nothing left to re-examine it.
+//
+// It is also the content half of the same hole. The verdict records WHEN
+// a check ran but not WHICH BYTES it ran against, so a scan that updates
+// Digest without re-verifying leaves a verdict certifying the artifact's
+// previous content. There is no digest to compare against -- binding one
+// needs a column -- but both cases share a signal: the verifying scan is
+// no longer the latest scan.
+//
+// So the comparison is against LastScanAt, not against a wall-clock
+// window, and it needs no configuration. With cosign enabled and in
+// scope the two timestamps are written in the same Update and move
+// together; they diverge only when a scan ran and verified nothing,
+// which is exactly the case where the verdict stopped being evidence
+// about the artifact as it now stands.
+func provenanceIsStale(a artifact.Artifact) bool {
+	if a.LastScanAt == nil {
+		// Never scanned, yet carrying a verdict: nothing establishes
+		// that the verdict describes this artifact's current state.
+		return a.ProvenanceCheckedAt != nil
+	}
+	// A verdict with no timestamp cannot be shown to be current. The two
+	// are written together, so this means a row from before
+	// ProvenanceCheckedAt existed.
+	if a.ProvenanceCheckedAt == nil {
+		return true
+	}
+	return a.ProvenanceCheckedAt.Before(*a.LastScanAt)
+}
+
 func Evaluate(p Policy, a artifact.Artifact, now time.Time) Result {
 	violations := []Violation{}
 
@@ -270,11 +308,22 @@ func Evaluate(p Policy, a artifact.Artifact, now time.Time) Result {
 		}
 	}
 
-	if p.RequireProvenance && a.Provenance != artifact.ProvenanceVerified {
-		violations = append(violations, Violation{
-			Rule:   "requireProvenance",
-			Detail: provenanceDetail(a.Provenance),
-		})
+	if p.RequireProvenance {
+		switch {
+		case a.Provenance != artifact.ProvenanceVerified:
+			violations = append(violations, Violation{
+				Rule:   "requireProvenance",
+				Detail: provenanceDetail(a.Provenance),
+			})
+		case provenanceIsStale(a):
+			// A verdict that outlived the scan it was reached in
+			// certifies bytes this artifact may no longer be. See
+			// provenanceIsStale.
+			violations = append(violations, Violation{
+				Rule:   "requireProvenance",
+				Detail: "the last scan did not verify provenance, so this \"verified\" predates it: the signature scanner is disabled or this ref no longer matches cosign.refPrefixes, and the verdict certifies an earlier state of the artifact rather than its current digest",
+			})
+		}
 	}
 
 	if p.LicenseDenylist {
