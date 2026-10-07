@@ -160,18 +160,50 @@ jobs:
 
           try_verify "--bundle <file>" --bundle /bundle.json
           try_verify "--bundle <file> --new-bundle-format" --bundle /bundle.json --new-bundle-format
-          # The control: no bundle at all, which is what runs in
-          # production today. If THIS fails too, the probe is measuring a
-          # broken image rather than the bundle flags.
-          echo "--- control: no bundle (today's production path)"
+
+          echo "=== 5. the cosign bundle subcommand (round 2 found it exists)"
+          docker run --rm --entrypoint cosign "$REF" bundle --help 2>&1 | head -30
+          echo
+
+          # THE QUESTION THAT DECIDES THE DESIGN.
+          #
+          # Classic cosign signatures live at a sibling sha256-<digest>.sig
+          # TAG, which is not an OCI referrer, so `oras copy --recursive`
+          # leaves it behind -- that is why provenance still verifies
+          # against source_ref and is the one scanner reaching upstream on
+          # every scan (architecture.md, "Mirroring artifacts").
+          #
+          # A v0.3 Sigstore bundle pushed by attest-build-provenance with
+          # push-to-registry may instead be a REFERRER. Referrers ARE
+          # copied by oras copy --recursive. If this image has one, the
+          # mirroring gap closes with no upload endpoint, no new table and
+          # no new API -- the bytes are already being copied today.
+          echo "=== 6. is the attestation an OCI REFERRER, or only a .sig tag"
+          echo "--- oras discover (referrers)"
+          docker run --rm --entrypoint oras "$REF" discover "$REF" 2>&1 | head -25
+          echo "exit=$?"
+          echo
+          echo "--- tags on the repository (is there a sha256-....sig / .att?)"
+          docker run --rm --entrypoint oras "$REF" repo tags \
+            "$(echo "$REF" | cut -d: -f1)" 2>&1 | grep -E "^sha256-" | head -10 \
+            || echo "(no sha256-* tags, or listing not permitted)"
+
+          echo
+          echo "=== 7. control, with TUF_ROOT set the way the scanner sets it"
+          # Round 2's control failed on `mkdir /.sigstore: read-only file
+          # system` -- it drove cosign DIRECTLY and so skipped the
+          # TUF_ROOT=/tmp/sigstore-tuf that SigstoreScanner.env() sets for
+          # exactly this reason. That accidentally re-confirmed the
+          # workaround is load-bearing, but it measured the wrong thing.
           docker run --rm --read-only --tmpfs /tmp \
+            -e TUF_ROOT=/tmp/sigstore-tuf \
             --entrypoint cosign "$REF" verify-attestation \
             --certificate-identity-regexp "^https://github.com/${REPO}/.*\$" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             --type "https://slsa.dev/provenance/v1" \
             -- "$REF" > /tmp/control.txt 2>&1
           echo "exit=$?"
-          tail -3 /tmp/control.txt
+          tail -4 /tmp/control.txt
 
       - name: Publish findings to the run summary
         if: always()
