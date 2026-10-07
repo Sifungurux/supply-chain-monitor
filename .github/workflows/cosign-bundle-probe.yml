@@ -1,0 +1,168 @@
+# TEMPORARY. Delete this file in the PR that uses what it found.
+#
+# H-3's remaining third is "bundle support": verifying an artifact from a
+# stored Sigstore bundle instead of fetching its signature from the
+# registry. That is what would let a MIRRORED artifact be verified
+# in-cluster -- cosign's classic signatures live at a sibling
+# `sha256-<digest>.sig` TAG, which is not an OCI referrer, so
+# `oras copy --recursive` does not bring it along and provenance is the
+# one scanner still reaching upstream on every scan.
+#
+# Before any of that gets written, one question has to be answered with
+# an observation rather than a guess: what does the cosign binary THIS
+# PROJECT PINS (3.1.3) actually accept for bundle verification?
+#
+# The reason that is not a formality. cosign v2's --fulcio-url and
+# --rekor-url were REMOVED in v3. A config naming them would have been
+# silently ignored, verification would have fallen back to the public
+# trust root, and it would still have reported a pass -- the worst
+# possible outcome for a trust setting. See SigstoreConfig.TrustedRootPath,
+# whose comment records that this was checked against the real binary
+# rather than assumed. The bundle flags are the same shape of unknown:
+# v2's --bundle meant the LEGACY cosign bundle, and the Sigstore bundle
+# format arrived separately with its own spelling.
+#
+# So: a separate, on-demand workflow rather than a step inside
+# publish-image. It keeps a probe out of the path that publishes and
+# signs releases, it can be re-run while iterating without pushing
+# commits to main, and removing it is deleting one file.
+name: cosign bundle probe (temporary, H-3)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_ref:
+        description: "Image to probe (tag or digest). Defaults to the latest main build."
+        required: false
+        default: ""
+
+# Read-only throughout. This workflow publishes nothing and signs
+# nothing, so it needs no id-token and no write scope anywhere -- a probe
+# that can only look is a probe nobody has to review before running.
+#
+# inputs.image_ref is dispatch-supplied, so it goes through env: and is
+# quoted at every use. workflow_dispatch already requires write access to
+# the repository, but an unquoted ${{ inputs.* }} inside a run: block is
+# the shape that gets copied somewhere it matters.
+permissions:
+  contents: read
+  packages: read
+  # gh attestation download/verify reads the attestations API.
+  attestations: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve the image reference
+        id: ref
+        env:
+          INPUT_REF: ${{ inputs.image_ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_REF" ]; then
+            echo "ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
+          else
+            # Same lowercasing publish-image does: ghcr requires it and
+            # this repository's owner is not lowercase.
+            image="ghcr.io/$(echo "$REPO" | tr '[:upper:]' '[:lower:]')/monitor-api"
+            echo "ref=${image}:main" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Probe
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ steps.ref.outputs.ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Deliberately not `set -e`: every command here is a question,
+          # and a "no" is a result to record rather than a reason to
+          # stop asking the rest.
+          set +e
+
+          exec > >(tee /tmp/probe.txt) 2>&1
+
+          echo "probing: $REF"
+          echo
+
+          echo "=== 1. the pinned binary's own version"
+          docker run --rm --entrypoint cosign "$REF" version 2>&1 | head -20
+          echo
+
+          echo "=== 2. bundle-related flags this binary advertises"
+          for sub in verify verify-attestation; do
+            echo "--- cosign $sub --help"
+            docker run --rm --entrypoint cosign "$REF" "$sub" --help 2>&1 \
+              | grep -iE '^\s+--(new-)?bundle|--trusted-root|--rfc3161|--tsa' \
+              || echo "(nothing matched -- this binary may not take a bundle at all)"
+          done
+          echo
+
+          echo "=== 3. obtaining a real bundle for this image"
+          gh attestation download "oci://${REF}" --repo "$REPO" --output-file /tmp/gh-bundle.jsonl
+          echo "gh attestation download exit=$?"
+          echo "bytes: $(wc -c < /tmp/gh-bundle.jsonl 2>/dev/null || echo 0)"
+          # The file is JSON Lines: one bundle per line. cosign wants a
+          # single bundle document, so the first line is what gets fed in.
+          head -1 /tmp/gh-bundle.jsonl > /tmp/bundle.json 2>/dev/null
+          echo "first line keys: $(jq -r 'keys | join(",")' < /tmp/bundle.json 2>/dev/null || echo '(not JSON)')"
+          echo "mediaType: $(jq -r '.mediaType // "(none)"' < /tmp/bundle.json 2>/dev/null)"
+          echo
+
+          echo "=== 4. does verification FROM THAT BUNDLE work, and spelled how"
+          try_verify() {
+            label="$1"; shift
+            echo "--- $label"
+            # No pipe into tail: $? must be cosign's status, not tail's.
+            # A probe that misreports success is worse than no probe.
+            docker run --rm --read-only --tmpfs /tmp \
+              -v /tmp/bundle.json:/bundle.json:ro \
+              --entrypoint cosign "$REF" verify-attestation \
+              "$@" \
+              --certificate-identity-regexp "^https://github.com/${REPO}/.*\$" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --type "https://slsa.dev/provenance/v1" \
+              -- "$REF" > /tmp/out.txt 2>&1
+            echo "exit=$?"
+            tail -6 /tmp/out.txt
+            echo
+          }
+
+          try_verify "--bundle <file>" --bundle /bundle.json
+          try_verify "--bundle <file> --new-bundle-format" --bundle /bundle.json --new-bundle-format
+          # The control: no bundle at all, which is what runs in
+          # production today. If THIS fails too, the probe is measuring a
+          # broken image rather than the bundle flags.
+          echo "--- control: no bundle (today's production path)"
+          docker run --rm --read-only --tmpfs /tmp \
+            --entrypoint cosign "$REF" verify-attestation \
+            --certificate-identity-regexp "^https://github.com/${REPO}/.*\$" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --type "https://slsa.dev/provenance/v1" \
+            -- "$REF" > /tmp/control.txt 2>&1
+          echo "exit=$?"
+          tail -3 /tmp/control.txt
+
+      - name: Publish findings to the run summary
+        if: always()
+        run: |
+          {
+            echo "### cosign bundle probe"
+            echo ""
+            echo "Read section 2 for the flag surface and section 4 for which"
+            echo "spelling verifies. Section 4's control says whether a failure"
+            echo "is about bundles or about the image."
+            echo ""
+            echo '```'
+            cat /tmp/probe.txt 2>/dev/null || echo "(probe produced no output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
