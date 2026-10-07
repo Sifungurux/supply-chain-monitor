@@ -1902,6 +1902,39 @@ Sigstore judged it (`public Sigstore` / `private Sigstore, trusted root …`)
 so "unsigned" is never ambiguous between *not signed by us* and *not
 signed by anyone the public instance knows*.
 
+#### Verifying one ref by hand
+
+`monitor-api verify-provenance <ref>` runs the configured cosign settings
+against a single ref, prints the verdict, the trust root and any finding,
+and exits non-zero unless the result is `verified`. It is how you answer
+"why does the dashboard say unsigned" without reading Job logs:
+
+```bash
+kubectl -n supply-chain-monitor exec deploy/monitor-api -- \
+  monitor-api verify-provenance ghcr.io/acme/checkout:2.4.1
+```
+
+Run inside the pod it inherits that deployment's real configuration, which
+is usually the point — a ref outside `refPrefixes` reports `(not checked)`
+rather than a verdict, and that is almost always the explanation.
+
+**CI runs this against its own published image on every push to main.**
+Not as a formality: every bug this verification path has had was invisible
+to `go test`, because the unit tests drive a stub cosign binary. The real
+one needs a writable TUF cache under a read-only root filesystem, and
+cosign's `slsaprovenance` shorthand means SLSA **v0.2** while
+`actions/attest-build-provenance` emits **v1** — an image with a perfectly
+good attestation was reported as having none. Both reached production and
+were found by hand there. So `ci.yml` verifies the image it just pushed,
+with the binary it just built, under the same read-only rootfs plus
+`tmpfs /tmp` the Deployment gives it, and it does **not** pin
+`COSIGN_ATTESTATION_TYPE` — the default is what every deployment gets, so
+the default is what has to be proven right.
+
+GitHub's own verifier runs first in that job, on purpose: if it fails the
+attestation is wrong and this project's code is not implicated, which is
+worth knowing before reading a stack trace.
+
 ### Which CVEs are actually being exploited
 
 Severity describes how bad exploitation *would* be. It says nothing

@@ -1358,3 +1358,55 @@ func TestSweepConcurrency(t *testing.T) {
 		})
 	}
 }
+
+// sigstoreConfigFromEnv is the single reader of the COSIGN_* variables,
+// so that `verify-provenance` (which ci.yml runs against the image it
+// just published) and the API server cannot be configured differently.
+//
+// This test exists for the drift, not the plumbing: rename one variable
+// on one side and the dogfood step verifies a configuration nothing
+// runs, while staying green.
+func TestSigstoreConfigFromEnv(t *testing.T) {
+	for k, v := range map[string]string{
+		"COSIGN_CERT_IDENTITY_REGEXP": "^https://github.com/acme/repo/.*$",
+		"COSIGN_CERT_OIDC_ISSUER":     "https://token.actions.githubusercontent.com",
+		"COSIGN_REQUIRE_ATTESTATION":  "true",
+		"COSIGN_ATTESTATION_TYPE":     "https://slsa.dev/provenance/v1",
+		"COSIGN_REF_PREFIXES":         "ghcr.io/acme/, ghcr.io/other/",
+		"COSIGN_TRUSTED_ROOT":         "/etc/sigstore/root.json",
+		"COSIGN_TUF_MIRROR":           "https://tuf.acme.test",
+		"COSIGN_TUF_ROOT":             "/etc/sigstore/tuf-root.json",
+	} {
+		t.Setenv(k, v)
+	}
+
+	got := sigstoreConfigFromEnv("/etc/docker")
+
+	if got.CertIdentityRegexp != "^https://github.com/acme/repo/.*$" {
+		t.Errorf("CertIdentityRegexp = %q", got.CertIdentityRegexp)
+	}
+	if got.CertOIDCIssuer != "https://token.actions.githubusercontent.com" {
+		t.Errorf("CertOIDCIssuer = %q", got.CertOIDCIssuer)
+	}
+	if !got.RequireAttestation {
+		t.Error("RequireAttestation = false, want true")
+	}
+	if got.AttestationType != "https://slsa.dev/provenance/v1" {
+		t.Errorf("AttestationType = %q", got.AttestationType)
+	}
+	// Split AND trimmed: the chart renders this as a comma-joined list
+	// and a leading space on the second prefix would stop it matching
+	// anything, silently.
+	if len(got.RefPrefixes) != 2 || got.RefPrefixes[0] != "ghcr.io/acme/" || got.RefPrefixes[1] != "ghcr.io/other/" {
+		t.Errorf("RefPrefixes = %#v", got.RefPrefixes)
+	}
+	if got.TrustedRootPath != "/etc/sigstore/root.json" {
+		t.Errorf("TrustedRootPath = %q", got.TrustedRootPath)
+	}
+	if got.TUFMirror != "https://tuf.acme.test" || got.TUFRootPath != "/etc/sigstore/tuf-root.json" {
+		t.Errorf("TUF settings = %q / %q", got.TUFMirror, got.TUFRootPath)
+	}
+	if got.DockerConfigDir != "/etc/docker" {
+		t.Errorf("DockerConfigDir = %q", got.DockerConfigDir)
+	}
+}
