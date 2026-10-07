@@ -84,126 +84,85 @@ jobs:
           REF: ${{ steps.ref.outputs.ref }}
           REPO: ${{ github.repository }}
         run: |
-          # Deliberately not `set -e`: every command here is a question,
-          # and a "no" is a result to record rather than a reason to
-          # stop asking the rest.
+          # Deliberately not `set -e`: every command is a question and a
+          # "no" is a result to record rather than a reason to stop.
           set +e
-
           exec > >(tee /tmp/probe.txt) 2>&1
 
           echo "probing: $REF"
-          echo
 
-          echo "=== 1. the pinned binary's own version"
-          docker run --rm --entrypoint cosign "$REF" version 2>&1 | head -20
-          echo
-
-          echo "=== 2. bundle-related flags this binary advertises"
-          # Round 1 anchored this grep to ^\s+ and found nothing, which
-          # is the load-bearing result of the whole probe -- so round 2
-          # greps the full help for the WORD, unanchored, and prints the
-          # flag count as a sanity check that help was captured at all.
-          for sub in verify verify-attestation; do
-            echo "--- cosign $sub --help"
-            docker run --rm --entrypoint cosign "$REF" "$sub" --help > /tmp/help.txt 2>&1
-            echo "(help captured: $(wc -l < /tmp/help.txt) lines, $(grep -c -- '--' /tmp/help.txt) containing --)"
-            echo "lines mentioning 'bundle', anywhere:"
-            grep -in "bundle" /tmp/help.txt || echo "  (none -- this binary takes no bundle)"
-            echo "trust/timestamp flags, for contrast:"
-            grep -inE -- "--trusted-root|--rfc3161|--tsa|--certificate-chain" /tmp/help.txt | head -6 || echo "  (none)"
+          # ROUND 4. Rounds 1-3 established: --bundle is not a flag on
+          # verify-attestation; `cosign bundle` only create/inspect/
+          # upgrade; and our SLSA attestation IS an OCI referrer
+          # (application/vnd.dev.sigstore.bundle.v0.3+json), which
+          # `oras copy --recursive` carries.
+          #
+          # So the whole remaining question is the one mirror.go's own
+          # comment stops short of: referrers are COPIED, but does
+          # verify-attestation then SUCCEED against the copy? If yes,
+          # "bundle support" is not an upload endpoint -- it is deleting
+          # an upstream round-trip.
+          #
+          # registry:2 on localhost, not a push to ghcr: it needs no
+          # write permission, leaves nothing behind, and is literally
+          # what scm-registry is.
+          echo "=== 1. a local registry, standing in for scm-registry"
+          docker run -d --rm -p 5000:5000 --name probe-registry registry:2 > /dev/null
+          for i in $(seq 1 20); do
+            curl -fsS http://localhost:5000/v2/ > /dev/null 2>&1 && break
+            sleep 1
           done
-          echo
-          echo "--- every cosign subcommand, in case bundles live elsewhere"
-          docker run --rm --entrypoint cosign "$REF" --help 2>&1 | sed -n '/Available Commands/,/^Flags/p'
-          echo
+          echo "registry up: $(curl -s -o /dev/null -w '%{http_code}' http://localhost:5000/v2/)"
 
-          echo "=== 3. obtaining a real bundle for this image"
-          # Round 1 passed --output-file, which this gh does not have;
-          # it writes <digest>.jsonl into the working directory instead.
-          echo "gh version: $(gh --version | head -1)"
-          echo "gh attestation download --help:"
-          gh attestation download --help 2>&1 | sed -n '/FLAGS/,/INHERITED/p' | head -20
-          mkdir -p /tmp/dl && cd /tmp/dl || echo "(could not enter /tmp/dl)"
-          gh attestation download "oci://${REF}" --repo "$REPO"
-          echo "gh attestation download exit=$?"
-          echo "files written: $(ls -la /tmp/dl 2>/dev/null | tail -n +2 | wc -l)"
-          ls -la /tmp/dl
-          found="$(find /tmp/dl -name '*.jsonl' -o -name '*.json' | head -1)"
-          echo "using: ${found:-<none>}"
-          [ -n "$found" ] && cp "$found" /tmp/gh-bundle.jsonl
-          echo "bytes: $(wc -c < /tmp/gh-bundle.jsonl 2>/dev/null || echo 0)"
-          # The file is JSON Lines: one bundle per line. cosign wants a
-          # single bundle document, so the first line is what gets fed in.
-          head -1 /tmp/gh-bundle.jsonl > /tmp/bundle.json 2>/dev/null
-          echo "first line keys: $(jq -r 'keys | join(",")' < /tmp/bundle.json 2>/dev/null || echo '(not JSON)')"
-          echo "mediaType: $(jq -r '.mediaType // "(none)"' < /tmp/bundle.json 2>/dev/null)"
-          echo
-
-          echo "=== 4. does verification FROM THAT BUNDLE work, and spelled how"
-          try_verify() {
-            label="$1"; shift
-            echo "--- $label"
-            # No pipe into tail: $? must be cosign's status, not tail's.
-            # A probe that misreports success is worse than no probe.
-            docker run --rm --read-only --tmpfs /tmp \
-              -v /tmp/bundle.json:/bundle.json:ro \
-              --entrypoint cosign "$REF" verify-attestation \
-              "$@" \
-              --certificate-identity-regexp "^https://github.com/${REPO}/.*\$" \
-              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-              --type "https://slsa.dev/provenance/v1" \
-              -- "$REF" > /tmp/out.txt 2>&1
-            echo "exit=$?"
-            tail -6 /tmp/out.txt
-            echo
-          }
-
-          try_verify "--bundle <file>" --bundle /bundle.json
-          try_verify "--bundle <file> --new-bundle-format" --bundle /bundle.json --new-bundle-format
-
-          echo "=== 5. the cosign bundle subcommand (round 2 found it exists)"
-          docker run --rm --entrypoint cosign "$REF" bundle --help 2>&1 | head -30
-          echo
-
-          # THE QUESTION THAT DECIDES THE DESIGN.
-          #
-          # Classic cosign signatures live at a sibling sha256-<digest>.sig
-          # TAG, which is not an OCI referrer, so `oras copy --recursive`
-          # leaves it behind -- that is why provenance still verifies
-          # against source_ref and is the one scanner reaching upstream on
-          # every scan (architecture.md, "Mirroring artifacts").
-          #
-          # A v0.3 Sigstore bundle pushed by attest-build-provenance with
-          # push-to-registry may instead be a REFERRER. Referrers ARE
-          # copied by oras copy --recursive. If this image has one, the
-          # mirroring gap closes with no upload endpoint, no new table and
-          # no new API -- the bytes are already being copied today.
-          echo "=== 6. is the attestation an OCI REFERRER, or only a .sig tag"
-          echo "--- oras discover (referrers)"
-          docker run --rm --entrypoint oras "$REF" discover "$REF" 2>&1 | head -25
-          echo "exit=$?"
-          echo
-          echo "--- tags on the repository (is there a sha256-....sig / .att?)"
-          docker run --rm --entrypoint oras "$REF" repo tags \
-            "$(echo "$REF" | cut -d: -f1)" 2>&1 | grep -E "^sha256-" | head -10 \
-            || echo "(no sha256-* tags, or listing not permitted)"
+          DST="localhost:5000/mirror/monitor-api:main"
 
           echo
-          echo "=== 7. control, with TUF_ROOT set the way the scanner sets it"
-          # Round 2's control failed on `mkdir /.sigstore: read-only file
-          # system` -- it drove cosign DIRECTLY and so skipped the
-          # TUF_ROOT=/tmp/sigstore-tuf that SigstoreScanner.env() sets for
-          # exactly this reason. That accidentally re-confirmed the
-          # workaround is load-bearing, but it measured the wrong thing.
-          docker run --rm --read-only --tmpfs /tmp \
+          echo "=== 2. the copy, with production's own flags"
+          # mirror.go's copyArgs: copy --recursive [--to-plain-http] -- src dst
+          docker run --rm --network host --entrypoint oras "$REF" \
+            copy --recursive --to-plain-http -- "$REF" "$DST" 2>&1 | tail -8
+          echo
+
+          echo "=== 3. did the referrer travel?"
+          docker run --rm --network host --entrypoint oras "$REF" \
+            discover --plain-http "$DST" 2>&1 | head -20
+          echo "discover exit=$?"
+
+          echo
+          echo "=== 4. THE QUESTION: does verify-attestation pass on the COPY?"
+          docker run --rm --network host --read-only --tmpfs /tmp \
+            -e TUF_ROOT=/tmp/sigstore-tuf \
+            --entrypoint cosign "$REF" verify-attestation \
+            --allow-insecure-registry \
+            --certificate-identity-regexp "^https://github.com/${REPO}/.*\$" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --type "https://slsa.dev/provenance/v1" \
+            -- "$DST" > /tmp/copy.txt 2>&1
+          rc=$?
+          echo "exit=$rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "RESULT: the mirrored copy verifies. Bundle support is a"
+            echo "        scanner change, not an upload endpoint."
+          else
+            echo "RESULT: the copy does NOT verify. Reason below decides"
+            echo "        whether a stored bundle is actually needed."
+          fi
+          tail -12 /tmp/copy.txt
+
+          echo
+          echo "=== 5. control: the SAME command against the ORIGINAL ref"
+          # If this fails too, section 4 proved nothing about mirroring.
+          docker run --rm --network host --read-only --tmpfs /tmp \
             -e TUF_ROOT=/tmp/sigstore-tuf \
             --entrypoint cosign "$REF" verify-attestation \
             --certificate-identity-regexp "^https://github.com/${REPO}/.*\$" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             --type "https://slsa.dev/provenance/v1" \
-            -- "$REF" > /tmp/control.txt 2>&1
+            -- "$REF" > /tmp/orig.txt 2>&1
           echo "exit=$?"
-          tail -4 /tmp/control.txt
+          tail -4 /tmp/orig.txt
+
+          docker rm -f probe-registry > /dev/null 2>&1
 
       - name: Publish findings to the run summary
         if: always()
