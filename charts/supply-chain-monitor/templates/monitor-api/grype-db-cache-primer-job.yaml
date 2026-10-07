@@ -62,6 +62,41 @@ spec:
             - |
               set -eu
               echo "downloading grype vulnerability DB into ${GRYPE_DB_CACHE_DIR}"
+              # Sweep grype's abandoned download staging directories
+              # BEFORE updating, not after.
+              #
+              # grype does not remove its temp dir when an update fails,
+              # and each one is ~700MB-1.3GB. So one failure makes the
+              # next failure likelier, and a cache that has failed enough
+              # times CANNOT succeed again at any size: on 2026-10-07
+              # this volume held ten of them, ~8GB inside 10Gi, and
+              # `grype db update` died with "unable to create db client
+              # temp dir: no space left on device" -- which reads as a
+              # sizing problem and is not one. Raising 2Gi to 10Gi
+              # (#224) bought time and nothing else.
+              #
+              # That failure is not confined to the cache. This Job is a
+              # Helm PRE-UPGRADE HOOK, so its failure fails the upgrade,
+              # Flux rolls back, and every unrelated change in the same
+              # commit is reverted. The cluster sat on a three-week-old
+              # chart and image that way, with each new deploy appearing
+              # to merge and silently reverting.
+              #
+              # Before, not after, because an "after" cleanup never runs
+              # on the path that creates the garbage -- the failing one.
+              #
+              # Best-effort for the same reason the chmod below is: a
+              # leftover owned by an earlier uid cannot be removed by
+              # this one, and under `set -eu` that would fail a primer
+              # that is otherwise about to succeed. If the sweep cannot
+              # free enough, `grype db update` fails on its own and says
+              # so.
+              stale=$(find "${GRYPE_DB_CACHE_DIR}" -maxdepth 1 -name 'grype-db-download*' 2>/dev/null | wc -l | tr -d ' ')
+              if [ "${stale}" -gt 0 ]; then
+                echo "sweeping ${stale} abandoned grype download staging director(ies)"
+                find "${GRYPE_DB_CACHE_DIR}" -maxdepth 1 -name 'grype-db-download*' \
+                  -exec rm -rf {} + 2>/dev/null || true
+              fi
               grype db update
               # grype creates its own schema-versioned subdirectory
               # (e.g. .../6/) mode 0700, owned by whatever uid this Job

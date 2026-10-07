@@ -2604,6 +2604,33 @@ fetches its own copy first (the same `oras pull`-backed fetch
 
 ### Resizing a scanner DB cache (the `size` value does nothing on an existing install)
 
+> **Before resizing: check whether the volume is full of garbage rather
+> than too small.** On 2026-10-07 the grype cache hit "no space left on
+> device" at 10Gi — it held ten abandoned `grype-db-download*` staging
+> directories totalling ~8GB, against a real database of 2.1GB. grype
+> does not remove its temp directory when an update fails, so each
+> failure made the next likelier and no size would have been enough.
+> Raising 2Gi to 10Gi (#224) bought time and nothing else. The primer and
+> the refresh CronJob now sweep those before downloading, but a volume
+> that filled before that shipped still needs clearing once:
+>
+> ```bash
+> kubectl -n supply-chain-monitor run scm-cacheclean --rm -i --restart=Never \
+>   --image=busybox:1.36 --overrides='{"spec":{"containers":[{"name":"d","image":"busybox:1.36",
+>   "command":["sh","-c","df -h /c|tail -1; rm -rf /c/grype-db-download*; df -h /c|tail -1"],
+>   "volumeMounts":[{"name":"c","mountPath":"/c"}]}],
+>   "volumes":[{"name":"c","persistentVolumeClaim":{"claimName":"scm-grype-db-cache"}}]}}'
+> ```
+>
+> **Why this is worth checking first:** the primer is a Helm
+> **pre-upgrade hook**. When it fails the upgrade fails, Flux rolls back,
+> and *every unrelated change in the same commit is reverted* — so the
+> symptom is not "scans are stale", it is "deploys merge and silently do
+> nothing". Confirm with
+> `kubectl get helmrelease -n flux-system supply-chain-monitor -o jsonpath='{.status.conditions}'`
+> and compare `status.lastAttemptedRevision` against the live
+> `status.history[0].chartVersion`.
+
 `monitorApi.grypeCache.persistence.size` and `monitorApi.trivyCache.persistence.size`
 apply **only when the PVC is first created.** Changing either on a cluster that
 already has the claim renders a new manifest that is never applied, and nothing
