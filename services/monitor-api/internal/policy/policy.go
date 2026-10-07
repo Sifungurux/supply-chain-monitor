@@ -82,6 +82,32 @@ type Policy struct {
 	// component inventory, and re-deriving would let the gate and the
 	// findings disagree.
 	LicenseDenylist bool `json:"licenseDenylist,omitempty"`
+
+	// RequireProvenance fails an artifact whose signature verification
+	// did not conclude VERIFIED. Until this existed, cosign's verdict
+	// was recorded and displayed but gated nothing -- an unsigned image
+	// passed every policy a signed one did.
+	//
+	// Only artifact.ProvenanceVerified passes. The other three states
+	// each fail, and they are NOT interchangeable, so each carries its
+	// own Detail:
+	//
+	//   unsigned    checked, and there is no such signature
+	//   unverified  the check could not be COMPLETED (registry down,
+	//               cosign error) -- "I could not find out" is not
+	//               "it is fine", the same reading that makes
+	//               RequireScanWithinDays fail a never-scanned artifact
+	//   ""          nothing checked it at all: no ProvenanceScanner is
+	//               configured, or this ref is outside
+	//               cosign.refPrefixes
+	//
+	// The empty case is the one that bites. Turning this rule on while
+	// cosign is disabled fails the ENTIRE fleet, and scoping cosign to
+	// a ref prefix fails every artifact outside it. That is deliberate
+	// -- a gate that passes what it never inspected is worth nothing --
+	// but it is a configuration error rather than a supply-chain one,
+	// so the Detail says which, in those words.
+	RequireProvenance bool `json:"requireProvenance,omitempty"`
 }
 
 // Violation is one failed rule. FindingID is set only when a specific
@@ -117,7 +143,7 @@ type Result struct {
 // green light nobody earned. See the dashboard's policyBadge.
 func (p Policy) Configured() bool {
 	return len(p.MaxSeverity) > 0 || p.DisallowUnsafe || p.RequireSBOM ||
-		p.RequireScanWithinDays > 0 || p.LicenseDenylist
+		p.RequireScanWithinDays > 0 || p.LicenseDenylist || p.RequireProvenance
 }
 
 // Load parses POLICY_JSON. An empty string is the legitimate "no
@@ -187,6 +213,26 @@ func validMaxSeverity(s string) bool {
 // having assessed a finding: a critical CVE a human has already
 // justified as not_affected must not keep failing a build, or the VEX
 // document does nothing and people route around the gate.
+// provenanceDetail explains a non-verified provenance state in the
+// terms the operator has to act on. The three failures need three
+// different responses -- re-sign the image, retry the check, or fix the
+// deployment's own cosign configuration -- and a shared "provenance not
+// verified" string would send every one of them to the wrong place.
+func provenanceDetail(p string) string {
+	switch p {
+	case artifact.ProvenanceUnsigned:
+		return "signature verification ran and found no signature from the required identity"
+	case artifact.ProvenanceUnverified:
+		return "signature verification could not be completed, so this artifact is unproven rather than unsigned -- retry before treating it as a supply-chain failure"
+	case artifact.ProvenanceUnknown:
+		return "nothing has verified this artifact: no provenance scanner is configured, or its ref falls outside cosign.refPrefixes. This is a configuration gap in the deployment, not a finding about the artifact"
+	default:
+		// Not reachable through ValidProvenance, but a row written by
+		// an older or future version must not read as verified.
+		return fmt.Sprintf("provenance is %q, which is not a verified state", p)
+	}
+}
+
 func Evaluate(p Policy, a artifact.Artifact, now time.Time) Result {
 	violations := []Violation{}
 
@@ -222,6 +268,13 @@ func Evaluate(p Policy, a artifact.Artifact, now time.Time) Result {
 				})
 			}
 		}
+	}
+
+	if p.RequireProvenance && a.Provenance != artifact.ProvenanceVerified {
+		violations = append(violations, Violation{
+			Rule:   "requireProvenance",
+			Detail: provenanceDetail(a.Provenance),
+		})
 	}
 
 	if p.LicenseDenylist {

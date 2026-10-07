@@ -1985,7 +1985,33 @@ monitorApi:
     requireSBOM: true
     requireScanWithinDays: 7
     licenseDenylist: true
+    requireProvenance: true   # see the warning below before enabling
 ```
+
+**`requireProvenance` fails three different things, and one of them is
+your own configuration.** It passes only `provenance: verified`. It fails
+`unsigned` (checked, no signature) and `unverified` (the check could not
+complete) — and it fails the empty state, meaning *nothing ever looked*,
+just as hard.
+
+That last case is the one to plan for. Only refs matching
+`monitorApi.cosign.refPrefixes` are checked at all, so enabling this rule
+on a deployment whose prefixes do not cover the fleet fails **every
+artifact outside them** on the next evaluation. That is deliberate — a
+gate that passes what it never inspected certifies nothing — but it is a
+deployment gap rather than a supply-chain one, and the violation detail
+says so in those words, so a build log tells you which you are looking at.
+
+Check what you are about to gate before turning it on:
+
+```bash
+curl -s -H "Authorization: Bearer $SCM_API_KEY" \
+  "http://localhost:30300/api/v1/artifacts?limit=500" \
+  | jq -r '.artifacts[] | select(.type=="image") | .provenance // "(never checked)"' \
+  | sort | uniq -c | sort -rn
+```
+
+Anything but `verified` in that tally is an artifact this rule will fail.
 
 ```bash
 curl -s -H "Authorization: Bearer $SCM_API_KEY" \

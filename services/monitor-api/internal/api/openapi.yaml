@@ -1113,7 +1113,7 @@ components:
           description: >-
             Which policy rule failed. One of maxSeverity,
             disallowUnsafe, requireSBOM, requireScanWithinDays,
-            licenseDenylist.
+            licenseDenylist, requireProvenance.
           example: maxSeverity
         detail:
           type: string

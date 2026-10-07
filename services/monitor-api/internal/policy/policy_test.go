@@ -404,3 +404,57 @@ func TestEvaluate_MaxSeverity_RiskAcceptance(t *testing.T) {
 		}
 	})
 }
+
+func TestEvaluate_RequireProvenance(t *testing.T) {
+	p := mustLoad(t, `{"requireProvenance": true}`)
+
+	t.Run("verified passes", func(t *testing.T) {
+		a := artifact.Artifact{Provenance: artifact.ProvenanceVerified}
+		if !policy.Evaluate(p, a, now).Pass {
+			t.Fatal("a verified artifact failed")
+		}
+	})
+
+	// The three failures are not interchangeable: one means re-sign the
+	// image, one means retry, one means fix this deployment's cosign
+	// configuration. A caller that cannot tell them apart cannot act.
+	for _, tc := range []struct {
+		name       string
+		provenance string
+		wantDetail string
+	}{
+		{"unsigned", artifact.ProvenanceUnsigned, "no signature"},
+		{"unverified", artifact.ProvenanceUnverified, "could not be completed"},
+		{"never checked", artifact.ProvenanceUnknown, "configuration gap"},
+	} {
+		t.Run(tc.name+" fails", func(t *testing.T) {
+			got := policy.Evaluate(p, artifact.Artifact{Provenance: tc.provenance}, now)
+			if got.Pass {
+				t.Fatalf("provenance %q passed requireProvenance", tc.provenance)
+			}
+			if got.Violations[0].Rule != "requireProvenance" {
+				t.Errorf("rule = %q, want requireProvenance", got.Violations[0].Rule)
+			}
+			if !strings.Contains(got.Violations[0].Detail, tc.wantDetail) {
+				t.Errorf("detail = %q, want it to contain %q", got.Violations[0].Detail, tc.wantDetail)
+			}
+		})
+	}
+
+	// The zero value is the empty string, so a policy that does NOT set
+	// this rule must not start failing every artifact that nothing has
+	// verified -- which, with cosign off, is all of them.
+	t.Run("rule off leaves unverified artifacts alone", func(t *testing.T) {
+		off := mustLoad(t, `{"requireSBOM": true}`)
+		a := artifact.Artifact{HasSBOM: true, Provenance: artifact.ProvenanceUnsigned}
+		if !policy.Evaluate(off, a, now).Pass {
+			t.Fatal("an unsigned artifact failed a policy that does not require provenance")
+		}
+	})
+
+	t.Run("counts as configured", func(t *testing.T) {
+		if !p.Configured() {
+			t.Fatal("requireProvenance alone did not make the policy configured, so the gate would render as 'no gate'")
+		}
+	})
+}
