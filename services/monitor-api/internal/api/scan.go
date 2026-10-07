@@ -340,11 +340,13 @@ func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scann
 				// per signed image would bury the unsigned ones -- so
 				// without this a signed image is indistinguishable from
 				// this scanner being switched off.
-				// provenanceRef, not a.Ref: a mirrored copy does not
-				// carry cosign's sibling .sig tag, and the signature was
-				// made about the original identity anyway. See
-				// mirror.go's provenanceRef.
-				findings, provenance, provenanceTrustRoot, scanErr = impl.ScanProvenance(ctx, provenanceRef(a))
+				// The mirrored copy first when there is one, then the
+				// original -- a Sigstore bundle referrer travels with
+				// `oras copy --recursive` and verifies against the copy,
+				// while a classic .sig tag does not. See mirror.go's
+				// provenanceRefs for the measurement and for why the
+				// ORDER is what makes this safe.
+				findings, provenance, provenanceTrustRoot, scanErr = scanProvenanceRefs(ctx, impl, provenanceRefs(a))
 			case scanner.ArtifactAwareScanner:
 				// Isolated scanners: the Job uploads its own documents
 				// back through POST /documents (main.go's

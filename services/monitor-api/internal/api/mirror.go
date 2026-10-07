@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
+	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/scanner"
 )
 
 // mirrorTimeout bounds one `oras copy`. Generous because it is a full
@@ -140,4 +141,88 @@ func provenanceRef(a *artifact.Artifact) string {
 		return a.SourceRef
 	}
 	return a.Ref
+}
+
+// provenanceRefs is provenanceRef plus the mirrored copy, in the order
+// to try them.
+//
+// The comment above is right about cosign's CLASSIC signatures: a
+// sibling `sha256-<digest>.sig` TAG is not a referrer and `oras copy
+// --recursive` leaves it behind. It is NOT right about every signature.
+// A modern Sigstore bundle -- what actions/attest-build-provenance
+// pushes, media type
+// application/vnd.dev.sigstore.bundle.v0.3+json -- is attached as an OCI
+// REFERRER, and --recursive carries referrers; mirror.go's own copyArgs
+// comment says so.
+//
+// Measured rather than assumed (CI run 37614709186): this project's own
+// image was copied with copyArgs' exact flags into a local registry:2,
+// the referrer arrived, and `cosign verify-attestation` against the COPY
+// exited 0 -- "claims validated", "transparency log verified offline".
+// It works because an attestation is bound to the DIGEST, not to a
+// repository path: the decoded subject still named the ghcr repository
+// while verification ran against localhost:5000.
+//
+// So for a mirrored artifact whose signature travelled, the upstream
+// round-trip every scan makes is unnecessary -- and upstream is the
+// least reliable participant in a scan (anonymous pull limits are the
+// single most common cause of a scan failing here).
+//
+// THE ORDER IS THE SAFETY PROPERTY. The mirror is tried first and the
+// source is tried LAST, so the final attempt is always exactly what this
+// code did before. A caller that keeps the first VERIFIED result and
+// otherwise the last one cannot turn a signed artifact into an unsigned
+// one, whatever the local registry does -- which is the failure mode
+// provenanceRef's comment calls a fleet-wide false alarm nobody can act
+// on.
+//
+// Cost: an artifact that is genuinely unsigned is verified twice. Those
+// are overwhelmingly third-party images, which cosign.refPrefixes
+// already excludes from being checked at all.
+func provenanceRefs(a *artifact.Artifact) []string {
+	source := provenanceRef(a)
+	// Not mirrored, or mirrored to itself (a local path, or a ref
+	// already in this registry -- see the backfill's second case).
+	if a.Ref == "" || a.Ref == source {
+		return []string{source}
+	}
+	return []string{a.Ref, source}
+}
+
+// scanProvenanceRefs verifies against each ref in turn and keeps the
+// first VERIFIED answer, falling back to the LAST attempt's result.
+//
+// Those two rules together are what make trying the mirror free of
+// risk. provenanceRefs always puts the original ref last, so the
+// fallback is byte-for-byte the verdict this code produced before the
+// mirror was ever consulted -- an unreachable local registry, a copy
+// whose referrer did not travel, a cosign error, all land on exactly
+// the old answer rather than on "unsigned".
+//
+// It cannot UPGRADE a verdict either: a VERIFIED from the mirror is a
+// real verification of the same digest against the same identity and
+// trust root, not a shortcut around one.
+func scanProvenanceRefs(ctx context.Context, s scanner.ProvenanceScanner, refs []string) ([]artifact.Finding, string, string, error) {
+	var findings []artifact.Finding
+	var provenance, trustRoot string
+	var err error
+
+	for i, ref := range refs {
+		findings, provenance, trustRoot, err = s.ScanProvenance(ctx, ref)
+		if provenance == artifact.ProvenanceVerified {
+			if i > 0 {
+				// Only interesting when the mirror did NOT answer: it
+				// means the copy is missing something the original has,
+				// and the upstream round-trip is still being paid.
+				slog.Info("provenance verified against the original ref after the mirrored copy did not",
+					"ref", ref, "tried_first", refs[0])
+			}
+			return findings, provenance, trustRoot, err
+		}
+		if i < len(refs)-1 {
+			slog.Debug("provenance not verified against this ref, trying the next",
+				"ref", ref, "provenance", provenance, "err", err)
+		}
+	}
+	return findings, provenance, trustRoot, err
 }
