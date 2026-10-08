@@ -301,6 +301,19 @@ func mergeRegistryAuths(registryAddr, username, password, authDir string) map[st
 func writeDockerConfig(registryAddr, username, password, authDir string) string {
 	auths := mergeRegistryAuths(registryAddr, username, password, authDir)
 	if len(auths) == 0 {
+		// Credentials were supplied but no host could be found to scope
+		// them to -- REGISTRY_ADDR unset, and no mounted docker_auth
+		// entries either. They are DROPPED rather than handed to oras
+		// as a bare --username/--password pair, which would both put
+		// them in argv and offer them to whatever registry a ref names.
+		//
+		// Said out loud because the symptom otherwise is a 401 from a
+		// private registry with correct-looking credentials configured.
+		if username != "" {
+			slog.Warn("registry credentials are configured but no registry address was, so they are being IGNORED -- "+
+				"set REGISTRY_ADDR (or mount docker_auth entries) so they can be scoped to a host",
+				"username", username)
+		}
 		return ""
 	}
 	dir, err := os.MkdirTemp("", "scm-dockerconfig-*")
@@ -333,11 +346,29 @@ func writeDockerConfig(registryAddr, username, password, authDir string) string 
 // would fall back to scm-registry's account and 401 against every other
 // registry, which surfaces as a failed scan rather than anything
 // visible at startup.
-func registryFetcher(plainHTTP bool, dockerConfigPath, username, password string) *scanner.RegistryFetcher {
-	if dockerConfigPath != "" {
-		return scanner.NewRegistryFetcherWithConfig(plainHTTP, dockerConfigPath)
-	}
-	return scanner.NewRegistryFetcher(plainHTTP, username, password)
+// registryFetcher takes a config PATH and no credentials, on purpose.
+//
+// RegistryFetcher can still authenticate from a --username/--password
+// pair, and the scanner package keeps that for its own tests and for
+// callers embedding it. Production must not reach it, and an `if` that
+// falls back to the pair is one line away from being reached again --
+// so the credentials are not in scope here at all.
+//
+// Two reasons, and the second is the one that bites:
+//
+//   - argv is world-readable through /proc/<pid>/cmdline, and the
+//     processes sharing this container parse untrusted artifact
+//     content for a living.
+//   - a username/password pair is NOT host-scoped. oras would offer it
+//     to whatever registry the ref names, which is the same shape as
+//     TRIVY_USERNAME/PASSWORD going to every host -- the reason
+//     DOCKER_CONFIG is used everywhere else in this file.
+//
+// An empty path means anonymous, which is the correct outcome when no
+// credential could be scoped to a host: see writeDockerConfig, which
+// says so when it happens.
+func registryFetcher(plainHTTP bool, dockerConfigPath string) *scanner.RegistryFetcher {
+	return scanner.NewRegistryFetcherWithConfig(plainHTTP, dockerConfigPath)
 }
 
 // mirrorDockerConfig returns the docker config `oras copy` authenticates
@@ -411,11 +442,10 @@ func mirrorDockerConfig(registryAddr, sharedConfigPath string) string {
 	return writeDockerConfig(registryAddr, username, os.Getenv("MIRROR_REGISTRY_PASSWORD"), "")
 }
 
-func digestResolverFor(dockerConfigPath, username, password string) *scanner.OrasDigestResolver {
-	if dockerConfigPath != "" {
-		return scanner.NewOrasDigestResolverWithConfig(dockerConfigPath)
-	}
-	return scanner.NewOrasDigestResolver(username, password)
+// digestResolverFor takes a config PATH and no credentials, for the
+// reasons registryFetcher gives.
+func digestResolverFor(dockerConfigPath string) *scanner.OrasDigestResolver {
+	return scanner.NewOrasDigestResolverWithConfig(dockerConfigPath)
 }
 
 // exportDockerConfig points DOCKER_CONFIG at the directory holding the
@@ -880,7 +910,7 @@ func runScanWorker() {
 			// it fetches its own copy first via the same RegistryFetcher
 			// the in-process path uses (internal/scanner/fetch.go). See
 			// docs/architecture.md ("Isolating SBOM trivy scanning").
-			fetcher := registryFetcher(getenvBool("FETCH_PLAIN_HTTP", true), workerDockerConfigPath, os.Getenv("REGISTRY_USERNAME"), os.Getenv("REGISTRY_PASSWORD"))
+			fetcher := registryFetcher(getenvBool("FETCH_PLAIN_HTTP", true), workerDockerConfigPath)
 			path, cleanup, fetchErr := fetcher.Fetch(ctx, ref)
 			defer cleanup()
 			if fetchErr != nil {
@@ -932,7 +962,7 @@ func runScanWorker() {
 		} else {
 			// sbom mode: same fetch-then-scan shape as trivy's sbom
 			// branch above -- see that branch's comment.
-			fetcher := registryFetcher(plainHTTP, workerDockerConfigPath, os.Getenv("REGISTRY_USERNAME"), os.Getenv("REGISTRY_PASSWORD"))
+			fetcher := registryFetcher(plainHTTP, workerDockerConfigPath)
 			path, cleanup, fetchErr := fetcher.Fetch(ctx, ref)
 			defer cleanup()
 			if fetchErr != nil {
@@ -2466,7 +2496,7 @@ func runAPIServer() {
 	// file/sbom/sarif ref naming ghcr.io authenticates with ghcr.io's
 	// entry instead of scm-registry's. Falls back to the pair when
 	// nothing is configured -- writeDockerConfig returns "" then.
-	fetcher := registryFetcher(fetchPlainHTTP, dockerConfigPath, registryUsername, registryPassword)
+	fetcher := registryFetcher(fetchPlainHTTP, dockerConfigPath)
 
 	// Announced at startup for the same reason DISABLE_SCAN_ISOLATION is
 	// (below): it re-enables a convention that is off by default because
@@ -2904,7 +2934,7 @@ func runAPIServer() {
 	// fetchPlainHTTP is the same flag already computed for fetcher, not
 	// a second config surface -- see NewRouter's own comment for why
 	// image refs never use it regardless of this setting.
-	digestResolver := digestResolverFor(dockerConfigPath, registryUsername, registryPassword)
+	digestResolver := digestResolverFor(dockerConfigPath)
 
 	// MIRROR_ARTIFACTS: copy every registered artifact into this
 	// cluster's own registry and scan the copy, instead of pulling from

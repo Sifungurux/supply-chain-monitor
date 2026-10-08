@@ -1410,3 +1410,48 @@ func TestSigstoreConfigFromEnv(t *testing.T) {
 		t.Errorf("DockerConfigDir = %q", got.DockerConfigDir)
 	}
 }
+
+// S-8: registry credentials must never reach argv.
+//
+// argv is world-readable through /proc/<pid>/cmdline, and the processes
+// sharing this container parse untrusted artifact content for a living.
+// A username/password pair is also not host-scoped -- oras would offer
+// it to whatever registry the ref names, the same shape as
+// TRIVY_USERNAME/PASSWORD going to every host.
+//
+// The scanner package still SUPPORTS the pair: its own tests cover it,
+// and it is documented behaviour for callers embedding the package.
+// What must not exist is a way for THIS BINARY to use it, so the check
+// is against main.go's source rather than against behaviour. A runtime
+// assertion would only prove the path was not taken on that run; this
+// proves the path is not there.
+func TestRegistryCredentialsNeverReachArgv(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	// The credential-taking constructors. Their WithConfig siblings are
+	// the only ones this binary may use, and the trailing "(" keeps
+	// NewRegistryFetcherWithConfig from matching NewRegistryFetcher.
+	for _, banned := range []string{
+		"scanner.NewOrasDigestResolver(",
+		"scanner.NewRegistryFetcher(",
+	} {
+		if bytes.Contains(src, []byte(banned)) {
+			t.Errorf("main.go calls %s -- that puts registry credentials on argv. "+
+				"Use the WithConfig constructor and let writeDockerConfig scope them to a host; "+
+				"an empty config path correctly means anonymous.", banned)
+		}
+	}
+
+	// The helpers must not ACCEPT credentials either. Taking them is
+	// what makes reintroducing the fallback a one-line change.
+	for _, sig := range []string{
+		"func registryFetcher(plainHTTP bool, dockerConfigPath string)",
+		"func digestResolverFor(dockerConfigPath string)",
+	} {
+		if !bytes.Contains(src, []byte(sig)) {
+			t.Errorf("expected %q -- the helpers must take a config path and no credentials", sig)
+		}
+	}
+}
