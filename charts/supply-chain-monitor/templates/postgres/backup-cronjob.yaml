@@ -116,6 +116,32 @@ spec:
                     out="/backups/scm-postgres-${ts}.sql.gz.gpg"
                   else
                     out="/backups/scm-postgres-${ts}.sql.gz"
+                    # Said on EVERY unencrypted run, not once at install.
+                    #
+                    # The plaintext path is the default and it is silent
+                    # by nature: it works, the Job goes green, and the
+                    # only tell is a filename that does not end .gpg.
+                    # Whoever set this cluster up may have decided that
+                    # deliberately; whoever is reading this log a year
+                    # later did not, and the dump holds every artifact
+                    # ref, finding and stage history in the fleet.
+                    #
+                    # Names the fix rather than the problem, because a
+                    # warning an operator cannot act on from the line
+                    # itself gets filtered out of log views by the
+                    # second week.
+                    echo "WARNING: =================================================="
+                    echo "WARNING: this backup is NOT ENCRYPTED."
+                    echo "WARNING: ${out}"
+                    echo "WARNING: is a plaintext dump of the whole database, sitting"
+                    echo "WARNING: on a PVC that outlives this pod."
+                    echo "WARNING:"
+                    echo "WARNING: To fix:  make backup-key"
+                    echo "WARNING:   then set postgres.backup.encryption.publicKeySecret"
+                    echo "WARNING:   to the Secret it creates. The cluster then holds"
+                    echo "WARNING:   only the half that ENCRYPTS and cannot read its"
+                    echo "WARNING:   own backups; keep the private half off-cluster."
+                    echo "WARNING: =================================================="
                   fi
                   echo "backing up ${POSTGRES_DB} to ${out}"
                   # Remove a partial file on ANY early exit. set -e aborts

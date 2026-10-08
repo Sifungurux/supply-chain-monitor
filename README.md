@@ -185,7 +185,7 @@ the reasoning for its default inline.
 | `monitorApi.cosign.enabled` | `false` | `true`, **scoped** | Needs `certIdentityRegexp` + `certOIDCIssuer` or it refuses to start. Note: unsigned is a `high` finding, so enabling it against a fleet of upstream images lights up every one of them |
 | `monitorApi.sweepSbom.enabled` | `false` | `true` | Re-derives CVEs from stored SBOMs nightly — a CVE published today surfaces fleet-wide tomorrow, at a fraction of the IO of a full rescan |
 | `monitorApi.rateLimit.requestsPerSecond` / `.burst` | `0` (off) / `20` | `20` / `50` | Off means one client can saturate the API |
-| `postgres.backup.encryption.publicKeySecret` | `""` | a Secret you hold the private half of | Backups are written unencrypted otherwise |
+| `postgres.backup.encryption.publicKeySecret` | `""` | `make backup-key`, then the Secret it creates | Otherwise every nightly dump is plaintext on a PVC that outlives the pod. The cluster holds only the half that **encrypts** and cannot read its own backups; keep the private half off-cluster. Each unencrypted run says so in its log |
 | `monitorApi.retention.enabled` | `false` | `true` with `days: 90` | Nothing ages out on its own |
 | `monitorApi.prometheusRule.enabled` / `serviceMonitor.enabled` | `false` | `true` if you run Prometheus | Ships real alert rules, including "backups have gone stale" |
 
