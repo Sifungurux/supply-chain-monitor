@@ -48,6 +48,12 @@ f=$(ls /backups/scm-postgres-*.sql.gz 2>/dev/null | head -1)
 sz=$(gzip -dc "$f" | wc -c)
 raw=$(pg_dump | wc -c)
 [ "$sz" = "$raw" ] && ok "byte-identical to pg_dump output ($sz bytes)" || bad "the awk gate altered the stream: $sz vs $raw"
+# The plaintext path is the DEFAULT and it is silent by nature: the Job
+# goes green and the only tell is a filename that does not end .gpg. The
+# warning has to name the fix, not just the problem -- one an operator
+# cannot act on from the line itself gets filtered out of log views.
+grep -q "NOT ENCRYPTED" /tmp/out && ok "unencrypted run warns" || bad "a plaintext backup said nothing about being plaintext"
+grep -q "make backup-key" /tmp/out && ok "the warning names the fix" || bad "warned without saying what to do about it"
 gzip -dc "$f" | grep -q "INSERT INTO t VALUES (1999" && ok "last row present (not truncated)" || bad "stream truncated"
 
 echo "=== T2: a dump that produces nothing must FAIL, not be kept ==="
@@ -154,6 +160,11 @@ export GNUPGHOME=/tmp/keyring
 dec=$(gpg --batch --quiet --decrypt "$e" 2>/dev/null | gzip -dc | wc -c)
 raw=$(pg_dump | wc -c)
 [ "$dec" = "$raw" ] && ok "decrypt->gunzip round-trips exactly ($dec bytes)" || bad "round-trip mismatch: $dec vs $raw"
+# The unencrypted warning must NOT fire here. A warning that goes off on
+# a correctly-configured cluster is one people learn to filter out, and
+# then it is not there when it matters. Asserted against T4's own run,
+# which is the only place GPG_RECIPIENT_FILE is actually exported.
+grep -q "NOT ENCRYPTED" /tmp/out && bad "warned about encryption on an ENCRYPTED backup" || ok "encrypted run stays quiet"
 unset GNUPGHOME
 
 echo "=== T5: an encrypted backup with no sidecar must be KEPT ==="
