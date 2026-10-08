@@ -770,3 +770,181 @@ func TestCarrySourcesForward_DoesNotResurrectFixed(t *testing.T) {
 		t.Errorf("returned %q, want CVE-1", got[0].ID)
 	}
 }
+
+func TestSourcesOf(t *testing.T) {
+	for _, tc := range []struct {
+		source string
+		want   []string
+	}{
+		{"trivy", []string{"trivy"}},
+		{"grype, trivy", []string{"grype", "trivy"}},
+		// Tolerated because Source is also settable by a POST
+		// /findings caller, not only by CoalesceSameIDSources.
+		{"grype,trivy", []string{"grype", "trivy"}},
+		{"  grype ,  trivy ", []string{"grype", "trivy"}},
+		// A finding nobody attributed is owned by nobody, NOT by a
+		// scanner named "". RetainUnrunSources depends on this: the
+		// empty case must retain, never resolve.
+		{"", nil},
+		{"   ", nil},
+	} {
+		got := artifact.SourcesOf(artifact.Finding{Source: tc.source})
+		if len(got) != len(tc.want) {
+			t.Errorf("SourcesOf(%q) = %v, want %v", tc.source, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("SourcesOf(%q) = %v, want %v", tc.source, got, tc.want)
+				break
+			}
+		}
+	}
+}
+
+// The table is the whole point: every combination of who claims a
+// finding and who re-checked it, because the wrong answer in any cell
+// is thousands of findings silently resolved or silently kept.
+func TestRetainUnrunSources(t *testing.T) {
+	ran := func(names ...string) map[string]bool {
+		m := map[string]bool{}
+		for _, n := range names {
+			m[n] = true
+		}
+		return m
+	}
+	existing := []artifact.Finding{
+		{ID: "CVE-1", Source: "trivy"},
+		{ID: "CVE-2", Source: "grype"},
+		{ID: "CVE-3", Source: "grype, trivy"},
+		{ID: "CVE-4", Source: ""},
+	}
+
+	for _, tc := range []struct {
+		name string
+		ran  map[string]bool
+		// IDs expected to be ADDED back (i.e. protected from resolution).
+		retained []string
+	}{
+		{
+			// Today's behaviour, expressed through the new mechanism:
+			// a round that covered nothing resolves nothing.
+			name:     "empty coverage retains everything",
+			ran:      ran(),
+			retained: []string{"CVE-1", "CVE-2", "CVE-3", "CVE-4"},
+		},
+		{
+			// trivy re-checked and dropped CVE-1, so CVE-1 may resolve.
+			// CVE-3 is also claimed by grype, which did not run.
+			name:     "trivy only",
+			ran:      ran("trivy"),
+			retained: []string{"CVE-2", "CVE-3", "CVE-4"},
+		},
+		{
+			name:     "grype only",
+			ran:      ran("grype"),
+			retained: []string{"CVE-1", "CVE-3", "CVE-4"},
+		},
+		{
+			// Full coverage: everything attributed may resolve. CVE-4
+			// still cannot -- nothing establishes who would re-report it.
+			name:     "both",
+			ran:      ran("grype", "trivy"),
+			retained: []string{"CVE-4"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := artifact.RetainUnrunSources(existing, nil, tc.ran)
+			ids := map[string]bool{}
+			for _, f := range got {
+				ids[f.ID] = true
+			}
+			if len(ids) != len(tc.retained) {
+				t.Fatalf("retained %d findings, want %d: %v", len(ids), len(tc.retained), ids)
+			}
+			for _, want := range tc.retained {
+				if !ids[want] {
+					t.Errorf("%s was not retained -- it would be resolved by a round that never re-checked it", want)
+				}
+			}
+		})
+	}
+
+	t.Run("a re-reported finding is not duplicated", func(t *testing.T) {
+		reported := []artifact.Finding{{ID: "CVE-3", Source: "grype, trivy"}}
+		got := artifact.RetainUnrunSources(existing, reported, ran("trivy"))
+		n := 0
+		for _, f := range got {
+			if f.ID == "CVE-3" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("CVE-3 appears %d times; a duplicate would make MergeFindings merge it against itself", n)
+		}
+	})
+
+	t.Run("retained findings keep their stored state verbatim", func(t *testing.T) {
+		seen := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		stored := []artifact.Finding{{
+			ID: "CVE-9", Source: "grype", Status: artifact.FindingStatusOpen,
+			FirstSeenAt: seen, Justification: "assessed",
+		}}
+		got := artifact.RetainUnrunSources(stored, nil, ran("trivy"))
+		if len(got) != 1 {
+			t.Fatalf("got %d findings, want 1", len(got))
+		}
+		// Retention must hand MergeFindings the finding AS STORED --
+		// that is what makes "still reported" mean "unchanged".
+		if got[0].FirstSeenAt != seen || got[0].Justification != "assessed" || got[0].Source != "grype" {
+			t.Errorf("retained finding was altered: %+v", got[0])
+		}
+	})
+}
+
+// The claim PR 2 will rely on, proved against the real MergeFindings
+// rather than asserted: retention + fix-detection ON resolves exactly
+// the findings the round re-checked, and nothing else.
+//
+// Without retention this same call resolves all four, which is the
+// nightly-sweep failure the sbom round currently avoids by refusing to
+// resolve anything at all.
+func TestRetainUnrunSources_ComposedWithMergeFindings(t *testing.T) {
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	seen := now.Add(-30 * 24 * time.Hour)
+	existing := []artifact.Finding{
+		{ID: "CVE-1", Source: "trivy", Status: artifact.FindingStatusOpen, FirstSeenAt: seen},
+		{ID: "CVE-2", Source: "grype", Status: artifact.FindingStatusOpen, FirstSeenAt: seen},
+		{ID: "CVE-3", Source: "grype, trivy", Status: artifact.FindingStatusOpen, FirstSeenAt: seen},
+	}
+	// trivy re-ran and reported nothing: CVE-1 is genuinely gone as far
+	// as trivy is concerned. grype did not run at all.
+	ranTrivy := map[string]bool{"trivy": true}
+
+	merged := artifact.MergeFindings(existing,
+		artifact.RetainUnrunSources(existing, nil, ranTrivy), now, true, nil)
+
+	status := map[string]string{}
+	for _, f := range merged {
+		status[f.ID] = f.Status
+	}
+	if status["CVE-1"] != artifact.FindingStatusFixed {
+		t.Errorf("CVE-1 = %q, want fixed -- trivy re-checked and dropped it", status["CVE-1"])
+	}
+	if status["CVE-2"] != artifact.FindingStatusOpen {
+		t.Errorf("CVE-2 = %q, want open -- grype never ran", status["CVE-2"])
+	}
+	if status["CVE-3"] != artifact.FindingStatusOpen {
+		t.Errorf("CVE-3 = %q, want open -- grype also claims it and never ran", status["CVE-3"])
+	}
+
+	// And the control: with NO coverage declared, the same merge must
+	// resolve nothing. This is the configuration PR 1 ships with.
+	none := artifact.MergeFindings(existing,
+		artifact.RetainUnrunSources(existing, nil, nil), now, true, nil)
+	for _, f := range none {
+		if f.Status != artifact.FindingStatusOpen {
+			t.Errorf("%s = %q with empty coverage, want open -- a round that covered nothing may resolve nothing", f.ID, f.Status)
+		}
+	}
+}
