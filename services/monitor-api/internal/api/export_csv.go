@@ -5,7 +5,9 @@ import (
 	"encoding/csv"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/kirk-pedersen/supply-chain-monitor/monitor-api/internal/artifact"
 )
@@ -157,11 +159,29 @@ func csvRow(a *artifact.Artifact, bucket string, f artifact.Finding) []string {
 // a comma or newline, and the spreadsheet evaluates the quoted contents
 // regardless.
 func csvSafe(s string) string {
-	if s == "" {
+	// The check is on the first NON-WHITESPACE rune, not on s[0].
+	//
+	// Testing s[0] directly is bypassed by one leading space: " =1+1"
+	// does not start with a formula character, so it would go through
+	// unprefixed, and an importer that trims leading whitespace then
+	// sees =1+1 and evaluates it. The same holds for a leading newline
+	// or a non-breaking space.
+	//
+	// Which whitespace a given spreadsheet trims is not something worth
+	// knowing precisely -- Excel, LibreOffice, Sheets and whatever
+	// somebody pipes this through all differ. Trimming everything
+	// unicode calls a space before deciding makes the answer not depend
+	// on that.
+	trimmed := strings.TrimLeftFunc(s, unicode.IsSpace)
+	if trimmed == "" {
+		// Empty, or whitespace only. Nothing to evaluate.
 		return s
 	}
-	switch s[0] {
-	case '=', '+', '-', '@', '\t', '\r':
+	switch trimmed[0] {
+	case '=', '+', '-', '@':
+		// The apostrophe goes on the ORIGINAL, not the trimmed value:
+		// the export should still show what the field actually said,
+		// whitespace included.
 		return "'" + s
 	}
 	return s
