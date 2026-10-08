@@ -726,11 +726,34 @@ func main() {
 //
 // Returns nil (mode answers 501) when the chosen tool has no isolated
 // scanner, which is what DISABLE_SCAN_ISOLATION leaves.
-func sbomReevalScanner(cveScanner string, trivySBOMDoc, grypeSBOMDoc scanner.Scanner) scanner.Scanner {
-	if cveScanner == "grype" {
-		return grypeSBOMDoc
+// Returns a SET, because under "both" the bucket was built by both
+// tools and a round that re-runs only one of them can never conclude
+// anything is resolved -- see internal/artifact.RetainUnrunSources and
+// scan.go's coverage handling. Running both is what lets the nightly
+// sweep finally resolve a fixed CVE instead of waiting for a full scan.
+//
+// nil entries are dropped rather than returned: DISABLE_SCAN_ISOLATION
+// leaves a tool with no isolated scanner, and a nil in this slice would
+// panic on dispatch. An empty result is how the mode answers 501.
+func sbomReevalScanners(cveScanner string, trivySBOMDoc, grypeSBOMDoc scanner.Scanner) []scanner.Scanner {
+	var chosen []scanner.Scanner
+	switch cveScanner {
+	case "grype":
+		chosen = []scanner.Scanner{grypeSBOMDoc}
+	case "both":
+		// Order matters only for log readability; coalescing unions the
+		// sources regardless.
+		chosen = []scanner.Scanner{trivySBOMDoc, grypeSBOMDoc}
+	default:
+		chosen = []scanner.Scanner{trivySBOMDoc}
 	}
-	return trivySBOMDoc
+	out := make([]scanner.Scanner, 0, len(chosen))
+	for _, s := range chosen {
+		if s != nil {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // fetchStoredSBOM downloads the SBOM document already stored for this
@@ -3070,7 +3093,7 @@ func runAPIServer() {
 		// leaves the endpoint open, as every deployment has today.
 		MetricsToken:      getenv("METRICS_TOKEN", ""),
 		BuildVersion:      BuildVersion(),
-		SBOMReevalScanner: sbomReevalScanner(cveScanner, isolatedTrivySBOMDoc, isolatedGrypeSBOMDoc),
+		SBOMReevalScanners: sbomReevalScanners(cveScanner, isolatedTrivySBOMDoc, isolatedGrypeSBOMDoc),
 		// Empty = same-origin only. The dashboard proxies through its
 		// own nginx, so it needs no entry here.
 		CORSAllowedOrigins: splitAndTrim(os.Getenv("CORS_ALLOWED_ORIGINS")),

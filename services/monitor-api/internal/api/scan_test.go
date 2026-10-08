@@ -1330,9 +1330,17 @@ func TestScanArtifact_NewFailureReplacesPreviousErrors(t *testing.T) {
 func newSBOMReevalRouter(full scanner.Registry, reeval scanner.Scanner) (http.Handler, *artifact.MemStore) {
 	store := artifact.NewMemStore()
 	tracker := pipeline.NewTracker([]string{"source", "build", "test", "scan", "sign", "publish", "deploy"})
+	// nil means "no re-evaluation scanner configured", which must give
+	// an EMPTY slice -- []scanner.Scanner{nil} has length 1, so the
+	// handler's len()==0 check would pass and it would dispatch a nil
+	// scanner. Same reason sbomReevalScanners drops nils in main.go.
+	var reevals []scanner.Scanner
+	if reeval != nil {
+		reevals = []scanner.Scanner{reeval}
+	}
 	return api.NewRouter(api.Config{
 		Store: store, Tracker: tracker, Scanners: full,
-		SBOMReevalScanner: reeval, APIKey: testAPIKey,
+		SBOMReevalScanners: reevals, APIKey: testAPIKey,
 	}), store
 }
 
@@ -1595,8 +1603,8 @@ func TestScanArtifact_SBOMOnlyDoesNotResolveDigests(t *testing.T) {
 	resolver := &fakeDigestResolver{digests: map[string]string{"alpine:3.19": "sha256:should-never-be-fetched"}}
 	h := api.NewRouter(api.Config{
 		Store: store, Tracker: tracker, APIKey: testAPIKey, DigestResolver: resolver,
-		Scanners:          scanner.Registry{artifact.TypeImage: {&fakeScanner{}}},
-		SBOMReevalScanner: &grypeSBOMLike{findings: []artifact.Finding{{ID: "CVE-2024-3", Source: "grype"}}},
+		Scanners:           scanner.Registry{artifact.TypeImage: {&fakeScanner{}}},
+		SBOMReevalScanners: []scanner.Scanner{&grypeSBOMLike{findings: []artifact.Finding{{ID: "CVE-2024-3", Source: "grype"}}}},
 	})
 
 	created := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)

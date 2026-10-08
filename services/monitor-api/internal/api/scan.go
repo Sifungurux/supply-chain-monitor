@@ -117,11 +117,11 @@ func (h *handler) scanArtifact(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "artifact has no stored SBOM document to re-evaluate -- a full scan generates one")
 			return
 		}
-		if h.sbomReeval == nil {
+		if len(h.sbomReeval) == 0 {
 			writeError(w, http.StatusNotImplemented, "sbom re-evaluation is not configured on this deployment")
 			return
 		}
-		scanners = []scanner.Scanner{h.sbomReeval}
+		scanners = h.sbomReeval
 	}
 
 	// Take a scan slot before touching anything -- deliberately after
@@ -538,6 +538,26 @@ func (h *handler) scanHoldingSlot(a *artifact.Artifact, scanners []scanner.Scann
 		// next FULL scan notices. That is the right trade: a stale
 		// "open" is visible and self-corrects, a wrong "fixed" is
 		// invisible and does not.
+		//
+		// PER-SOURCE OWNERSHIP IS NOT ENOUGH TO LIFT THIS, and the
+		// reason is in the sentence above about grype-only deployments.
+		// internal/artifact.RetainUnrunSources can keep a round from
+		// resolving a finding whose scanner did not RUN -- so with both
+		// tools re-evaluating, every finding's scanner has run and the
+		// obvious next step is to turn this on. It would still be
+		// wrong, because Source records WHICH TOOL, never WHICH MODE.
+		//
+		// The bucket was built by IMAGE-mode scans. This round is
+		// SBOM-mode. A finding image-mode trivy took from a binary the
+		// SBOM does not describe is absent from SBOM-mode trivy's
+		// report while "trivy" is on record as having re-checked it --
+		// so full scanner coverage would resolve it anyway. Fixing that
+		// means attributing findings by (tool, mode), which the Source
+		// column cannot express today and which no stored finding
+		// carries.
+		//
+		// So: both tools re-evaluate (grype's findings are refreshed
+		// rather than left to rot), and this still returns false.
 		if sbomOnly {
 			return false
 		}

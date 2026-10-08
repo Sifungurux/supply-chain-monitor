@@ -137,7 +137,7 @@ type Config struct {
 	// malware scan (see scanModeSBOMOnly in scan.go). nil disables the
 	// mode -- POST .../scan?mode=sbom-only then answers 501, which is
 	// what every existing deployment and test gets by not setting it.
-	SBOMReevalScanner scanner.Scanner
+	SBOMReevalScanners []scanner.Scanner
 	// Fetcher resolves an sbom-type artifact's ref to a local file after
 	// a scan, so its own component inventory can be indexed the same way
 	// an uploaded SBOM's is (see scan.go's indexSBOMTypeComponents).
@@ -181,7 +181,7 @@ type Config struct {
 // method+wildcard routing, so no external router dependency is needed.
 // See Config for what each field does and what its zero value means.
 func NewRouter(cfg Config) http.Handler {
-	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, mirror: cfg.Mirror, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher, licenseDenylist: cfg.LicenseDenylist, staleAfterDays: cfg.StaleAfterDays, policy: cfg.Policy, enricher: cfg.Enricher, sbomReeval: cfg.SBOMReevalScanner, buildVersion: cfg.BuildVersion}
+	h := &handler{store: cfg.Store, tracker: cfg.Tracker, scanners: cfg.Scanners, digestResolver: cfg.DigestResolver, fetchPlainHTTP: cfg.FetchPlainHTTP, mirror: cfg.Mirror, scanTimeout: cfg.ScanTimeout, requireDigest: cfg.RequireDigest, notifiers: cfg.Notifications.Notifiers, notifyMinSeverity: cfg.Notifications.MinSeverity, notifyOnFirstScan: cfg.Notifications.NotifyOnFirstScan, maxArtifacts: cfg.RegLimits.MaxArtifacts, ready: cfg.Ready, fetcher: cfg.Fetcher, licenseDenylist: cfg.LicenseDenylist, staleAfterDays: cfg.StaleAfterDays, policy: cfg.Policy, enricher: cfg.Enricher, sbomReeval: cfg.SBOMReevalScanners, buildVersion: cfg.BuildVersion}
 	h.metrics = newMetrics()
 	h.scanCaps = cfg.ScanLimits.caps()
 
