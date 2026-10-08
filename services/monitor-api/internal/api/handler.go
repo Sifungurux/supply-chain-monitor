@@ -110,7 +110,7 @@ type handler struct {
 	// configured on this deployment, and scanArtifact answers 501 --
 	// never a silent fall back to the full scanner set, which would
 	// make a "cheap" nightly CronJob re-scan the whole fleet.
-	sbomReeval scanner.Scanner
+	sbomReeval []scanner.Scanner
 
 	// buildVersion backs the scm_build_info metric -- see Config.
 	buildVersion string

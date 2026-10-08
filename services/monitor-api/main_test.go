@@ -1032,38 +1032,52 @@ func (s *stubScanner) Scan(context.Context, string) ([]artifact.Finding, error) 
 // the existing findings that cannot dedupe, cannot be covered by a VEX
 // statement written about a CVE, and cannot carry KEV/EPSS, which are
 // keyed by CVE id.
-func TestSBOMReevalScanner_MatchesTheToolThatBuiltTheBucket(t *testing.T) {
+func TestSBOMReevalScanners_CoverTheToolsThatBuiltTheBucket(t *testing.T) {
 	trivySBOMDoc := &stubScanner{name: "trivy"}
 	grypeSBOMDoc := &stubScanner{name: "grype"}
 
 	for _, tc := range []struct {
 		cveScanner string
-		want       string
+		want       []string
 		why        string
 	}{
-		{"grype", "grype", "the bucket holds grype's advisory ids, so grype must re-evaluate it"},
-		{"trivy", "trivy", "trivy-only deployment"},
-		{"both", "trivy", "under both, trivy's ids dominate the bucket (35195 vs 4557 measured)"},
-		{"", "trivy", "unset falls back to trivy, matching the chart default"},
+		{"grype", []string{"grype"}, "the bucket holds grype's advisory ids, so grype must re-evaluate it"},
+		{"trivy", []string{"trivy"}, "trivy-only deployment"},
+		{"both", []string{"trivy", "grype"}, "BOTH built the bucket, so both re-evaluate -- running one leaves the other's findings never refreshed"},
+		{"", []string{"trivy"}, "unset falls back to trivy, matching the chart default"},
 	} {
-		got := sbomReevalScanner(tc.cveScanner, trivySBOMDoc, grypeSBOMDoc)
-		s, ok := got.(*stubScanner)
-		if !ok || s.name != tc.want {
-			t.Errorf("cveScanner=%q selected %v, want %q -- %s", tc.cveScanner, got, tc.want, tc.why)
+		got := sbomReevalScanners(tc.cveScanner, trivySBOMDoc, grypeSBOMDoc)
+		if len(got) != len(tc.want) {
+			t.Errorf("cveScanner=%q selected %d scanners, want %d -- %s", tc.cveScanner, len(got), len(tc.want), tc.why)
+			continue
+		}
+		for i, s := range got {
+			stub, ok := s.(*stubScanner)
+			if !ok || stub.name != tc.want[i] {
+				t.Errorf("cveScanner=%q selected %v at %d, want %q -- %s", tc.cveScanner, s, i, tc.want[i], tc.why)
+			}
 		}
 	}
 }
 
-// TestSBOMReevalScanner_NilWhenToolUnavailable covers
-// DISABLE_SCAN_ISOLATION, where no isolated scanner is constructed at
-// all. nil must propagate so the mode answers 501 rather than the
-// handler falling back to a full scan.
-func TestSBOMReevalScanner_NilWhenToolUnavailable(t *testing.T) {
-	if got := sbomReevalScanner("both", nil, nil); got != nil {
-		t.Errorf("got %v, want nil", got)
+// DISABLE_SCAN_ISOLATION leaves a tool with no isolated scanner. A nil
+// must be DROPPED, never carried: an empty result is how the mode
+// answers 501, while a nil inside the slice would panic on dispatch.
+func TestSBOMReevalScanners_DropsUnavailableTools(t *testing.T) {
+	if got := sbomReevalScanners("both", nil, nil); len(got) != 0 {
+		t.Errorf("got %v, want empty", got)
 	}
-	if got := sbomReevalScanner("grype", &stubScanner{name: "trivy"}, nil); got != nil {
-		t.Errorf("cveScanner=grype with no grype scanner should be nil, got %v", got)
+	if got := sbomReevalScanners("grype", &stubScanner{name: "trivy"}, nil); len(got) != 0 {
+		t.Errorf("cveScanner=grype with no grype scanner should be empty, got %v", got)
+	}
+	// "both" with only trivy available still runs trivy -- a partial
+	// round is worth more than none, and it resolves nothing either way.
+	got := sbomReevalScanners("both", &stubScanner{name: "trivy"}, nil)
+	if len(got) != 1 {
+		t.Fatalf("got %d scanners, want 1", len(got))
+	}
+	if s, ok := got[0].(*stubScanner); !ok || s.name != "trivy" {
+		t.Errorf("got %v, want the trivy scanner", got[0])
 	}
 }
 

@@ -23,6 +23,9 @@ Work in the current phase, tracked to completion. Items graduate here from
 | S-7 | Tekton examples use a scoped `ci` key | 0 | done — `register\|scan\|read\|stage:write`, no `admin` | #222 |
 | L-1 | Split `postgres_store.go` by concern, before H-2 | 0 | done — 2,350 lines into six files, no behaviour change | #219 |
 | H-3 | Provenance verification on; bundle support; dogfooded in CI; `require_provenance` | 1 | done — see below; "bundle support" landed as a scanner change, not the upload endpoint it was scoped as | #232, #234 |
+| S-8 | Registry credentials never on argv | 1 | done — the fallback is unexpressible, not merely unused | #241 |
+| S-9 | Loud warning when backups run unencrypted; `make backup-key` in quickstart | 1 | done | #240 |
+| H-5 | Per-source finding ownership in the SBOM sweep; trivy + grype re-evaluate | 1 | **partially done** — see below; the ownership half cannot be switched on | #242, #243 |
 
 **Phase 0 is complete.** Two things it did not finish, carried deliberately
 rather than silently:
@@ -47,6 +50,28 @@ provenance tries the mirrored ref first and falls back to the original,
 removing an upstream round-trip per scan. A classic `sha256-<digest>.sig`
 tag still does not travel, which is why the fallback stays.
 
+**H-5 is partially delivered, and the remaining half is blocked on
+something the data model cannot currently express.** "trivy + grype
+re-evaluate" shipped: under `cveScanner: both` the nightly round now runs
+both tools instead of trivy alone, so grype's findings (4,557 of 46,728
+open here) are refreshed rather than left to rot. "Per-source finding
+ownership" also shipped as a mechanism — `RetainUnrunSources` keeps a
+round from resolving a finding whose scanner never ran — but it is
+**landed unwired**, because it is not sufficient to turn fix-detection on.
+
+`Finding.Source` records WHICH TOOL re-checked a finding, never WHICH
+MODE. The cve bucket is built by IMAGE-mode scans while the sweep is
+SBOM-mode, so a finding image-mode trivy took from a binary the SBOM does
+not describe is absent from SBOM-mode trivy's report while "trivy" is on
+record as having re-checked it. Full scanner coverage would resolve it
+anyway. Closing H-5 means attributing findings by `(tool, mode)` — a
+schema change plus a backfill for every stored finding — and that is a
+item in its own right, not a follow-up commit.
+
+Until then a genuinely-fixed CVE still waits for a full scan, which
+remains the right trade: a stale "open" is visible and self-corrects, a
+wrong "fixed" is invisible and does not.
+
 ## Deferred
 
 Accepted in principle, not yet in play. No status is tracked until the item
@@ -54,10 +79,7 @@ reaches **Accepted** — a Deferred item is never a review finding.
 
 | ID | Item | Lands in |
 |---|---|---|
-| H-5 | Per-source finding ownership in the SBOM sweep; trivy + grype re-evaluate | Phase 1 |
 | M-2 | CycloneDX SBOM+VEX export; fleet findings CSV; validated by a Dependency-Track import | Phase 1 |
-| S-8 | Registry credentials never on argv | Phase 1 |
-| S-9 | Loud warning when backups run unencrypted; `make backup-key` in quickstart | Phase 1 |
 | H-2 | API-managed keys: create/list/revoke, expiry, hashed at rest | Phase 2 |
 | M-3 | CycloneDX fleet VEX + cached fleet-VEX reads | Phase 2 |
 | *new* | Versioned pluggable-scanner schema + conformance test + user-guide page | Phase 2 |
