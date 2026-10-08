@@ -3091,8 +3091,8 @@ func runAPIServer() {
 		// running a full scan.
 		// Optional bearer token for GET /metrics (report S4). Empty
 		// leaves the endpoint open, as every deployment has today.
-		MetricsToken:      getenv("METRICS_TOKEN", ""),
-		BuildVersion:      BuildVersion(),
+		MetricsToken:       getenv("METRICS_TOKEN", ""),
+		BuildVersion:       BuildVersion(),
 		SBOMReevalScanners: sbomReevalScanners(cveScanner, isolatedTrivySBOMDoc, isolatedGrypeSBOMDoc),
 		// Empty = same-origin only. The dashboard proxies through its
 		// own nginx, so it needs no entry here.
