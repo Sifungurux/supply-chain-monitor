@@ -60,6 +60,24 @@ spec:
         - podSelector:
             matchLabels:
               app: scm-enrich-refresh
+        # `make check-live-secrets`, which PRESENTS THE LEAKED PASSWORD
+        # to this database and requires it to be refused. Without this
+        # entry the check pod is dropped before it reaches Postgres and
+        # psql exits 2 on a timeout -- which the script correctly calls
+        # INCONCLUSIVE rather than a pass, so the effect is not a false
+        # all-clear, it is a check that can never run. Measured on the
+        # rack 2026-10-08: "connection to server at scm-postgres ...
+        # failed: timeout expired".
+        #
+        # Admitting it costs nothing a determined caller did not already
+        # have: these selectors match on a label the pod asserts about
+        # ITSELF, so anyone who can create a pod in this namespace can
+        # already claim app=monitor-api. The policy bounds which
+        # WORKLOADS talk to Postgres, and a credential check that has to
+        # reach it to mean anything is one of them.
+        - podSelector:
+            matchLabels:
+              app: scm-check-leaked-postgres
       ports:
         - protocol: TCP
           port: {{ .Values.monitorApi.postgres.port | int }}
