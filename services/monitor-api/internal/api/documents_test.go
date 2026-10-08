@@ -483,3 +483,55 @@ func TestExportFindingsCSV(t *testing.T) {
 		}
 	})
 }
+
+// Spreadsheet formula injection. This export exists to be opened in
+// Excel/LibreOffice/Sheets, which evaluate a cell beginning with
+// = + - @ tab or CR as a formula -- and Ref, Title and Justification are
+// all caller-controlled (POST /artifacts, POST /findings, an uploaded
+// VEX document respectively).
+func TestExportFindingsCSV_NeutralisesFormulaInjection(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	// A ref a caller could genuinely register.
+	a := mustCreate(t, store, `=cmd|'/c calc'!A1`, artifact.TypeImage)
+	if _, err := store.Update(a.ID, func(cur *artifact.Artifact) {
+		cur.CVEFindings = []artifact.Finding{{
+			ID:            "CVE-1",
+			Severity:      "high",
+			Source:        "trivy",
+			Title:         `@SUM(1+9)*cmd|' /C calc'!A0`,
+			Status:        artifact.FindingStatusNotAffected,
+			Justification: `+HYPERLINK("http://evil","click")`,
+		}}
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	rec := doRaw(t, h, http.MethodGet, "/api/v1/export/findings.csv", "", nil)
+	rows, err := csv.NewReader(strings.NewReader(rec.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("not valid CSV: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want header + 1", len(rows))
+	}
+
+	for i, cell := range rows[1] {
+		if cell == "" {
+			continue
+		}
+		switch cell[0] {
+		case '=', '+', '-', '@', '\t', '\r':
+			t.Errorf("column %d (%q) begins with a formula character: %q",
+				i, rows[0][i], cell)
+		}
+	}
+
+	// Neutralised, not destroyed: the original text must still be
+	// readable by a human, just not by the formula engine.
+	body := rec.Body.String()
+	for _, want := range []string{"calc", "HYPERLINK", "SUM"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the payload text %q was dropped rather than neutralised", want)
+		}
+	}
+}

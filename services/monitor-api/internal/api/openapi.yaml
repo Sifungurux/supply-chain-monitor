@@ -575,6 +575,12 @@ paths:
         spreadsheet opens without complaint -- the export is therefore
         built whole and refused with 413 if it would exceed the cap,
         rather than streamed and hoped for.
+
+
+        Free-text columns are neutralised against spreadsheet formula
+        injection: a value beginning with = + - @ tab or CR is prefixed
+        with an apostrophe, so it displays as written and is not
+        evaluated. Ref, Title and Justification are all caller-supplied.
       parameters:
         - name: active
           in: query

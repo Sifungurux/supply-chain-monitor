@@ -115,14 +115,56 @@ func findingBuckets(a *artifact.Artifact) []namedBucket {
 }
 
 func csvRow(a *artifact.Artifact, bucket string, f artifact.Finding) []string {
+	// Every free-text column goes through csvSafe. The timestamps and
+	// numbers are formatted by this process and cannot lead with a
+	// formula character, so they are left alone -- but anything a
+	// caller, a scanner or an uploaded document can set is neutralised.
 	return []string{
-		a.ID, a.Ref, a.SourceRef, string(a.Type), string(a.Status),
-		a.CurrentStage, utcOrEmpty(a.LastScanAt), a.Provenance,
-		bucket, f.ID, f.Severity, f.Source, f.Title,
-		f.Status, f.FirstSeenAt.UTC().Format(time.RFC3339), utcOrEmpty(f.ResolvedAt),
-		f.Justification, utcOrEmpty(f.AcceptedUntil), f.AcceptedBy, f.AcceptanceReason,
+		csvSafe(a.ID), csvSafe(a.Ref), csvSafe(a.SourceRef), csvSafe(string(a.Type)), csvSafe(string(a.Status)),
+		csvSafe(a.CurrentStage), utcOrEmpty(a.LastScanAt), csvSafe(a.Provenance),
+		bucket, csvSafe(f.ID), csvSafe(f.Severity), csvSafe(f.Source), csvSafe(f.Title),
+		csvSafe(f.Status), f.FirstSeenAt.UTC().Format(time.RFC3339), utcOrEmpty(f.ResolvedAt),
+		csvSafe(f.Justification), utcOrEmpty(f.AcceptedUntil), csvSafe(f.AcceptedBy), csvSafe(f.AcceptanceReason),
 		strconv.FormatFloat(f.EPSSScore, 'f', -1, 64), strconv.FormatBool(f.KnownExploited),
 	}
+}
+
+// csvSafe neutralises spreadsheet formula injection.
+//
+// Excel, LibreOffice and Google Sheets evaluate a cell beginning with
+// =, +, -, @, tab or CR as a FORMULA, and a formula can exfiltrate the
+// rest of the sheet or trigger a command prompt. This export exists to
+// be opened in exactly those programs, so the risk is not theoretical
+// for it.
+//
+// The inputs are caller-controlled, within this system's own stated
+// threat model rather than in spite of it:
+//
+//   - Artifact.Ref arrives on POST /artifacts
+//   - Finding.Title, Severity and Source arrive on POST
+//     /artifacts/{id}/findings, whose whole point is that a CI scanner
+//     reports them -- and scanner output is treated as untrusted
+//     everywhere else in this codebase, which is why scans run in
+//     isolated Jobs at all
+//   - Justification arrives inside an uploaded VEX document
+//
+// A leading apostrophe is the accepted mitigation: the spreadsheet
+// shows the original text and does not evaluate it. It is mildly lossy
+// for a value that genuinely starts with "-", which is the price of the
+// cell not being a program.
+//
+// Quoting is NOT a fix -- csv.Writer already quotes anything containing
+// a comma or newline, and the spreadsheet evaluates the quoted contents
+// regardless.
+func csvSafe(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + s
+	}
+	return s
 }
 
 func utcOrEmpty(t *time.Time) string {
