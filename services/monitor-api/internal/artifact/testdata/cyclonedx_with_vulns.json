@@ -1,0 +1,169 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.7.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.7",
+  "serialNumber": "urn:uuid:26a64f4a-8a80-4b85-9ed2-7e69ab987199",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-10-08T12:42:20+00:00",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "manufacturer": {
+            "name": "Aqua Security Software Ltd."
+          },
+          "group": "aquasecurity",
+          "name": "trivy",
+          "version": "0.72.0"
+        }
+      ]
+    },
+    "component": {
+      "bom-ref": "4fbefb69-661a-42a9-93fe-328083c74e37",
+      "type": "container",
+      "name": "alpine:3.19",
+      "properties": [
+        {
+          "name": "aquasecurity:trivy:SchemaVersion",
+          "value": "2"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "bom-ref": "5046591e-edc5-4de2-97ba-389728467135",
+      "type": "operating-system",
+      "name": "alpine:3.19 (alpine 3.19.9)",
+      "properties": [
+        {
+          "name": "aquasecurity:trivy:Class",
+          "value": "os-pkgs"
+        },
+        {
+          "name": "aquasecurity:trivy:Type",
+          "value": "alpine"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pkg:apk/alpine/busybox@1.36.1-r20?arch=x86_64&distro=3.19.9",
+      "type": "library",
+      "supplier": {
+        "name": "Sören Tempel <soeren+alpine@soeren-tempel.net>"
+      },
+      "name": "busybox",
+      "version": "1.36.1-r20",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "448f4dc2cc8b12d1bc9996a6bb924b129eaa92e9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        }
+      ],
+      "purl": "pkg:apk/alpine/busybox@1.36.1-r20?arch=x86_64&distro=3.19.9",
+      "properties": [
+        {
+          "name": "aquasecurity:trivy:LayerDiffID",
+          "value": "sha256:0b44b2151d78267ab6f2c76208c3be18688f49b2b0afd6852a9533f2cce121c5"
+        },
+        {
+          "name": "aquasecurity:trivy:LayerDigest",
+          "value": "sha256:17a39c0ba978cc27001e9c56a480f98106e1ab74bd56eb302f9fd4cf758ea43f"
+        },
+        {
+          "name": "aquasecurity:trivy:PkgID",
+          "value": "busybox@1.36.1-r20"
+        },
+        {
+          "name": "aquasecurity:trivy:PkgType",
+          "value": "alpine"
+        },
+        {
+          "name": "aquasecurity:trivy:SrcName",
+          "value": "busybox"
+        },
+        {
+          "name": "aquasecurity:trivy:SrcVersion",
+          "value": "1.36.1-r20"
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "4fbefb69-661a-42a9-93fe-328083c74e37",
+      "dependsOn": [
+        "5046591e-edc5-4de2-97ba-389728467135"
+      ]
+    },
+    {
+      "ref": "5046591e-edc5-4de2-97ba-389728467135",
+      "dependsOn": [
+        "pkg:apk/alpine/busybox@1.36.1-r20?arch=x86_64&distro=3.19.9"
+      ]
+    }
+  ],
+  "vulnerabilities": [
+    {
+      "id": "CVE-2024-58251",
+      "source": {
+        "name": "alpine",
+        "url": "https://secdb.alpinelinux.org/"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "ubuntu"
+          },
+          "severity": "medium"
+        }
+      ],
+      "cwes": [
+        150
+      ],
+      "description": "In netstat in BusyBox through 1.37.0, local users can launch of network application with an argv[0] containing an ANSI terminal escape sequence, leading to a denial of service (terminal locked up) when netstat is used by a victim.",
+      "recommendation": "Upgrade busybox to version 1.36.1-r21",
+      "advisories": [
+        {
+          "url": "https://avd.aquasec.com/nvd/cve-2024-58251"
+        },
+        {
+          "url": "http://www.openwall.com/lists/oss-security/2025/04/23/6"
+        },
+        {
+          "url": "https://bugs.busybox.net/show_bug.cgi?id=15922"
+        },
+        {
+          "url": "https://www.busybox.net"
+        },
+        {
+          "url": "https://www.busybox.net/downloads/"
+        },
+        {
+          "url": "https://www.cve.org/CVERecord?id=CVE-2024-58251"
+        }
+      ],
+      "published": "2025-04-23T18:16:03+00:00",
+      "updated": "2026-06-17T08:14:42+00:00",
+      "affects": [
+        {
+          "ref": "pkg:apk/alpine/busybox@1.36.1-r20?arch=x86_64&distro=3.19.9",
+          "versions": [
+            {
+              "version": "1.36.1-r20",
+              "status": "affected"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
