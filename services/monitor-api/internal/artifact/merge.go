@@ -455,3 +455,90 @@ func mergeSourceList(values ...string) string {
 	sort.Strings(sources)
 	return strings.Join(sources, ", ")
 }
+
+// SourcesOf splits a Finding's Source into the scanners that claim it.
+//
+// Source is the ", "-joined, sorted set CoalesceSameIDSources writes --
+// "trivy", "grype", or "grype, trivy" -- so this is its inverse. An
+// empty Source yields nothing rather than one empty name: a finding
+// nobody attributed is owned by nobody, which RetainUnrunSources then
+// treats as un-rechecked.
+func SourcesOf(f Finding) []string {
+	if strings.TrimSpace(f.Source) == "" {
+		return nil
+	}
+	parts := strings.Split(f.Source, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// RetainUnrunSources is how a PARTIAL round merges with fix-detection on
+// without resolving findings it never looked for.
+//
+// A round that runs only some of the scanners which built a bucket
+// cannot say anything about the rest. Today the sbom-only sweep answers
+// that by refusing to resolve ANYTHING (scan.go's detectFixedFor), which
+// is correct and also means a genuinely-fixed CVE stays open until the
+// next full scan. The finer answer is per finding: resolve the ones
+// every claiming scanner re-checked, leave the others exactly as they
+// were.
+//
+// It works by ADDING those others back into the reported set rather than
+// by teaching MergeFindings a new rule. A finding present in `reported`
+// is "still reported", so it keeps its status, its FirstSeenAt and its
+// Source untouched -- which is precisely "nobody re-checked this, so
+// nothing about it changed". That keeps one definition of resolution in
+// one place instead of two that can disagree.
+//
+// `ran` is the set of scanner names this round actually executed. An
+// EMPTY set means the round covered nothing, so everything is retained
+// and the merge can resolve nothing -- byte-for-byte today's behaviour,
+// which is what makes this safe to introduce before anything relies on
+// it.
+//
+// A finding is retained when ANY of its claiming scanners did not run.
+// "grype, trivy" with only trivy run stays put: grype has not spoken,
+// and dropping it on trivy's word alone would discard the corroboration
+// CarrySourcesForward exists to protect. A finding with no Source at all
+// is retained for the same reason -- nothing establishes who would have
+// re-reported it.
+func RetainUnrunSources(existing, reported []Finding, ran map[string]bool) []Finding {
+	if len(existing) == 0 {
+		return reported
+	}
+	reportedByID := make(map[string]bool, len(reported))
+	for _, f := range reported {
+		reportedByID[f.ID] = true
+	}
+
+	// Copied rather than appended in place: reported is the caller's
+	// slice and is also handed to the notification and enrichment
+	// paths. Same reasoning as CarrySourcesForward.
+	out := make([]Finding, len(reported), len(reported)+len(existing))
+	copy(out, reported)
+
+	for _, old := range existing {
+		if reportedByID[old.ID] {
+			continue // re-reported: the merge has a real answer for it.
+		}
+		covered := false
+		if srcs := SourcesOf(old); len(srcs) > 0 {
+			covered = true
+			for _, s := range srcs {
+				if !ran[s] {
+					covered = false
+					break
+				}
+			}
+		}
+		if !covered {
+			out = append(out, old)
+		}
+	}
+	return out
+}
