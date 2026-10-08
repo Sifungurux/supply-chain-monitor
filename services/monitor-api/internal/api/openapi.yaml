@@ -794,6 +794,46 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/artifacts/{id}/export/cyclonedx:
+    parameters:
+      - $ref: "#/components/parameters/ArtifactID"
+    get:
+      tags: [documents]
+      summary: Export the stored SBOM with this deployment's VEX state overlaid
+      description: >-
+        The stored CycloneDX document plus the judgements that live only
+        here: VEX suppressions and their justification, time-boxed risk
+        acceptances with the accepter and expiry, fixed status, and the
+        findings the other CVE scanner contributed.
+
+
+        Distinct from GET /documents/sbom, which returns the bytes a scan
+        stored, unchanged. This is derived from those bytes AND from
+        mutable state, so two calls a day apart can legitimately differ.
+
+
+        Findings the stored document does not already list are added
+        without an `affects` array: a finding records no package, so
+        nothing ties it to a component. A consumer that links
+        vulnerabilities to components will show those unattached.
+      responses:
+        "200":
+          description: An annotated CycloneDX document.
+          content:
+            application/vnd.cyclonedx+json:
+              schema:
+                type: string
+                format: binary
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >-
+            The artifact has no stored SBOM to annotate. A full scan
+            generates one.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /api/v1/artifacts/{id}/vex:
     parameters:
       - $ref: "#/components/parameters/ArtifactID"

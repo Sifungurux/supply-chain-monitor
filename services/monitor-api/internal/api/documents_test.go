@@ -331,3 +331,68 @@ func TestScanToken_DownloadAuth(t *testing.T) {
 		}
 	})
 }
+
+// M-2's export endpoint. The annotator itself is covered in
+// internal/artifact; these cover the HTTP contract around it.
+func TestExportCycloneDX(t *testing.T) {
+	sbom := []byte(`{"bomFormat":"CycloneDX","specVersion":"1.7","version":1,` +
+		`"components":[{"type":"library","name":"busybox","purl":"pkg:apk/alpine/busybox@1.36.1-r20"}],` +
+		`"vulnerabilities":[{"id":"CVE-2024-58251","ratings":[{"severity":"medium"}]}]}`)
+
+	t.Run("overlays our state onto the stored document", func(t *testing.T) {
+		h, store := newTestRouter(scanner.Registry{})
+		a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+		doRaw(t, h, http.MethodPost, "/api/v1/artifacts/"+a.ID+"/documents/sbom", "application/vnd.cyclonedx+json", sbom)
+
+		// A suppression that exists only here -- the stored document
+		// knows nothing about it.
+		a.CVEFindings = []artifact.Finding{{
+			ID: "CVE-2024-58251", Status: artifact.FindingStatusNotAffected,
+			Justification: "vulnerable code is not in the execute path",
+		}}
+		if _, err := store.Update(a.ID, func(cur *artifact.Artifact) {
+			cur.CVEFindings = a.CVEFindings
+		}); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+
+		rec := doRaw(t, h, http.MethodGet, "/api/v1/artifacts/"+a.ID+"/export/cyclonedx", "", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "application/vnd.cyclonedx+json" {
+			t.Errorf("Content-Type = %q", ct)
+		}
+		if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "cyclonedx-vex.json") {
+			t.Errorf("Content-Disposition = %q", cd)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "not_affected") || !strings.Contains(body, "execute path") {
+			t.Errorf("the suppression did not reach the export: %s", body)
+		}
+		// The stored document must be untouched by an export of it.
+		stored := doRaw(t, h, http.MethodGet, "/api/v1/artifacts/"+a.ID+"/documents/sbom", "", nil)
+		if strings.Contains(stored.Body.String(), "not_affected") {
+			t.Error("exporting mutated the stored document -- documents/sbom must keep returning what the scan stored")
+		}
+	})
+
+	t.Run("no stored SBOM is a 409, not a 404", func(t *testing.T) {
+		h, store := newTestRouter(scanner.Registry{})
+		a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+		rec := doRaw(t, h, http.MethodGet, "/api/v1/artifacts/"+a.ID+"/export/cyclonedx", "", nil)
+		// The artifact exists and the route is right; there is just
+		// nothing to annotate yet.
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("unknown artifact is a 404", func(t *testing.T) {
+		h, _ := newTestRouter(scanner.Registry{})
+		rec := doRaw(t, h, http.MethodGet, "/api/v1/artifacts/does-not-exist/export/cyclonedx", "", nil)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", rec.Code)
+		}
+	})
+}
