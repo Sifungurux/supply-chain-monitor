@@ -556,6 +556,46 @@ paths:
                     items: { $ref: "#/components/schemas/FindingMatch" }
         "400": { $ref: "#/components/responses/BadRequest" }
 
+  /api/v1/export/findings.csv:
+    get:
+      tags: [findings]
+      summary: Every finding in the fleet, flat, for a spreadsheet
+      description: >-
+        One row per (artifact, finding), across ALL buckets -- cve,
+        malware, misconfiguration, secret, other -- with `bucket` as a
+        column so the consumer can sort and filter themselves.
+
+
+        Carries the columns no scanner report has: VEX justification,
+        risk acceptance (who, until when, why), EPSS score and KEV flag.
+
+
+        Capped. A CSV has no end-of-file marker, so a response truncated
+        by a mid-stream failure is a perfectly valid shorter CSV that a
+        spreadsheet opens without complaint -- the export is therefore
+        built whole and refused with 413 if it would exceed the cap,
+        rather than streamed and hoped for.
+      parameters:
+        - name: active
+          in: query
+          required: false
+          schema: { type: string, enum: ["true"] }
+          description: >-
+            Drop fixed, VEX-suppressed and in-force accepted findings,
+            leaving what still needs attention.
+      responses:
+        "200":
+          description: CSV, one row per finding.
+          content:
+            text/csv:
+              schema: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413":
+          description: >-
+            Too many findings to export whole. Narrow with ?active=true.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /api/v1/findings/{findingID}/artifacts:
     get:
       tags: [findings]

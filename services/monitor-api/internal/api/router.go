@@ -213,6 +213,9 @@ func NewRouter(cfg Config) http.Handler {
 	mux.HandleFunc("DELETE /api/v1/artifacts/{id}", requireScope(ScopeAdmin, h.deleteArtifact))
 	mux.HandleFunc("GET /api/v1/findings", requireScope(ScopeRead, h.searchFindings))
 	mux.HandleFunc("GET /api/v1/findings/{findingID}/artifacts", requireScope(ScopeRead, h.findByFindingID))
+	// M-2: the whole fleet flat, for triage in a spreadsheet. ?active=true
+	// drops fixed, VEX-suppressed and in-force accepted findings.
+	mux.HandleFunc("GET /api/v1/export/findings.csv", requireScope(ScopeRead, h.exportFindingsCSV))
 	mux.HandleFunc("GET /api/v1/components", requireScope(ScopeRead, h.listByComponent))
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/components/diff", requireScope(ScopeRead, h.listComponentDiff))
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/policy", requireScope(ScopeRead, h.getPolicy))

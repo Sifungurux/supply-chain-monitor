@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"encoding/csv"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -393,6 +394,92 @@ func TestExportCycloneDX(t *testing.T) {
 		rec := doRaw(t, h, http.MethodGet, "/api/v1/artifacts/does-not-exist/export/cyclonedx", "", nil)
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404", rec.Code)
+		}
+	})
+}
+
+func TestExportFindingsCSV(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	fixed := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	accepted := time.Now().Add(30 * 24 * time.Hour)
+	if _, err := store.Update(a.ID, func(cur *artifact.Artifact) {
+		cur.CVEFindings = []artifact.Finding{
+			{ID: "CVE-1", Severity: "high", Source: "trivy", Status: artifact.FindingStatusOpen, EPSSScore: 0.42, KnownExploited: true},
+			{ID: "CVE-2", Severity: "low", Source: "grype", Status: artifact.FindingStatusFixed, ResolvedAt: &fixed},
+			{ID: "CVE-3", Severity: "critical", Source: "trivy", Status: artifact.FindingStatusOpen,
+				AcceptedUntil: &accepted, AcceptedBy: "kirk", AcceptanceReason: "no upstream fix"},
+		}
+		// Every bucket, not just cve: a flat export is for sorting, and
+		// malware is what somebody would sort to the top.
+		cur.MalwareFindings = []artifact.Finding{
+			{ID: "Eicar-Test-Signature", Severity: "critical", Source: "clamav", Status: artifact.FindingStatusOpen},
+		}
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	t.Run("every bucket, one row per finding", func(t *testing.T) {
+		rec := doRaw(t, h, http.MethodGet, "/api/v1/export/findings.csv", "", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/csv") {
+			t.Errorf("Content-Type = %q", ct)
+		}
+		rows, err := csv.NewReader(strings.NewReader(rec.Body.String())).ReadAll()
+		if err != nil {
+			t.Fatalf("output is not valid CSV: %v", err)
+		}
+		if len(rows) != 5 { // header + 4 findings
+			t.Fatalf("got %d rows (incl. header), want 5", len(rows))
+		}
+		// The bucket must be a COLUMN, or sorting malware to the top is
+		// impossible and the export is cve-only in practice.
+		header := rows[0]
+		bucketCol := -1
+		for i, h := range header {
+			if h == "bucket" {
+				bucketCol = i
+			}
+		}
+		if bucketCol < 0 {
+			t.Fatal("no bucket column")
+		}
+		buckets := map[string]bool{}
+		for _, r := range rows[1:] {
+			buckets[r[bucketCol]] = true
+		}
+		if !buckets["cve"] || !buckets["malware"] {
+			t.Errorf("buckets present = %v, want both cve and malware", buckets)
+		}
+	})
+
+	t.Run("active=true drops fixed and accepted", func(t *testing.T) {
+		rec := doRaw(t, h, http.MethodGet, "/api/v1/export/findings.csv?active=true", "", nil)
+		rows, err := csv.NewReader(strings.NewReader(rec.Body.String())).ReadAll()
+		if err != nil {
+			t.Fatalf("not valid CSV: %v", err)
+		}
+		// CVE-1 and the malware one are active; CVE-2 is fixed and
+		// CVE-3 has an in-force acceptance.
+		if len(rows) != 3 {
+			t.Fatalf("got %d rows (incl. header), want 3: %v", len(rows), rows)
+		}
+		body := rec.Body.String()
+		if strings.Contains(body, "CVE-2") || strings.Contains(body, "CVE-3") {
+			t.Errorf("active=true returned a fixed or accepted finding:\n%s", body)
+		}
+	})
+
+	t.Run("the judgements that live only here survive the export", func(t *testing.T) {
+		rec := doRaw(t, h, http.MethodGet, "/api/v1/export/findings.csv", "", nil)
+		body := rec.Body.String()
+		for _, want := range []string{"kirk", "no upstream fix", "0.42", "true"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("export is missing %q -- that is data no scanner report carries", want)
+			}
 		}
 	})
 }
