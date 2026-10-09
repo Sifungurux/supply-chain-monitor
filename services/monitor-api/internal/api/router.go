@@ -213,6 +213,9 @@ func NewRouter(cfg Config) http.Handler {
 	mux.HandleFunc("DELETE /api/v1/artifacts/{id}", requireScope(ScopeAdmin, h.deleteArtifact))
 	mux.HandleFunc("GET /api/v1/findings", requireScope(ScopeRead, h.searchFindings))
 	mux.HandleFunc("GET /api/v1/findings/{findingID}/artifacts", requireScope(ScopeRead, h.findByFindingID))
+	// M-2: the whole fleet flat, for triage in a spreadsheet. ?active=true
+	// drops fixed, VEX-suppressed and in-force accepted findings.
+	mux.HandleFunc("GET /api/v1/export/findings.csv", requireScope(ScopeRead, h.exportFindingsCSV))
 	mux.HandleFunc("GET /api/v1/components", requireScope(ScopeRead, h.listByComponent))
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/components/diff", requireScope(ScopeRead, h.listComponentDiff))
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/policy", requireScope(ScopeRead, h.getPolicy))
@@ -226,6 +229,9 @@ func NewRouter(cfg Config) http.Handler {
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/maintainer", requireScope(ScopeAdmin, h.updateMaintainer))
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/documents/{kind}", requireScope(ScopeDocumentsWrite, h.uploadDocument))
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/documents/{kind}", requireScope(ScopeRead, h.downloadDocument))
+	// M-2: the stored SBOM plus our own VEX state. See exportCycloneDX
+	// for why this is a separate route and not a query parameter.
+	mux.HandleFunc("GET /api/v1/artifacts/{id}/export/cyclonedx", requireScope(ScopeRead, h.exportCycloneDX))
 	// Findings and VEX are scan RESULTS arriving by another route. They
 	// are NOT admin -- an external scanner needs to submit them, and
 	// requiring admin would hand every CI scanner full authority, which

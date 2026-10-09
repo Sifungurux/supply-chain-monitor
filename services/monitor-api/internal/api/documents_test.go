@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"encoding/csv"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -330,4 +331,207 @@ func TestScanToken_DownloadAuth(t *testing.T) {
 			t.Errorf("got %d, want 401", code)
 		}
 	})
+}
+
+// M-2's export endpoint. The annotator itself is covered in
+// internal/artifact; these cover the HTTP contract around it.
+func TestExportCycloneDX(t *testing.T) {
+	sbom := []byte(`{"bomFormat":"CycloneDX","specVersion":"1.7","version":1,` +
+		`"components":[{"type":"library","name":"busybox","purl":"pkg:apk/alpine/busybox@1.36.1-r20"}],` +
+		`"vulnerabilities":[{"id":"CVE-2024-58251","ratings":[{"severity":"medium"}]}]}`)
+
+	t.Run("overlays our state onto the stored document", func(t *testing.T) {
+		h, store := newTestRouter(scanner.Registry{})
+		a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+		doRaw(t, h, http.MethodPost, "/api/v1/artifacts/"+a.ID+"/documents/sbom", "application/vnd.cyclonedx+json", sbom)
+
+		// A suppression that exists only here -- the stored document
+		// knows nothing about it.
+		a.CVEFindings = []artifact.Finding{{
+			ID: "CVE-2024-58251", Status: artifact.FindingStatusNotAffected,
+			Justification: "vulnerable code is not in the execute path",
+		}}
+		if _, err := store.Update(a.ID, func(cur *artifact.Artifact) {
+			cur.CVEFindings = a.CVEFindings
+		}); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+
+		rec := doRaw(t, h, http.MethodGet, "/api/v1/artifacts/"+a.ID+"/export/cyclonedx", "", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "application/vnd.cyclonedx+json" {
+			t.Errorf("Content-Type = %q", ct)
+		}
+		if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "cyclonedx-vex.json") {
+			t.Errorf("Content-Disposition = %q", cd)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "not_affected") || !strings.Contains(body, "execute path") {
+			t.Errorf("the suppression did not reach the export: %s", body)
+		}
+		// The stored document must be untouched by an export of it.
+		stored := doRaw(t, h, http.MethodGet, "/api/v1/artifacts/"+a.ID+"/documents/sbom", "", nil)
+		if strings.Contains(stored.Body.String(), "not_affected") {
+			t.Error("exporting mutated the stored document -- documents/sbom must keep returning what the scan stored")
+		}
+	})
+
+	t.Run("no stored SBOM is a 409, not a 404", func(t *testing.T) {
+		h, store := newTestRouter(scanner.Registry{})
+		a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+		rec := doRaw(t, h, http.MethodGet, "/api/v1/artifacts/"+a.ID+"/export/cyclonedx", "", nil)
+		// The artifact exists and the route is right; there is just
+		// nothing to annotate yet.
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("unknown artifact is a 404", func(t *testing.T) {
+		h, _ := newTestRouter(scanner.Registry{})
+		rec := doRaw(t, h, http.MethodGet, "/api/v1/artifacts/does-not-exist/export/cyclonedx", "", nil)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", rec.Code)
+		}
+	})
+}
+
+func TestExportFindingsCSV(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	a := mustCreate(t, store, "alpine:3.19", artifact.TypeImage)
+
+	fixed := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	accepted := time.Now().Add(30 * 24 * time.Hour)
+	if _, err := store.Update(a.ID, func(cur *artifact.Artifact) {
+		cur.CVEFindings = []artifact.Finding{
+			{ID: "CVE-1", Severity: "high", Source: "trivy", Status: artifact.FindingStatusOpen, EPSSScore: 0.42, KnownExploited: true},
+			{ID: "CVE-2", Severity: "low", Source: "grype", Status: artifact.FindingStatusFixed, ResolvedAt: &fixed},
+			{ID: "CVE-3", Severity: "critical", Source: "trivy", Status: artifact.FindingStatusOpen,
+				AcceptedUntil: &accepted, AcceptedBy: "kirk", AcceptanceReason: "no upstream fix"},
+		}
+		// Every bucket, not just cve: a flat export is for sorting, and
+		// malware is what somebody would sort to the top.
+		cur.MalwareFindings = []artifact.Finding{
+			{ID: "Eicar-Test-Signature", Severity: "critical", Source: "clamav", Status: artifact.FindingStatusOpen},
+		}
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	t.Run("every bucket, one row per finding", func(t *testing.T) {
+		rec := doRaw(t, h, http.MethodGet, "/api/v1/export/findings.csv", "", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/csv") {
+			t.Errorf("Content-Type = %q", ct)
+		}
+		rows, err := csv.NewReader(strings.NewReader(rec.Body.String())).ReadAll()
+		if err != nil {
+			t.Fatalf("output is not valid CSV: %v", err)
+		}
+		if len(rows) != 5 { // header + 4 findings
+			t.Fatalf("got %d rows (incl. header), want 5", len(rows))
+		}
+		// The bucket must be a COLUMN, or sorting malware to the top is
+		// impossible and the export is cve-only in practice.
+		header := rows[0]
+		bucketCol := -1
+		for i, h := range header {
+			if h == "bucket" {
+				bucketCol = i
+			}
+		}
+		if bucketCol < 0 {
+			t.Fatal("no bucket column")
+		}
+		buckets := map[string]bool{}
+		for _, r := range rows[1:] {
+			buckets[r[bucketCol]] = true
+		}
+		if !buckets["cve"] || !buckets["malware"] {
+			t.Errorf("buckets present = %v, want both cve and malware", buckets)
+		}
+	})
+
+	t.Run("active=true drops fixed and accepted", func(t *testing.T) {
+		rec := doRaw(t, h, http.MethodGet, "/api/v1/export/findings.csv?active=true", "", nil)
+		rows, err := csv.NewReader(strings.NewReader(rec.Body.String())).ReadAll()
+		if err != nil {
+			t.Fatalf("not valid CSV: %v", err)
+		}
+		// CVE-1 and the malware one are active; CVE-2 is fixed and
+		// CVE-3 has an in-force acceptance.
+		if len(rows) != 3 {
+			t.Fatalf("got %d rows (incl. header), want 3: %v", len(rows), rows)
+		}
+		body := rec.Body.String()
+		if strings.Contains(body, "CVE-2") || strings.Contains(body, "CVE-3") {
+			t.Errorf("active=true returned a fixed or accepted finding:\n%s", body)
+		}
+	})
+
+	t.Run("the judgements that live only here survive the export", func(t *testing.T) {
+		rec := doRaw(t, h, http.MethodGet, "/api/v1/export/findings.csv", "", nil)
+		body := rec.Body.String()
+		for _, want := range []string{"kirk", "no upstream fix", "0.42", "true"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("export is missing %q -- that is data no scanner report carries", want)
+			}
+		}
+	})
+}
+
+// Spreadsheet formula injection. This export exists to be opened in
+// Excel/LibreOffice/Sheets, which evaluate a cell beginning with
+// = + - @ tab or CR as a formula -- and Ref, Title and Justification are
+// all caller-controlled (POST /artifacts, POST /findings, an uploaded
+// VEX document respectively).
+func TestExportFindingsCSV_NeutralisesFormulaInjection(t *testing.T) {
+	h, store := newTestRouter(scanner.Registry{})
+	// A ref a caller could genuinely register.
+	a := mustCreate(t, store, `=cmd|'/c calc'!A1`, artifact.TypeImage)
+	if _, err := store.Update(a.ID, func(cur *artifact.Artifact) {
+		cur.CVEFindings = []artifact.Finding{{
+			ID:            "CVE-1",
+			Severity:      "high",
+			Source:        "trivy",
+			Title:         `@SUM(1+9)*cmd|' /C calc'!A0`,
+			Status:        artifact.FindingStatusNotAffected,
+			Justification: `+HYPERLINK("http://evil","click")`,
+		}}
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	rec := doRaw(t, h, http.MethodGet, "/api/v1/export/findings.csv", "", nil)
+	rows, err := csv.NewReader(strings.NewReader(rec.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("not valid CSV: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want header + 1", len(rows))
+	}
+
+	for i, cell := range rows[1] {
+		if cell == "" {
+			continue
+		}
+		switch cell[0] {
+		case '=', '+', '-', '@', '\t', '\r':
+			t.Errorf("column %d (%q) begins with a formula character: %q",
+				i, rows[0][i], cell)
+		}
+	}
+
+	// Neutralised, not destroyed: the original text must still be
+	// readable by a human, just not by the formula engine.
+	body := rec.Body.String()
+	for _, want := range []string{"calc", "HYPERLINK", "SUM"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the payload text %q was dropped rather than neutralised", want)
+		}
+	}
 }

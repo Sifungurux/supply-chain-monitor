@@ -229,3 +229,65 @@ func safeDocumentContentType(stored string) string {
 		return "application/octet-stream"
 	}
 }
+
+// exportCycloneDX serves the stored SBOM with this deployment's own
+// finding state overlaid: VEX suppressions and their justifications,
+// time-boxed risk acceptances, fixed status, and the findings the other
+// scanner contributed. See artifact.AnnotateCycloneDX for what that adds
+// and what it deliberately does not.
+//
+// A separate route from GET .../documents/sbom rather than a query
+// parameter on it, because the two answer different questions and only
+// one of them is reproducible. documents/sbom returns the bytes a scan
+// stored, unchanged, forever -- which is what you want when the question
+// is "what did the scanner say". This returns a document derived from
+// those bytes AND from mutable state, so two calls a day apart can
+// legitimately differ. Collapsing them into one URL would make the
+// stored document's immutability depend on a parameter.
+//
+// read scope: it discloses no more than GET /artifacts/{id} already
+// does, in a different shape.
+func (h *handler) exportCycloneDX(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	// Store.Get reports a missing artifact as an error rather than
+	// (nil, nil), and every other handler maps that straight to 404 --
+	// see getPolicy. Matched here rather than invented differently.
+	art, err := h.store.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	doc, err := h.store.GetDocument(id, artifact.DocumentKindSBOM)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if doc == nil {
+		// 409 rather than 404: the artifact exists and the route is
+		// right, it just has nothing to annotate yet. Same reading as
+		// the sbom-only scan mode's 409.
+		writeError(w, http.StatusConflict,
+			"artifact has no stored SBOM to export -- a full scan generates one")
+		return
+	}
+
+	// Only the cve bucket. The others hold malware, misconfiguration and
+	// secret findings, which are not vulnerabilities of a COMPONENT and
+	// have no honest place in a CycloneDX vulnerabilities array.
+	out, err := artifact.AnnotateCycloneDX(doc.Content, art.CVEFindings, time.Now())
+	if err != nil {
+		// The stored document is not something a caller supplied on this
+		// request, so a failure here is this deployment's problem, not a
+		// bad request.
+		writeError(w, http.StatusInternalServerError, "could not annotate the stored SBOM: "+err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/vnd.cyclonedx+json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+id+`-cyclonedx-vex.json"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out)
+}

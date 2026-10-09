@@ -556,6 +556,52 @@ paths:
                     items: { $ref: "#/components/schemas/FindingMatch" }
         "400": { $ref: "#/components/responses/BadRequest" }
 
+  /api/v1/export/findings.csv:
+    get:
+      tags: [findings]
+      summary: Every finding in the fleet, flat, for a spreadsheet
+      description: >-
+        One row per (artifact, finding), across ALL buckets -- cve,
+        malware, misconfiguration, secret, other -- with `bucket` as a
+        column so the consumer can sort and filter themselves.
+
+
+        Carries the columns no scanner report has: VEX justification,
+        risk acceptance (who, until when, why), EPSS score and KEV flag.
+
+
+        Capped. A CSV has no end-of-file marker, so a response truncated
+        by a mid-stream failure is a perfectly valid shorter CSV that a
+        spreadsheet opens without complaint -- the export is therefore
+        built whole and refused with 413 if it would exceed the cap,
+        rather than streamed and hoped for.
+
+
+        Free-text columns are neutralised against spreadsheet formula
+        injection: a value beginning with = + - @ tab or CR is prefixed
+        with an apostrophe, so it displays as written and is not
+        evaluated. Ref, Title and Justification are all caller-supplied.
+      parameters:
+        - name: active
+          in: query
+          required: false
+          schema: { type: string, enum: ["true"] }
+          description: >-
+            Drop fixed, VEX-suppressed and in-force accepted findings,
+            leaving what still needs attention.
+      responses:
+        "200":
+          description: CSV, one row per finding.
+          content:
+            text/csv:
+              schema: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413":
+          description: >-
+            Too many findings to export whole. Narrow with ?active=true.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /api/v1/findings/{findingID}/artifacts:
     get:
       tags: [findings]
@@ -794,6 +840,46 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/artifacts/{id}/export/cyclonedx:
+    parameters:
+      - $ref: "#/components/parameters/ArtifactID"
+    get:
+      tags: [documents]
+      summary: Export the stored SBOM with this deployment's VEX state overlaid
+      description: >-
+        The stored CycloneDX document plus the judgements that live only
+        here: VEX suppressions and their justification, time-boxed risk
+        acceptances with the accepter and expiry, fixed status, and the
+        findings the other CVE scanner contributed.
+
+
+        Distinct from GET /documents/sbom, which returns the bytes a scan
+        stored, unchanged. This is derived from those bytes AND from
+        mutable state, so two calls a day apart can legitimately differ.
+
+
+        Findings the stored document does not already list are added
+        without an `affects` array: a finding records no package, so
+        nothing ties it to a component. A consumer that links
+        vulnerabilities to components will show those unattached.
+      responses:
+        "200":
+          description: An annotated CycloneDX document.
+          content:
+            application/vnd.cyclonedx+json:
+              schema:
+                type: string
+                format: binary
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >-
+            The artifact has no stored SBOM to annotate. A full scan
+            generates one.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /api/v1/artifacts/{id}/vex:
     parameters:
       - $ref: "#/components/parameters/ArtifactID"
