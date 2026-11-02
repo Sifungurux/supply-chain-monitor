@@ -1962,8 +1962,11 @@ monitorApi:
         memory: 256Mi
       limits:
         cpu: 500m
-        # 1536Mi, matching scanConcurrencyPerKind's scan-Job limit from
-        # #223 rather than carrying a second number for the same tool.
+        # 3Gi. 1536Mi (matching scanConcurrencyPerKind's scan-Job limit
+        # from #223) still OOM-KILLED both refresh CronJobs: grype on 3 of
+        # its last 6 runs, trivy on 4 runs in 8 days, measured on the live
+        # cluster 2026-11-02 after Zabbix flagged the failed pods. The DB
+        # jobs peak above the scan Jobs, so they get their own number.
         #
         # 768Mi OOM-KILLED both DB jobs: exitCode 137 on the grype
         # primer and on 3 of the last 6 trivy refresh runs, measured on
@@ -1981,7 +1984,7 @@ monitorApi:
         # Raised for BOTH caches on the evidence that both were dying,
         # which is #223's lesson restated: a per-kind exception only
         # finds the next one in production.
-        memory: 1536Mi
+        memory: 3Gi
   # The shared PersistentVolumeClaim IsolatedGrypeScanner mounts
   # read-only into every grype scan-worker Job -- grype's own
   # counterpart to trivyCache above, kept warm by
@@ -2066,8 +2069,11 @@ monitorApi:
         memory: 256Mi
       limits:
         cpu: 500m
-        # 1536Mi, matching scanConcurrencyPerKind's scan-Job limit from
-        # #223 rather than carrying a second number for the same tool.
+        # 3Gi. 1536Mi (matching scanConcurrencyPerKind's scan-Job limit
+        # from #223) still OOM-KILLED both refresh CronJobs: grype on 3 of
+        # its last 6 runs, trivy on 4 runs in 8 days, measured on the live
+        # cluster 2026-11-02 after Zabbix flagged the failed pods. The DB
+        # jobs peak above the scan Jobs, so they get their own number.
         #
         # 768Mi OOM-KILLED both DB jobs: exitCode 137 on the grype
         # primer and on 3 of the last 6 trivy refresh runs, measured on
@@ -2085,7 +2091,7 @@ monitorApi:
         # Raised for BOTH caches on the evidence that both were dying,
         # which is #223's lesson restated: a per-kind exception only
         # finds the next one in production.
-        memory: 1536Mi
+        memory: 3Gi
   # Periodically scans artifacts still sitting at status "registered"
   # (registered but never scanned) -- see templates/monitor-api/
   # sweep-registered-cronjob.yaml and main.go's runSweepRegistered.
