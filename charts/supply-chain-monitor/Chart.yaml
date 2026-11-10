@@ -31,7 +31,7 @@ type: application
 # INDEPENDENT of appVersion below -- a values-only fix to this chart
 # does not imply a new monitor-api build, and pretending otherwise means
 # one of the two numbers is always lying.
-version: 0.1.0-rc.1
+version: 0.1.0
 # The monitor-api build this chart release was cut against. "dev" is
 # the working-tree placeholder and is never what ships: the release
 # workflow stamps the tagged commit's own short SHA here, which is

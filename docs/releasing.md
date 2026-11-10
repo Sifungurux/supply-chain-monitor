@@ -7,16 +7,20 @@ this page is the why, and the one manual step.
 
 ## What a release is, and what it is not
 
-This project's own cluster does **not** consume released charts. Flux
-reads the chart straight out of the repository
+This project's own k3d cluster does **not** consume released charts.
+Flux reads the chart straight out of the repository
 (`reconcileStrategy: Revision`, see
 [`k8s/releases/supply-chain-monitor-helmrelease.yaml`](../k8s/releases/supply-chain-monitor-helmrelease.yaml)),
-so every push to `main` reaches the cluster immediately and a release
-changes nothing about that loop. A release exists so that *somebody
-else* can install a known version:
+so every push to `main` reaches it immediately.
+
+The homelab rack (Sifungurux/homelab) consumes **released charts only**:
+an `OCIRepository` pinned by tag and digest, verified with cosign against
+this workflow's identity. A push to `main` does not reach the rack; a
+release and a homelab PR bumping the pin do. A release is also what lets
+anybody else install a known version:
 
 ```
-helm install scm oci://ghcr.io/sifungurux/supply-chain-monitor/charts/supply-chain-monitor --version 0.1.0-rc.1
+helm install scm oci://ghcr.io/sifungurux/supply-chain-monitor/charts/supply-chain-monitor --version 0.1.0
 ```
 
 Release candidates are marked as such in the version (`-rc.N`), and
@@ -55,8 +59,8 @@ placeholder, which is never what ships.
 3. **Tag and push**:
 
    ```
-   git tag chart-v0.1.0-rc.1
-   git push origin chart-v0.1.0-rc.1
+   git tag chart-v0.1.0
+   git push origin chart-v0.1.0
    ```
 
    The tag must match Chart.yaml exactly (`chart-v` + the version). The
@@ -69,10 +73,20 @@ placeholder, which is never what ships.
 
 The workflow then re-runs the chart checks (a tag can point at any
 commit, including one that never went through a PR), packages, pushes to
-ghcr, attests the pushed digest, and creates a GitHub Release — marked
+ghcr, signs the pushed digest with cosign (keyless), attests it, and creates a GitHub Release — marked
 prerelease automatically when the version carries a prerelease part.
 
 ## Verifying a release
+
+The signature, which is what Flux checks before fetching:
+
+```
+cosign verify ghcr.io/sifungurux/supply-chain-monitor/charts/supply-chain-monitor@<digest> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/Sifungurux/supply-chain-monitor/.github/workflows/release-chart.yml@refs/tags/chart-v'
+```
+
+The provenance attestation:
 
 ```
 gh attestation verify oci://ghcr.io/sifungurux/supply-chain-monitor/charts/supply-chain-monitor@<digest> --repo Sifungurux/supply-chain-monitor
@@ -93,7 +107,7 @@ names one specific build:
 
 ```
 helm install scm oci://ghcr.io/sifungurux/supply-chain-monitor/charts/supply-chain-monitor \
-  --version 0.1.0-rc.1 \
+  --version 0.1.0 \
   --set monitorApi.image.repository=ghcr.io/sifungurux/supply-chain-monitor/monitor-api \
   --set monitorApi.image.digest=sha256:...
 ```
