@@ -369,7 +369,7 @@ GOVULNCHECK_VERSION ?= v1.7.0
 # noticed. That pair happened to resolve to the same go1.26.6, so the
 # invariant was broken without a consequence, which is the state a
 # check exists to catch.
-GO_BUILD_IMAGE ?= golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb
+GO_BUILD_IMAGE ?= golang:1.27-alpine@sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523
 
 # Fails if GO_BUILD_IMAGE and services/monitor-api/Dockerfile disagree
 # about the Go toolchain. A bump that moves one and not the other is

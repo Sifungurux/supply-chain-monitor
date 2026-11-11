@@ -25,7 +25,7 @@
 # speed. This is the standard buildx pattern for Go, and it makes a
 # multi-arch build cheap enough for CI to produce both arches from one
 # amd64 runner -- which the cluster needs, since it is arm64.
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY . .
@@ -76,7 +76,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-$(go env GOARCH)}
 # same reason -- see its comment. This stage's own note about avoiding
 # emulation is now enforced by the build rather than left to whoever
 # happens to be building.
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS umoci-build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523 AS umoci-build
 # Pinned to a COMMIT, not a tag. `--branch v0.4.7` (what this used to
 # do) looked exactly as pinned as this does while guaranteeing nothing:
 # a tag is a mutable ref the upstream repo can move, or anyone with push
