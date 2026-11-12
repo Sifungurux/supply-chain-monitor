@@ -184,6 +184,36 @@ func TestAnnotateCycloneDX_AddsFindingsTheDocumentDoesNotHave(t *testing.T) {
 	vulnByID(t, doc, "CVE-2024-58251")
 }
 
+// Every severity spelling the live fleet stores (taken from the findings
+// CSV on 2026-11-12), plus junk. Dependency-Track rejects the WHOLE upload
+// with a schema error if one rating is outside CycloneDX's enum, so a
+// single grype "Negligible" used to make an artifact's export unimportable.
+func TestAnnotateCycloneDX_SeverityIsAlwaysInTheCycloneDXEnum(t *testing.T) {
+	for in, want := range map[string]string{
+		"CRITICAL": "critical", "Critical": "critical",
+		"HIGH": "high", "High": "high",
+		"MEDIUM": "medium", "Medium": "medium",
+		"LOW": "low", "Low": "low",
+		"Negligible": "info", // grype's lowest; CycloneDX calls it info
+		"UNKNOWN":    "unknown", "Unknown": "unknown",
+		"bogus": "unknown",
+	} {
+		out, err := artifact.AnnotateCycloneDX(storedSBOM(t), []artifact.Finding{
+			{ID: "GHSA-sev", Source: "grype", Severity: in},
+		}, time.Now())
+		if err != nil {
+			t.Fatalf("%s: annotate: %v", in, err)
+		}
+		ratings, _ := vulnByID(t, decode(t, out), "GHSA-sev")["ratings"].([]any)
+		if len(ratings) != 1 {
+			t.Fatalf("%s: ratings = %v, want one", in, ratings)
+		}
+		if got := ratings[0].(map[string]any)["severity"]; got != want {
+			t.Errorf("severity %q exported as %v, want %q", in, got, want)
+		}
+	}
+}
+
 func TestAnnotateCycloneDX_RefusesNonCycloneDX(t *testing.T) {
 	if _, err := artifact.AnnotateCycloneDX([]byte(`{"spdxVersion":"SPDX-2.3"}`), nil, time.Now()); err == nil {
 		t.Fatal("an SPDX document was annotated as though it were CycloneDX")

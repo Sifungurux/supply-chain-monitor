@@ -98,7 +98,7 @@ func AnnotateCycloneDX(stored []byte, findings []Finding, now time.Time) ([]byte
 		if f.Severity != "" {
 			vuln["ratings"] = []any{map[string]any{
 				"source":   map[string]any{"name": f.Source},
-				"severity": strings.ToLower(f.Severity),
+				"severity": cdxSeverity(f.Severity),
 			}}
 		}
 		if a := analysisFor(f, now); a != nil {
@@ -166,4 +166,17 @@ func analysisFor(f Finding, now time.Time) map[string]any {
 		}
 	}
 	return nil
+}
+
+// cdxSeverity maps a scanner's severity onto CycloneDX's closed enum.
+// Lowercasing alone is not enough: grype's "Negligible" is not in it, and
+// one out-of-enum rating makes Dependency-Track reject the whole document.
+func cdxSeverity(s string) string {
+	switch s = strings.ToLower(s); s {
+	case "critical", "high", "medium", "low", "info", "none", "unknown":
+		return s
+	case "negligible":
+		return "info"
+	}
+	return "unknown"
 }
