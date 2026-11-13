@@ -26,6 +26,7 @@ Work in the current phase, tracked to completion. Items graduate here from
 | S-8 | Registry credentials never on argv | 1 | done — the fallback is unexpressible, not merely unused | #241 |
 | S-9 | Loud warning when backups run unencrypted; `make backup-key` in quickstart | 1 | done | #240 |
 | H-5 | Per-source finding ownership in the SBOM sweep; trivy + grype re-evaluate | 1 | **partially done** — see below; the ownership half cannot be switched on | #242, #243 |
+| M-2 | CycloneDX SBOM+VEX export; fleet findings CSV; validated by a Dependency-Track import | 1 | done — validated against DT 4.14.6; see below for what DT cannot apply | #244, #254, #255 |
 
 **Phase 0 is complete.** Two things it did not finish, carried deliberately
 rather than silently:
@@ -72,6 +73,24 @@ Until then a genuinely-fixed CVE still waits for a full scan, which
 remains the right trade: a stale "open" is visible and self-corrects, a
 wrong "fixed" is invisible and does not.
 
+**M-2's Dependency-Track import needed two fixes the export alone did not
+show.** grype's "Negligible" severity is outside CycloneDX's enum and made
+DT reject 28 of 90 artifact exports whole (#254). And DT applies a VEX
+analysis only on an exact `(source, id)` match: with its OSV ecosystems on
+it files a CVE as `OSV/ALPINE-CVE-…`, `DEBIAN-`, `UBUNTU-` or the Go
+`GO-…` id, so until #255 renamed entries by the affected package's purl,
+not one exported analysis applied. Verified on four real images with DT
+4.14.6 (OSV Alpine, Debian, Ubuntu, Go enabled). Three things DT still
+cannot apply, by construction:
+
+- **Grype-only findings**: absent from trivy's SBOM, so no `affects`.
+- **`resolved`**: a fixed finding is absent from the latest SBOM, same reason.
+- **Findings DT does not report itself**: it reports far fewer than trivy
+  on Debian/Ubuntu (rust:1.80: 598 vs 9,000 entries).
+
+The fleet has no `not_affected` or accepted findings yet, so the import has
+never carried a real decision — only harness-marked ones.
+
 ## Deferred
 
 Accepted in principle, not yet in play. No status is tracked until the item
@@ -79,7 +98,6 @@ reaches **Accepted** — a Deferred item is never a review finding.
 
 | ID | Item | Lands in |
 |---|---|---|
-| M-2 | CycloneDX SBOM+VEX export; fleet findings CSV; validated by a Dependency-Track import | Phase 1 |
 | H-2 | API-managed keys: create/list/revoke, expiry, hashed at rest | Phase 2 |
 | M-3 | CycloneDX fleet VEX + cached fleet-VEX reads | Phase 2 |
 | *new* | Versioned pluggable-scanner schema + conformance test + user-guide page | Phase 2 |
