@@ -48,6 +48,7 @@ func AnnotateCycloneDX(stored []byte, findings []Finding, now time.Time) ([]byte
 		byID[f.ID] = f
 	}
 
+	purls := componentPURLs(doc)
 	existing, _ := doc["vulnerabilities"].([]any)
 	seen := make(map[string]bool, len(existing))
 
@@ -72,6 +73,7 @@ func AnnotateCycloneDX(stored []byte, findings []Finding, now time.Time) ([]byte
 		if a := analysisFor(f, now); a != nil {
 			vuln["analysis"] = a
 		}
+		relabelForDT(vuln, purls)
 	}
 
 	// Add what only we know about. These carry no `affects`, because a
@@ -179,4 +181,97 @@ func cdxSeverity(s string) string {
 		return "info"
 	}
 	return "unknown"
+}
+
+// relabelForDT renames a vulnerability to the (source, id) pair
+// Dependency-Track files it under, so that DT applies our analysis to it.
+//
+// DT matches a VEX entry to a finding on exact (source, id) and nothing
+// else: no aliases. trivy names a vulnerability after the CVE and labels
+// it with the feed it read ("alpine", "debian", "govulndb"), while DT --
+// which finds distro and Go vulnerabilities through OSV -- files the same
+// thing as OSV/ALPINE-CVE-..., OSV/DEBIAN-CVE-..., OSV/GO-2025-4010. Under
+// trivy's naming, not one analysis in an export applied. Each mapping
+// below was checked against DT 4.14.6 with the OSV ecosystem enabled.
+//
+// The ecosystem is read from the affected component's purl, not from the
+// ID: the same CVE is ALPINE- in one image and DEBIAN- in another. Only
+// entries with `affects` are touched; DT skips the rest whatever they
+// are called. What trivy called it is kept as a CycloneDX reference.
+func relabelForDT(vuln map[string]any, purls map[string]string) {
+	id, _ := vuln["id"].(string)
+	affects, _ := vuln["affects"].([]any)
+	if len(affects) == 0 {
+		return
+	}
+	// ponytail: first affected component decides; trivy writes one entry
+	// per ecosystem (0 mixed entries across 4 real images), so it is all.
+	first, _ := affects[0].(map[string]any)
+	ref, _ := first["ref"].(string)
+	purl := purls[ref]
+
+	newID := ""
+	for prefix, osv := range map[string]string{
+		"pkg:apk/alpine/": "ALPINE-",
+		"pkg:deb/debian/": "DEBIAN-",
+		"pkg:deb/ubuntu/": "UBUNTU-",
+	} {
+		if strings.HasPrefix(purl, prefix) {
+			newID = id // a DSA- is filed under its own name
+			if strings.HasPrefix(id, "CVE-") {
+				newID = osv + id
+			}
+		}
+	}
+	if strings.HasPrefix(purl, "pkg:golang/") {
+		newID = goVulnID(vuln) // "" when trivy gave no Go advisory: left alone
+	}
+	if newID == "" {
+		return
+	}
+
+	orig := map[string]any{"id": id}
+	if src, ok := vuln["source"].(map[string]any); ok {
+		orig["source"] = src
+	}
+	refs, _ := vuln["references"].([]any)
+	vuln["references"] = append(refs, orig)
+	vuln["id"] = newID
+	vuln["source"] = map[string]any{"name": "OSV"}
+}
+
+// componentPURLs maps every component's bom-ref to its purl, nested
+// components included.
+func componentPURLs(doc map[string]any) map[string]string {
+	out := map[string]string{}
+	var walk func([]any)
+	walk = func(cs []any) {
+		for _, c := range cs {
+			m, _ := c.(map[string]any)
+			ref, _ := m["bom-ref"].(string)
+			purl, _ := m["purl"].(string)
+			if ref != "" && purl != "" {
+				out[ref] = purl
+			}
+			sub, _ := m["components"].([]any)
+			walk(sub)
+		}
+	}
+	cs, _ := doc["components"].([]any)
+	walk(cs)
+	return out
+}
+
+// goVulnID is the Go vulnerability database ID trivy links to in an
+// entry's advisories (https://pkg.go.dev/vuln/GO-2025-4010), or "".
+func goVulnID(vuln map[string]any) string {
+	advs, _ := vuln["advisories"].([]any)
+	for _, a := range advs {
+		m, _ := a.(map[string]any)
+		u, _ := m["url"].(string)
+		if _, id, ok := strings.Cut(u, "pkg.go.dev/vuln/GO-"); ok && id != "" {
+			return "GO-" + id
+		}
+	}
+	return ""
 }
