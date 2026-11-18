@@ -56,3 +56,6 @@ testscan.json
 # workflow. The published artifact is the one in ghcr, never a tarball
 # that happened to be left in a working tree.
 dist/
+
+# Serena rewrites its own config on every run
+.serena/
