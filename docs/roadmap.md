@@ -38,6 +38,18 @@ rather than silently:
   with **half its CVE coverage** and no failure reason (see #223). Those need a
   rescan; the status cannot tell you which they are.
 
+**Phase 1 is complete** (closed 2026-11-23), with one item carried
+rather than finished:
+
+- **H-5's ownership half** stays landed-but-unwired until findings are
+  attributed by `(tool, mode)`. That is a schema change plus a backfill,
+  scheduled as its own item, not a Phase 1 follow-up. Until then a fixed
+  CVE waits for a full scan to be marked fixed (see below).
+- **M-2 has never carried a real decision**: the fleet has no
+  `not_affected` or accepted findings, so the DT import is proven only
+  with harness-marked ones.
+- Both Phase 0 carry-overs above are still open.
+
 **H-3's scope changed on contact with the pinned binary**, and the
 roadmap line is kept as written so the change is visible rather than
 tidied away. "Bundle support" was scoped as a stored bundle per artifact
